@@ -34,4 +34,9 @@ function ResourceManager.spend(player: Player, amount: number): boolean
 	return true
 end
 
+function ResourceManager.add(player: Player, amount: number)
+	store[player.UserId] = (store[player.UserId] or 0) + amount
+	sync(player)
+end
+
 return ResourceManager

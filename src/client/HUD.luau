@@ -7,6 +7,7 @@ local resLabel: TextLabel?
 local selLabel: TextLabel?
 
 local BLUE   = Color3.fromRGB(40,  90, 150)
+local GOLD   = Color3.fromRGB(160, 120,  10)
 local RED    = Color3.fromRGB(160, 50,  50)
 local DARK   = Color3.fromRGB(20,  20,  20)
 local WHITE  = Color3.new(1, 1, 1)
@@ -42,6 +43,7 @@ local function makeButton(parent: Instance, text: string, pos: UDim2, size: UDim
 end
 
 -- Creates the ScreenGui and returns the elements needed by other modules.
+-- Returns: dragFrame, barracksBuildBtn, mineBuildBtn, cancelBtn
 function HUD.create(): (Frame, TextButton, TextButton, TextButton)
 	local sg          = Instance.new("ScreenGui")
 	sg.Name           = "RTSHUD"
@@ -71,19 +73,21 @@ function HUD.create(): (Frame, TextButton, TextButton, TextButton)
 	dragFrame.Parent                    = sg
 
 	-- Bottom action buttons
-	local spawnBtn = makeButton(sg, "Spawn Unit (25)",
-		UDim2.new(0, 10,  1, -60), UDim2.fromOffset(165, 50))
 	local buildBtn = makeButton(sg, "Build Barracks (50)",
-		UDim2.new(0, 185, 1, -60), UDim2.fromOffset(185, 50))
+		UDim2.new(0, 10,  1, -60), UDim2.fromOffset(185, 50))
+	local mineBtn  = makeButton(sg, "Build Mine (75)",
+		UDim2.new(0, 205, 1, -60), UDim2.fromOffset(155, 50), GOLD)
 	local cancelBtn = makeButton(sg, "Cancel [Esc]",
-		UDim2.new(0, 380, 1, -60), UDim2.fromOffset(140, 50), RED)
+		UDim2.new(0, 370, 1, -60), UDim2.fromOffset(140, 50), RED)
 	cancelBtn.Visible = false
 
-	return dragFrame, spawnBtn, buildBtn, cancelBtn
+	return dragFrame, buildBtn, mineBtn, cancelBtn
 end
 
 -- Wires up network events and button callbacks (call after UnitController is init'd).
-function HUD.wire(network, unitController, buildingPlacer, buildBtn: TextButton, cancelBtn: TextButton)
+function HUD.wire(network, unitController, buildingPlacer,
+	buildBtn: TextButton, mineBtn: TextButton, cancelBtn: TextButton)
+
 	network.onResourceSync(function(n: number)
 		if resLabel then resLabel.Text = "Resources: " .. n end
 	end)
@@ -95,15 +99,21 @@ function HUD.wire(network, unitController, buildingPlacer, buildBtn: TextButton,
 	end)
 
 	buildBtn.MouseButton1Click:Connect(function()
-		buildingPlacer.enterPlacementMode()
+		buildingPlacer.enterPlacementMode("Barracks")
+	end)
+
+	mineBtn.MouseButton1Click:Connect(function()
+		buildingPlacer.enterPlacementMode("Mine")
 	end)
 
 	cancelBtn.MouseButton1Click:Connect(function()
 		buildingPlacer.exitPlacementMode()
 	end)
 
-	buildingPlacer.onModeChanged(function(active: boolean)
-		buildBtn.BackgroundColor3 = active and RED or BLUE
+	-- Highlight whichever button is active; restore both when mode exits
+	buildingPlacer.onModeChanged(function(active: boolean, buildingType: string?)
+		buildBtn.BackgroundColor3 = (active and buildingType == "Barracks") and RED or BLUE
+		mineBtn.BackgroundColor3  = (active and buildingType == "Mine")     and RED or GOLD
 		cancelBtn.Visible         = active
 	end)
 end

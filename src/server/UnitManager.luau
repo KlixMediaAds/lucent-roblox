@@ -12,14 +12,17 @@ local units: {[string]: UnitData} = {}
 local counter    = 0
 local unitsFolder: Folder
 
-local function spawnUnit(player: Player, position: Vector3)
+local function spawnUnit(player: Player, position: Vector3, unitType: string)
+	local typeDef = Config.UNIT_TYPES[unitType]
+	if not typeDef then return end
+
 	counter += 1
 	local id = "u" .. counter
 
 	local part          = Instance.new("Part")
 	part.Name           = id
-	part.Size           = Config.UNIT_SIZE
-	part.Position       = Vector3.new(position.X, Config.UNIT_SIZE.Y / 2 + 0.1, position.Z)
+	part.Size           = typeDef.size
+	part.Position       = Vector3.new(position.X, typeDef.size.Y / 2 + 0.1, position.Z)
 	part.BrickColor     = player.TeamColor
 	part.Material       = Enum.Material.SmoothPlastic
 	part.Anchored       = true
@@ -29,7 +32,13 @@ local function spawnUnit(player: Player, position: Vector3)
 	ov.Name         = "OwnerId"
 	ov.Value        = tostring(player.UserId)
 	ov.Parent       = part
-	part.Parent     = unitsFolder
+
+	local tv        = Instance.new("StringValue")
+	tv.Name         = "UnitType"
+	tv.Value        = unitType
+	tv.Parent       = part
+
+	part.Parent = unitsFolder
 
 	units[id] = { part = part, owner = player, target = nil }
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
@@ -77,10 +86,29 @@ function UnitManager.init(resourceManager)
 		end
 	end)
 
-	RemoteHandler.get(Config.REMOTES.SpawnUnit).OnServerEvent:Connect(function(player, pos)
-		if typeof(pos) ~= "Vector3" then return end
-		if not resourceManager.spend(player, Config.UNIT_COST) then return end
-		spawnUnit(player, pos)
+	-- Train a unit from a barracks
+	RemoteHandler.get(Config.REMOTES.TrainUnit).OnServerEvent:Connect(function(player, barrackId, unitType)
+		if type(barrackId) ~= "string" or type(unitType) ~= "string" then return end
+		local typeDef = Config.UNIT_TYPES[unitType]
+		if not typeDef then return end
+
+		-- Find and validate the barracks
+		local buildingsFolder = workspace:FindFirstChild("Buildings")
+		if not buildingsFolder then return end
+		local building = buildingsFolder:FindFirstChild(barrackId)
+		if not building then return end
+
+		local ownerVal = building:FindFirstChild("OwnerId")
+		if not ownerVal or ownerVal.Value ~= tostring(player.UserId) then return end
+
+		local base = building:FindFirstChild("Base") :: BasePart
+		if not base then return end
+
+		if not resourceManager.spend(player, typeDef.cost) then return end
+
+		-- Spawn just outside the barracks on the right side
+		local spawnPos = base.Position + Vector3.new(Config.BUILDING_SIZE.X + typeDef.size.X, 0, 0)
+		spawnUnit(player, spawnPos, unitType)
 	end)
 
 	RemoteHandler.get(Config.REMOTES.MoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)

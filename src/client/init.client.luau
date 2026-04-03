@@ -1,70 +1,70 @@
-local UserInputService = game:GetService("UserInputService")
-local Players          = game:GetService("Players")
+local Players = game:GetService("Players")
 
 local Network        = require(script:WaitForChild("Network"))
 local CameraModule   = require(script:WaitForChild("Camera"))
 local BuildingPlacer = require(script:WaitForChild("BuildingPlacer"))
 local UnitController = require(script:WaitForChild("UnitController"))
+local BarracksPanel  = require(script:WaitForChild("BarracksPanel"))
+local MinePanel      = require(script:WaitForChild("MinePanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 
-local BLUE   = Color3.fromRGB(40,  90, 150)
-local ORANGE = Color3.fromRGB(150, 80,  20)
-
-local isSpawning = false
-
-local function isBlocked(): boolean
-	return isSpawning or BuildingPlacer.isActive()
-end
-
 -- Disable default character controls so WASD only moves the RTS camera.
--- BindToRenderStep in Camera already overrides Roblox's camera script.
 task.spawn(function()
 	local ok, PlayerModule = pcall(require,
 		Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule"))
-	if ok then
-		PlayerModule:GetControls():Disable()
-	end
+	if ok then PlayerModule:GetControls():Disable() end
 end)
 
--- Initialise in dependency order (earlier init = earlier InputBegan priority)
+local function isBlocked(): boolean
+	return BuildingPlacer.isActive()
+end
+
+-- Initialise in dependency order (earlier init = higher InputBegan priority)
 CameraModule.init()
 BuildingPlacer.init(Network, CameraModule)
 
-local dragFrame, spawnBtn, buildBtn, cancelBtn = HUD.create()
+-- HUD must be created before BarracksPanel / MinePanel (both attach to RTSHUD)
+local dragFrame, buildBtn, mineBtn, cancelBtn = HUD.create()
 
--- UnitController connects InputBegan AFTER BuildingPlacer, so BuildingPlacer
--- always handles its clicks first and isBlocked() reflects the updated state.
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
 
-HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, cancelBtn)
+BarracksPanel.init(Network)
+MinePanel.init()
 
--- Spawn mode: connected last so UnitController's InputBegan fires before ours,
--- sees isBlocked()=true, and skips drag-start for this click.
-spawnBtn.MouseButton1Click:Connect(function()
-	if isBlocked() then return end
-	isSpawning            = true
-	spawnBtn.Text         = "Click ground..."
-	spawnBtn.BackgroundColor3 = ORANGE
+HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, cancelBtn)
 
-	local conn
-	conn = UserInputService.InputBegan:Connect(function(input, gpe)
-		if gpe then return end
-		local done = false
+-- ── Barracks panel ────────────────────────────────────────────────────────────
+UnitController.onBarracksSelected(function(barrackId: string?)
+	if barrackId then
+		BarracksPanel.show(barrackId)
+	else
+		BarracksPanel.hide()
+	end
+end)
 
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			local pos = CameraModule.getGroundPosition()
-			if pos then Network.spawnUnit(pos) end
-			done = true
-		elseif input.KeyCode == Enum.KeyCode.Escape
-			or input.UserInputType == Enum.UserInputType.MouseButton2 then
-			done = true
-		end
+-- ── Mineral / Mine wiring ─────────────────────────────────────────────────────
 
-		if done then
-			conn:Disconnect()
-			isSpawning                = false
-			spawnBtn.Text             = "Spawn Unit (25)"
-			spawnBtn.BackgroundColor3 = BLUE
-		end
-	end)
+-- Receive the initial deposit list and give it to BuildingPlacer for Mine snapping
+Network.onSyncDeposits(function(positions: {Vector3})
+	BuildingPlacer.setDepositPositions(positions)
+end)
+
+-- When a deposit is claimed, remove it from the Mine ghost's snap candidates
+Network.onDepositClaimed(function(pos: Vector3)
+	BuildingPlacer.removeDeposit(pos)
+end)
+
+local localUserId = Players.LocalPlayer.UserId
+
+-- Track mines and miner counts for this player's MinePanel
+Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
+	if buildingType == "Mine" and ownerId == localUserId then
+		MinePanel.registerMine(id)
+	end
+end)
+
+Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount: number)
+	if ownerUserId == localUserId then
+		MinePanel.updateMinerCount(mineId, minerCount)
+	end
 end)

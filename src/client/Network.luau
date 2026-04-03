@@ -5,16 +5,17 @@ local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 
 local Network = {}
 
-function Network.spawnUnit(pos: Vector3)
-	RemoteHandler.get(Config.REMOTES.SpawnUnit):FireServer(pos)
+function Network.trainUnit(barrackId: string, unitType: string)
+	RemoteHandler.get(Config.REMOTES.TrainUnit):FireServer(barrackId, unitType)
 end
 
 function Network.moveUnits(ids: {string}, target: Vector3)
 	RemoteHandler.get(Config.REMOTES.MoveUnits):FireServer(ids, target)
 end
 
-function Network.placeBuilding(pos: Vector3)
-	RemoteHandler.get(Config.REMOTES.PlaceBuilding):FireServer(pos)
+-- buildingType: "Barracks" or "Mine"
+function Network.placeBuilding(pos: Vector3, buildingType: string)
+	RemoteHandler.get(Config.REMOTES.PlaceBuilding):FireServer(pos, buildingType)
 end
 
 function Network.onResourceSync(fn: (number) -> ())
@@ -25,12 +26,27 @@ function Network.onUnitSpawned(fn: (string, number, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitSpawned).OnClientEvent:Connect(fn)
 end
 
-function Network.onBuildingPlaced(fn: (string, number, Vector3) -> ())
+-- Now carries buildingType as 4th arg
+function Network.onBuildingPlaced(fn: (string, number, Vector3, string) -> ())
 	RemoteHandler.get(Config.REMOTES.BuildingPlaced).OnClientEvent:Connect(fn)
 end
 
 function Network.onUnitsOrderedMove(fn: ({string}, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove).OnClientEvent:Connect(fn)
+end
+
+-- Mineral / Mine events
+function Network.onSyncDeposits(fn: ({Vector3}) -> ())
+	RemoteHandler.get(Config.REMOTES.SyncDeposits).OnClientEvent:Connect(fn)
+end
+
+function Network.onDepositClaimed(fn: (Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.DepositClaimed).OnClientEvent:Connect(fn)
+end
+
+-- mineId, ownerUserId, new total miner count for that mine
+function Network.onMinerSpawned(fn: (string, number, number) -> ())
+	RemoteHandler.get(Config.REMOTES.MinerSpawned).OnClientEvent:Connect(fn)
 end
 
 return Network

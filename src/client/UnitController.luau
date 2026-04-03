@@ -7,7 +7,9 @@ local localPlayer  = Players.LocalPlayer
 local mouse        = localPlayer:GetMouse()
 local selected: {string}  = {}
 local knownUnits: {[string]: {part: BasePart, ownerId: number}} = {}
+local knownBuildings: {[string]: {base: BasePart, ownerId: number, buildingType: string}} = {}
 local onChangedCb: ((number) -> ())?
+local onBarracksSelectedCb: ((string?) -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
 
@@ -43,6 +45,18 @@ local function hitUnit(): string?
 	return nil
 end
 
+local function hitBuilding(): string?
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
+	if not result then return nil end
+	for id, info in knownBuildings do
+		if info.base == result.Instance and info.ownerId == localPlayer.UserId then
+			return id
+		end
+	end
+	return nil
+end
+
 local function boxSelect(x0: number, y0: number, x1: number, y1: number)
 	selected = {}
 	for id, info in knownUnits do
@@ -70,6 +84,19 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		end)
 	end)
 
+	-- Track all replicated buildings for click detection
+	network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
+		task.spawn(function()
+			local folder = workspace:WaitForChild("Buildings", 10)
+			if not folder then return end
+			local model = folder:WaitForChild(id, 10)
+			if not model then return end
+			local base = model:WaitForChild("Base", 5) :: BasePart
+			if not base then return end
+			knownBuildings[id] = { base = base, ownerId = ownerId, buildingType = buildingType or "Barracks" }
+		end)
+	end)
+
 	-- LMB down: begin possible drag
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
@@ -84,6 +111,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if #selected == 0 then return end
 			local ground = cameraModule.getGroundPosition()
 			if ground then network.moveUnits(selected, ground) end
+
+		elseif input.KeyCode == Enum.KeyCode.Escape then
+			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
 		end
 	end)
 
@@ -120,14 +150,29 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
+			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
 		else
-			-- Single click
-			local id = hitUnit()
-			if id then
+			-- Single click — check unit first, then barracks
+			local uid = hitUnit()
+			if uid then
 				if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then clearSelection() end
-				addToSelection(id)
+				addToSelection(uid)
+				if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
 			else
-				clearSelection()
+				local bid = hitBuilding()
+				if bid then
+					clearSelection()
+					local info = knownBuildings[bid]
+					-- Only open the Barracks panel for Barracks-type buildings
+					if info and info.buildingType == "Barracks" then
+						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
+					else
+						if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+					end
+				else
+					clearSelection()
+					if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+				end
 			end
 		end
 	end)
@@ -139,6 +184,10 @@ end
 
 function UnitController.onSelectionChanged(fn: (number) -> ())
 	onChangedCb = fn
+end
+
+function UnitController.onBarracksSelected(fn: (string?) -> ())
+	onBarracksSelectedCb = fn
 end
 
 return UnitController
