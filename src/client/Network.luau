@@ -13,6 +13,10 @@ function Network.moveUnits(ids: {string}, target: Vector3)
 	RemoteHandler.get(Config.REMOTES.MoveUnits):FireServer(ids, target)
 end
 
+function Network.attackMoveUnits(ids: {string}, target: Vector3)
+	RemoteHandler.get(Config.REMOTES.AttackMoveUnits):FireServer(ids, target)
+end
+
 -- buildingType: "Barracks" or "Mine"
 function Network.placeBuilding(pos: Vector3, buildingType: string)
 	RemoteHandler.get(Config.REMOTES.PlaceBuilding):FireServer(pos, buildingType)
@@ -62,6 +66,11 @@ end
 -- barrelTip, targetPos: spawn a projectile visual
 function Network.onTurretShot(fn: (Vector3, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.TurretShot).OnClientEvent:Connect(fn)
+end
+
+-- fromPos, toPos, unitType: unit landed a hit
+function Network.onUnitHit(fn: (Vector3, Vector3, string) -> ())
+	RemoteHandler.get(Config.REMOTES.UnitHit).OnClientEvent:Connect(fn)
 end
 
 return Network

@@ -18,7 +18,44 @@ local dragFrame: Frame?
 local dragStart  = Vector2.zero
 local dragEnd    = Vector2.zero
 local isDragging = false
+local atkMoveHeld = false  -- true while A key is held
 local MIN_DRAG   = 8   -- pixels
+
+-- ── Move-order ping ───────────────────────────────────────────────────────────
+local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
+	local color = isAtkMove
+		and Color3.fromRGB(255, 140, 0)   -- orange = attack-move
+		or  Color3.fromRGB(0, 230, 80)    -- green  = regular move
+
+	local ring          = Instance.new("Part")
+	ring.Name           = "_MovePing"
+	ring.Shape          = Enum.PartType.Cylinder
+	-- Cylinder's length runs along X by default; rotate so it lies flat (Y-up)
+	ring.CFrame         = CFrame.new(pos + Vector3.new(0, 0.3, 0))
+		* CFrame.Angles(0, 0, math.pi / 2)
+	ring.Size           = Vector3.new(0.12, 2, 2)
+	ring.Color          = color
+	ring.Material       = Enum.Material.Neon
+	ring.Anchored       = true
+	ring.CanCollide     = false
+	ring.CanQuery       = false
+	ring.CastShadow     = false
+	ring.Transparency   = 0.2
+	ring.Parent         = workspace
+
+	-- Expand + fade over ~0.45 s without TweenService
+	task.spawn(function()
+		for i = 1, 6 do
+			task.wait(0.07)
+			if not ring.Parent then break end
+			local t = i / 6
+			local d = 2 + t * 9
+			ring.Size         = Vector3.new(0.12, d, d)
+			ring.Transparency = 0.2 + t * 0.8
+		end
+		if ring.Parent then ring:Destroy() end
+	end)
+end
 
 local function syncSelectionBoxes()
 	-- Remove boxes for units no longer selected
@@ -165,6 +202,12 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			return
 		end
 
+		-- A: hold for attack-move mode
+		if input.KeyCode == Enum.KeyCode.A then
+			atkMoveHeld = true
+			return
+		end
+
 		if isBlockedFn and isBlockedFn() then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -175,10 +218,23 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 			if #selected == 0 then return end
 			local ground = cameraModule.getGroundPosition()
-			if ground then network.moveUnits(selected, ground) end
+			if ground then
+				if atkMoveHeld then
+					network.attackMoveUnits(selected, ground)
+				else
+					network.moveUnits(selected, ground)
+				end
+				spawnMovePing(ground, atkMoveHeld)
+			end
 
 		elseif input.KeyCode == Enum.KeyCode.Escape then
 			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == Enum.KeyCode.A then
+			atkMoveHeld = false
 		end
 	end)
 

@@ -133,6 +133,65 @@ Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount:
 	HUD.setIncome(totalIncome())
 end)
 
+-- ── Unit attack VFX ──────────────────────────────────────────────────────────
+-- Traveling projectile from attacker → target, then a brief impact flash.
+-- Soldiers: small fast yellow bullet.  Tanks: larger slower orange shell with arc.
+
+Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
+	local isTank   = unitType == "Tank"
+	local projSize = isTank and Vector3.new(0.9, 0.9, 0.9) or Vector3.new(0.45, 0.45, 0.45)
+	local color    = isTank and BrickColor.new("Bright orange") or BrickColor.new("Bright yellow")
+	local travel   = isTank and 0.26 or 0.14   -- seconds to reach target
+	local arc      = isTank and 3.5 or 0.8     -- peak height of trajectory
+
+	-- Offset origin to unit's approximate gun height
+	local origin = fromPos + Vector3.new(0, 1.5, 0)
+	local dest   = toPos   + Vector3.new(0, 1.0, 0)
+
+	local proj          = Instance.new("Part")
+	proj.Name           = "_UnitProj"
+	proj.Size           = projSize
+	proj.Shape          = Enum.PartType.Ball
+	proj.BrickColor     = color
+	proj.Material       = Enum.Material.Neon
+	proj.Position       = origin
+	proj.Anchored       = true
+	proj.CanCollide     = false
+	proj.CanQuery       = false
+	proj.CastShadow     = false
+	proj.Parent         = workspace
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t = math.min(elapsed / travel, 1)
+		proj.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * arc, 0)
+
+		if t >= 1 then
+			conn:Disconnect()
+			proj:Destroy()
+
+			-- Impact flash
+			local flash         = Instance.new("Part")
+			flash.Name          = "_UnitImpact"
+			flash.Size          = isTank
+				and Vector3.new(2.8, 2.8, 2.8)
+				or  Vector3.new(1.5, 1.5, 1.5)
+			flash.Shape         = Enum.PartType.Ball
+			flash.BrickColor    = color
+			flash.Material      = Enum.Material.Neon
+			flash.Position      = dest
+			flash.Anchored      = true
+			flash.CanCollide    = false
+			flash.CanQuery      = false
+			flash.CastShadow    = false
+			flash.Parent        = workspace
+			task.delay(0.09, function() flash:Destroy() end)
+		end
+	end)
+end)
+
 -- ── Turret projectile VFX ─────────────────────────────────────────────────────
 
 Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3)

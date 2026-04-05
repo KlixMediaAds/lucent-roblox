@@ -12,8 +12,12 @@ Config.UNIT_TYPES = {
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = 22
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14 }  -- per-type max speed
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4  }  -- velocity lerp factor
 Config.UNIT_FORMATION_SPACING = 7
+Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
+Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
+Config.TANK_SPLASH_RANGE      = 10   -- studs AoE around building target on tank hit
 
 -- Buildings
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
@@ -65,9 +69,9 @@ Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12 }
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250  }
 Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 30   }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35   }
 Config.UNIT_ATTACK_RANGE   = 15    -- studs
-Config.UNIT_ATTACK_RATE    = 1.0   -- seconds between each unit's attacks
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6 }  -- seconds between attacks
 
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
@@ -93,6 +97,8 @@ Config.REMOTES = {
 	NeedCommandCenter = "NeedCommandCenter",
 	TrainingUpdate    = "TrainingUpdate",
 	TurretShot        = "TurretShot",
+	AttackMoveUnits   = "AttackMoveUnits",
+	UnitHit           = "UnitHit",
 }
 
 return Config

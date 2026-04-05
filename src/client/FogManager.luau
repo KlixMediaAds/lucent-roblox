@@ -1,51 +1,96 @@
 --[[
-	FogManager — Starcraft 2-style fog of war
+	FogManager v3 — Starcraft 2-style fog of war
 
-	Three cell states per grid tile:
-	  UNEXPLORED  (0) — never visited → pitch-black opaque tile
-	  EXPLORED    (1) — visited before, no current vision → dark shroud overlay;
-	                    enemy buildings shown as a transparent "last known" ghost,
-	                    enemy units hidden (they move)
-	  VISIBLE     (2) — currently inside a vision radius → no fog, everything shown
-
-	Visibility sources and radii:
-	  Own units     →  65 studs
-	  Own buildings →  55 studs
-	  Own miners    →  30 studs
+	Improvements over v2:
+	  1. Ghost accuracy   — enemy buildings only ghost if we've actually seen them;
+	                        Destroying fires on the client when they die, removing
+	                        the ghost immediately.
+	  2. Smooth unit fade — enemy units fade in/out over 0.15 s via TweenService
+	                        instead of snapping to visible/invisible.
+	  3. Finer grid       — CELL_SIZE 12, GRID_CELLS 36 (was 20 / 22). Rounder
+	                        vision circles and tighter tile edges.
+	  4. Per-type vision  — CC=75, Barracks=50, Mine=45, Turret=40 (was flat 55).
+	  5. Source caching   — own-part lists rebuilt only when folders change;
+	                        positions are read fresh every tick (units move).
+	  6. rc precomputed   — Source stores the bounding-box cell radius so
+	                        math.sqrt is never called inside the hot inner loop.
+	  7. Fog resets on CC loss — FogManager.reset() wipes explored memory and
+	                        returns the map to black (called from init.client).
+	  8. Deposits hidden  — mineral deposits are invisible in unexplored cells;
+	                        visible/explored cells show them normally.
 --]]
 
-local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local Players      = game:GetService("Players")
 
 local FogManager  = {}
 local localPlayer = Players.LocalPlayer
 
 -- ── Config ────────────────────────────────────────────────────────────────────
-local CELL_SIZE    = 20    -- studs per fog tile  (map coverage: ±220 studs)
-local GRID_CELLS   = 22    -- tiles per axis
-local HALF         = GRID_CELLS / 2   -- 11
-local FOG_Y        = 0.15  -- world Y of tile centres
+local CELL_SIZE  = 12     -- studs per fog tile
+local GRID_CELLS = 36     -- tiles per axis  →  ±216 stud coverage
+local HALF       = GRID_CELLS / 2  -- 18
 
-local SHROUD_TRANS = 0.45  -- shroud tile transparency when "explored" (0=opaque)
-local GHOST_MOD    = 0.55  -- LocalTransparencyModifier for "last known" buildings
+local FOG_Y        = 0.15
+local SHROUD_TRANS = 0.45  -- explored-but-not-visible overlay opacity (0 = fully opaque)
+local GHOST_MOD    = 0.55  -- LocalTransparencyModifier for last-known-position buildings
+local UNIT_FADE    = 0.15  -- seconds for enemy-unit fade in/out
 
-local TICK = 0.3           -- seconds between fog updates
+local TICK = 0.3  -- fog update interval
 
-local VIS_UNIT     = 65
-local VIS_BUILDING = 55
+-- Per-building-type vision radii (studs)
+local VIS_CC       = 75
+local VIS_BARRACKS = 50
+local VIS_MINE     = 45
+local VIS_TURRET   = 40
 local VIS_MINER    = 30
+local VIS_UNIT     = 65
 
 local STATE_UNEXPLORED = 0
 local STATE_EXPLORED   = 1
 local STATE_VISIBLE    = 2
 
--- ── State ─────────────────────────────────────────────────────────────────────
+local FADE_INFO = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
+
+-- Precomputed squared radii + cell-radii for unit / miner (constant across all sources)
+local UNIT_R2  = VIS_UNIT  * VIS_UNIT
+local UNIT_RC  = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
+local MINER_R2 = VIS_MINER * VIS_MINER
+local MINER_RC = math.ceil(VIS_MINER / CELL_SIZE) + 1
+
+-- ── Module state ──────────────────────────────────────────────────────────────
 local localUserId: number
 local fogFolder:   Folder
 
-local blackLayer:  { { Part } } = {}   -- pitch-black tiles
-local shroudLayer: { { Part } } = {}   -- dark-overlay tiles
-local tileState:   { { number } } = {} -- current state per cell (avoids redundant writes)
-local exploredMap: { [number]: { [number]: true } } = {}   -- permanent memory
+-- Fog tile layers
+local blackLayer:  { { Part } } = {}
+local shroudLayer: { { Part } } = {}
+local tileState:   { { number } } = {}
+
+-- Permanent exploration memory (never shrinks until reset)
+local exploredMap: { [number]: { [number]: true } } = {}
+
+-- ── Source cache ──────────────────────────────────────────────────────────────
+type Source = { x: number, z: number, r2: number, rc: number }
+
+-- Cached lists of own parts — rebuilt only when a folder child changes
+local ownUnitParts:    { BasePart } = {}
+local ownBuildingData: { { part: BasePart, r2: number, rc: number } } = {}
+local ownMinerParts:   { BasePart } = {}
+local sourcesDirty = true
+
+-- ── Ghost building tracking ───────────────────────────────────────────────────
+-- Keyed by model.Name (building ID). Entry exists only while building is alive
+-- AND we've had line-of-sight on it at least once.
+local seenEnemyBuildings: { [string]: true } = {}
+
+-- ── Unit fade tracking ────────────────────────────────────────────────────────
+local unitLastVis:  { [string]: boolean } = {}  -- part.Name → last vis state
+local activeTweens: { [string]: Tween }  = {}  -- part.Name → in-progress tween
+
+-- ── Deposit cache ─────────────────────────────────────────────────────────────
+local depositParts:   { BasePart } = {}
+local depositsDirty = true
 
 -- ── Grid helpers ──────────────────────────────────────────────────────────────
 
@@ -64,31 +109,30 @@ local function inBounds(row: number, col: number): boolean
 	return row >= 1 and row <= GRID_CELLS and col >= 1 and col <= GRID_CELLS
 end
 
--- ── Tile factories ────────────────────────────────────────────────────────────
+-- ── Tile layer ────────────────────────────────────────────────────────────────
 
-local function makeTilePart(y: number, trans: number): Part
+local function makeTile(trans: number): Part
 	local p         = Instance.new("Part")
 	p.Name          = "Tile"
 	p.Size          = Vector3.new(CELL_SIZE, 0.1, CELL_SIZE)
 	p.Color         = Color3.new(0, 0, 0)
-	p.Material      = Enum.Material.SmoothPlastic
+	p.Material      = Enum.Material.Neon
 	p.Transparency  = trans
 	p.Anchored      = true
 	p.CanCollide    = false
 	p.CastShadow    = false
-	p.CanQuery      = false   -- invisible to raycasts: placement / selection unaffected
-	p.Position      = Vector3.new(0, y, 0)
+	p.CanQuery      = false  -- raycasts ignore fog tiles
 	return p
 end
 
 local function applyTileState(row: number, col: number, state: number)
 	if state == STATE_UNEXPLORED then
-		blackLayer[row][col].Transparency  = 0   -- opaque black
-		shroudLayer[row][col].Transparency = 1   -- shroud hidden (black handles it)
+		blackLayer[row][col].Transparency  = 0
+		shroudLayer[row][col].Transparency = 1
 	elseif state == STATE_EXPLORED then
-		blackLayer[row][col].Transparency  = 1   -- black gone permanently
-		shroudLayer[row][col].Transparency = SHROUD_TRANS   -- dark overlay
-	else -- STATE_VISIBLE
+		blackLayer[row][col].Transparency  = 1
+		shroudLayer[row][col].Transparency = SHROUD_TRANS
+	else  -- STATE_VISIBLE
 		blackLayer[row][col].Transparency  = 1
 		shroudLayer[row][col].Transparency = 1
 	end
@@ -99,13 +143,8 @@ local function buildFogGrid()
 	fogFolder.Name   = "FogOfWar"
 	fogFolder.Parent = workspace
 
-	local blackF        = Instance.new("Folder")
-	blackF.Name         = "Black"
-	blackF.Parent       = fogFolder
-
-	local shroudF       = Instance.new("Folder")
-	shroudF.Name        = "Shroud"
-	shroudF.Parent      = fogFolder
+	local blackF   = Instance.new("Folder"); blackF.Name  = "Black";  blackF.Parent  = fogFolder
+	local shroudF  = Instance.new("Folder"); shroudF.Name = "Shroud"; shroudF.Parent = fogFolder
 
 	for row = 1, GRID_CELLS do
 		blackLayer[row]  = {}
@@ -114,40 +153,46 @@ local function buildFogGrid()
 		for col = 1, GRID_CELLS do
 			local wx, wz = cellCentre(row, col)
 
-			local black = makeTilePart(FOG_Y, 0)         -- starts opaque
-			black.Position = Vector3.new(wx, FOG_Y, wz)
-			black.Parent   = blackF
+			local black        = makeTile(0)  -- opaque
+			black.Position     = Vector3.new(wx, FOG_Y, wz)
+			black.Parent       = blackF
+			blackLayer[row][col] = black
 
-			local shroud = makeTilePart(FOG_Y + 0.05, 1) -- starts invisible
-			shroud.Position = Vector3.new(wx, FOG_Y + 0.05, wz)
-			shroud.Parent   = shroudF
-
-			blackLayer[row][col]  = black
+			local shroud       = makeTile(1)  -- invisible initially
+			shroud.Position    = Vector3.new(wx, FOG_Y + 0.05, wz)
+			shroud.Parent      = shroudF
 			shroudLayer[row][col] = shroud
-			tileState[row][col]   = STATE_UNEXPLORED
+
+			tileState[row][col] = STATE_UNEXPLORED
 		end
 	end
 end
 
--- ── Vision sources ────────────────────────────────────────────────────────────
+-- ── Source cache helpers ──────────────────────────────────────────────────────
 
-type Source = { x: number, z: number, r2: number }
-
-local function collectSources(): { Source }
-	local out: { Source } = {}
-	local myStr = tostring(localUserId)
-
-	local function add(p: BasePart, r: number)
-		local pos = p.Position
-		table.insert(out, { x = pos.X, z = pos.Z, r2 = r * r })
+local function buildingTypeRadius(btype: string): (number, number)
+	local r: number
+	if      btype == "CommandCenter" then r = VIS_CC
+	elseif  btype == "Barracks"      then r = VIS_BARRACKS
+	elseif  btype == "Mine"          then r = VIS_MINE
+	elseif  btype == "Turret"        then r = VIS_TURRET
+	else                                  r = VIS_BARRACKS
 	end
+	return r * r, math.ceil(r / CELL_SIZE) + 1
+end
+
+local function rebuildSourceList()
+	local myStr     = tostring(localUserId)
+	ownUnitParts    = {}
+	ownBuildingData = {}
+	ownMinerParts   = {}
 
 	local unitsF = workspace:FindFirstChild("Units")
 	if unitsF then
 		for _, c in unitsF:GetChildren() do
 			local ov = c:FindFirstChild("OwnerId")
 			if ov and ov.Value == myStr and c:IsA("BasePart") then
-				add(c :: BasePart, VIS_UNIT)
+				table.insert(ownUnitParts, c :: BasePart)
 			end
 		end
 	end
@@ -159,7 +204,10 @@ local function collectSources(): { Source }
 			if ov and ov.Value == myStr then
 				local base = model:FindFirstChild("Base")
 				if base and base:IsA("BasePart") then
-					add(base :: BasePart, VIS_BUILDING)
+					local btv   = model:FindFirstChild("BuildingType")
+					local btype = btv and btv.Value or "Barracks"
+					local r2, rc = buildingTypeRadius(btype)
+					table.insert(ownBuildingData, { part = base :: BasePart, r2 = r2, rc = rc })
 				end
 			end
 		end
@@ -170,29 +218,58 @@ local function collectSources(): { Source }
 		for _, c in minersF:GetChildren() do
 			local ov = c:FindFirstChild("OwnerId")
 			if ov and ov.Value == myStr and c:IsA("BasePart") then
-				add(c :: BasePart, VIS_MINER)
+				table.insert(ownMinerParts, c :: BasePart)
 			end
 		end
 	end
 
+	sourcesDirty = false
+end
+
+-- Reads fresh positions every tick (units move); rebuilds part list only when dirty.
+local function collectSources(): { Source }
+	if sourcesDirty then rebuildSourceList() end
+
+	local out: { Source } = {}
+	for _, p in ownUnitParts do
+		local pos = p.Position
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = UNIT_R2, rc = UNIT_RC })
+	end
+	for _, bd in ownBuildingData do
+		local pos = bd.part.Position
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = bd.r2, rc = bd.rc })
+	end
+	for _, p in ownMinerParts do
+		local pos = p.Position
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = MINER_R2, rc = MINER_RC })
+	end
 	return out
+end
+
+-- ── Deposit cache ─────────────────────────────────────────────────────────────
+
+local function rebuildDepositList()
+	depositParts = {}
+	local depositsF = workspace:FindFirstChild("Deposits")
+	if depositsF then
+		for _, p in depositsF:GetChildren() do
+			if p:IsA("BasePart") then table.insert(depositParts, p :: BasePart) end
+		end
+	end
+	depositsDirty = false
 end
 
 -- ── Visibility grid ───────────────────────────────────────────────────────────
 
 local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: true } }
 	local visGrid: { [number]: { [number]: true } } = {}
-
 	for _, src in sources do
-		local radius  = math.sqrt(src.r2)
-		local radiusC = math.ceil(radius / CELL_SIZE) + 1
 		local cRow, cCol = worldToCell(src.x, src.z)
-
-		for dr = -radiusC, radiusC do
+		for dr = -src.rc, src.rc do
 			local row = cRow + dr
 			if row < 1 or row > GRID_CELLS then continue end
 			if not visGrid[row] then visGrid[row] = {} end
-			for dc = -radiusC, radiusC do
+			for dc = -src.rc, src.rc do
 				local col = cCol + dc
 				if col < 1 or col > GRID_CELLS then continue end
 				local cwx, cwz = cellCentre(row, col)
@@ -204,11 +281,8 @@ local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: 
 			end
 		end
 	end
-
 	return visGrid
 end
-
--- ── Per-position helpers ──────────────────────────────────────────────────────
 
 local function posIsVisible(pos: Vector3, visGrid: { [number]: { [number]: true } }): boolean
 	local row, col = worldToCell(pos.X, pos.Z)
@@ -228,32 +302,24 @@ local function updateFog()
 	local sources = collectSources()
 	local visGrid = computeVisibleGrid(sources)
 
-	-- Permanently mark all currently-visible cells as explored
+	-- Permanently mark visible cells as explored
 	for row, cols in visGrid do
 		if not exploredMap[row] then exploredMap[row] = {} end
-		for col in cols do
-			exploredMap[row][col] = true
-		end
+		for col in cols do exploredMap[row][col] = true end
 	end
 
-	-- ── Fog grid tiles ────────────────────────────────────────────────────
+	-- ── 1. Fog grid tiles ─────────────────────────────────────────────────
 	for row = 1, GRID_CELLS do
 		local visRow = visGrid[row]
 		local expRow = exploredMap[row]
 		for col = 1, GRID_CELLS do
 			local vis = visRow ~= nil and visRow[col] == true
 			local exp = expRow ~= nil and expRow[col] == true
-
 			local newState: number
-			if vis then
-				newState = STATE_VISIBLE
-			elseif exp then
-				newState = STATE_EXPLORED
-			else
-				newState = STATE_UNEXPLORED
+			if vis then           newState = STATE_VISIBLE
+			elseif exp then       newState = STATE_EXPLORED
+			else                  newState = STATE_UNEXPLORED
 			end
-
-			-- Only write to parts when state actually changes
 			if newState ~= tileState[row][col] then
 				tileState[row][col] = newState
 				applyTileState(row, col, newState)
@@ -261,29 +327,45 @@ local function updateFog()
 		end
 	end
 
-	-- ── Enemy units: visible → show, otherwise → hide ─────────────────────
-	local myStr   = tostring(localUserId)
-	local unitsF  = workspace:FindFirstChild("Units")
+	local myStr = tostring(localUserId)
+
+	-- ── 2. Enemy units — smooth fade in/out ───────────────────────────────
+	local unitsF = workspace:FindFirstChild("Units")
 	if unitsF then
 		for _, child in unitsF:GetChildren() do
 			if not child:IsA("BasePart") then continue end
 			local ov = child:FindFirstChild("OwnerId")
 			if not ov or ov.Value == myStr then continue end
 			local bp  = child :: BasePart
+			local uid = bp.Name
 			local vis = posIsVisible(bp.Position, visGrid)
-			bp.LocalTransparencyModifier = if vis then 0 else 1
+
+			if unitLastVis[uid] ~= vis then
+				unitLastVis[uid] = vis
+				local prev = activeTweens[uid]
+				if prev then prev:Cancel() end
+				local tw = TweenService:Create(bp, FADE_INFO, {
+					LocalTransparencyModifier = if vis then 0 else 1
+				})
+				activeTweens[uid] = tw
+				tw:Play()
+				tw.Completed:Connect(function(ps)
+					if ps == Enum.PlaybackState.Completed then activeTweens[uid] = nil end
+				end)
+			end
+
+			-- BillboardGuis hard-cut (no benefit tweening UI opacity)
 			for _, gc in bp:GetChildren() do
 				if gc:IsA("BillboardGui") then
-					local bb = gc :: BillboardGui
-					bb.Enabled = vis
+					(gc :: BillboardGui).Enabled = vis
 				end
 			end
 		end
 	end
 
-	-- ── Enemy buildings:
-	--    visible   → normal
-	--    explored  → ghosted (last-known position, semi-transparent)
+	-- ── 3. Enemy buildings — normal / ghost / hidden ──────────────────────
+	--    visible   → show fully
+	--    explored  → ghost ONLY if we've had LoS on it before AND it still exists
 	--    unexplored → fully hidden
 	local buildingsF = workspace:FindFirstChild("Buildings")
 	if buildingsF then
@@ -295,33 +377,37 @@ local function updateFog()
 			local bpos = (base :: BasePart).Position
 			local vis  = posIsVisible(bpos, visGrid)
 			local exp  = posIsExplored(bpos)
+			local bid  = model.Name
+
+			-- First time we see this building: record it and watch for death
+			if vis and not seenEnemyBuildings[bid] then
+				seenEnemyBuildings[bid] = true
+				(base :: BasePart).Destroying:Connect(function()
+					seenEnemyBuildings[bid] = nil
+				end)
+			end
 
 			local modifier: number
 			local bbEnabled: boolean
 			if vis then
-				modifier  = 0
-				bbEnabled = true
-			elseif exp then
-				modifier  = GHOST_MOD   -- semi-transparent "last known" ghost
-				bbEnabled = false
+				modifier = 0; bbEnabled = true
+			elseif exp and seenEnemyBuildings[bid] then
+				modifier = GHOST_MOD; bbEnabled = false
 			else
-				modifier  = 1           -- fully invisible
-				bbEnabled = false
+				modifier = 1; bbEnabled = false
 			end
 
 			for _, desc in model:GetDescendants() do
 				if desc:IsA("BasePart") then
-					local dp = desc :: BasePart
-					dp.LocalTransparencyModifier = modifier
+					(desc :: BasePart).LocalTransparencyModifier = modifier
 				elseif desc:IsA("BillboardGui") then
-					local bb = desc :: BillboardGui
-					bb.Enabled = bbEnabled
+					(desc :: BillboardGui).Enabled = bbEnabled
 				end
 			end
 		end
 	end
 
-	-- ── Enemy miners: visible → show, otherwise → hide ────────────────────
+	-- ── 4. Enemy miners — instant ─────────────────────────────────────────
 	local minersF = workspace:FindFirstChild("Miners")
 	if minersF then
 		for _, child in minersF:GetChildren() do
@@ -332,16 +418,65 @@ local function updateFog()
 			bp.LocalTransparencyModifier = if posIsVisible(bp.Position, visGrid) then 0 else 1
 		end
 	end
+
+	-- ── 5. Mineral deposits — hidden in unexplored cells ──────────────────
+	if depositsDirty then rebuildDepositList() end
+	for _, dp in depositParts do
+		local pos = dp.Position
+		-- Show in visible or explored cells; hide in unexplored black
+		local show = posIsVisible(pos, visGrid) or posIsExplored(pos)
+		dp.LocalTransparencyModifier = if show then 0 else 1
+	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
+
+-- Call when the local player is eliminated (CC destroyed). Wipes exploration
+-- memory so the map returns to black — the player must re-scout after rebuilding.
+function FogManager.reset()
+	exploredMap        = {}
+	seenEnemyBuildings = {}
+	unitLastVis        = {}
+
+	for _, tw in activeTweens do tw:Cancel() end
+	activeTweens = {}
+
+	for row = 1, GRID_CELLS do
+		for col = 1, GRID_CELLS do
+			if tileState[row][col] ~= STATE_UNEXPLORED then
+				tileState[row][col] = STATE_UNEXPLORED
+				applyTileState(row, col, STATE_UNEXPLORED)
+			end
+		end
+	end
+
+	sourcesDirty  = true
+	depositsDirty = true
+end
 
 function FogManager.init(userId: number)
 	localUserId = userId
 	buildFogGrid()
 
 	task.spawn(function()
-		task.wait(1)   -- let world geometry settle
+		-- Wire dirty flags to folder changes so source/deposit lists
+		-- are rebuilt only when membership actually changes.
+		local function watch(name: string, fn: () -> ())
+			local f = workspace:WaitForChild(name, 15)
+			if not f then return end
+			f.ChildAdded:Connect(fn)
+			f.ChildRemoved:Connect(fn)
+		end
+
+		local function dirtySource()  sourcesDirty  = true end
+		local function dirtyDeposit() depositsDirty = true end
+
+		watch("Units",     dirtySource)
+		watch("Buildings", dirtySource)
+		watch("Miners",    dirtySource)
+		watch("Deposits",  dirtyDeposit)
+
+		task.wait(1)  -- let world geometry and remotes settle
 		while true do
 			updateFog()
 			task.wait(TICK)

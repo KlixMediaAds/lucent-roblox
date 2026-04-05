@@ -15,6 +15,15 @@ type UnitData = {
 	maxHp       : number,
 	attackTimer : number,
 	attackDmg   : number,
+	attackRate  : number,
+	unitType    : string,
+	home        : Vector3,
+	aggroId     : string?,
+	aggroHome   : Vector3?,
+	atkMoveDest : Vector3?,
+	velocity    : Vector3,   -- current world-space velocity (XZ only)
+	moveSpeed   : number,    -- max speed in studs/s
+	accel       : number,    -- velocity lerp factor (higher = snappier)
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -22,8 +31,8 @@ type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos
 local units: { [string]: UnitData } = {}
 local counter    = 0
 local unitsFolder: Folder
-local buildingManagerRef: any   -- set via setBuildingManager after init
-local resourceManagerRef:  any  -- set in init
+local buildingManagerRef: any
+local resourceManagerRef: any
 
 local barrackQueues:     { [string]: { QueueItem } } = {}
 local barrackIsTraining: { [string]: boolean }       = {}
@@ -31,29 +40,35 @@ local barrackTrainStart: { [string]: number }        = {}
 
 local MAX_QUEUE = 5
 
--- ── Health bar helpers ────────────────────────────────────────────────────────
+local aggroScanFrame = 0
+local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
+
+local SEP_DIST = 5.5   -- studs: same-team separation trigger radius
+local SEP_PUSH = 0.18  -- studs pushed per frame per overlapping neighbour
+
+-- ── Health bar ────────────────────────────────────────────────────────────────
 
 local function addHealthBar(part: BasePart)
-	local bb           = Instance.new("BillboardGui")
-	bb.Name            = "HealthBar"
-	bb.Size            = UDim2.new(0, 60, 0, 7)
-	bb.StudsOffset     = Vector3.new(0, part.Size.Y / 2 + 1.5, 0)
-	bb.AlwaysOnTop     = false
-	bb.Enabled         = false   -- hidden at full HP
-	bb.Parent          = part
+	local bb            = Instance.new("BillboardGui")
+	bb.Name             = "HealthBar"
+	bb.Size             = UDim2.new(0, 60, 0, 7)
+	bb.StudsOffset      = Vector3.new(0, part.Size.Y / 2 + 1.5, 0)
+	bb.AlwaysOnTop      = false
+	bb.Enabled          = false
+	bb.Parent           = part
 
-	local bg           = Instance.new("Frame")
-	bg.Size            = UDim2.new(1, 0, 1, 0)
+	local bg            = Instance.new("Frame")
+	bg.Size             = UDim2.new(1, 0, 1, 0)
 	bg.BackgroundColor3 = Color3.fromRGB(40, 0, 0)
-	bg.BorderSizePixel = 0
-	bg.Parent          = bb
+	bg.BorderSizePixel  = 0
+	bg.Parent           = bb
 
-	local fill         = Instance.new("Frame")
-	fill.Name          = "Fill"
-	fill.Size          = UDim2.new(1, 0, 1, 0)
+	local fill          = Instance.new("Frame")
+	fill.Name           = "Fill"
+	fill.Size           = UDim2.new(1, 0, 1, 0)
 	fill.BackgroundColor3 = Color3.fromRGB(0, 200, 50)
-	fill.BorderSizePixel = 0
-	fill.Parent        = bg
+	fill.BorderSizePixel  = 0
+	fill.Parent         = bg
 end
 
 local function applyHP(data: UnitData)
@@ -72,7 +87,7 @@ local function applyHP(data: UnitData)
 	bb.Enabled = data.hp < data.maxHp
 end
 
--- ── Spawn / move (internal) ───────────────────────────────────────────────────
+-- ── Spawn ─────────────────────────────────────────────────────────────────────
 
 local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	local typeDef = Config.UNIT_TYPES[unitType]
@@ -102,8 +117,11 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 
 	part.Parent = unitsFolder
 
-	local maxHp = (Config.UNIT_HP :: any)[unitType] or 100
-	local dmg   = (Config.UNIT_ATTACK_DAMAGE :: any)[unitType] or 10
+	local maxHp    = (Config.UNIT_HP :: any)[unitType] or 100
+	local dmg      = (Config.UNIT_ATTACK_DAMAGE :: any)[unitType] or 10
+	local atkRate  = (Config.UNIT_ATTACK_RATE :: any)[unitType] or 1.0
+	local spd      = (Config.UNIT_MOVE_SPEED :: any)[unitType] or 22
+	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	addHealthBar(part)
 
 	units[id] = {
@@ -112,11 +130,39 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 		target      = nil,
 		hp          = maxHp,
 		maxHp       = maxHp,
-		attackTimer = math.random() * Config.UNIT_ATTACK_RATE,
+		attackTimer = math.random() * atkRate,
 		attackDmg   = dmg,
+		attackRate  = atkRate,
+		unitType    = unitType,
+		home        = position,
+		aggroId     = nil,
+		aggroHome   = nil,
+		atkMoveDest = nil,
+		velocity    = Vector3.zero,
+		moveSpeed   = spd,
+		accel       = acc,
 	}
 
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
+end
+
+-- ── Move helpers ──────────────────────────────────────────────────────────────
+
+local function applyFormation(valid: { string }, targetPos: Vector3)
+	local cols = math.max(1, math.ceil(math.sqrt(#valid)))
+	for i, id in valid do
+		local c = (i - 1) % cols
+		local r = math.floor((i - 1) / cols)
+		local formPos = Vector3.new(
+			targetPos.X + (c - (cols - 1) / 2) * Config.UNIT_FORMATION_SPACING,
+			0,
+			targetPos.Z + r * Config.UNIT_FORMATION_SPACING
+		)
+		local data = units[id]
+		data.target     = formPos
+		data.aggroId    = nil
+		data.aggroHome  = nil
+	end
 end
 
 local function moveUnits(player: Player, ids: { string }, targetPos: Vector3)
@@ -126,24 +172,41 @@ local function moveUnits(player: Player, ids: { string }, targetPos: Vector3)
 			table.insert(valid, id)
 		end
 	end
+	applyFormation(valid, targetPos)
+	for _, id in valid do units[id].atkMoveDest = nil end
+	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
+end
 
+local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vector3)
+	local valid = {}
+	for _, id in ids do
+		if units[id] and units[id].owner == player then
+			table.insert(valid, id)
+		end
+	end
 	local cols = math.max(1, math.ceil(math.sqrt(#valid)))
 	for i, id in valid do
 		local c = (i - 1) % cols
 		local r = math.floor((i - 1) / cols)
-		units[id].target = Vector3.new(
+		local formPos = Vector3.new(
 			targetPos.X + (c - (cols - 1) / 2) * Config.UNIT_FORMATION_SPACING,
 			0,
 			targetPos.Z + r * Config.UNIT_FORMATION_SPACING
 		)
+		local data = units[id]
+		data.target      = formPos
+		data.aggroId     = nil
+		data.aggroHome   = nil
+		data.atkMoveDest = formPos
 	end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
 end
 
--- ── Barracks queue helpers ────────────────────────────────────────────────────
+-- ── Barracks queue ────────────────────────────────────────────────────────────
 
 local function fireTrainingUpdate(barrackId: string, player: Player)
 	if not player.Parent then return end
+	if player.UserId < 0 then return end
 	local q = barrackQueues[barrackId] or {}
 	local progress = 0
 	if barrackIsTraining[barrackId] and #q > 0 and barrackTrainStart[barrackId] then
@@ -161,15 +224,12 @@ local function startNextInQueue(barrackId: string)
 		barrackIsTraining[barrackId] = false
 		return
 	end
-
 	barrackIsTraining[barrackId] = true
 	barrackTrainStart[barrackId] = tick()
-	local item = q[1]
+	local item   = q[1]
 	local player = item.player
-
 	fireTrainingUpdate(barrackId, player)
 
-	-- Periodic progress updates for the client progress bar
 	task.spawn(function()
 		local startSnapshot = barrackTrainStart[barrackId]
 		while true do
@@ -197,8 +257,6 @@ end
 
 -- ── Public AI API ─────────────────────────────────────────────────────────────
 
--- Server-side equivalent of the TrainUnit remote — AI calls this directly so
--- training goes through the same queue / progress pipeline as player training.
 function UnitManager.trainFromBarracks(barrackId: string, unitType: string, player: any): boolean
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return false end
@@ -226,12 +284,7 @@ function UnitManager.trainFromBarracks(barrackId: string, unitType: string, play
 	end
 
 	barrackQueues[barrackId] = q
-	table.insert(q, {
-		unitType  = unitType,
-		trainTime = trainTime,
-		player    = player,
-		spawnPos  = spawnPos,
-	})
+	table.insert(q, { unitType = unitType, trainTime = trainTime, player = player, spawnPos = spawnPos })
 
 	if not barrackIsTraining[barrackId] then
 		startNextInQueue(barrackId)
@@ -242,9 +295,7 @@ end
 function UnitManager.spawnUnitAt(player: Player, position: Vector3, unitType: string)
 	local trainTime = (Config.UNIT_TRAIN_TIME :: any)[unitType] or 0
 	if trainTime > 0 then
-		task.delay(trainTime, function()
-			spawnUnit(player, position, unitType)
-		end)
+		task.delay(trainTime, function() spawnUnit(player, position, unitType) end)
 	else
 		spawnUnit(player, position, unitType)
 	end
@@ -281,19 +332,16 @@ function UnitManager.setBuildingManager(bm: any)
 	buildingManagerRef = bm
 end
 
--- Returns (hit, hitPosition) — hit is true if an enemy unit was found and damaged.
 function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number): (boolean, Vector3?)
 	local bestId, bestDist = nil :: string?, math.huge
 	for id, data in units do
 		if data.hp <= 0 then continue end
 		if tostring(data.owner.UserId) == attackerOwnerIdStr then continue end
 		local d = (data.part.Position - fromPos).Magnitude
-		if d <= range and d < bestDist then
-			bestDist = d; bestId = id
-		end
+		if d <= range and d < bestDist then bestDist = d; bestId = id end
 	end
 	if not bestId then return false, nil end
-	local data = units[bestId]
+	local data   = units[bestId]
 	local hitPos = data.part.Position
 	data.hp -= damage
 	applyHP(data)
@@ -312,69 +360,229 @@ function UnitManager.init(resourceManager)
 	unitsFolder.Name   = "Units"
 	unitsFolder.Parent = workspace
 
-	-- Movement + combat tick
+	local LEASH         = Config.UNIT_LEASH_RANGE
+	local AGGRO         = Config.UNIT_AGGRO_RADIUS
+	local unitHitRemote = RemoteHandler.get(Config.REMOTES.UnitHit)
+
 	RunService.Heartbeat:Connect(function(dt)
 		local toRemove: { string } = {}
+		aggroScanFrame = (aggroScanFrame + 1) % AGGRO_SCAN_EVERY
+		local doAggro  = aggroScanFrame == 0
 
 		for id, data in units do
-			-- Movement
-			if data.target then
-				local pos   = data.part.Position
-				local flat  = Vector3.new(data.target.X, pos.Y, data.target.Z)
-				local delta = flat - pos
-				if delta.Magnitude < 0.5 then
-					data.target = nil
+
+			-- ── 1. Aggro: update chase target or resolve ───────────────────────
+			if data.aggroId then
+				local aggroTarget = units[data.aggroId]
+				if not aggroTarget or aggroTarget.hp <= 0 then
+					data.aggroId   = nil
+					data.aggroHome = nil
+					data.target    = data.atkMoveDest or data.home
 				else
-					local step         = math.min(Config.UNIT_MOVE_SPEED * dt, delta.Magnitude)
-					data.part.Position = pos + delta.Unit * step
+					local ep = aggroTarget.part.Position
+					data.target = Vector3.new(ep.X, 0, ep.Z)
+
+					if data.aggroHome then
+						if (data.part.Position - data.aggroHome).Magnitude > LEASH then
+							data.aggroId   = nil
+							data.aggroHome = nil
+							data.target    = data.atkMoveDest or data.home
+						end
+					end
 				end
 			end
 
-			-- Combat
+			-- ── 2. Velocity-based movement ────────────────────────────────────
+			local pos = data.part.Position
+
+			-- Compute desired velocity toward target (zero when no target or arrived)
+			local desired = Vector3.zero
+			if data.target then
+				local flat  = Vector3.new(data.target.X, pos.Y, data.target.Z)
+				local delta = flat - pos
+				if delta.Magnitude < 1.5 then
+					-- Arrived
+					data.target = nil
+					if not data.aggroId then
+						data.home = pos
+						if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
+							data.atkMoveDest = nil
+						end
+					end
+				else
+					desired = delta.Unit * data.moveSpeed
+				end
+			end
+
+			-- Lerp velocity: decelerate faster than accelerate for snappier stops
+			local lerpFactor = if desired.Magnitude < 0.1
+				then math.min(data.accel * 2.5 * dt, 1)
+				else math.min(data.accel * dt, 1)
+			data.velocity = data.velocity:Lerp(desired, lerpFactor)
+
+			-- Apply velocity and face the direction of travel
+			local vel = data.velocity
+			if vel.Magnitude > 0.15 then
+				local newPos = Vector3.new(pos.X + vel.X * dt, pos.Y, pos.Z + vel.Z * dt)
+				local flatVel = Vector3.new(vel.X, 0, vel.Z)
+				if flatVel.Magnitude > 0.5 then
+					data.part.CFrame = CFrame.lookAt(newPos, newPos + flatVel)
+				else
+					data.part.Position = newPos
+				end
+			end
+
+			-- ── 3. Aggro scan (idle + A-moving units only) ─────────────────────
+			if doAggro and not data.aggroId then
+				if data.target == nil or data.atkMoveDest ~= nil then
+					local myStr = tostring(data.owner.UserId)
+					local myPos = data.part.Position
+					local bestId2, bestDist2 = nil :: string?, AGGRO + 1
+					for otherId, other in units do
+						if other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == myStr then continue end
+						local d = (other.part.Position - myPos).Magnitude
+						if d <= AGGRO and d < bestDist2 then
+							bestDist2 = d; bestId2 = otherId
+						end
+					end
+					if bestId2 then
+						data.aggroId   = bestId2
+						data.aggroHome = data.part.Position
+					end
+				end
+			end
+
+			-- ── 4. Combat ─────────────────────────────────────────────────────
 			if data.hp <= 0 then continue end
 			data.attackTimer += dt
-			if data.attackTimer < Config.UNIT_ATTACK_RATE then continue end
-			data.attackTimer -= Config.UNIT_ATTACK_RATE
+			if data.attackTimer < data.attackRate then continue end
+			data.attackTimer -= data.attackRate
 
 			local myPos      = data.part.Position
 			local myOwnerStr = tostring(data.owner.UserId)
-			local attacked   = false
+			local hitPos: Vector3? = nil
 
-			-- Attack nearest enemy unit in range
-			for otherId, other in units do
-				if other.hp <= 0 then continue end
-				if tostring(other.owner.UserId) == myOwnerStr then continue end
-				if (other.part.Position - myPos).Magnitude <= Config.UNIT_ATTACK_RANGE then
+			if data.unitType == "Tank" then
+				-- Tanks: buildings first (+ splash on nearby units), fall back to units
+				if buildingManagerRef then
+					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
+						myPos, myOwnerStr, Config.UNIT_ATTACK_RANGE)
+					if bId and bPos then
+						buildingManagerRef.damage(bId, data.attackDmg)
+						hitPos = bPos
+						local splashR = Config.TANK_SPLASH_RANGE
+						for otherId, other in units do
+							if other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == myOwnerStr then continue end
+							if (other.part.Position - bPos).Magnitude <= splashR then
+								other.hp -= math.floor(data.attackDmg * 0.5)
+								applyHP(other)
+								if other.hp <= 0 then table.insert(toRemove, otherId) end
+							end
+						end
+					end
+				end
+				if not hitPos then
+					local bestId2, bestDist2 = nil :: string?, math.huge
+					for otherId, other in units do
+						if other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == myOwnerStr then continue end
+						local d = (other.part.Position - myPos).Magnitude
+						if d <= Config.UNIT_ATTACK_RANGE and d < bestDist2 then
+							bestDist2 = d; bestId2 = otherId
+						end
+					end
+					if bestId2 then
+						local other = units[bestId2]
+						hitPos = other.part.Position
+						other.hp -= data.attackDmg
+						applyHP(other)
+						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+					end
+				end
+			else
+				-- Soldiers: nearest enemy unit first, fall back to buildings
+				local bestId2, bestDist2 = nil :: string?, math.huge
+				for otherId, other in units do
+					if other.hp <= 0 then continue end
+					if tostring(other.owner.UserId) == myOwnerStr then continue end
+					local d = (other.part.Position - myPos).Magnitude
+					if d <= Config.UNIT_ATTACK_RANGE and d < bestDist2 then
+						bestDist2 = d; bestId2 = otherId
+					end
+				end
+				if bestId2 then
+					local other = units[bestId2]
+					hitPos = other.part.Position
 					other.hp -= data.attackDmg
 					applyHP(other)
-					if other.hp <= 0 then
-						table.insert(toRemove, otherId)
+					if other.hp <= 0 then table.insert(toRemove, bestId2) end
+				elseif buildingManagerRef then
+					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
+						myPos, myOwnerStr, Config.UNIT_ATTACK_RANGE)
+					if bId and bPos then
+						buildingManagerRef.damage(bId, data.attackDmg)
+						hitPos = bPos
 					end
-					attacked = true
-					break
 				end
 			end
 
-			-- Attack nearest enemy building in range (if no unit was hit)
-			if not attacked and buildingManagerRef then
-				local bId = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, Config.UNIT_ATTACK_RANGE)
-				if bId then
-					buildingManagerRef.damage(bId, data.attackDmg)
+			-- Face attack target, then fire VFX
+			if hitPos then
+				local flatDir = Vector3.new(hitPos.X - myPos.X, 0, hitPos.Z - myPos.Z)
+				if flatDir.Magnitude > 0.1 then
+					data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
+				end
+				unitHitRemote:FireAllClients(myPos, hitPos, data.unitType)
+			end
+		end
+
+		-- ── Separation pass ────────────────────────────────────────────────────
+		-- Nudge overlapping same-team units apart so they don't stack.
+		-- Runs every frame; n is small enough that O(n²) is fine.
+		for id, data in units do
+			local myPos = data.part.Position
+			local myStr = tostring(data.owner.UserId)
+			local pushX, pushZ = 0, 0
+			local count = 0
+
+			for otherId, other in units do
+				if otherId == id then continue end
+				if tostring(other.owner.UserId) ~= myStr then continue end
+				local dx   = myPos.X - other.part.Position.X
+				local dz   = myPos.Z - other.part.Position.Z
+				local dist = math.sqrt(dx * dx + dz * dz)
+				if dist < SEP_DIST and dist > 0.01 then
+					local strength = (SEP_DIST - dist) / SEP_DIST
+					pushX += (dx / dist) * strength
+					pushZ += (dz / dist) * strength
+					count += 1
+				end
+			end
+
+			if count > 0 then
+				local mag = math.sqrt(pushX * pushX + pushZ * pushZ)
+				if mag > 0.01 then
+					local nx = myPos.X + (pushX / mag) * SEP_PUSH
+					local nz = myPos.Z + (pushZ / mag) * SEP_PUSH
+					-- Preserve facing rotation, only move position
+					data.part.CFrame = CFrame.new(nx, myPos.Y, nz) * data.part.CFrame.Rotation
 				end
 			end
 		end
 
-		-- Remove dead units after iteration
+		-- Remove dead units
 		for _, id in toRemove do
-			local data = units[id]
-			if data then
-				data.part:Destroy()
+			local d = units[id]
+			if d then
+				d.part:Destroy()
 				units[id] = nil
 			end
 		end
 	end)
 
-	-- Train a unit from a barracks (queue-based)
+	-- Train remote
 	RemoteHandler.get(Config.REMOTES.TrainUnit).OnServerEvent:Connect(function(player, barrackId, unitType)
 		if type(barrackId) ~= "string" or type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
@@ -391,7 +599,6 @@ function UnitManager.init(resourceManager)
 		local base = building:FindFirstChild("Base") :: BasePart
 		if not base then return end
 
-		-- Cap queue length
 		local q = barrackQueues[barrackId] or {}
 		if #q >= MAX_QUEUE then return end
 
@@ -420,8 +627,12 @@ function UnitManager.init(resourceManager)
 		moveUnits(player, ids, targetPos)
 	end)
 
+	RemoteHandler.get(Config.REMOTES.AttackMoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)
+		if type(ids) ~= "table" or typeof(targetPos) ~= "Vector3" then return end
+		attackMoveUnits(player, ids, targetPos)
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
-		-- Remove units
 		local toRemove = {}
 		for id, data in units do
 			if data.owner == player then table.insert(toRemove, id) end
@@ -430,7 +641,6 @@ function UnitManager.init(resourceManager)
 			units[id].part:Destroy()
 			units[id] = nil
 		end
-		-- Clear barracks queues owned by this player
 		local qToClean = {}
 		for barrackId, q in barrackQueues do
 			if #q > 0 and q[1].player == player then
@@ -438,7 +648,7 @@ function UnitManager.init(resourceManager)
 			end
 		end
 		for _, bid in qToClean do
-			barrackQueues[bid] = nil
+			barrackQueues[bid]     = nil
 			barrackIsTraining[bid] = nil
 			barrackTrainStart[bid] = nil
 		end

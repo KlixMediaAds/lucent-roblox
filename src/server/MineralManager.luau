@@ -277,7 +277,7 @@ end
 function MineralManager.getMineCount(player: any): number
 	local n = 0
 	for _, data in mines do
-		if data.owner == player then n += 1 end
+		if data.owner == player and not data.depleted then n += 1 end
 	end
 	return n
 end

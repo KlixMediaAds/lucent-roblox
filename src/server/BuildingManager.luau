@@ -12,7 +12,7 @@ local resourceManagerRef: any
 local unitManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
-type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart? }
+type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
@@ -201,13 +201,14 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 	local startHp = (buildTime > 0) and 1 or maxHp
 	buildingData[id] = {
-		hp           = startHp,
-		maxHp        = maxHp,
-		base         = base,
-		owner        = player,
-		buildingType = buildingType,
-		head         = buildingType == "Turret" and (model:FindFirstChild("Head") :: BasePart?) or nil,
-		barrel       = buildingType == "Turret" and (model:FindFirstChild("Barrel") :: BasePart?) or nil,
+		hp             = startHp,
+		maxHp          = maxHp,
+		base           = base,
+		owner          = player,
+		buildingType   = buildingType,
+		head           = buildingType == "Turret" and (model:FindFirstChild("Head") :: BasePart?) or nil,
+		barrel         = buildingType == "Turret" and (model:FindFirstChild("Barrel") :: BasePart?) or nil,
+		isConstructing = buildTime > 0,
 	}
 	applyHP(buildingData[id])
 
@@ -250,7 +251,8 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			local data = buildingData[id]
 			if data then
 				model:PivotTo(CFrame.new(position.X, finalY, position.Z))
-				data.hp = math.max(data.hp, maxHp)
+				data.hp            = math.max(data.hp, maxHp)
+				data.isConstructing = false
 				applyHP(data)
 			end
 		end)
@@ -389,7 +391,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RunService.Heartbeat:Connect(function(dt)
 		for id, data in buildingData do
 			if data.buildingType ~= "Turret" then continue end
-			if data.hp < data.maxHp then continue end   -- still under construction
+			if data.isConstructing then continue end   -- still under construction
 
 			turretTimers[id] = (turretTimers[id] or 0) + dt
 			if turretTimers[id] < Config.TURRET_ATTACK_RATE then continue end
