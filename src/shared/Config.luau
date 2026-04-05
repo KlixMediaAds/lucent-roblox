@@ -25,7 +25,7 @@ Config.BUILDING_GRID         = 5     -- snap grid in studs
 
 -- Mineral Deposits
 Config.DEPOSIT_COUNT         = 8
-Config.DEPOSIT_SIZE          = Vector3.new(8, 1.5, 8)
+Config.DEPOSIT_SIZE          = Vector3.new(5, 10, 5)
 Config.DEPOSIT_SPREAD        = 150   -- half-extent of random placement area
 
 -- Mini Miners (spawned automatically by Mine buildings)
@@ -53,8 +53,21 @@ Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command 
 
 -- Mine limits & depletion
 Config.MAX_MINES                = 3     -- max mine buildings per player
-Config.DEPOSIT_TOTAL_RESOURCES  = 300   -- total resources a deposit holds before depleting
+Config.DEPOSIT_TOTAL_RESOURCES  = 1000  -- total resources a deposit holds before depleting
 Config.MINE_DECAY_RATE          = 5     -- HP/second drained from a depleted mine
+
+-- Mine upgrades (one per mine, mutually exclusive)
+Config.MINE_UPGRADE_COST = { Efficiency = 150, Capacity = 125 }
+Config.MINE_UPGRADE_EFFICIENCY_MULT  = 2.0   -- income per miner × this
+Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
+
+-- Workshop
+Config.WORKSHOP_COST      = 100
+
+-- Research techs (time in seconds; no resource cost)
+Config.RESEARCH = {
+	BetterMines = { time = 5, desc = "Unlocks the ability to upgrade mine buildings." },
+}
 
 -- Turret
 Config.TURRET_COST        = 100
@@ -63,12 +76,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Workshop = 10 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Workshop = 400 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35   }
 Config.UNIT_ATTACK_RANGE   = 15    -- studs
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6 }  -- seconds between attacks
@@ -99,6 +112,10 @@ Config.REMOTES = {
 	TurretShot        = "TurretShot",
 	AttackMoveUnits   = "AttackMoveUnits",
 	UnitHit           = "UnitHit",
+	UpgradeMine       = "UpgradeMine",
+	StartResearch     = "StartResearch",
+	ResearchUpdate    = "ResearchUpdate",
+	ResearchCompleted = "ResearchCompleted",
 }
 
 return Config

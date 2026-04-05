@@ -9,6 +9,8 @@ local CameraModule   = require(script:WaitForChild("Camera"))
 local BuildingPlacer = require(script:WaitForChild("BuildingPlacer"))
 local UnitController = require(script:WaitForChild("UnitController"))
 local BarracksPanel  = require(script:WaitForChild("BarracksPanel"))
+local MinePanel      = require(script:WaitForChild("MinePanel"))
+local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 
@@ -26,6 +28,13 @@ local INCOME_PER_MINER = Config.MINI_MINER_INCOME * (60 / Config.MINI_MINER_INCO
 
 -- mineId → current miner count (only this player's mines)
 local mineMiners: { [string]: number } = {}
+
+-- Current resource amount (tracked for MinePanel affordability checks)
+local currentResources = 0
+
+-- Research state (replicated from server)
+local researchedTechs:   { [string]: boolean } = {}
+local researchProgress:  { [string]: number?  } = {}
 
 -- buildingType → count of owned (non-CC) buildings for requirement system
 local ownedBuildingCounts: { [string]: number } = {}
@@ -52,13 +61,20 @@ end
 CameraModule.init()
 BuildingPlacer.init(Network, CameraModule)
 
-local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn = HUD.create()
+local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn, workshopBtn = HUD.create()
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
 BarracksPanel.init(Network)
+MinePanel.init(Network,
+	function() return currentResources end,
+	function(mineId) return mineMiners[mineId] or 0 end,
+	function(techName) return researchedTechs[techName] == true end)
+WorkshopPanel.init(Network,
+	function(techName) return researchedTechs[techName] == true end,
+	function(techName) return researchProgress[techName] end)
 FogManager.init(localUserId)
 
-HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn)
+HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn, workshopBtn)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
 
@@ -66,8 +82,13 @@ local function enterCCMode()
 	BuildingPlacer.exitPlacementMode()
 	clearMinerData()
 	ownedBuildingCounts = {}
+	researchedTechs    = {}
+	researchProgress   = {}
 	refreshRequirements()
 	HUD.setCommandCenterMode(true)
+	BarracksPanel.hide()
+	MinePanel.hide()
+	WorkshopPanel.hide()
 end
 
 Network.onNeedCommandCenter(function()
@@ -111,9 +132,33 @@ end)
 -- ── Barracks panel ────────────────────────────────────────────────────────────
 UnitController.onBarracksSelected(function(barrackId: string?)
 	if barrackId then
+		MinePanel.hide()
+		WorkshopPanel.hide()
 		BarracksPanel.show(barrackId)
 	else
 		BarracksPanel.hide()
+	end
+end)
+
+-- ── Mine panel ────────────────────────────────────────────────────────────────
+UnitController.onMineSelected(function(mineId: string?)
+	if mineId then
+		BarracksPanel.hide()
+		WorkshopPanel.hide()
+		MinePanel.show(mineId)
+	else
+		MinePanel.hide()
+	end
+end)
+
+-- ── Workshop panel ─────────────────────────────────────────────────────────────
+UnitController.onWorkshopSelected(function(workshopId: string?)
+	if workshopId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.show(workshopId)
+	else
+		WorkshopPanel.hide()
 	end
 end)
 
@@ -131,6 +176,26 @@ Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount:
 	if ownerUserId ~= localUserId then return end
 	mineMiners[mineId] = minerCount
 	HUD.setIncome(totalIncome())
+	MinePanel.refreshIfVisible()
+end)
+
+Network.onResourceSync(function(amount: number)
+	currentResources = amount
+	MinePanel.refreshIfVisible()
+end)
+
+-- ── Research events ───────────────────────────────────────────────────────────
+
+Network.onResearchUpdate(function(techName: string, progress: number)
+	researchProgress[techName] = progress
+	WorkshopPanel.refreshIfVisible()
+end)
+
+Network.onResearchCompleted(function(techName: string)
+	researchedTechs[techName]  = true
+	researchProgress[techName] = nil
+	WorkshopPanel.refreshIfVisible()
+	MinePanel.refreshIfVisible()
 end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────

@@ -88,10 +88,6 @@ local seenEnemyBuildings: { [string]: true } = {}
 local unitLastVis:  { [string]: boolean } = {}  -- part.Name → last vis state
 local activeTweens: { [string]: Tween }  = {}  -- part.Name → in-progress tween
 
--- ── Deposit cache ─────────────────────────────────────────────────────────────
-local depositParts:   { BasePart } = {}
-local depositsDirty = true
-
 -- ── Grid helpers ──────────────────────────────────────────────────────────────
 
 local function cellCentre(row: number, col: number): (number, number)
@@ -244,19 +240,6 @@ local function collectSources(): { Source }
 		table.insert(out, { x = pos.X, z = pos.Z, r2 = MINER_R2, rc = MINER_RC })
 	end
 	return out
-end
-
--- ── Deposit cache ─────────────────────────────────────────────────────────────
-
-local function rebuildDepositList()
-	depositParts = {}
-	local depositsF = workspace:FindFirstChild("Deposits")
-	if depositsF then
-		for _, p in depositsF:GetChildren() do
-			if p:IsA("BasePart") then table.insert(depositParts, p :: BasePart) end
-		end
-	end
-	depositsDirty = false
 end
 
 -- ── Visibility grid ───────────────────────────────────────────────────────────
@@ -419,14 +402,6 @@ local function updateFog()
 		end
 	end
 
-	-- ── 5. Mineral deposits — hidden in unexplored cells ──────────────────
-	if depositsDirty then rebuildDepositList() end
-	for _, dp in depositParts do
-		local pos = dp.Position
-		-- Show in visible or explored cells; hide in unexplored black
-		local show = posIsVisible(pos, visGrid) or posIsExplored(pos)
-		dp.LocalTransparencyModifier = if show then 0 else 1
-	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -450,8 +425,7 @@ function FogManager.reset()
 		end
 	end
 
-	sourcesDirty  = true
-	depositsDirty = true
+	sourcesDirty = true
 end
 
 function FogManager.init(userId: number)
@@ -468,13 +442,11 @@ function FogManager.init(userId: number)
 			f.ChildRemoved:Connect(fn)
 		end
 
-		local function dirtySource()  sourcesDirty  = true end
-		local function dirtyDeposit() depositsDirty = true end
+		local function dirtySource() sourcesDirty = true end
 
 		watch("Units",     dirtySource)
 		watch("Buildings", dirtySource)
 		watch("Miners",    dirtySource)
-		watch("Deposits",  dirtyDeposit)
 
 		task.wait(1)  -- let world geometry and remotes settle
 		while true do

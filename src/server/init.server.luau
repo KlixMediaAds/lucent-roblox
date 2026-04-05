@@ -6,16 +6,19 @@ local Config            = require(Shared:WaitForChild("Config"))
 -- Create all RemoteEvents before other modules need them
 local RemoteHandler   = require(Shared:WaitForChild("RemoteHandler"))
 
-local TeamManager     = require(script:WaitForChild("TeamManager"))
-local ResourceManager = require(script:WaitForChild("ResourceManager"))
-local UnitManager     = require(script:WaitForChild("UnitManager"))
-local BuildingManager = require(script:WaitForChild("BuildingManager"))
-local MineralManager  = require(script:WaitForChild("MineralManager"))
-local AIManager       = require(script:WaitForChild("AIManager"))
+local TeamManager      = require(script:WaitForChild("TeamManager"))
+local ResourceManager  = require(script:WaitForChild("ResourceManager"))
+local UnitManager      = require(script:WaitForChild("UnitManager"))
+local BuildingManager  = require(script:WaitForChild("BuildingManager"))
+local MineralManager   = require(script:WaitForChild("MineralManager"))
+local ResearchManager  = require(script:WaitForChild("ResearchManager"))
+local AIManager        = require(script:WaitForChild("AIManager"))
 
 TeamManager.init()
 ResourceManager.init()
+ResearchManager.init()
 MineralManager.init(ResourceManager)
+MineralManager.setResearchManager(ResearchManager)
 UnitManager.init(ResourceManager)
 BuildingManager.init(ResourceManager, MineralManager)
 UnitManager.setBuildingManager(BuildingManager)
@@ -28,6 +31,7 @@ BuildingManager.setOnCCDestroyed(function(player)
 	UnitManager.removeAllUnitsFor(player)
 	BuildingManager.removeAllBuildingsFor(player)   -- also cleans up mines
 	ResourceManager.reset(player)
+	ResearchManager.resetPlayer(player)
 
 	if player.UserId > 0 then
 		-- Real player: tell their client to enter CC placement mode again

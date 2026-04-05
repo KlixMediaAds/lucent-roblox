@@ -1,387 +1,432 @@
-local Players = game:GetService("Players")
+local Players    = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local Config            = require(Shared:WaitForChild("Config"))
+local UILib             = require(script.Parent:WaitForChild("UILib"))
 
 local HUD         = {}
 local localPlayer = Players.LocalPlayer
+local C           = UILib.C
 
-local resLabel: TextLabel?
-local selLabel: TextLabel?
+-- ── State ─────────────────────────────────────────────────────────────────────
+
+local resLabel:  TextLabel?
+local incLabel:  TextLabel?
+local selLabel:  TextLabel?
+local buildBarRef: Frame?
+local cancelBtnRef: TextButton?
+local ccBtnRef:   TextButton?
+
 local currentResources = 0
 local currentIncome    = 0
-
--- Build menu state
-local buildMenuBtnRef: TextButton?
-local buildMenuTray:   Frame?
 local buildMenuOpen    = false
-local cancelBtnRef:    TextButton?
-local ccBtnRef:        TextButton?
+local buildToggleBtnRef: TextButton?
 
--- Individual build buttons (inside tray, returned for wiring)
-local buildBtnRef:  TextButton?
-local mineBtnRef:   TextButton?
-local turretBtnRef: TextButton?
+-- Per-building-type card data
+type CardData = {
+	btn:        TextButton,
+	accentBar:  Frame,
+	nameLbl:    TextLabel,
+	subLbl:     TextLabel,
+	stroke:     UIStroke,
+	color:      Color3,
+}
+local cardMap: { [string]: CardData } = {}
 
--- Tooltip refs
-local tooltipFrame: Frame?
-local tooltipTitle: TextLabel?
-local tooltipDesc:  TextLabel?
-local tooltipReqs:  TextLabel?
+-- Requirement system
+local playerCounts:      { [string]: number } = {}
+local currentActivePlacing: string?           = nil
 
--- Requirement system state
-local playerCounts: { [string]: number } = {}
-local currentActivePlacing: string?      = nil
+-- ── Building metadata ─────────────────────────────────────────────────────────
 
--- Building metadata: description + what each type requires
-local BUILDING_INFO: { [string]: { desc: string, requires: { [string]: number } } } = {
-	Mine     = { desc = "Extracts resources from mineral deposits. Max 3.",    requires = {} },
-	Barracks = { desc = "Trains soldiers and tanks for your army.",             requires = { Mine = 1 } },
-	Turret   = { desc = "Defensive cannon that attacks nearby enemies.",        requires = { Barracks = 1 } },
+local BUILDING_INFO: { [string]: { cost: number, requires: { [string]: number } } } = {
+	Mine     = { cost = Config.MINE_COST,      requires = {} },
+	Barracks = { cost = Config.BUILDING_COST,  requires = { Mine = 1 } },
+	Workshop = { cost = Config.WORKSHOP_COST,  requires = { Mine = 1 } },
+	Turret   = { cost = Config.TURRET_COST,    requires = { Barracks = 1 } },
 }
 
--- Colours
-local BLUE     = Color3.fromRGB(40,  90, 150)
-local GOLD     = Color3.fromRGB(160, 120,  10)
-local ORANGE   = Color3.fromRGB(170,  80,  20)
-local RED      = Color3.fromRGB(160,  50,  50)
-local TEAL     = Color3.fromRGB(20,  130, 120)
-local GREEN2   = Color3.fromRGB(35,  110,  40)
-local GRAY     = Color3.fromRGB(50,   50,  55)
-local DARK     = Color3.fromRGB(20,   20,  20)
-local WHITE    = Color3.new(1, 1, 1)
-local SUBTEXT  = Color3.fromRGB(160, 180, 210)
-local DIM_TEXT = Color3.fromRGB(90,   90, 100)
+local CARD_ENTRIES: { { btype: string, color: Color3, label: string } } = {
+	{ btype = "Mine",     color = C.MINE,     label = "MINE"     },
+	{ btype = "Barracks", color = C.BARRACKS, label = "BARRACKS" },
+	{ btype = "Workshop", color = C.WORKSHOP, label = "WORKSHOP" },
+	{ btype = "Turret",   color = C.TURRET,   label = "TURRET"   },
+}
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
 
-local function isUnlocked(buildingType: string): boolean
-	local info = BUILDING_INFO[buildingType]
+local function isUnlocked(btype: string): boolean
+	local info = BUILDING_INFO[btype]
 	if not info then return true end
-	for reqType, reqCount in info.requires do
-		if (playerCounts[reqType] or 0) < reqCount then return false end
+	for req, count in info.requires do
+		if (playerCounts[req] or 0) < count then return false end
 	end
 	return true
 end
 
--- Recolour each tray button to reflect locked / active / normal state.
-local function updateTrayButtonVisuals(activePlacing: string?)
-	local entries = {
-		{ btype = "Mine",     btn = mineBtnRef,   normal = GOLD   },
-		{ btype = "Barracks", btn = buildBtnRef,  normal = BLUE   },
-		{ btype = "Turret",   btn = turretBtnRef, normal = ORANGE },
-	}
-	for _, e in entries do
-		local btn = e.btn
-		if not btn then continue end
-		if not isUnlocked(e.btype) then
-			btn.BackgroundColor3 = GRAY
-			btn.TextColor3       = DIM_TEXT
-		elseif activePlacing == e.btype then
-			btn.BackgroundColor3 = RED
-			btn.TextColor3       = WHITE
-		else
-			btn.BackgroundColor3 = e.normal
-			btn.TextColor3       = WHITE
-		end
-	end
-end
+-- ── Card visual state ─────────────────────────────────────────────────────────
 
--- ── Label / button factories ──────────────────────────────────────────────────
+local function applyCardState(btype: string)
+	local d = cardMap[btype]
+	if not d then return end
 
-local function refreshResLabel()
-	if not resLabel then return end
-	local text = "Resources: " .. currentResources
-	if currentIncome > 0 then text ..= "  (+" .. currentIncome .. "/min)" end
-	resLabel.Text = text
-end
+	local locked  = not isUnlocked(btype)
+	local placing = currentActivePlacing == btype
+	local info    = BUILDING_INFO[btype]
 
-local function makeLabel(parent: Instance, text: string, pos: UDim2, size: UDim2): TextLabel
-	local l                  = Instance.new("TextLabel")
-	l.Text                   = text
-	l.Position               = pos
-	l.Size                   = size
-	l.BackgroundColor3       = DARK
-	l.BackgroundTransparency = 0.4
-	l.TextColor3             = WHITE
-	l.TextScaled             = true
-	l.Font                   = Enum.Font.GothamBold
-	l.Parent                 = parent
-	return l
-end
+	if placing then
+		-- Bright cyan: actively placing this building
+		d.btn.BackgroundColor3       = Color3.fromRGB(0, 60, 80)
+		d.btn.BackgroundTransparency = 0
+		d.accentBar.BackgroundColor3 = C.ACCENT
+		d.nameLbl.TextColor3         = C.ACCENT
+		d.subLbl.Text                = "PLACING..."
+		d.subLbl.TextColor3          = C.ACCENT
+		d.stroke.Color               = C.ACCENT
+		d.stroke.Thickness           = 1.8
 
-local function makeButton(parent: Instance, text: string, pos: UDim2, size: UDim2, color: Color3?): TextButton
-	local b                  = Instance.new("TextButton")
-	b.Text                   = text
-	b.Position               = pos
-	b.Size                   = size
-	b.BackgroundColor3       = color or BLUE
-	b.TextColor3             = WHITE
-	b.TextScaled             = true
-	b.Font                   = Enum.Font.GothamBold
-	b.Parent                 = parent
-	local c                  = Instance.new("UICorner")
-	c.CornerRadius           = UDim.new(0, 6)
-	c.Parent                 = b
-	return b
-end
-
--- ── Tooltip ───────────────────────────────────────────────────────────────────
-
-local function hideTooltip()
-	if tooltipFrame then tooltipFrame.Visible = false end
-end
-
-local function showTooltip(buildingType: string, button: TextButton)
-	if not tooltipFrame then return end
-	local info = BUILDING_INFO[buildingType]
-	if not info then hideTooltip(); return end
-
-	if tooltipTitle then tooltipTitle.Text = buildingType:upper() end
-	if tooltipDesc  then tooltipDesc.Text  = info.desc end
-
-	if tooltipReqs then
-		if next(info.requires) == nil then
-			tooltipReqs.Text       = "No requirements"
-			tooltipReqs.TextColor3 = SUBTEXT
-		else
-			local parts = {}
-			for reqType, reqCount in info.requires do
-				local have = (playerCounts[reqType] or 0) >= reqCount
-				local mark = have and "✓" or "✗"
-				table.insert(parts, mark .. " Requires " .. reqType .. " ×" .. reqCount)
+	elseif locked then
+		-- Dim: requirements not met
+		local missingReq = ""
+		if info then
+			for req in info.requires do
+				if (playerCounts[req] or 0) < (info.requires[req] or 1) then
+					missingReq = req; break
+				end
 			end
-			tooltipReqs.Text       = table.concat(parts, "\n")
-			tooltipReqs.TextColor3 = isUnlocked(buildingType)
-				and Color3.fromRGB(80, 200, 90)
-				or  Color3.fromRGB(220, 55, 55)
+		end
+		d.btn.BackgroundColor3       = C.BG_LOCKED
+		d.btn.BackgroundTransparency = 0
+		d.accentBar.BackgroundColor3 = C.DIM
+		d.nameLbl.TextColor3         = C.DIM
+		d.subLbl.Text                = missingReq ~= "" and ("Needs " .. missingReq) or "LOCKED"
+		d.subLbl.TextColor3          = Color3.fromRGB(160, 50, 50)
+		d.stroke.Color               = C.BORDER_LO
+		d.stroke.Thickness           = 1
+
+	else
+		-- Normal: available to build
+		d.btn.BackgroundColor3       = C.BG_CARD
+		d.btn.BackgroundTransparency = 0
+		d.accentBar.BackgroundColor3 = d.color
+		d.nameLbl.TextColor3         = C.TEXT
+		d.subLbl.Text                = "◆ " .. tostring(info and info.cost or 0) .. " res"
+		d.subLbl.TextColor3          = C.GOLD
+		d.stroke.Color               = C.BORDER
+		d.stroke.Thickness           = 1
+	end
+end
+
+local function updateAllCards()
+	for _, e in CARD_ENTRIES do
+		applyCardState(e.btype)
+	end
+end
+
+-- ── Resource display ──────────────────────────────────────────────────────────
+
+local function refreshResDisplay()
+	if resLabel then
+		resLabel.Text = tostring(currentResources)
+	end
+	if incLabel then
+		if currentIncome > 0 then
+			incLabel.Text = string.format("+%.0f/min", currentIncome)
+			incLabel.TextColor3 = C.GREEN
+		else
+			incLabel.Text = ""
 		end
 	end
-
-	-- Position tooltip to the right of the tray (tray left=10, width=152, gap=8 → x=170)
-	local absY = button.AbsolutePosition.Y
-	tooltipFrame.Position = UDim2.fromOffset(170, absY)
-	tooltipFrame.Visible  = true
 end
 
--- ── Tray open / close ─────────────────────────────────────────────────────────
+-- ── Card construction ─────────────────────────────────────────────────────────
 
-local function setTrayOpen(open: boolean)
-	buildMenuOpen = open
-	if not open then hideTooltip() end
-	if buildMenuTray   then buildMenuTray.Visible = open end
-	if buildMenuBtnRef then
-		buildMenuBtnRef.Text             = open and "Build  ▲" or "Build  ▼"
-		buildMenuBtnRef.BackgroundColor3 = open and GREEN2 or BLUE
-	end
+local function makeCard(parent: Instance, btype: string, label: string, color: Color3): TextButton
+	local zi = 5
+
+	-- Root: a TextButton so click and hover work directly on the card
+	local btn                  = Instance.new("TextButton")
+	btn.Name                   = btype .. "Card"
+	btn.Size                   = UDim2.fromOffset(128, 60)
+	btn.BackgroundColor3       = C.BG_CARD
+	btn.BackgroundTransparency = 0
+	btn.Text                   = ""
+	btn.AutoButtonColor        = false
+	btn.BorderSizePixel        = 0
+	btn.LayoutOrder            = #CARD_ENTRIES   -- overwritten by caller
+	btn.ZIndex                 = zi
+	btn.Parent                 = parent
+	UILib.corner(btn, 8)
+	local sk = UILib.stroke(btn, C.BORDER, 1)
+
+	-- Subtle hover feedback
+	btn.MouseEnter:Connect(function()
+		if currentActivePlacing ~= btype and isUnlocked(btype) then
+			btn.BackgroundColor3 = Color3.fromRGB(22, 32, 58)
+		end
+	end)
+	btn.MouseLeave:Connect(function()
+		if currentActivePlacing ~= btype then
+			applyCardState(btype)
+		end
+	end)
+
+	-- Coloured accent bar at top
+	local bar                  = Instance.new("Frame")
+	bar.Name                   = "AccentBar"
+	bar.Size                   = UDim2.new(1, -2, 0, 5)
+	bar.Position               = UDim2.fromOffset(1, 1)
+	bar.BackgroundColor3       = color
+	bar.BorderSizePixel        = 0
+	bar.ZIndex                 = zi + 1
+	bar.Parent                 = btn
+	UILib.corner(bar, 6)
+
+	-- Building name
+	local nameLbl              = UILib.lbl(btn, label,
+		UDim2.fromOffset(108, 18), UDim2.fromOffset(10, 10),
+		{ bold = true, size = 13, color = C.TEXT, zIndex = zi + 1 })
+	nameLbl.Name               = "NameLbl"
+
+	-- Cost / status
+	local subLbl               = UILib.lbl(btn, "",
+		UDim2.fromOffset(108, 14), UDim2.fromOffset(10, 30),
+		{ size = 11, color = C.GOLD, zIndex = zi + 1 })
+	subLbl.Name                = "SubLbl"
+
+	cardMap[btype] = {
+		btn       = btn,
+		accentBar = bar,
+		nameLbl   = nameLbl,
+		subLbl    = subLbl,
+		stroke    = sk,
+		color     = color,
+	}
+
+	return btn
 end
 
--- ── create ────────────────────────────────────────────────────────────────────
+-- ── HUD.create ────────────────────────────────────────────────────────────────
 
-function HUD.create(): (Frame, TextButton, TextButton, TextButton, TextButton, TextButton)
+function HUD.create(): (Frame, TextButton, TextButton, TextButton, TextButton, TextButton, TextButton)
 	local sg               = Instance.new("ScreenGui")
 	sg.Name                = "RTSHUD"
 	sg.ResetOnSpawn        = false
 	sg.ZIndexBehavior      = Enum.ZIndexBehavior.Sibling
 	sg.Parent              = localPlayer.PlayerGui
 
-	resLabel = makeLabel(sg, "Resources: 400",
-		UDim2.fromOffset(10, 10), UDim2.fromOffset(260, 42))
+	-- ── Resource bar (top-left) ──────────────────────────────────────────
+	local resBar                  = Instance.new("Frame")
+	resBar.Name                   = "ResourceBar"
+	resBar.Size                   = UDim2.fromOffset(272, 40)
+	resBar.Position               = UDim2.fromOffset(12, 12)
+	resBar.BackgroundColor3       = C.BG_PANEL
+	resBar.BackgroundTransparency = 0.08
+	resBar.BorderSizePixel        = 0
+	resBar.ZIndex                 = 4
+	resBar.Parent                 = sg
+	UILib.corner(resBar, 8)
+	UILib.stroke(resBar, C.BORDER, 1)
 
-	selLabel = makeLabel(sg, "",
-		UDim2.new(0.5, -120, 0, 10), UDim2.fromOffset(240, 42))
-	selLabel.BackgroundTransparency = 1
+	-- Diamond icon
+	local diamond                 = UILib.lbl(resBar, "◆",
+		UDim2.fromOffset(22, 40), UDim2.fromOffset(8, 0),
+		{ bold = true, size = 18, color = C.GOLD, align = Enum.TextXAlignment.Center, zIndex = 5 })
+	diamond.Name = "Diamond"
 
+	-- Resource number
+	local rLbl                    = UILib.lbl(resBar, "400",
+		UDim2.fromOffset(100, 40), UDim2.fromOffset(30, 0),
+		{ bold = true, size = 16, color = C.GOLD, align = Enum.TextXAlignment.Left, zIndex = 5 })
+	rLbl.Name = "ResLabel"
+	resLabel   = rLbl
+
+	-- Separator dot
+	local dot                     = UILib.lbl(resBar, "·",
+		UDim2.fromOffset(14, 40), UDim2.fromOffset(132, 0),
+		{ size = 16, color = C.SUBTEXT, align = Enum.TextXAlignment.Center, zIndex = 5 })
+	dot.Name = "Dot"
+
+	-- Income
+	local iLbl                    = UILib.lbl(resBar, "",
+		UDim2.fromOffset(112, 40), UDim2.fromOffset(148, 0),
+		{ size = 13, color = C.GREEN, align = Enum.TextXAlignment.Left, zIndex = 5 })
+	iLbl.Name = "IncLabel"
+	incLabel   = iLbl
+
+	-- ── Selection label (top-center) ─────────────────────────────────────
+	local sLbl                    = Instance.new("TextLabel")
+	sLbl.Name                     = "SelLabel"
+	sLbl.Size                     = UDim2.fromOffset(280, 38)
+	sLbl.Position                 = UDim2.new(0.5, -140, 0, 12)
+	sLbl.BackgroundTransparency   = 1
+	sLbl.TextColor3               = C.TEXT
+	sLbl.Font                     = Enum.Font.GothamBold
+	sLbl.TextSize                 = 15
+	sLbl.TextXAlignment           = Enum.TextXAlignment.Center
+	sLbl.Text                     = ""
+	sLbl.ZIndex                   = 4
+	sLbl.Parent                   = sg
+	selLabel = sLbl
+
+	-- ── Drag-select rectangle ─────────────────────────────────────────────
 	local dragFrame                  = Instance.new("Frame")
 	dragFrame.Name                   = "DragSelect"
-	dragFrame.BackgroundColor3       = Color3.fromRGB(100, 200, 255)
-	dragFrame.BackgroundTransparency = 0.7
+	dragFrame.BackgroundColor3       = C.ACCENT
+	dragFrame.BackgroundTransparency = 0.76
 	dragFrame.BorderSizePixel        = 1
-	dragFrame.BorderColor3           = Color3.fromRGB(160, 220, 255)
+	dragFrame.BorderColor3           = C.ACCENT
 	dragFrame.Visible                = false
 	dragFrame.ZIndex                 = 20
 	dragFrame.Parent                 = sg
 
-	-- CC placement button (centred at bottom)
-	local ccBtn = makeButton(sg, "Place Command Center",
-		UDim2.new(0.5, -130, 1, -60), UDim2.fromOffset(260, 50), TEAL)
-	ccBtnRef    = ccBtn
+	-- ── Bottom button row (toggle + cancel sit here) ─────────────────────
+	-- Layout from bottom: 10px margin → 50px button row → 8px gap → 72px tray → 8px gap → panels
 
-	-- ── Build tray ────────────────────────────────────────────────────────
-	local tray                       = Instance.new("Frame")
-	tray.Name                        = "BuildTray"
-	tray.Size                        = UDim2.fromOffset(152, 154)
-	tray.Position                    = UDim2.new(0, 10, 1, -222)
-	tray.BackgroundColor3            = Color3.fromRGB(18, 18, 18)
-	tray.BackgroundTransparency      = 0.18
-	tray.Visible                     = false
-	tray.ZIndex                      = 8
-	tray.Parent                      = sg
+	-- CC placement button (centered, CC mode only)
+	local ccBtn                  = UILib.btn(sg,
+		"⌂  PLACE COMMAND CENTER",
+		UDim2.fromOffset(280, 50),
+		UDim2.new(0.5, -140, 1, -60),
+		C.TEAL, 4)
+	ccBtn.Name                   = "CCButton"
+	ccBtn.TextSize               = 15
+	ccBtn.Visible                = false
+	ccBtnRef                     = ccBtn
 
-	local trayCorner                 = Instance.new("UICorner")
-	trayCorner.CornerRadius          = UDim.new(0, 8)
-	trayCorner.Parent                = tray
+	-- Build toggle button (bottom-left, game mode)
+	local toggleBtn              = UILib.btn(sg,
+		"BUILD  ▼",
+		UDim2.fromOffset(164, 50),
+		UDim2.new(0, 10, 1, -60),
+		C.BG_CARD, 4)
+	toggleBtn.Name               = "BuildToggle"
+	toggleBtn.TextSize           = 14
+	toggleBtn.Visible            = false
+	buildToggleBtnRef            = toggleBtn
 
-	local trayStroke                 = Instance.new("UIStroke")
-	trayStroke.Color                 = Color3.fromRGB(60, 60, 70)
-	trayStroke.Thickness             = 1
-	trayStroke.Parent                = tray
+	-- Cancel button (right of toggle, placement mode only)
+	local cancelBtn              = UILib.btn(sg,
+		"✕  CANCEL",
+		UDim2.fromOffset(145, 50),
+		UDim2.new(0, 184, 1, -60),
+		C.RED, 6)
+	cancelBtn.Name               = "CancelBtn"
+	cancelBtn.TextSize           = 14
+	cancelBtn.Visible            = false
+	cancelBtnRef                 = cancelBtn
 
-	local trayLayout                 = Instance.new("UIListLayout")
-	trayLayout.FillDirection         = Enum.FillDirection.Vertical
-	trayLayout.SortOrder             = Enum.SortOrder.LayoutOrder
-	trayLayout.Padding               = UDim.new(0, 5)
-	trayLayout.Parent                = tray
+	-- ── Build card tray (above toggle row, collapsed by default) ──────────
+	local buildBar                   = Instance.new("Frame")
+	buildBar.Name                    = "BuildBar"
+	buildBar.Size                    = UDim2.fromOffset(564, 72)
+	buildBar.Position                = UDim2.new(0.5, -282, 1, -140)
+	buildBar.BackgroundColor3        = C.BG_PANEL
+	buildBar.BackgroundTransparency  = 0.08
+	buildBar.BorderSizePixel         = 0
+	buildBar.Visible                 = false   -- collapsed until toggled
+	buildBar.ZIndex                  = 4
+	buildBar.Parent                  = sg
+	UILib.corner(buildBar, 10)
+	UILib.stroke(buildBar, C.BORDER, 1)
+	buildBarRef = buildBar
 
-	local trayPad                    = Instance.new("UIPadding")
-	trayPad.PaddingTop               = UDim.new(0, 6)
-	trayPad.PaddingBottom            = UDim.new(0, 6)
-	trayPad.PaddingLeft              = UDim.new(0, 6)
-	trayPad.PaddingRight             = UDim.new(0, 6)
-	trayPad.Parent                   = tray
+	local layout                     = Instance.new("UIListLayout")
+	layout.FillDirection             = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment       = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment         = Enum.VerticalAlignment.Center
+	layout.Padding                   = UDim.new(0, 8)
+	layout.Parent                    = buildBar
 
-	-- Buttons in order: Mine (no reqs) → Barracks (needs Mine) → Turret (needs Barracks)
-	local mineBtn   = makeButton(tray, "Mine  (75)",     UDim2.new(), UDim2.new(1, 0, 0, 42), GOLD)
-	local buildBtn  = makeButton(tray, "Barracks  (50)", UDim2.new(), UDim2.new(1, 0, 0, 42))
-	local turretBtn = makeButton(tray, "Turret  (100)",  UDim2.new(), UDim2.new(1, 0, 0, 42), ORANGE)
+	-- Build cards — order matches CARD_ENTRIES
+	local btnRefs: { [string]: TextButton } = {}
+	for i, e in CARD_ENTRIES do
+		local b          = makeCard(buildBar, e.btype, e.label, e.color)
+		b.LayoutOrder    = i
+		btnRefs[e.btype] = b
+	end
 
-	buildMenuTray = tray
-	buildBtnRef   = buildBtn
-	mineBtnRef    = mineBtn
-	turretBtnRef  = turretBtn
+	-- Apply initial visual state
+	updateAllCards()
 
-	-- ── Tooltip frame ─────────────────────────────────────────────────────
-	local tt                         = Instance.new("Frame")
-	tt.Name                          = "BuildTooltip"
-	tt.Size                          = UDim2.fromOffset(210, 108)
-	tt.BackgroundColor3              = Color3.fromRGB(12, 18, 34)
-	tt.BackgroundTransparency        = 0.06
-	tt.BorderSizePixel               = 0
-	tt.Visible                       = false
-	tt.ZIndex                        = 20
-	tt.Parent                        = sg
+	return dragFrame,
+		btnRefs["Barracks"],
+		btnRefs["Mine"],
+		btnRefs["Turret"],
+		cancelBtn,
+		ccBtn,
+		btnRefs["Workshop"]
+end
 
-	local ttCorner                   = Instance.new("UICorner")
-	ttCorner.CornerRadius            = UDim.new(0, 8)
-	ttCorner.Parent                  = tt
+-- ── Private helpers ──────────────────────────────────────────────────────────
 
-	local ttStroke                   = Instance.new("UIStroke")
-	ttStroke.Color                   = Color3.fromRGB(55, 90, 150)
-	ttStroke.Thickness               = 1.2
-	ttStroke.Parent                  = tt
-
-	local ttPad                      = Instance.new("UIPadding")
-	ttPad.PaddingTop                 = UDim.new(0, 8)
-	ttPad.PaddingLeft                = UDim.new(0, 10)
-	ttPad.PaddingRight               = UDim.new(0, 10)
-	ttPad.PaddingBottom              = UDim.new(0, 8)
-	ttPad.Parent                     = tt
-
-	local ttLayout                   = Instance.new("UIListLayout")
-	ttLayout.FillDirection           = Enum.FillDirection.Vertical
-	ttLayout.SortOrder               = Enum.SortOrder.LayoutOrder
-	ttLayout.Padding                 = UDim.new(0, 5)
-	ttLayout.Parent                  = tt
-
-	local ttTitle                    = Instance.new("TextLabel")
-	ttTitle.Name                     = "Title"
-	ttTitle.LayoutOrder              = 1
-	ttTitle.Size                     = UDim2.new(1, 0, 0, 18)
-	ttTitle.BackgroundTransparency   = 1
-	ttTitle.TextColor3               = WHITE
-	ttTitle.Font                     = Enum.Font.GothamBold
-	ttTitle.TextSize                 = 14
-	ttTitle.TextXAlignment           = Enum.TextXAlignment.Left
-	ttTitle.Parent                   = tt
-
-	local ttDesc                     = Instance.new("TextLabel")
-	ttDesc.Name                      = "Desc"
-	ttDesc.LayoutOrder               = 2
-	ttDesc.Size                      = UDim2.new(1, 0, 0, 40)
-	ttDesc.BackgroundTransparency    = 1
-	ttDesc.TextColor3                = SUBTEXT
-	ttDesc.Font                      = Enum.Font.Gotham
-	ttDesc.TextSize                  = 12
-	ttDesc.TextXAlignment            = Enum.TextXAlignment.Left
-	ttDesc.TextWrapped               = true
-	ttDesc.Parent                    = tt
-
-	local ttReqs                     = Instance.new("TextLabel")
-	ttReqs.Name                      = "Reqs"
-	ttReqs.LayoutOrder               = 3
-	ttReqs.Size                      = UDim2.new(1, 0, 0, 28)
-	ttReqs.BackgroundTransparency    = 1
-	ttReqs.TextColor3                = SUBTEXT
-	ttReqs.Font                      = Enum.Font.Gotham
-	ttReqs.TextSize                  = 12
-	ttReqs.TextXAlignment            = Enum.TextXAlignment.Left
-	ttReqs.TextWrapped               = true
-	ttReqs.Parent                    = tt
-
-	tooltipFrame = tt
-	tooltipTitle = ttTitle
-	tooltipDesc  = ttDesc
-	tooltipReqs  = ttReqs
-
-	-- ── Bottom action bar ─────────────────────────────────────────────────
-	local buildMenuBtn = makeButton(sg, "Build  ▼",
-		UDim2.new(0, 10, 1, -60), UDim2.fromOffset(152, 50))
-	buildMenuBtnRef    = buildMenuBtn
-
-	local cancelBtn = makeButton(sg, "Cancel [Esc]",
-		UDim2.new(0, 170, 1, -60), UDim2.fromOffset(145, 50), RED)
-	cancelBtn.Visible  = false
-	cancelBtnRef       = cancelBtn
-
-	buildMenuBtn.Visible = false   -- hidden until CC is placed
-
-	return dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn
+local function setTrayOpen(open: boolean)
+	buildMenuOpen = open
+	if buildBarRef  then buildBarRef.Visible  = open end
+	if buildToggleBtnRef then
+		buildToggleBtnRef.Text             = open and "BUILD  ▲" or "BUILD  ▼"
+		buildToggleBtnRef.BackgroundColor3 = open and C.GREEN   or C.BG_CARD
+	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function HUD.setResources(n: number)
 	currentResources = n
-	refreshResLabel()
+	refreshResDisplay()
 end
 
 function HUD.setIncome(perMin: number)
 	currentIncome = perMin
-	refreshResLabel()
+	refreshResDisplay()
 end
 
 function HUD.setCommandCenterMode(isCC: boolean)
-	if ccBtnRef        then ccBtnRef.Visible        = isCC     end
-	if buildMenuBtnRef then buildMenuBtnRef.Visible = not isCC end
-	if cancelBtnRef    then cancelBtnRef.Visible    = false    end
+	if ccBtnRef         then ccBtnRef.Visible         = isCC     end
+	if buildToggleBtnRef then buildToggleBtnRef.Visible = not isCC end
+	if cancelBtnRef     then cancelBtnRef.Visible     = false    end
 	setTrayOpen(false)
 end
 
--- Called from init.client whenever owned building counts change.
 function HUD.refreshTrayState(counts: { [string]: number })
 	playerCounts = counts
-	updateTrayButtonVisuals(currentActivePlacing)
-	hideTooltip()
+	updateAllCards()
 end
 
-function HUD.wire(network, unitController, buildingPlacer,
-	buildBtn: TextButton, mineBtn: TextButton, turretBtn: TextButton, cancelBtn: TextButton)
+-- ── HUD.wire ──────────────────────────────────────────────────────────────────
 
+function HUD.wire(
+	network,       unitController, buildingPlacer,
+	buildBtn:      TextButton,
+	mineBtn:       TextButton,
+	turretBtn:     TextButton,
+	cancelBtn:     TextButton,
+	workshopBtn:   TextButton
+)
+	-- Resource sync
 	network.onResourceSync(function(n: number)
 		HUD.setResources(n)
 	end)
 
+	-- Selection display
 	unitController.onSelectionChanged(function(n: number)
 		if selLabel then
-			selLabel.Text = n > 0 and (n .. " unit" .. (n == 1 and "" or "s") .. " selected") or ""
+			selLabel.Text = n > 0
+				and (n .. " unit" .. (n == 1 and "" or "s") .. " selected")
+				or  ""
 		end
 	end)
 
-	-- Build toggle
-	if buildMenuBtnRef then
-		buildMenuBtnRef.MouseButton1Click:Connect(function()
+	-- Toggle tray open/close
+	if buildToggleBtnRef then
+		buildToggleBtnRef.MouseButton1Click:Connect(function()
 			setTrayOpen(not buildMenuOpen)
 		end)
 	end
 
-	-- Tray buttons — lock-aware clicks
+	-- Build card clicks — also close the tray
 	mineBtn.MouseButton1Click:Connect(function()
 		if not isUnlocked("Mine") then return end
 		setTrayOpen(false)
@@ -394,6 +439,12 @@ function HUD.wire(network, unitController, buildingPlacer,
 		buildingPlacer.enterPlacementMode("Barracks")
 	end)
 
+	workshopBtn.MouseButton1Click:Connect(function()
+		if not isUnlocked("Workshop") then return end
+		setTrayOpen(false)
+		buildingPlacer.enterPlacementMode("Workshop")
+	end)
+
 	turretBtn.MouseButton1Click:Connect(function()
 		if not isUnlocked("Turret") then return end
 		setTrayOpen(false)
@@ -404,31 +455,15 @@ function HUD.wire(network, unitController, buildingPlacer,
 		buildingPlacer.exitPlacementMode()
 	end)
 
-	-- Hover tooltips
-	mineBtn.MouseEnter:Connect(function()   showTooltip("Mine",     mineBtn)   end)
-	mineBtn.MouseLeave:Connect(function()   hideTooltip()                       end)
-	buildBtn.MouseEnter:Connect(function()  showTooltip("Barracks", buildBtn)  end)
-	buildBtn.MouseLeave:Connect(function()  hideTooltip()                       end)
-	turretBtn.MouseEnter:Connect(function() showTooltip("Turret",   turretBtn) end)
-	turretBtn.MouseLeave:Connect(function() hideTooltip()                       end)
-
+	-- Placement mode changes
 	buildingPlacer.onModeChanged(function(active: boolean, buildingType: string?)
 		currentActivePlacing = active and buildingType or nil
-
-		if buildMenuBtnRef then
-			if active and buildingType ~= "CommandCenter" then
-				buildMenuBtnRef.BackgroundColor3 = RED
-			elseif buildMenuOpen then
-				buildMenuBtnRef.BackgroundColor3 = GREEN2
-			else
-				buildMenuBtnRef.BackgroundColor3 = BLUE
-				buildMenuBtnRef.Text             = "Build  ▼"
-			end
+		updateAllCards()
+		-- Close tray when placement begins; restore toggle when done
+		if active then
+			setTrayOpen(false)
 		end
-
-		updateTrayButtonVisuals(currentActivePlacing)
-		cancelBtn.Visible = active and (buildingType ~= "CommandCenter")
-		if active then setTrayOpen(false) end
+		cancelBtn.Visible = active and buildingType ~= "CommandCenter"
 	end)
 end
 

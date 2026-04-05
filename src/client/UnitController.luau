@@ -11,7 +11,9 @@ local knownUnits: {[string]: {part: BasePart, ownerId: number}} = {}
 local knownBuildings: {[string]: {base: BasePart, ownerId: number, buildingType: string}} = {}
 local selectionBoxes: {[string]: SelectionBox} = {}
 local onChangedCb: ((number) -> ())?
-local onBarracksSelectedCb: ((string?) -> ())?
+local onBarracksSelectedCb:  ((string?) -> ())?
+local onMineSelectedCb:      ((string?) -> ())?
+local onWorkshopSelectedCb:  ((string?) -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
 
@@ -199,6 +201,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			end
 			notify()
 			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+			if onMineSelectedCb     then onMineSelectedCb(nil)     end
+			if onWorkshopSelectedCb then onWorkshopSelectedCb(nil) end
 			return
 		end
 
@@ -274,27 +278,45 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
-			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+			if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+			if onMineSelectedCb      then onMineSelectedCb(nil)      end
+			if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
 		else
-			-- Single click — check unit first, then barracks
+			-- Single click — check unit first, then buildings
 			local uid = hitUnit()
 			if uid then
 				if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then clearSelection() end
 				addToSelection(uid)
-				if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+				if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+				if onMineSelectedCb      then onMineSelectedCb(nil)      end
+				if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
 			else
 				local bid = hitBuilding()
 				if bid then
 					clearSelection()
 					local info = knownBuildings[bid]
-					if info and info.buildingType == "Barracks" then
-						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
+					if info and info.buildingType == "Barracks" and info.ownerId == localPlayer.UserId then
+						if onBarracksSelectedCb  then onBarracksSelectedCb(bid)  end
+						if onMineSelectedCb      then onMineSelectedCb(nil)      end
+						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+					elseif info and info.buildingType == "Mine" and info.ownerId == localPlayer.UserId then
+						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+						if onMineSelectedCb      then onMineSelectedCb(bid)      end
+						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+					elseif info and info.buildingType == "Workshop" and info.ownerId == localPlayer.UserId then
+						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+						if onMineSelectedCb      then onMineSelectedCb(nil)      end
+						if onWorkshopSelectedCb  then onWorkshopSelectedCb(bid)  end
 					else
-						if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+						if onMineSelectedCb      then onMineSelectedCb(nil)      end
+						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
 					end
 				else
 					clearSelection()
-					if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+					if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
+					if onMineSelectedCb      then onMineSelectedCb(nil)      end
+					if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
 				end
 			end
 		end
@@ -311,6 +333,14 @@ end
 
 function UnitController.onBarracksSelected(fn: (string?) -> ())
 	onBarracksSelectedCb = fn
+end
+
+function UnitController.onMineSelected(fn: (string?) -> ())
+	onMineSelectedCb = fn
+end
+
+function UnitController.onWorkshopSelected(fn: (string?) -> ())
+	onWorkshopSelectedCb = fn
 end
 
 return UnitController

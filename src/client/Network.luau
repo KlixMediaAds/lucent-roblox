@@ -73,4 +73,22 @@ function Network.onUnitHit(fn: (Vector3, Vector3, string) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitHit).OnClientEvent:Connect(fn)
 end
 
+function Network.upgradeMine(mineId: string, upgradeType: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeMine):FireServer(mineId, upgradeType)
+end
+
+function Network.startResearch(workshopId: string, techName: string)
+	RemoteHandler.get(Config.REMOTES.StartResearch):FireServer(workshopId, techName)
+end
+
+-- techName, progress (0–1)
+function Network.onResearchUpdate(fn: (string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.ResearchUpdate).OnClientEvent:Connect(fn)
+end
+
+-- techName
+function Network.onResearchCompleted(fn: (string) -> ())
+	RemoteHandler.get(Config.REMOTES.ResearchCompleted).OnClientEvent:Connect(fn)
+end
+
 return Network

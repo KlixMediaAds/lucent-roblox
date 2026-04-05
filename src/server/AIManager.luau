@@ -146,9 +146,10 @@ local function nearestFreeDeposit(fromPos: Vector3): Vector3?
 	local folder = workspace:FindFirstChild("Deposits")
 	if not folder then return nil end
 	local best, bestDist = nil :: Vector3?, math.huge
-	for _, part in folder:GetChildren() do
-		local p2 = Vector3.new(part.Position.X, 0, part.Position.Z)
-		local d  = (p2 - Vector3.new(fromPos.X, 0, fromPos.Z)).Magnitude
+	for _, obj in folder:GetChildren() do
+		local wpos = obj:GetPivot().Position   -- works for both Model and BasePart
+		local p2   = Vector3.new(wpos.X, 0, wpos.Z)
+		local d    = (p2 - Vector3.new(fromPos.X, 0, fromPos.Z)).Magnitude
 		if d < bestDist then bestDist = d; best = p2 end
 	end
 	return best
