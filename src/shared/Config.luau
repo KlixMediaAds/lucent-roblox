@@ -1,7 +1,7 @@
 local Config = {}
 
 -- Economy
-Config.STARTING_RESOURCES   = 100
+Config.STARTING_RESOURCES   = 400
 Config.BUILDING_COST         = 50   -- Barracks cost
 Config.MINE_COST             = 75   -- Mine building cost
 
@@ -43,6 +43,32 @@ Config.MINER_OFFSETS = {
 	Vector3.new(-1, 0, -1),  -- NW
 }
 
+-- Command Center
+Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
+Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command centers
+
+-- Mine limits & depletion
+Config.MAX_MINES                = 3     -- max mine buildings per player
+Config.DEPOSIT_TOTAL_RESOURCES  = 300   -- total resources a deposit holds before depleting
+Config.MINE_DECAY_RATE          = 5     -- HP/second drained from a depleted mine
+
+-- Turret
+Config.TURRET_COST        = 100
+Config.TURRET_RANGE       = 50    -- studs
+Config.TURRET_DAMAGE      = 20
+Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
+
+-- Build / train times (seconds)  —  CommandCenter is always instant
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12 }
+
+-- Combat / Health
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250  }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 30   }
+Config.UNIT_ATTACK_RANGE   = 15    -- studs
+Config.UNIT_ATTACK_RATE    = 1.0   -- seconds between each unit's attacks
+
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
 Config.CAMERA_MOVE_SPEED     = 60
@@ -61,9 +87,12 @@ Config.REMOTES = {
 	UnitSpawned      = "UnitSpawned",
 	BuildingPlaced   = "BuildingPlaced",
 	UnitsOrderedMove = "UnitsOrderedMove",
-	SyncDeposits     = "SyncDeposits",
-	DepositClaimed   = "DepositClaimed",
-	MinerSpawned     = "MinerSpawned",
+	SyncDeposits      = "SyncDeposits",
+	DepositClaimed    = "DepositClaimed",
+	MinerSpawned      = "MinerSpawned",
+	NeedCommandCenter = "NeedCommandCenter",
+	TrainingUpdate    = "TrainingUpdate",
+	TurretShot        = "TurretShot",
 }
 
 return Config

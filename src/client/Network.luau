@@ -49,4 +49,19 @@ function Network.onMinerSpawned(fn: (string, number, number) -> ())
 	RemoteHandler.get(Config.REMOTES.MinerSpawned).OnClientEvent:Connect(fn)
 end
 
+-- Fired when the player needs to (re)place their Command Center
+function Network.onNeedCommandCenter(fn: () -> ())
+	RemoteHandler.get(Config.REMOTES.NeedCommandCenter).OnClientEvent:Connect(fn)
+end
+
+-- barrackId, queue (array of unitType strings), frontProgress (0-1)
+function Network.onTrainingUpdate(fn: (string, {string}, number) -> ())
+	RemoteHandler.get(Config.REMOTES.TrainingUpdate).OnClientEvent:Connect(fn)
+end
+
+-- barrelTip, targetPos: spawn a projectile visual
+function Network.onTurretShot(fn: (Vector3, Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.TurretShot).OnClientEvent:Connect(fn)
+end
+
 return Network

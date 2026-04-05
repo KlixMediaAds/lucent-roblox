@@ -1,5 +1,6 @@
 local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local GuiService       = game:GetService("GuiService")
 
 local UnitController = {}
 
@@ -8,6 +9,7 @@ local mouse        = localPlayer:GetMouse()
 local selected: {string}  = {}
 local knownUnits: {[string]: {part: BasePart, ownerId: number}} = {}
 local knownBuildings: {[string]: {base: BasePart, ownerId: number, buildingType: string}} = {}
+local selectionBoxes: {[string]: SelectionBox} = {}
 local onChangedCb: ((number) -> ())?
 local onBarracksSelectedCb: ((string?) -> ())?
 local isBlockedFn: (() -> boolean)?
@@ -18,7 +20,44 @@ local dragEnd    = Vector2.zero
 local isDragging = false
 local MIN_DRAG   = 8   -- pixels
 
+local function syncSelectionBoxes()
+	-- Remove boxes for units no longer selected
+	local selectedSet: {[string]: boolean} = {}
+	for _, id in selected do selectedSet[id] = true end
+
+	for id, box in selectionBoxes do
+		if not selectedSet[id] then
+			box:Destroy()
+			selectionBoxes[id] = nil
+		end
+	end
+
+	-- Add boxes for newly selected units
+	for _, id in selected do
+		if selectionBoxes[id] then continue end
+		local info = knownUnits[id]
+		if not info or not info.part.Parent then continue end  -- stale / destroyed
+
+		local box                  = Instance.new("SelectionBox")
+		box.Adornee                = info.part
+		box.Color3                 = Color3.fromRGB(0, 200, 255)
+		box.LineThickness          = 0.06
+		box.SurfaceTransparency    = 0.8
+		box.SurfaceColor3          = Color3.fromRGB(0, 200, 255)
+		box.Parent                 = workspace
+
+		selectionBoxes[id] = box
+
+		-- Clean up automatically if the unit is destroyed
+		info.part.Destroying:Connect(function()
+			local b = selectionBoxes[id]
+			if b then b:Destroy(); selectionBoxes[id] = nil end
+		end)
+	end
+end
+
 local function notify()
+	syncSelectionBoxes()
 	if onChangedCb then onChangedCb(#selected) end
 end
 
@@ -73,7 +112,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	dragFrame    = frame
 	isBlockedFn  = isBlocked
 
-	-- Track all replicated units
+	-- Track all replicated units; auto-clean when a unit is destroyed
 	network.onUnitSpawned(function(id: string, ownerId: number, _pos: Vector3)
 		task.spawn(function()
 			local folder = workspace:WaitForChild("Units", 10)
@@ -81,6 +120,18 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			local part = folder:WaitForChild(id, 10) :: BasePart
 			if not part then return end
 			knownUnits[id] = { part = part, ownerId = ownerId }
+
+			part.Destroying:Connect(function()
+				knownUnits[id] = nil
+				-- Remove from active selection
+				for i = #selected, 1, -1 do
+					if selected[i] == id then table.remove(selected, i); break end
+				end
+				-- Clean up SelectionBox
+				local box = selectionBoxes[id]
+				if box then box:Destroy(); selectionBoxes[id] = nil end
+				notify()
+			end)
 		end)
 	end)
 
@@ -97,9 +148,23 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		end)
 	end)
 
-	-- LMB down: begin possible drag
+	-- Input
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
+
+		-- F2: select all owned living units (works even during building placement)
+		if input.KeyCode == Enum.KeyCode.F2 then
+			selected = {}
+			for id, info in knownUnits do
+				if info.ownerId == localPlayer.UserId and info.part.Parent then
+					table.insert(selected, id)
+				end
+			end
+			notify()
+			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
+			return
+		end
+
 		if isBlockedFn and isBlockedFn() then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -125,8 +190,11 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		local d = dragEnd - dragStart
 		if math.abs(d.X) > MIN_DRAG or math.abs(d.Y) > MIN_DRAG then
 			if dragFrame then
-				local x0 = math.min(dragStart.X, dragEnd.X)
-				local y0 = math.min(dragStart.Y, dragEnd.Y)
+				-- GetMouseLocation() is in raw viewport space; ScreenGui positions
+				-- are offset by the GUI inset (top bar), so subtract it.
+				local inset = GuiService:GetGuiInset()
+				local x0 = math.min(dragStart.X, dragEnd.X) - inset.X
+				local y0 = math.min(dragStart.Y, dragEnd.Y) - inset.Y
 				dragFrame.Position = UDim2.fromOffset(x0, y0)
 				dragFrame.Size     = UDim2.fromOffset(math.abs(d.X), math.abs(d.Y))
 				dragFrame.Visible  = true
@@ -163,7 +231,6 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				if bid then
 					clearSelection()
 					local info = knownBuildings[bid]
-					-- Only open the Barracks panel for Barracks-type buildings
 					if info and info.buildingType == "Barracks" then
 						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
 					else

@@ -8,6 +8,7 @@ local ResourceManager   = {}
 local store: {[number]: number} = {}
 
 local function sync(player: Player)
+	if player.UserId < 0 then return end   -- AI bots (negative UserId) have no client to sync
 	RemoteHandler.get(Config.REMOTES.SyncResources):FireClient(player, store[player.UserId] or 0)
 end
 
@@ -32,6 +33,11 @@ function ResourceManager.spend(player: Player, amount: number): boolean
 	store[player.UserId] = current - amount
 	sync(player)
 	return true
+end
+
+function ResourceManager.reset(player: Player)
+	store[player.UserId] = Config.STARTING_RESOURCES
+	sync(player)
 end
 
 function ResourceManager.add(player: Player, amount: number)
