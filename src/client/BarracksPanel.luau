@@ -11,6 +11,7 @@ local C              = UILib.C
 local panel:            Frame?
 local activeBarracksId: string? = nil
 local networkRef:       any
+local hasResearchFn:    ((string) -> boolean)?
 
 local lastTrainingState: { [string]: { queue: {string}, progress: number } } = {}
 
@@ -19,6 +20,9 @@ local progFill:   Frame?
 local progLabel:  TextLabel?
 local queueLabel: TextLabel?
 local statusSection: Frame?
+
+-- Elite button ref (for research-gate refresh)
+local eliteBtn: TextButton?
 
 -- ── World-space training bar (above barracks in 3D) ───────────────────────────
 
@@ -93,12 +97,40 @@ local function updateScreenUI(queue: {string}, progress: number)
 	end
 end
 
+-- ── Elite button state refresh ────────────────────────────────────────────────
+
+local function refreshEliteBtn()
+	if not eliteBtn then return end
+	local unlocked = hasResearchFn and hasResearchFn("EliteUnits") or false
+
+	local labels: {TextLabel} = {}
+	for _, ch in eliteBtn:GetChildren() do
+		if ch:IsA("TextLabel") then table.insert(labels, ch) end
+	end
+	local nameLbl = labels[1]
+	local costLbl = labels[2]
+
+	if unlocked then
+		eliteBtn.BackgroundColor3       = Color3.fromRGB(180, 80, 230)
+		eliteBtn.BackgroundTransparency = 0.12
+		eliteBtn.Active                 = true
+		if nameLbl then nameLbl.TextColor3 = C.TEXT end
+		if costLbl then costLbl.TextColor3 = C.GOLD; costLbl.Text = "◆ 100 res" end
+	else
+		eliteBtn.BackgroundColor3       = C.BG_LOCKED
+		eliteBtn.BackgroundTransparency = 0
+		eliteBtn.Active                 = false
+		if nameLbl then nameLbl.TextColor3 = C.DIM end
+		if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "Needs: Elite Units research" end
+	end
+end
+
 -- ── Train button (custom multi-label card) ────────────────────────────────────
 
 local function makeTrainBtn(parent: Instance, name: string, cost: string, color: Color3, zi: number): TextButton
 	local btn                  = Instance.new("TextButton")
 	btn.Name                   = name .. "Btn"
-	btn.Size                   = UDim2.fromOffset(168, 68)
+	btn.Size                   = UDim2.fromOffset(108, 68)
 	btn.BackgroundColor3       = color
 	btn.BackgroundTransparency = 0.12
 	btn.Text                   = ""
@@ -122,22 +154,23 @@ local function makeTrainBtn(parent: Instance, name: string, cost: string, color:
 
 	-- Unit name
 	UILib.lbl(btn, name:upper(),
-		UDim2.fromOffset(148, 22), UDim2.fromOffset(10, 14),
-		{ bold = true, size = 14, color = C.TEXT, zIndex = zi + 1 })
+		UDim2.fromOffset(88, 22), UDim2.fromOffset(10, 14),
+		{ bold = true, size = 13, color = C.TEXT, zIndex = zi + 1 })
 
 	-- Cost
 	UILib.lbl(btn, "◆ " .. cost,
-		UDim2.fromOffset(148, 16), UDim2.fromOffset(10, 38),
-		{ size = 12, color = C.GOLD, zIndex = zi + 1 })
+		UDim2.fromOffset(88, 16), UDim2.fromOffset(10, 38),
+		{ size = 11, color = C.GOLD, zIndex = zi + 1 })
 
 	return btn
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
 
-function BarracksPanel.init(network)
-	networkRef = network
-	local sg   = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+function BarracksPanel.init(network, hasResearch)
+	networkRef    = network
+	hasResearchFn = hasResearch
+	local sg      = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
 	-- Panel frame
 	local p = UILib.panel(sg,
@@ -150,7 +183,7 @@ function BarracksPanel.init(network)
 	-- Title bar
 	UILib.titleBar(p, "BARRACKS", function() BarracksPanel.hide() end, C.BARRACKS)
 
-	-- Train buttons row
+	-- Train buttons row (3 buttons)
 	local trainRow                   = Instance.new("Frame")
 	trainRow.Name                    = "TrainRow"
 	trainRow.Size                    = UDim2.fromOffset(354, 68)
@@ -163,11 +196,15 @@ function BarracksPanel.init(network)
 	rowLayout.FillDirection          = Enum.FillDirection.Horizontal
 	rowLayout.HorizontalAlignment    = Enum.HorizontalAlignment.Center
 	rowLayout.VerticalAlignment      = Enum.VerticalAlignment.Center
-	rowLayout.Padding                = UDim.new(0, 10)
+	rowLayout.Padding                = UDim.new(0, 8)
 	rowLayout.Parent                 = trainRow
 
-	local soldierBtn = makeTrainBtn(trainRow, "Soldier", "25 res", C.GREEN,   11)
-	local tankBtn    = makeTrainBtn(trainRow, "Tank",    "60 res", C.BARRACKS, 11)
+	local soldierBtn = makeTrainBtn(trainRow, "Soldier", "25 res",  C.GREEN,    11)
+	local tankBtn    = makeTrainBtn(trainRow, "Tank",    "60 res",  C.BARRACKS, 11)
+	local eliteBtnL  = makeTrainBtn(trainRow, "Elite",   "100 res", Color3.fromRGB(180, 80, 230), 11)
+	eliteBtn         = eliteBtnL
+
+	refreshEliteBtn()
 
 	-- Divider
 	UILib.divider(p, 118, 10, 10)
@@ -212,6 +249,12 @@ function BarracksPanel.init(network)
 		if activeBarracksId then networkRef.trainUnit(activeBarracksId, "Tank") end
 	end)
 
+	eliteBtnL.MouseButton1Click:Connect(function()
+		if activeBarracksId and eliteBtnL.Active then
+			networkRef.trainUnit(activeBarracksId, "Elite")
+		end
+	end)
+
 	-- Training update listener
 	network.onTrainingUpdate(function(barrackId: string, queue: {string}, progress: number)
 		lastTrainingState[barrackId] = { queue = queue, progress = progress }
@@ -227,6 +270,7 @@ end
 function BarracksPanel.show(barrackId: string)
 	activeBarracksId = barrackId
 	if panel then panel.Visible = true end
+	refreshEliteBtn()
 	local state = lastTrainingState[barrackId]
 	if state then
 		updateScreenUI(state.queue, state.progress)
@@ -238,6 +282,10 @@ end
 function BarracksPanel.hide()
 	activeBarracksId = nil
 	if panel then panel.Visible = false end
+end
+
+function BarracksPanel.refreshIfVisible()
+	if panel and (panel :: Frame).Visible then refreshEliteBtn() end
 end
 
 function BarracksPanel.isVisible(): boolean

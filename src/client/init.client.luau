@@ -13,6 +13,7 @@ local MinePanel      = require(script:WaitForChild("MinePanel"))
 local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
+local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -59,12 +60,14 @@ local function isBlocked(): boolean
 end
 
 CameraModule.init()
+SpiderLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 
 local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn, workshopBtn = HUD.create()
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
-BarracksPanel.init(Network)
+BarracksPanel.init(Network,
+	function(techName) return researchedTechs[techName] == true end)
 MinePanel.init(Network,
 	function() return currentResources end,
 	function(mineId) return mineMiners[mineId] or 0 end,
@@ -75,6 +78,23 @@ WorkshopPanel.init(Network,
 FogManager.init(localUserId)
 
 HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn, workshopBtn)
+
+-- ── Hide building panels when entering placement mode ─────────────────────────
+-- If a panel (BarracksPanel, MinePanel, WorkshopPanel) is visible when the
+-- player enters placement mode, it sits on top of the map and intercepts the
+-- placement click (gpe = true), silently swallowing the click and leaving
+-- isPlacing = true forever (until Escape/right-click).  Hiding panels on every
+-- build-card click prevents this.
+local function hideBuildingPanels()
+	BarracksPanel.hide()
+	MinePanel.hide()
+	WorkshopPanel.hide()
+end
+buildBtn.MouseButton1Click:Connect(hideBuildingPanels)
+mineBtn.MouseButton1Click:Connect(hideBuildingPanels)
+turretBtn.MouseButton1Click:Connect(hideBuildingPanels)
+workshopBtn.MouseButton1Click:Connect(hideBuildingPanels)
+ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
 
@@ -172,6 +192,21 @@ Network.onDepositClaimed(function(pos: Vector3)
 	BuildingPlacer.removeDeposit(pos)
 end)
 
+-- ── Spider legs for Elite units ───────────────────────────────────────────────
+
+Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
+	task.spawn(function()
+		local unitsFolder = workspace:WaitForChild("Units", 10) :: Folder?
+		if not unitsFolder then return end
+		local part = unitsFolder:WaitForChild(unitId, 10) :: BasePart?
+		if not part then return end
+		local tv = part:FindFirstChild("UnitType") :: StringValue?
+		if tv and tv.Value == "Elite" then
+			SpiderLegs.attach(unitId, part)
+		end
+	end)
+end)
+
 Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount: number)
 	if ownerUserId ~= localUserId then return end
 	mineMiners[mineId] = minerCount
@@ -196,13 +231,223 @@ Network.onResearchCompleted(function(techName: string)
 	researchProgress[techName] = nil
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
+	BarracksPanel.refreshIfVisible()
 end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────
 -- Traveling projectile from attacker → target, then a brief impact flash.
 -- Soldiers: small fast yellow bullet.  Tanks: larger slower orange shell with arc.
+-- Elite: large purple lobbed orb with trail + full explosion VFX.
+
+-- Elite explosion: single RenderStepped connection animates all pieces together.
+local function spawnEliteExplosion(pos: Vector3)
+	-- ── Core burst (instant, very short) ──────────────────────────────────
+	local core        = Instance.new("Part")
+	core.Name         = "_ECore"
+	core.Shape        = Enum.PartType.Ball
+	core.Size         = Vector3.new(3, 3, 3)
+	core.BrickColor   = BrickColor.new("White")
+	core.Material     = Enum.Material.Neon
+	core.Anchored     = true
+	core.CanCollide   = false
+	core.CanQuery     = false
+	core.CastShadow   = false
+	core.Position     = pos
+	core.Parent       = workspace
+
+	-- ── Outer flash (expands + fades) ─────────────────────────────────────
+	local flash        = Instance.new("Part")
+	flash.Name         = "_EFlash"
+	flash.Shape        = Enum.PartType.Ball
+	flash.Size         = Vector3.new(2, 2, 2)
+	flash.BrickColor   = BrickColor.new("Bright violet")
+	flash.Material     = Enum.Material.Neon
+	flash.Anchored     = true
+	flash.CanCollide   = false
+	flash.CanQuery     = false
+	flash.CastShadow   = false
+	flash.Position     = pos
+	flash.Parent       = workspace
+
+	-- ── Shockwave ring (horizontal disc expanding outward) ─────────────────
+	-- Cylinder in Roblox: round face along X axis, Size.X = length, Size.Y = Size.Z = diameter.
+	-- Rotate 90° around Z so the disc lies flat (Y axis = up).
+	local ring         = Instance.new("Part")
+	ring.Name          = "_ERing"
+	ring.Shape         = Enum.PartType.Cylinder
+	ring.Size          = Vector3.new(0.35, 1, 1)
+	ring.BrickColor    = BrickColor.new("Bright violet")
+	ring.Material      = Enum.Material.Neon
+	ring.Anchored      = true
+	ring.CanCollide    = false
+	ring.CanQuery      = false
+	ring.CastShadow    = false
+	ring.CFrame        = CFrame.new(pos + Vector3.new(0, 0.4, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+	ring.Parent        = workspace
+
+	-- ── Debris chunks (5 pieces, fly outward with gravity) ────────────────
+	type DebrisData = { part: Part, vx: number, vy: number, vz: number }
+	local debris: { DebrisData } = {}
+	for i = 1, 5 do
+		local angle = (i - 1) / 5 * math.pi * 2 + math.random() * 0.6
+		local spd   = 10 + math.random() * 7
+		local d: Part = Instance.new("Part")
+		d.Name        = "_EDeb"
+		d.Size        = Vector3.new(0.9, 0.9, 0.9)
+		d.BrickColor  = i % 2 == 0 and BrickColor.new("Dark indigo") or BrickColor.new("Bright violet")
+		d.Material    = Enum.Material.Neon
+		d.Anchored    = true
+		d.CanCollide  = false
+		d.CanQuery    = false
+		d.CastShadow  = false
+		d.Position    = pos
+		d.Parent      = workspace
+		table.insert(debris, {
+			part = d,
+			vx   = math.cos(angle) * spd,
+			vy   = 8 + math.random() * 5,
+			vz   = math.sin(angle) * spd,
+		})
+	end
+
+	-- ── Single connection animates all pieces ──────────────────────────────
+	local FLASH_DUR  = 0.30
+	local RING_DUR   = 0.22
+	local CORE_DUR   = 0.10
+	local DEBRIS_DUR = 0.55
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+
+		-- Core: quick white burst
+		if core then
+			if elapsed < CORE_DUR then
+				core.Transparency = elapsed / CORE_DUR
+			else
+				core:Destroy()
+				core = nil :: any
+			end
+		end
+
+		-- Flash: expands 2→9 studs, fades out
+		if flash then
+			if elapsed < FLASH_DUR then
+				local t = elapsed / FLASH_DUR
+				local s = 2 + t * 7
+				flash.Size         = Vector3.new(s, s, s)
+				flash.Transparency = t * 0.85
+			else
+				flash:Destroy()
+				flash = nil :: any
+			end
+		end
+
+		-- Ring: diameter expands 1→12 studs, fades out
+		if ring then
+			if elapsed < RING_DUR then
+				local t = elapsed / RING_DUR
+				local d = 1 + t * 11
+				ring.Size         = Vector3.new(0.35, d, d)
+				ring.Transparency = 0.2 + t * 0.8
+			else
+				ring:Destroy()
+				ring = nil :: any
+			end
+		end
+
+		-- Debris: fly outward under gravity, fade
+		for _, db in debris do
+			if db.part then
+				if elapsed < DEBRIS_DUR then
+					local t = elapsed / DEBRIS_DUR
+					db.vy -= 30 * dt
+					db.part.Position = db.part.Position
+						+ Vector3.new(db.vx * dt, db.vy * dt, db.vz * dt)
+					db.part.Transparency = t
+				else
+					db.part:Destroy()
+					db.part = nil :: any
+				end
+			end
+		end
+
+		if elapsed >= DEBRIS_DUR then
+			conn:Disconnect()
+		end
+	end)
+end
+
+-- Elite lobbed orb: large arc, purple, with a color trail.
+local function spawnEliteProjectile(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL = 0.55
+	local ARC    = 7.0
+
+	local origin = fromPos + Vector3.new(0, 2.5, 0)
+	local dest   = toPos   + Vector3.new(0, 1.0, 0)
+
+	local proj        = Instance.new("Part")
+	proj.Name         = "_EliteOrb"
+	proj.Shape        = Enum.PartType.Ball
+	proj.Size         = Vector3.new(1.2, 1.2, 1.2)
+	proj.BrickColor   = BrickColor.new("Bright violet")
+	proj.Material     = Enum.Material.Neon
+	proj.Anchored     = true
+	proj.CanCollide   = false
+	proj.CanQuery     = false
+	proj.CastShadow   = false
+	proj.Position     = origin
+	proj.Parent       = workspace
+
+	-- Trail (needs two attachments as anchor points)
+	local a0          = Instance.new("Attachment", proj)
+	a0.Position       = Vector3.new(0,  0.4, 0)
+	local a1          = Instance.new("Attachment", proj)
+	a1.Position       = Vector3.new(0, -0.4, 0)
+
+	local trail              = Instance.new("Trail", proj)
+	trail.Attachment0        = a0
+	trail.Attachment1        = a1
+	trail.Lifetime           = 0.45
+	trail.MinLength          = 0
+	trail.FaceCamera         = true
+	trail.Color              = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(230, 120, 255)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(160,  40, 220)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB( 60,   0, 120)),
+	})
+	trail.Transparency       = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.0),
+		NumberSequenceKeypoint.new(1, 1.0),
+	})
+	trail.WidthScale         = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1.0),
+		NumberSequenceKeypoint.new(1, 0.0),
+	})
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t = math.min(elapsed / TRAVEL, 1)
+		proj.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+
+		if t >= 1 then
+			conn:Disconnect()
+			proj:Destroy()
+			spawnEliteExplosion(dest)
+		end
+	end)
+end
 
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
+	-- Elite gets its own lobbed projectile with trail + explosion.
+	if unitType == "Elite" then
+		spawnEliteProjectile(fromPos, toPos)
+		return
+	end
+
 	local isTank   = unitType == "Tank"
 	local projSize = isTank and Vector3.new(0.9, 0.9, 0.9) or Vector3.new(0.45, 0.45, 0.45)
 	local color    = isTank and BrickColor.new("Bright orange") or BrickColor.new("Bright yellow")

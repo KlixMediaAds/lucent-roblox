@@ -9,11 +9,12 @@ Config.MINE_COST             = 75   -- Mine building cost
 Config.UNIT_TYPES = {
 	Soldier = { cost = 25, size = Vector3.new(4, 4, 4) },
 	Tank    = { cost = 60, size = Vector3.new(7, 5, 9)  },
+	Elite   = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14 }  -- per-type max speed
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4  }  -- velocity lerp factor
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20 }  -- per-type max speed
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8  }  -- velocity lerp factor
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -66,7 +67,8 @@ Config.WORKSHOP_COST      = 100
 
 -- Research techs (time in seconds; no resource cost)
 Config.RESEARCH = {
-	BetterMines = { time = 5, desc = "Unlocks the ability to upgrade mine buildings." },
+	BetterMines = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
+	EliteUnits  = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
 }
 
 -- Turret
@@ -77,14 +79,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Workshop = 10 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250  }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180  }
 Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Workshop = 400 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35   }
-Config.UNIT_ATTACK_RANGE   = 15    -- studs
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6 }  -- seconds between attacks
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25   }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 15, Elite = 30 }  -- studs per type
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0  }  -- seconds between attacks
 
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon

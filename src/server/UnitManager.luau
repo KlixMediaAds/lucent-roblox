@@ -31,8 +31,9 @@ type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos
 local units: { [string]: UnitData } = {}
 local counter    = 0
 local unitsFolder: Folder
-local buildingManagerRef: any
-local resourceManagerRef: any
+local buildingManagerRef:  any
+local resourceManagerRef:  any
+local researchManagerRef:  any
 
 local barrackQueues:     { [string]: { QueueItem } } = {}
 local barrackIsTraining: { [string]: boolean }       = {}
@@ -122,6 +123,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	local atkRate  = (Config.UNIT_ATTACK_RATE :: any)[unitType] or 1.0
 	local spd      = (Config.UNIT_MOVE_SPEED :: any)[unitType] or 22
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
+	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
 
 	units[id] = {
@@ -133,6 +135,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 		attackTimer = math.random() * atkRate,
 		attackDmg   = dmg,
 		attackRate  = atkRate,
+		attackRange = atkRange,
 		unitType    = unitType,
 		home        = position,
 		aggroId     = nil,
@@ -261,6 +264,12 @@ function UnitManager.trainFromBarracks(barrackId: string, unitType: string, play
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return false end
 
+	if typeDef.researchReq then
+		if not researchManagerRef or not researchManagerRef.hasResearch(player, typeDef.researchReq) then
+			return false
+		end
+	end
+
 	local buildingsFolder = workspace:FindFirstChild("Buildings")
 	if not buildingsFolder then return false end
 	local building = buildingsFolder:FindFirstChild(barrackId)
@@ -330,6 +339,10 @@ end
 
 function UnitManager.setBuildingManager(bm: any)
 	buildingManagerRef = bm
+end
+
+function UnitManager.setResearchManager(rm: any)
+	researchManagerRef = rm
 end
 
 function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number): (boolean, Vector3?)
@@ -463,11 +476,13 @@ function UnitManager.init(resourceManager)
 			local myOwnerStr = tostring(data.owner.UserId)
 			local hitPos: Vector3? = nil
 
+			local atkRange = data.attackRange
+
 			if data.unitType == "Tank" then
 				-- Tanks: buildings first (+ splash on nearby units), fall back to units
 				if buildingManagerRef then
 					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
-						myPos, myOwnerStr, Config.UNIT_ATTACK_RANGE)
+						myPos, myOwnerStr, atkRange)
 					if bId and bPos then
 						buildingManagerRef.damage(bId, data.attackDmg)
 						hitPos = bPos
@@ -489,7 +504,7 @@ function UnitManager.init(resourceManager)
 						if other.hp <= 0 then continue end
 						if tostring(other.owner.UserId) == myOwnerStr then continue end
 						local d = (other.part.Position - myPos).Magnitude
-						if d <= Config.UNIT_ATTACK_RANGE and d < bestDist2 then
+						if d <= atkRange and d < bestDist2 then
 							bestDist2 = d; bestId2 = otherId
 						end
 					end
@@ -502,13 +517,13 @@ function UnitManager.init(resourceManager)
 					end
 				end
 			else
-				-- Soldiers: nearest enemy unit first, fall back to buildings
+				-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
 				local bestId2, bestDist2 = nil :: string?, math.huge
 				for otherId, other in units do
 					if other.hp <= 0 then continue end
 					if tostring(other.owner.UserId) == myOwnerStr then continue end
 					local d = (other.part.Position - myPos).Magnitude
-					if d <= Config.UNIT_ATTACK_RANGE and d < bestDist2 then
+					if d <= atkRange and d < bestDist2 then
 						bestDist2 = d; bestId2 = otherId
 					end
 				end
@@ -520,7 +535,7 @@ function UnitManager.init(resourceManager)
 					if other.hp <= 0 then table.insert(toRemove, bestId2) end
 				elseif buildingManagerRef then
 					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
-						myPos, myOwnerStr, Config.UNIT_ATTACK_RANGE)
+						myPos, myOwnerStr, atkRange)
 					if bId and bPos then
 						buildingManagerRef.damage(bId, data.attackDmg)
 						hitPos = bPos
@@ -587,6 +602,13 @@ function UnitManager.init(resourceManager)
 		if type(barrackId) ~= "string" or type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
+
+		-- Research gate: if this unit type requires a tech, verify the player has it
+		if typeDef.researchReq then
+			if not researchManagerRef or not researchManagerRef.hasResearch(player, typeDef.researchReq) then
+				return
+			end
+		end
 
 		local buildingsFolder = workspace:FindFirstChild("Buildings")
 		if not buildingsFolder then return end
