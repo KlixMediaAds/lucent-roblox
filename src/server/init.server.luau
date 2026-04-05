@@ -26,6 +26,7 @@ UnitManager.setBuildingManager(BuildingManager)
 BuildingManager.setUnitManager(UnitManager)
 MineralManager.setBuildingManager(BuildingManager)
 AIManager.init(UnitManager, BuildingManager, ResourceManager)
+AIManager.setResearchManager(ResearchManager)
 
 -- ── Elimination callback ──────────────────────────────────────────────────────
 BuildingManager.setOnCCDestroyed(function(player)

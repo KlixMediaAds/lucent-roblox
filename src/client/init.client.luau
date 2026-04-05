@@ -184,6 +184,11 @@ end)
 
 -- ── Mineral / income wiring ───────────────────────────────────────────────────
 
+-- UnitsOrderedMove is fired by the server whenever any player issues a move
+-- command (including AI bots).  Connect a no-op to prevent the event queue
+-- from filling up with dropped messages.
+Network.onUnitsOrderedMove(function(_ids: {string}, _targetPos: Vector3) end)
+
 Network.onSyncDeposits(function(positions: {Vector3})
 	BuildingPlacer.setDepositPositions(positions)
 end)

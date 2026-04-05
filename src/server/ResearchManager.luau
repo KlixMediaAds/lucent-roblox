@@ -29,6 +29,31 @@ function ResearchManager.resetPlayer(player: any)
 	playerResearch[player.UserId] = { done = {}, inProgress = {} }
 end
 
+-- AI-side research trigger: identical logic to the remote handler but skips
+-- FireClient calls (AI bots have no real client to update).
+function ResearchManager.startForPlayer(player: any, _workshopId: string, techName: string)
+	local tech = (Config.RESEARCH :: any)[techName]
+	if not tech then return end
+
+	local state = getState(player)
+	if state.done[techName] then return end
+	if state.inProgress[techName] then return end
+
+	state.inProgress[techName] = true
+
+	task.spawn(function()
+		local elapsed   = 0
+		local totalTime = tech.time :: number
+		while elapsed < totalTime do
+			local dt = task.wait(0.2)
+			if not state.inProgress[techName] then return end
+			elapsed = math.min(elapsed + dt, totalTime)
+		end
+		state.inProgress[techName] = nil
+		state.done[techName]       = true
+	end)
+end
+
 function ResearchManager.init()
 	RemoteHandler.get(Config.REMOTES.StartResearch).OnServerEvent:Connect(
 		function(player: any, workshopId: any, techName: any)

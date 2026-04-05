@@ -326,6 +326,23 @@ function UnitManager.sendAllUnitsTo(player: Player, targetPos: Vector3)
 	if #ids > 0 then moveUnits(player, ids, targetPos) end
 end
 
+-- Send a specific subset of unit IDs to a position (used by AI squad system).
+function UnitManager.sendUnitsTo(player: any, ids: { string }, targetPos: Vector3)
+	if #ids > 0 then moveUnits(player :: Player, ids, targetPos) end
+end
+
+-- Return a list of { id, part, unitType } for all units owned by player.
+-- Used by the AI to rebuild squad role assignments each strategy tick.
+function UnitManager.getPlayerUnitData(player: any): { { id: string, part: BasePart, unitType: string } }
+	local result = {}
+	for id, data in units do
+		if data.owner == player then
+			table.insert(result, { id = id, part = data.part, unitType = data.unitType })
+		end
+	end
+	return result
+end
+
 function UnitManager.removeAllUnitsFor(player: any)
 	local toRemove = {}
 	for id, data in units do
