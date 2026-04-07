@@ -192,7 +192,7 @@ local function refresh()
 	-- ── Status label ──────────────────────────────────────────────────────
 	if statusLbl then
 		if not hasResearch then
-			statusLbl.Text = "Research 'Better Mines' at a Workshop to unlock upgrades."
+			statusLbl.Text = "Research 'Better Mines' at your Command Center to unlock upgrades."
 		elseif upgrade then
 			statusLbl.Text = upgrade .. " upgrade active.  The other option is permanently locked."
 		else

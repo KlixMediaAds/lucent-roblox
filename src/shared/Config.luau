@@ -62,9 +62,6 @@ Config.MINE_UPGRADE_COST = { Efficiency = 150, Capacity = 125 }
 Config.MINE_UPGRADE_EFFICIENCY_MULT  = 2.0   -- income per miner × this
 Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
 
--- Workshop
-Config.WORKSHOP_COST      = 100
-
 -- Research techs (time in seconds; no resource cost)
 Config.RESEARCH = {
 	BetterMines = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
@@ -78,12 +75,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Workshop = 10 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Workshop = 400 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25   }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 15, Elite = 30 }  -- studs per type
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0  }  -- seconds between attacks
@@ -113,6 +110,8 @@ Config.REMOTES = {
 	TrainingUpdate    = "TrainingUpdate",
 	TurretShot        = "TurretShot",
 	AttackMoveUnits   = "AttackMoveUnits",
+	FocusAttack       = "FocusAttack",
+	UnitDied          = "UnitDied",
 	UnitHit           = "UnitHit",
 	UpgradeMine       = "UpgradeMine",
 	StartResearch     = "StartResearch",

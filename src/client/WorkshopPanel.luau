@@ -8,9 +8,9 @@ local WorkshopPanel     = {}
 local localPlayer       = Players.LocalPlayer
 local C                 = UILib.C
 
-local panel:            Frame?
-local activeWorkshopId: string? = nil
-local networkRef:       any
+local panel:       Frame?
+local activeCCId:  string? = nil
+local networkRef:  any
 local getResearchedFn:  ((string) -> boolean)?
 local getProgressFn:    ((string) -> number?)?
 
@@ -37,7 +37,7 @@ local function makeTechCard(
 	btn.Name                   = techKey .. "Card"
 	btn.Size                   = UDim2.fromOffset(350, 68)
 	btn.Position               = position
-	btn.BackgroundColor3       = C.WORKSHOP
+	btn.BackgroundColor3       = C.TEAL
 	btn.BackgroundTransparency = 0.14
 	btn.Text                   = ""
 	btn.AutoButtonColor        = true
@@ -50,7 +50,7 @@ local function makeTechCard(
 	local bar                  = Instance.new("Frame")
 	bar.Size                   = UDim2.new(1, -2, 0, 4)
 	bar.Position               = UDim2.fromOffset(1, 1)
-	bar.BackgroundColor3       = C.WORKSHOP
+	bar.BackgroundColor3       = C.TEAL
 	bar.BorderSizePixel        = 0
 	bar.ZIndex                 = 12
 	bar.Parent                 = btn
@@ -72,12 +72,12 @@ local function makeTechCard(
 	local pb = UILib.progressBar(parent,
 		UDim2.fromOffset(350, 6),
 		UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + 70),
-		C.WORKSHOP, 11)
+		C.TEAL, 11)
 	pb.track.Visible = false
 
 	btn.MouseButton1Click:Connect(function()
-		if not activeWorkshopId or not btn.Active then return end
-		networkRef.startResearch(activeWorkshopId, techKey)
+		if not activeCCId or not btn.Active then return end
+		networkRef.startResearch(activeCCId, techKey)
 	end)
 
 	return { btn = btn, progFill = pb.fill, progTrack = pb.track }
@@ -122,7 +122,7 @@ local function refreshCard(techKey: string, name: string, desc: string)
 		end
 
 	else
-		btn.BackgroundColor3       = C.WORKSHOP
+		btn.BackgroundColor3       = C.TEAL
 		btn.BackgroundTransparency = 0.14
 		btn.Active                 = true
 		if nameLbl then nameLbl.TextColor3 = C.TEXT;    nameLbl.Text = name:upper() end
@@ -143,7 +143,7 @@ local TECHS = {
 }
 
 local function refresh()
-	if not activeWorkshopId then return end
+	if not activeCCId then return end
 	for _, t in TECHS do
 		refreshCard(t.key, t.name, t.desc)
 	end
@@ -184,7 +184,7 @@ function WorkshopPanel.init(
 	p.Visible = false
 	panel     = p
 
-	UILib.titleBar(p, "WORKSHOP — RESEARCH", function() WorkshopPanel.hide() end, C.WORKSHOP)
+	UILib.titleBar(p, "COMMAND CENTER — RESEARCH", function() WorkshopPanel.hide() end, C.TEAL)
 
 	-- Card 1: Better Mines  (y=42)
 	techRefs["BetterMines"] = makeTechCard(p, "BetterMines", "Better Mines",
@@ -204,14 +204,14 @@ end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
-function WorkshopPanel.show(workshopId: string)
-	activeWorkshopId = workshopId
+function WorkshopPanel.show(ccId: string)
+	activeCCId = ccId
 	if panel then panel.Visible = true end
 	refresh()
 end
 
 function WorkshopPanel.hide()
-	activeWorkshopId = nil
+	activeCCId = nil
 	if panel then panel.Visible = false end
 end
 

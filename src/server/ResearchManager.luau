@@ -56,8 +56,8 @@ end
 
 function ResearchManager.init()
 	RemoteHandler.get(Config.REMOTES.StartResearch).OnServerEvent:Connect(
-		function(player: any, workshopId: any, techName: any)
-			if type(workshopId) ~= "string" or type(techName) ~= "string" then return end
+		function(player: any, _buildingId: any, techName: any)
+			if type(_buildingId) ~= "string" or type(techName) ~= "string" then return end
 			local tech = (Config.RESEARCH :: any)[techName]
 			if not tech then return end
 

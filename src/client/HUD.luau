@@ -44,14 +44,12 @@ local currentActivePlacing: string?           = nil
 local BUILDING_INFO: { [string]: { cost: number, requires: { [string]: number } } } = {
 	Mine     = { cost = Config.MINE_COST,      requires = {} },
 	Barracks = { cost = Config.BUILDING_COST,  requires = { Mine = 1 } },
-	Workshop = { cost = Config.WORKSHOP_COST,  requires = { Mine = 1 } },
 	Turret   = { cost = Config.TURRET_COST,    requires = { Barracks = 1 } },
 }
 
 local CARD_ENTRIES: { { btype: string, color: Color3, label: string } } = {
 	{ btype = "Mine",     color = C.MINE,     label = "MINE"     },
 	{ btype = "Barracks", color = C.BARRACKS, label = "BARRACKS" },
-	{ btype = "Workshop", color = C.WORKSHOP, label = "WORKSHOP" },
 	{ btype = "Turret",   color = C.TURRET,   label = "TURRET"   },
 }
 
@@ -356,8 +354,7 @@ function HUD.create(): (Frame, TextButton, TextButton, TextButton, TextButton, T
 		btnRefs["Mine"],
 		btnRefs["Turret"],
 		cancelBtn,
-		ccBtn,
-		btnRefs["Workshop"]
+		ccBtn
 end
 
 -- ── Private helpers ──────────────────────────────────────────────────────────
@@ -402,8 +399,7 @@ function HUD.wire(
 	buildBtn:      TextButton,
 	mineBtn:       TextButton,
 	turretBtn:     TextButton,
-	cancelBtn:     TextButton,
-	workshopBtn:   TextButton
+	cancelBtn:     TextButton
 )
 	-- Resource sync
 	network.onResourceSync(function(n: number)
@@ -437,12 +433,6 @@ function HUD.wire(
 		if not isUnlocked("Barracks") then return end
 		setTrayOpen(false)
 		buildingPlacer.enterPlacementMode("Barracks")
-	end)
-
-	workshopBtn.MouseButton1Click:Connect(function()
-		if not isUnlocked("Workshop") then return end
-		setTrayOpen(false)
-		buildingPlacer.enterPlacementMode("Workshop")
 	end)
 
 	turretBtn.MouseButton1Click:Connect(function()

@@ -13,15 +13,43 @@ local selectionBoxes: {[string]: SelectionBox} = {}
 local onChangedCb: ((number) -> ())?
 local onBarracksSelectedCb:  ((string?) -> ())?
 local onMineSelectedCb:      ((string?) -> ())?
-local onWorkshopSelectedCb:  ((string?) -> ())?
+local onCCSelectedCb:        ((string?) -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
+
+-- ── Building hover + selection highlight ──────────────────────────────────────
+local hoverBuildingId:     string?      = nil
+local hoverBox:            SelectionBox? = nil
+local selectedBuildingId:  string?      = nil
+local selectedBuildingBox: SelectionBox? = nil
 
 local dragStart  = Vector2.zero
 local dragEnd    = Vector2.zero
 local isDragging = false
 local atkMoveHeld = false  -- true while A key is held
 local MIN_DRAG   = 8   -- pixels
+
+-- ── Unit voice lines ─────────────────────────────────────────────────────────
+local SOLDIER_VOICE_IDS = {88664954760340,  70872333577296,  135999718666781}
+local TANK_VOICE_IDS    = {128274629467753, 139954121143852, 75168311027870}
+local SOLDIER_DEATH_ID  = 97350089441789
+local TANK_DEATH_ID     = 137547229383680
+
+local function playSound(id: number, pitchRange: number, volume: number)
+	local s = Instance.new("Sound")
+	s.SoundId             = "rbxassetid://" .. id
+	s.PlaybackSpeed       = 1 + (math.random() * pitchRange - pitchRange * 0.5)
+	s.Volume              = volume
+	s.RollOffMaxDistance  = 0
+	s.Parent              = workspace
+	s:Play()
+	s.Ended:Connect(function() s:Destroy() end)
+end
+
+local function playSoldierVoice() playSound(SOLDIER_VOICE_IDS[math.random(#SOLDIER_VOICE_IDS)], 0.2, 1) end
+local function playSoldierDeath() playSound(SOLDIER_DEATH_ID, 0.12, 1) end
+local function playTankVoice()    playSound(TANK_VOICE_IDS[math.random(#TANK_VOICE_IDS)],       0.1, 2) end
+local function playTankDeath()    playSound(TANK_DEATH_ID, 0.06, 2) end
 
 -- ── Move-order ping ───────────────────────────────────────────────────────────
 local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
@@ -135,6 +163,95 @@ local function hitBuilding(): string?
 	return nil
 end
 
+local function hitEnemyUnit(): string?
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
+	if not result then return nil end
+	for id, info in knownUnits do
+		if info.part == result.Instance and info.ownerId ~= localPlayer.UserId then
+			return id
+		end
+	end
+	return nil
+end
+
+local function hitEnemyBuilding(): string?
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
+	if not result then return nil end
+	local inst = result.Instance
+	for id, info in knownBuildings do
+		if info.ownerId ~= localPlayer.UserId then
+			-- Match on Base part or any part whose parent is the same model
+			if info.base == inst or info.base.Parent == inst.Parent then
+				return id
+			end
+		end
+	end
+	return nil
+end
+
+-- Returns the Model that owns a building's Base part, or nil.
+local function buildingModel(bid: string): Model?
+	local info = knownBuildings[bid]
+	if not info then return nil end
+	local parent = info.base.Parent
+	return (parent and parent:IsA("Model")) and parent :: Model or nil
+end
+
+-- Show/clear the thin white hover outline.
+local function setHover(bid: string?)
+	if bid == hoverBuildingId then return end
+	if hoverBox then hoverBox:Destroy(); hoverBox = nil end
+	hoverBuildingId = bid
+
+	-- Don't overlap with the selection box on the same building.
+	if not bid or bid == selectedBuildingId then return end
+
+	local model = buildingModel(bid)
+	if not model then return end
+
+	local box                = Instance.new("SelectionBox")
+	box.Adornee              = model
+	box.Color3               = Color3.fromRGB(255, 255, 255)
+	box.LineThickness         = 0.05
+	box.SurfaceTransparency  = 1        -- outline only, no fill
+	box.Parent               = workspace
+	hoverBox                 = box
+end
+
+-- Show/clear the teal selection box with a slight surface fill.
+local function selectBuilding(bid: string?)
+	if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
+	selectedBuildingId = bid
+
+	-- Re-evaluate hover so it doesn't stack on the newly selected building.
+	setHover(hoverBuildingId == bid and nil or hoverBuildingId)
+
+	if not bid then return end
+	local model = buildingModel(bid)
+	if not model then return end
+
+	local box                = Instance.new("SelectionBox")
+	box.Adornee              = model
+	box.Color3               = Color3.fromRGB(80, 255, 180)
+	box.LineThickness         = 0.10
+	box.SurfaceTransparency  = 0.78
+	box.SurfaceColor3        = Color3.fromRGB(80, 255, 180)
+	box.Parent               = workspace
+	selectedBuildingBox      = box
+
+	-- Auto-clear when the building is destroyed.
+	local info = knownBuildings[bid]
+	if info then
+		info.base.Destroying:Connect(function()
+			if selectedBuildingId ~= bid then return end
+			if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
+			selectedBuildingId = nil
+		end)
+	end
+end
+
 local function boxSelect(x0: number, y0: number, x1: number, y1: number)
 	selected = {}
 	for id, info in knownUnits do
@@ -160,6 +277,15 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if not part then return end
 			knownUnits[id] = { part = part, ownerId = ownerId }
 
+			if ownerId == localPlayer.UserId then
+				local ut = part:FindFirstChild("UnitType")
+				if ut then
+					if      ut.Value == "Soldier" then playSoldierVoice()
+					elseif  ut.Value == "Tank"    then playTankVoice()
+					end
+				end
+			end
+
 			part.Destroying:Connect(function()
 				knownUnits[id] = nil
 				-- Remove from active selection
@@ -172,6 +298,13 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				notify()
 			end)
 		end)
+	end)
+
+	-- Unit death sounds
+	network.onUnitDied(function(unitType: string, _pos: Vector3)
+		if      unitType == "Tank"    then playTankDeath()
+		elseif  unitType == "Soldier" then playSoldierDeath()
+		end
 	end)
 
 	-- Track all replicated buildings for click detection
@@ -187,6 +320,15 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		end)
 	end)
 
+	-- Hover highlight: update whenever the mouse moves.
+	mouse.Move:Connect(function()
+		if isBlockedFn and isBlockedFn() then
+			setHover(nil)
+			return
+		end
+		setHover(hitBuilding())
+	end)
+
 	-- Input
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
@@ -200,9 +342,10 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				end
 			end
 			notify()
+			selectBuilding(nil)
 			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
 			if onMineSelectedCb     then onMineSelectedCb(nil)     end
-			if onWorkshopSelectedCb then onWorkshopSelectedCb(nil) end
+			if onCCSelectedCb then onCCSelectedCb(nil) end
 			return
 		end
 
@@ -222,7 +365,41 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 			if #selected == 0 then return end
 			local ground = cameraModule.getGroundPosition()
+
+			local function maybeUnitVoice()
+				for _, id in selected do
+					local info = knownUnits[id]
+					if info and info.ownerId == localPlayer.UserId then
+						local ut = info.part:FindFirstChild("UnitType")
+						if ut then
+							if      ut.Value == "Tank"    then playTankVoice();    return
+							elseif  ut.Value == "Soldier" then playSoldierVoice(); return
+							end
+						end
+					end
+				end
+			end
+
+			-- Without A held: detect enemy under cursor for focus attack
+			if not atkMoveHeld then
+				local enemyUnitId = hitEnemyUnit()
+				if enemyUnitId then
+					maybeUnitVoice()
+					network.focusAttack(selected, enemyUnitId, "unit")
+					if ground then spawnMovePing(ground, true) end
+					return
+				end
+				local enemyBldId = hitEnemyBuilding()
+				if enemyBldId then
+					maybeUnitVoice()
+					network.focusAttack(selected, enemyBldId, "building")
+					if ground then spawnMovePing(ground, true) end
+					return
+				end
+			end
+
 			if ground then
+				maybeUnitVoice()
 				if atkMoveHeld then
 					network.attackMoveUnits(selected, ground)
 				else
@@ -274,49 +451,53 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		if math.abs(d.X) > MIN_DRAG or math.abs(d.Y) > MIN_DRAG then
 			-- Box select
 			clearSelection()
+			selectBuilding(nil)
 			boxSelect(
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
 			if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 			if onMineSelectedCb      then onMineSelectedCb(nil)      end
-			if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+			if onCCSelectedCb  then onCCSelectedCb(nil)  end
 		else
 			-- Single click — check unit first, then buildings
 			local uid = hitUnit()
 			if uid then
 				if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then clearSelection() end
 				addToSelection(uid)
+				selectBuilding(nil)
 				if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 				if onMineSelectedCb      then onMineSelectedCb(nil)      end
-				if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+				if onCCSelectedCb  then onCCSelectedCb(nil)  end
 			else
 				local bid = hitBuilding()
 				if bid then
 					clearSelection()
+					selectBuilding(bid)
 					local info = knownBuildings[bid]
 					if info and info.buildingType == "Barracks" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(bid)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+						if onCCSelectedCb  then onCCSelectedCb(nil)  end
 					elseif info and info.buildingType == "Mine" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(bid)      end
-						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
-					elseif info and info.buildingType == "Workshop" and info.ownerId == localPlayer.UserId then
+						if onCCSelectedCb  then onCCSelectedCb(nil)  end
+					elseif info and info.buildingType == "CommandCenter" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onWorkshopSelectedCb  then onWorkshopSelectedCb(bid)  end
+						if onCCSelectedCb  then onCCSelectedCb(bid)  end
 					else
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+						if onCCSelectedCb  then onCCSelectedCb(nil)  end
 					end
 				else
 					clearSelection()
+					selectBuilding(nil)
 					if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 					if onMineSelectedCb      then onMineSelectedCb(nil)      end
-					if onWorkshopSelectedCb  then onWorkshopSelectedCb(nil)  end
+					if onCCSelectedCb  then onCCSelectedCb(nil)  end
 				end
 			end
 		end
@@ -339,8 +520,8 @@ function UnitController.onMineSelected(fn: (string?) -> ())
 	onMineSelectedCb = fn
 end
 
-function UnitController.onWorkshopSelected(fn: (string?) -> ())
-	onWorkshopSelectedCb = fn
+function UnitController.onCCSelected(fn: (string?) -> ())
+	onCCSelectedCb = fn
 end
 
 return UnitController

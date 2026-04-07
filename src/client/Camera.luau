@@ -88,6 +88,19 @@ function Camera.init()
 	apply()
 end
 
+function Camera.getFocus(): Vector3
+	return focus
+end
+
+function Camera.getYaw(): number
+	return yaw
+end
+
+function Camera.setFocus(pos: Vector3)
+	focus = Vector3.new(pos.X, 0, pos.Z)
+	apply()
+end
+
 -- Returns the world position on the y=0 ground plane under the cursor.
 -- Uses Mouse.UnitRay which Roblox resolves internally, avoiding the
 -- coordinate-space mismatch between GetMouseLocation and ScreenPointToRay.

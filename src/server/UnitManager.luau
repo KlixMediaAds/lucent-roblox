@@ -24,6 +24,7 @@ type UnitData = {
 	velocity    : Vector3,   -- current world-space velocity (XZ only)
 	moveSpeed   : number,    -- max speed in studs/s
 	accel       : number,    -- velocity lerp factor (higher = snappier)
+	focusBldId  : string?,   -- building ID to focus-fire (nil = none)
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -144,6 +145,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 		velocity    = Vector3.zero,
 		moveSpeed   = spd,
 		accel       = acc,
+		focusBldId  = nil,
 	}
 
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
@@ -165,6 +167,7 @@ local function applyFormation(valid: { string }, targetPos: Vector3)
 		data.target     = formPos
 		data.aggroId    = nil
 		data.aggroHome  = nil
+		data.focusBldId = nil
 	end
 end
 
@@ -200,6 +203,7 @@ local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vecto
 		data.target      = formPos
 		data.aggroId     = nil
 		data.aggroHome   = nil
+		data.focusBldId  = nil
 		data.atkMoveDest = formPos
 	end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
@@ -376,6 +380,9 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	data.hp -= damage
 	applyHP(data)
 	if data.hp <= 0 then
+		if (data.unitType == "Tank" or data.unitType == "Soldier") and data.owner.Parent then
+			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
+		end
 		data.part:Destroy()
 		units[bestId] = nil
 	end
@@ -393,6 +400,7 @@ function UnitManager.init(resourceManager)
 	local LEASH         = Config.UNIT_LEASH_RANGE
 	local AGGRO         = Config.UNIT_AGGRO_RADIUS
 	local unitHitRemote = RemoteHandler.get(Config.REMOTES.UnitHit)
+	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
 
 	RunService.Heartbeat:Connect(function(dt)
 		local toRemove: { string } = {}
@@ -409,15 +417,48 @@ function UnitManager.init(resourceManager)
 					data.aggroHome = nil
 					data.target    = data.atkMoveDest or data.home
 				else
-					local ep = aggroTarget.part.Position
-					data.target = Vector3.new(ep.X, 0, ep.Z)
+					local ep    = aggroTarget.part.Position
+					local myPos = data.part.Position
+					local dx    = ep.X - myPos.X
+					local dz    = ep.Z - myPos.Z
+					local dist  = math.sqrt(dx * dx + dz * dz)
+					local stopAt = data.attackRange * 0.85
+					if dist > stopAt then
+						local frac  = (dist - stopAt) / dist
+						data.target = Vector3.new(myPos.X + dx * frac, 0, myPos.Z + dz * frac)
+					else
+						data.target = nil   -- already in range, hold position
+					end
 
 					if data.aggroHome then
-						if (data.part.Position - data.aggroHome).Magnitude > LEASH then
+						if (myPos - data.aggroHome).Magnitude > LEASH then
 							data.aggroId   = nil
 							data.aggroHome = nil
 							data.target    = data.atkMoveDest or data.home
 						end
+					end
+				end
+			end
+
+			-- ── 1b. Focus building: approach and hold at attack range ──────────
+			if data.focusBldId and not data.aggroId then
+				local bf    = workspace:FindFirstChild("Buildings")
+				local model = bf and bf:FindFirstChild(data.focusBldId)
+				local base  = model and model:FindFirstChild("Base")
+				if not base or not (base :: BasePart).Parent then
+					data.focusBldId = nil
+				else
+					local bpos  = (base :: BasePart).Position
+					local myPos = data.part.Position
+					local dx    = bpos.X - myPos.X
+					local dz    = bpos.Z - myPos.Z
+					local dist  = math.sqrt(dx * dx + dz * dz)
+					local stopAt = data.attackRange * 0.85
+					if dist > stopAt then
+						local frac  = (dist - stopAt) / dist
+						data.target = Vector3.new(myPos.X + dx * frac, 0, myPos.Z + dz * frac)
+					else
+						data.target = nil   -- in range, hold position
 					end
 				end
 			end
@@ -463,7 +504,7 @@ function UnitManager.init(resourceManager)
 			end
 
 			-- ── 3. Aggro scan (idle + A-moving units only) ─────────────────────
-			if doAggro and not data.aggroId then
+			if doAggro and not data.aggroId and not data.focusBldId then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
 					local myPos = data.part.Position
@@ -498,8 +539,23 @@ function UnitManager.init(resourceManager)
 			if data.unitType == "Tank" then
 				-- Tanks: buildings first (+ splash on nearby units), fall back to units
 				if buildingManagerRef then
-					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
-						myPos, myOwnerStr, atkRange)
+					local bId: string?, bPos: Vector3?
+					if data.focusBldId then
+						local bf    = workspace:FindFirstChild("Buildings")
+						local model = bf and bf:FindFirstChild(data.focusBldId)
+						local base  = model and model:FindFirstChild("Base")
+						if base and (base :: BasePart).Parent then
+							local bp = base :: BasePart
+							if (bp.Position - myPos).Magnitude <= atkRange then
+								bId = data.focusBldId; bPos = bp.Position
+							end
+						else
+							data.focusBldId = nil
+						end
+					end
+					if not bId then
+						bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+					end
 					if bId and bPos then
 						buildingManagerRef.damage(bId, data.attackDmg)
 						hitPos = bPos
@@ -551,8 +607,23 @@ function UnitManager.init(resourceManager)
 					applyHP(other)
 					if other.hp <= 0 then table.insert(toRemove, bestId2) end
 				elseif buildingManagerRef then
-					local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(
-						myPos, myOwnerStr, atkRange)
+					local bId: string?, bPos: Vector3?
+					if data.focusBldId then
+						local bf    = workspace:FindFirstChild("Buildings")
+						local model = bf and bf:FindFirstChild(data.focusBldId)
+						local base  = model and model:FindFirstChild("Base")
+						if base and (base :: BasePart).Parent then
+							local bp = base :: BasePart
+							if (bp.Position - myPos).Magnitude <= atkRange then
+								bId = data.focusBldId; bPos = bp.Position
+							end
+						else
+							data.focusBldId = nil
+						end
+					end
+					if not bId then
+						bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+					end
 					if bId and bPos then
 						buildingManagerRef.damage(bId, data.attackDmg)
 						hitPos = bPos
@@ -608,6 +679,9 @@ function UnitManager.init(resourceManager)
 		for _, id in toRemove do
 			local d = units[id]
 			if d then
+				if (d.unitType == "Tank" or d.unitType == "Soldier") and d.owner.Parent then
+					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
+				end
 				d.part:Destroy()
 				units[id] = nil
 			end
@@ -669,6 +743,27 @@ function UnitManager.init(resourceManager)
 	RemoteHandler.get(Config.REMOTES.AttackMoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)
 		if type(ids) ~= "table" or typeof(targetPos) ~= "Vector3" then return end
 		attackMoveUnits(player, ids, targetPos)
+	end)
+
+	RemoteHandler.get(Config.REMOTES.FocusAttack).OnServerEvent:Connect(function(player, ids, targetId, targetType)
+		if type(ids) ~= "table" or type(targetId) ~= "string" or type(targetType) ~= "string" then return end
+		for _, id in ids do
+			local data = units[id]
+			if not data or data.owner ~= player then continue end
+			data.atkMoveDest = nil
+			data.target      = nil
+			if targetType == "unit" then
+				if units[targetId] then
+					data.aggroId    = targetId
+					data.aggroHome  = nil   -- no leash on manual focus attacks
+					data.focusBldId = nil
+				end
+			elseif targetType == "building" then
+				data.focusBldId = targetId
+				data.aggroId    = nil
+				data.aggroHome  = nil
+			end
+		end
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)

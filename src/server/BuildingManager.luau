@@ -167,56 +167,6 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		ring.CastShadow    = false
 		ring.Parent        = model
 
-	elseif buildingType == "Workshop" then
-		-- Bench slab on top of base
-		local bench        = Instance.new("Part")
-		bench.Name         = "Bench"
-		bench.Size         = Vector3.new(size.X - 2, 1, size.Z - 2)
-		bench.Position     = position + Vector3.new(0, size.Y + 0.5, 0)
-		bench.BrickColor   = BrickColor.new("Dark stone grey")
-		bench.Material     = Enum.Material.Metal
-		bench.Anchored     = true
-		bench.Parent       = model
-		-- Left post
-		local postL        = Instance.new("Part")
-		postL.Name         = "PostL"
-		postL.Size         = Vector3.new(1, 4, 1)
-		postL.Position     = position + Vector3.new(-3, size.Y + 3, 0)
-		postL.BrickColor   = BrickColor.new("Dark stone grey")
-		postL.Material     = Enum.Material.Metal
-		postL.Anchored     = true
-		postL.Parent       = model
-		-- Right post
-		local postR        = Instance.new("Part")
-		postR.Name         = "PostR"
-		postR.Size         = Vector3.new(1, 4, 1)
-		postR.Position     = position + Vector3.new(3, size.Y + 3, 0)
-		postR.BrickColor   = BrickColor.new("Dark stone grey")
-		postR.Material     = Enum.Material.Metal
-		postR.Anchored     = true
-		postR.Parent       = model
-		-- Glowing blue beam connecting the posts
-		local beam         = Instance.new("Part")
-		beam.Name          = "Beam"
-		beam.Size          = Vector3.new(7, 0.5, 0.5)
-		beam.Position      = position + Vector3.new(0, size.Y + 5, 0)
-		beam.BrickColor    = BrickColor.new("Bright blue")
-		beam.Material      = Enum.Material.Neon
-		beam.Anchored      = true
-		beam.CastShadow    = false
-		beam.Parent        = model
-		-- Cyan orb at the center of the beam
-		local orb          = Instance.new("Part")
-		orb.Name           = "Orb"
-		orb.Shape          = Enum.PartType.Ball
-		orb.Size           = Vector3.new(2, 2, 2)
-		orb.Position       = position + Vector3.new(0, size.Y + 5.5, 0)
-		orb.BrickColor     = BrickColor.new("Cyan")
-		orb.Material       = Enum.Material.Neon
-		orb.Anchored       = true
-		orb.CastShadow     = false
-		orb.Parent         = model
-
 	else
 		-- Barracks flag
 		local flag      = Instance.new("Part")
@@ -406,14 +356,12 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return false end
 	end
 
-	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Workshop needs a Mine
+	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks
 	if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
-	if buildingType == "Workshop" and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 
-	local cost = buildingType == "Mine" and Config.MINE_COST
+	local cost = buildingType == "Mine"   and Config.MINE_COST
 		or buildingType == "Turret" and Config.TURRET_COST
-		or buildingType == "Workshop" and Config.WORKSHOP_COST
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
@@ -527,14 +475,12 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return end
 		end
 
-		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Workshop needs a Mine
+		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks
 		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
-		if buildingType == "Workshop" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 
-		local cost = buildingType == "Mine" and Config.MINE_COST
+		local cost = buildingType == "Mine"   and Config.MINE_COST
 			or buildingType == "Turret" and Config.TURRET_COST
-			or buildingType == "Workshop" and Config.WORKSHOP_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
 

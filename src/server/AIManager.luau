@@ -76,9 +76,8 @@ type DifficultyProfile = {
 	maxUnits:         number,
 	maxMines:         number,
 	maxBarracks:      number,
-	maxTurrets:       number,
-	maxWorkshops:     number,
-	doResearch:       boolean,
+	maxTurrets:   number,
+	doResearch:   boolean,
 	baseWeights:      { [string]: number },
 	visionRadius:     number,
 	enemyMemory:      number,   -- seconds before forgetting last spotted position
@@ -95,9 +94,8 @@ local DIFFICULTY: { [string]: DifficultyProfile } = {
 		maxUnits         = 6,
 		maxMines         = 1,
 		maxBarracks      = 1,
-		maxTurrets       = 0,
-		maxWorkshops     = 0,
-		doResearch       = false,
+		maxTurrets   = 0,
+		doResearch   = false,
 		baseWeights      = { Soldier = 1 },
 		visionRadius     = 45,
 		enemyMemory      = 15,
@@ -112,9 +110,8 @@ local DIFFICULTY: { [string]: DifficultyProfile } = {
 		maxUnits         = 16,
 		maxMines         = 2,
 		maxBarracks      = 1,
-		maxTurrets       = 2,
-		maxWorkshops     = 0,
-		doResearch       = false,
+		maxTurrets   = 2,
+		doResearch   = false,
 		baseWeights      = { Soldier = 6, Tank = 4 },
 		visionRadius     = 58,
 		enemyMemory      = 45,
@@ -129,9 +126,8 @@ local DIFFICULTY: { [string]: DifficultyProfile } = {
 		maxUnits         = 999,
 		maxMines         = 3,
 		maxBarracks      = 2,
-		maxTurrets       = 4,
-		maxWorkshops     = 1,
-		doResearch       = true,
+		maxTurrets   = 4,
+		doResearch   = true,
 		baseWeights      = { Soldier = 2, Tank = 6, Elite = 0 },
 		visionRadius     = 65,
 		enemyMemory      = 120,
@@ -159,12 +155,6 @@ local TURRET_CANDIDATES: { Vector3 } = {
 	Vector3.new(-25, 0, 25), Vector3.new( 25, 0,-25),
 	Vector3.new(-35, 0,  0), Vector3.new( 35, 0,  0),
 	Vector3.new(  0, 0,-35), Vector3.new(  0, 0, 35),
-}
-
-local WORKSHOP_CANDIDATES: { Vector3 } = {
-	Vector3.new(  0, 0, 30), Vector3.new(  0, 0,-30),
-	Vector3.new( 30, 0,  0), Vector3.new(-30, 0,  0),
-	Vector3.new( 25, 0, 25), Vector3.new(-25, 0, 25),
 }
 
 -- ── Bot spawn configuration ───────────────────────────────────────────────────
@@ -512,20 +502,13 @@ local function btExpansionPhase(ai)
 		end
 	end
 
-	-- Workshop
-	if not ai.workshopId and ai.diff.doResearch then
-		if canAfford(ai.player, Config.WORKSHOP_COST, ai.diff.reserveResources) then
-			local ok, id = tryPlace(ai.player, ai.base, "Workshop", WORKSHOP_CANDIDATES)
-			if ok and id then ai.workshopId = id end
-		end
-	end
-
-	-- Research (hard AI only): BetterMines → EliteUnits
-	if ai.diff.doResearch and ai.workshopId and researchManager then
+	-- Research (hard AI only): BetterMines → EliteUnits.
+	-- Requires CC (always available once hasCC is true).
+	if ai.diff.doResearch and ai.hasCC and researchManager then
 		local order = { "BetterMines", "EliteUnits" }
 		for _, tech in order do
 			if not researchManager.hasResearch(ai.player, tech) then
-				researchManager.startForPlayer(ai.player, ai.workshopId, tech)
+				researchManager.startForPlayer(ai.player, "cc", tech)
 				break   -- only queue one at a time
 			end
 		end
@@ -643,7 +626,6 @@ type AIState = {
 	mineCount:   number,
 	barrackIds:  { string },
 	turretCount: number,
-	workshopId:  string?,
 
 	-- Vision memory
 	lastKnownEnemyPos: Vector3?,
@@ -691,7 +673,6 @@ function AIManager.resetBot(userId: number)
 	ai.mineCount         = 0
 	ai.barrackIds        = {}
 	ai.turretCount       = 0
-	ai.workshopId        = nil
 	ai.lastKnownEnemyPos = nil
 	ai.lastEnemySeenTick = 0
 	ai.priorityTarget    = nil
@@ -749,7 +730,6 @@ function AIManager.spawnAI(difficulty: string): boolean
 		mineCount   = 0,
 		barrackIds  = {},
 		turretCount = 0,
-		workshopId  = nil,
 
 		lastKnownEnemyPos = nil,
 		lastEnemySeenTick = 0,

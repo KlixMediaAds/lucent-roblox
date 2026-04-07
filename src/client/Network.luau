@@ -17,6 +17,14 @@ function Network.attackMoveUnits(ids: {string}, target: Vector3)
 	RemoteHandler.get(Config.REMOTES.AttackMoveUnits):FireServer(ids, target)
 end
 
+function Network.focusAttack(ids: {string}, targetId: string, targetType: string)
+	RemoteHandler.get(Config.REMOTES.FocusAttack):FireServer(ids, targetId, targetType)
+end
+
+function Network.onUnitDied(fn: (unitType: string, pos: Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.UnitDied).OnClientEvent:Connect(fn)
+end
+
 -- buildingType: "Barracks" or "Mine"
 function Network.placeBuilding(pos: Vector3, buildingType: string)
 	RemoteHandler.get(Config.REMOTES.PlaceBuilding):FireServer(pos, buildingType)

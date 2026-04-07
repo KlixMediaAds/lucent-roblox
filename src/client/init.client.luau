@@ -14,6 +14,7 @@ local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
+local MiniMap        = require(script:WaitForChild("MiniMap"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -63,7 +64,7 @@ CameraModule.init()
 SpiderLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 
-local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn, workshopBtn = HUD.create()
+local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn = HUD.create()
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
 BarracksPanel.init(Network,
@@ -76,8 +77,9 @@ WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function(techName) return researchProgress[techName] end)
 FogManager.init(localUserId)
+MiniMap.init(CameraModule, localUserId)
 
-HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn, workshopBtn)
+HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn)
 
 -- ── Hide building panels when entering placement mode ─────────────────────────
 -- If a panel (BarracksPanel, MinePanel, WorkshopPanel) is visible when the
@@ -93,7 +95,6 @@ end
 buildBtn.MouseButton1Click:Connect(hideBuildingPanels)
 mineBtn.MouseButton1Click:Connect(hideBuildingPanels)
 turretBtn.MouseButton1Click:Connect(hideBuildingPanels)
-workshopBtn.MouseButton1Click:Connect(hideBuildingPanels)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
@@ -171,12 +172,12 @@ UnitController.onMineSelected(function(mineId: string?)
 	end
 end)
 
--- ── Workshop panel ─────────────────────────────────────────────────────────────
-UnitController.onWorkshopSelected(function(workshopId: string?)
-	if workshopId then
+-- ── Command Center research panel ─────────────────────────────────────────────
+UnitController.onCCSelected(function(ccId: string?)
+	if ccId then
 		BarracksPanel.hide()
 		MinePanel.hide()
-		WorkshopPanel.show(workshopId)
+		WorkshopPanel.show(ccId)
 	else
 		WorkshopPanel.hide()
 	end
