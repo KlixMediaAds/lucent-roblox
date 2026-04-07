@@ -52,6 +52,11 @@ Config.MINER_OFFSETS = {
 Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
 Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command centers
 
+-- Monument (win condition — upgrade from Command Center)
+Config.MONUMENT_COST         = 1500
+Config.MONUMENT_WIN_DURATION = 300    -- seconds to hold monument for victory (5 minutes)
+Config.MONUMENT_SIZE         = Vector3.new(5, 20, 5)
+
 -- Mine limits & depletion
 Config.MAX_MINES                = 3     -- max mine buildings per player
 Config.DEPOSIT_TOTAL_RESOURCES  = 1000  -- total resources a deposit holds before depleting
@@ -75,12 +80,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25   }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 15, Elite = 30 }  -- studs per type
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0  }  -- seconds between attacks
@@ -117,6 +122,9 @@ Config.REMOTES = {
 	StartResearch     = "StartResearch",
 	ResearchUpdate    = "ResearchUpdate",
 	ResearchCompleted = "ResearchCompleted",
+	BuildMonument    = "BuildMonument",
+	MonumentProgress = "MonumentProgress",
+	PlayerWon        = "PlayerWon",
 }
 
 return Config

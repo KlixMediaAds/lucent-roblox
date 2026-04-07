@@ -418,6 +418,24 @@ function MineralManager.removeAllMinesFor(player: any)
 	for _, id in toRemove do MineralManager.removeMine(id) end
 end
 
+function MineralManager.resetAll()
+	-- Clear mines and miners
+	mines = {}
+	for _, part in minersFolder:GetChildren() do part:Destroy() end
+
+	-- Clear deposit state and visuals
+	depositList    = {}
+	depositClaimed = {}
+	for _, model in depositsFolder:GetChildren() do model:Destroy() end
+
+	-- Regenerate fresh deposits and sync to all clients
+	generateDeposits()
+	for _, pos in depositList do makeDepositPart(pos) end
+	RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
+		MineralManager.getUnclaimedPositions()
+	)
+end
+
 function MineralManager.setBuildingManager(bm: any)
 	buildingManagerRef = bm
 end

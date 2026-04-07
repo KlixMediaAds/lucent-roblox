@@ -16,11 +16,17 @@ type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, bui
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
+local onPlayerWonCb: (() -> ())?
+
+local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
+local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
+local monumentHeartbeatAccum = 0
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
+	if buildingType == "Monument"      then return Config.MONUMENT_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -167,6 +173,38 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		ring.CastShadow    = false
 		ring.Parent        = model
 
+	elseif buildingType == "Monument" then
+		-- Shaft: stone-grey, non-neon so it's not blinding
+		base.BrickColor = BrickColor.new("Light stone grey")
+		base.Material   = Enum.Material.SmoothPlastic
+
+		-- Small glowing orb at the tip
+		local tip        = Instance.new("Part")
+		tip.Name         = "Tip"
+		tip.Shape        = Enum.PartType.Ball
+		tip.Size         = Vector3.new(3.5, 3.5, 3.5)
+		tip.Position     = position + Vector3.new(0, size.Y + 1.75, 0)
+		tip.BrickColor   = BrickColor.new("Bright yellow")
+		tip.Material     = Enum.Material.Neon
+		tip.Anchored     = true
+		tip.CastShadow   = false
+		tip.Parent       = model
+
+		-- Two thin gold ring accents at 35% and 70% of the shaft height
+		for i = 1, 2 do
+			local ring       = Instance.new("Part")
+			ring.Name        = "Ring" .. i
+			ring.Shape       = Enum.PartType.Cylinder
+			ring.Size        = Vector3.new(0.35, 8, 8)
+			ring.CFrame      = CFrame.new(position + Vector3.new(0, size.Y * (i / 3 + 0.05), 0))
+				* CFrame.Angles(0, 0, math.pi / 2)
+			ring.BrickColor  = BrickColor.new("Bright yellow")
+			ring.Material    = Enum.Material.Neon
+			ring.Anchored    = true
+			ring.CastShadow  = false
+			ring.Parent      = model
+		end
+
 	else
 		-- Barracks flag
 		local flag      = Instance.new("Part")
@@ -254,6 +292,12 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 				data.hp            = math.max(data.hp, maxHp)
 				data.isConstructing = false
 				applyHP(data)
+
+				if buildingType == "Monument" then
+					monumentWinTimer[id] = 0
+					RemoteHandler.get(Config.REMOTES.MonumentProgress)
+						:FireAllClients(player.UserId, Config.MONUMENT_WIN_DURATION)
+				end
 			end
 		end)
 	end
@@ -267,8 +311,22 @@ function BuildingManager.hasCommandCenter(player: any): boolean
 	return playerHasCC[player.UserId] == true
 end
 
+function BuildingManager.resetAll()
+	for _, model in buildingsFolder:GetChildren() do model:Destroy() end
+	buildingData             = {}
+	playerHasCC              = {}
+	turretTimers             = {}
+	monumentByOwner          = {}
+	monumentWinTimer         = {}
+	monumentHeartbeatAccum   = 0
+end
+
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
 	onCCDestroyedCb = fn
+end
+
+function BuildingManager.setOnPlayerWon(fn: () -> ())
+	onPlayerWonCb = fn
 end
 
 function BuildingManager.setUnitManager(um: any)
@@ -282,8 +340,9 @@ function BuildingManager.damage(id: string, amount: number)
 	applyHP(data)
 	if data.hp > 0 then return end
 
-	local wasCC = data.buildingType == "CommandCenter"
-	local owner = data.owner
+	local wasCC       = data.buildingType == "CommandCenter"
+	local wasMonument = data.buildingType == "Monument"
+	local owner       = data.owner
 	buildingData[id] = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
 	turretTimers[id] = nil
 
@@ -297,6 +356,12 @@ function BuildingManager.damage(id: string, amount: number)
 	if wasCC then
 		playerHasCC[owner.UserId] = nil
 		if onCCDestroyedCb then onCCDestroyedCb(owner) end
+	end
+
+	if wasMonument then
+		monumentByOwner[owner.UserId] = nil
+		monumentWinTimer[id] = nil
+		RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(owner.UserId, nil)
 	end
 end
 
@@ -322,6 +387,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		if not data then continue end
 		buildingData[id] = nil
 		turretTimers[id] = nil
+		monumentWinTimer[id] = nil
 		if data.buildingType == "Mine" and mineralManager then
 			mineralManager.removeMine(id)
 		end
@@ -329,6 +395,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		if model then model:Destroy() end
 	end
 	playerHasCC[player.UserId] = nil
+	monumentByOwner[player.UserId] = nil
 end
 
 function BuildingManager.placeForPlayer(player: any, position: Vector3, buildingType: string): boolean
@@ -444,6 +511,34 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				RemoteHandler.get(Config.REMOTES.TurretShot):FireAllClients(barrelTip, targetPos)
 			end
 		end
+
+		-- ── Monument win timers ────────────────────────────────────────────────
+		monumentHeartbeatAccum += dt
+		local sendProgress = false
+		if monumentHeartbeatAccum >= 1 then
+			monumentHeartbeatAccum -= 1
+			sendProgress = true
+		end
+
+		for userId, bid in monumentByOwner do
+			local mdata = buildingData[bid]
+			if not mdata or mdata.isConstructing then continue end
+
+			monumentWinTimer[bid] = (monumentWinTimer[bid] or 0) + dt
+
+			if monumentWinTimer[bid] >= Config.MONUMENT_WIN_DURATION then
+				RemoteHandler.get(Config.REMOTES.PlayerWon):FireAllClients(userId)
+				monumentByOwner[userId] = nil
+				monumentWinTimer[bid]   = nil
+				if onPlayerWonCb then task.spawn(onPlayerWonCb) end
+				break
+			end
+
+			if sendProgress then
+				local remaining = Config.MONUMENT_WIN_DURATION - monumentWinTimer[bid]
+				RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(userId, remaining)
+			end
+		end
 	end)
 
 	-- ── PlaceBuilding remote ──────────────────────────────────────────────
@@ -495,6 +590,37 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			mineralManager.registerMine(id, snapped, player)
 		end
 	end)
+
+	-- ── BuildMonument remote ──────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.BuildMonument).OnServerEvent:Connect(function(player)
+		BuildingManager.buildMonument(player)
+	end)
+end
+
+-- ── Monument upgrade ──────────────────────────────────────────────────────────
+
+function BuildingManager.buildMonument(player: any): boolean
+	if monumentByOwner[player.UserId] then return false end
+	if not playerHasCC[player.UserId] then return false end
+	if not resourceManagerRef or resourceManagerRef.get(player) < Config.MONUMENT_COST then return false end
+
+	-- Find CC ground-level position
+	local ccPos: Vector3?
+	for _, data in buildingData do
+		if data.owner == player and data.buildingType == "CommandCenter" then
+			ccPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+			break
+		end
+	end
+	if not ccPos then return false end
+
+	resourceManagerRef.spend(player, Config.MONUMENT_COST)
+	local id = createBuilding(player, ccPos, "Monument")
+	monumentByOwner[player.UserId] = id
+
+	-- Signal construction started
+	RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(player.UserId, -1)
+	return true
 end
 
 return BuildingManager

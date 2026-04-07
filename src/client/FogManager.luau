@@ -169,6 +169,7 @@ end
 local function buildingTypeRadius(btype: string): (number, number)
 	local r: number
 	if      btype == "CommandCenter" then r = VIS_CC
+	elseif  btype == "Monument"      then r = VIS_CC
 	elseif  btype == "Barracks"      then r = VIS_BARRACKS
 	elseif  btype == "Mine"          then r = VIS_MINE
 	elseif  btype == "Turret"        then r = VIS_TURRET
@@ -350,6 +351,7 @@ local function updateFog()
 	--    visible   → show fully
 	--    explored  → ghost ONLY if we've had LoS on it before AND it still exists
 	--    unexplored → fully hidden
+	--    Monument  → ALWAYS fully visible (win-condition structure)
 	local buildingsF = workspace:FindFirstChild("Buildings")
 	if buildingsF then
 		for _, model in buildingsF:GetChildren() do
@@ -357,6 +359,21 @@ local function updateFog()
 			if not ov or ov.Value == myStr then continue end
 			local base = model:FindFirstChild("Base")
 			if not base or not base:IsA("BasePart") then continue end
+
+			-- Monuments are always visible regardless of fog
+			local btv   = model:FindFirstChild("BuildingType") :: StringValue?
+			local btype = btv and btv.Value or ""
+			if btype == "Monument" then
+				for _, desc in model:GetDescendants() do
+					if desc:IsA("BasePart") then
+						(desc :: BasePart).LocalTransparencyModifier = 0
+					elseif desc:IsA("BillboardGui") then
+						(desc :: BillboardGui).Enabled = true
+					end
+				end
+				continue
+			end
+
 			local bpos = (base :: BasePart).Position
 			local vis  = posIsVisible(bpos, visGrid)
 			local exp  = posIsExplored(bpos)

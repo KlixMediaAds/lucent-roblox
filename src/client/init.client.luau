@@ -34,6 +34,13 @@ local mineMiners: { [string]: number } = {}
 -- Current resource amount (tracked for MinePanel affordability checks)
 local currentResources = 0
 
+-- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
+local winOverlay: Frame?
+
+-- Monument tracking
+local monumentBuildingId: { [number]: string }       = {}  -- ownerUserId → buildingId
+local monumentBillboards: { [number]: BillboardGui } = {}  -- ownerUserId → floating timer
+
 -- Research state (replicated from server)
 local researchedTechs:   { [string]: boolean } = {}
 local researchProgress:  { [string]: number?  } = {}
@@ -75,7 +82,8 @@ MinePanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
-	function(techName) return researchProgress[techName] end)
+	function(techName) return researchProgress[techName] end,
+	function() return currentResources end)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
@@ -110,6 +118,10 @@ local function enterCCMode()
 	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
+	WorkshopPanel.resetMonument()
+	if winOverlay then winOverlay.Visible = false end
+	monumentBuildingId = {}
+	monumentBillboards = {}
 end
 
 Network.onNeedCommandCenter(function()
@@ -123,6 +135,10 @@ end)
 Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
 		HUD.setCommandCenterMode(false)
+	end
+
+	if buildingType == "Monument" then
+		monumentBuildingId[ownerId] = id
 	end
 
 	-- Track this player's non-CC buildings for the requirement system
@@ -238,6 +254,182 @@ Network.onResearchCompleted(function(techName: string)
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
+end)
+
+-- ── Monument & win condition ──────────────────────────────────────────────────
+
+-- ── Toast notification helper ─────────────────────────────────────────────────
+local function showNotification(text: string, color: Color3?)
+	local sg      = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+	local lbl     = Instance.new("TextLabel")
+	lbl.Size      = UDim2.fromOffset(460, 44)
+	lbl.Position  = UDim2.new(0.5, -230, 0, 72)
+	lbl.BackgroundColor3 = Color3.fromRGB(8, 12, 26)
+	lbl.BackgroundTransparency = 0.08
+	lbl.BorderSizePixel = 0
+	lbl.Font      = Enum.Font.GothamBold
+	lbl.TextSize  = 16
+	lbl.TextColor3 = color or Color3.fromRGB(255, 215, 0)
+	lbl.Text      = text
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.ZIndex    = 50
+	lbl.Parent    = sg
+	local stroke  = Instance.new("UIStroke"); stroke.Color = color or Color3.fromRGB(255, 215, 0)
+	stroke.Thickness = 1; stroke.Parent = lbl
+	local corner  = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = lbl
+	task.delay(4.5, function()
+		for i = 1, 15 do
+			task.wait(0.05)
+			lbl.BackgroundTransparency = 0.08 + i / 15 * 0.92
+			lbl.TextTransparency       = i / 15
+		end
+		lbl:Destroy()
+	end)
+end
+
+-- ── Monument timer billboard ──────────────────────────────────────────────────
+local function getOrCreateMonumentBillboard(ownerUserId: number): BillboardGui?
+	if monumentBillboards[ownerUserId] and monumentBillboards[ownerUserId].Parent then
+		return monumentBillboards[ownerUserId]
+	end
+	local bid = monumentBuildingId[ownerUserId]
+	if not bid then return nil end
+	local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
+	if not buildingsF then return nil end
+	local model = buildingsF:FindFirstChild(bid)
+	if not model then return nil end
+	local base = model:FindFirstChild("Base") :: BasePart?
+	if not base then return nil end
+
+	local bb             = Instance.new("BillboardGui")
+	bb.Name              = "MonumentTimer"
+	bb.Size              = UDim2.fromOffset(160, 26)
+	bb.StudsOffset       = Vector3.new(0, 16, 0)
+	bb.MaxDistance       = 600
+	bb.AlwaysOnTop       = false
+	bb.Parent            = base
+
+	local bg             = Instance.new("Frame")
+	bg.Size              = UDim2.new(1, 0, 1, 0)
+	bg.BackgroundColor3  = Color3.fromRGB(8, 12, 26)
+	bg.BackgroundTransparency = 0.2
+	bg.BorderSizePixel   = 0
+	bg.Parent            = bb
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = bg
+
+	local lbl            = Instance.new("TextLabel")
+	lbl.Name             = "TimerLabel"
+	lbl.Size             = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font             = Enum.Font.GothamBold
+	lbl.TextSize         = 13
+	lbl.TextColor3       = Color3.fromRGB(255, 215, 0)
+	lbl.Text             = "Monument Rising..."
+	lbl.Parent           = bb
+
+	monumentBillboards[ownerUserId] = bb
+	return bb
+end
+
+local function updateMonumentBillboard(ownerUserId: number, timeRemaining: number?)
+	local bb  = getOrCreateMonumentBillboard(ownerUserId)
+	if not bb then return end
+	local lbl = bb:FindFirstChild("TimerLabel") :: TextLabel?
+	if not lbl then return end
+
+	if timeRemaining == nil or timeRemaining == -1 then
+		lbl.Text = "Monument Rising..."
+	else
+		local mins = math.floor(timeRemaining / 60)
+		local secs = math.floor(timeRemaining % 60)
+		local player = Players:GetPlayerByUserId(ownerUserId)
+		local name   = player and player.DisplayName or "???"
+		lbl.Text     = string.format("%s  —  Win in %d:%02d", name, mins, secs)
+	end
+end
+
+Network.onMonumentProgress(function(ownerUserId: number, timeRemaining: number?)
+	-- Update local player's workshop panel
+	if ownerUserId == localUserId then
+		WorkshopPanel.onMonumentProgress(timeRemaining)
+	end
+
+	-- Update floating timer billboard
+	if timeRemaining == nil then
+		-- Monument destroyed — clear stale refs (the model/billboard is already gone)
+		monumentBillboards[ownerUserId] = nil
+		monumentBuildingId[ownerUserId] = nil
+
+		if ownerUserId ~= localUserId then
+			local p    = Players:GetPlayerByUserId(ownerUserId)
+			local name = p and p.Name or "Enemy"
+			showNotification(name .. "'s Monument was destroyed!", Color3.fromRGB(50, 200, 80))
+		end
+	elseif timeRemaining == -1 then
+		-- Construction just started
+		updateMonumentBillboard(ownerUserId, -1)
+
+		local p    = Players:GetPlayerByUserId(ownerUserId)
+		local name = p and p.Name or "Someone"
+		if ownerUserId == localUserId then
+			showNotification("Your Monument is rising! Defend it for 5 minutes to win!")
+		else
+			showNotification(name .. " is building a Monument! Destroy it to stop them!", Color3.fromRGB(255, 80, 60))
+		end
+	else
+		-- Countdown tick
+		updateMonumentBillboard(ownerUserId, timeRemaining)
+	end
+end)
+
+-- Win / lose overlay
+do
+	local sg             = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+	local overlay        = Instance.new("Frame")
+	overlay.Name         = "WinOverlay"
+	overlay.Size         = UDim2.new(1, 0, 1, 0)
+	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	overlay.BackgroundTransparency = 0.45
+	overlay.ZIndex       = 100
+	overlay.Visible      = false
+	overlay.Parent       = sg
+	winOverlay           = overlay
+
+	local heading        = Instance.new("TextLabel")
+	heading.Name         = "Heading"
+	heading.Size         = UDim2.new(1, 0, 0, 110)
+	heading.Position     = UDim2.new(0, 0, 0.5, -90)
+	heading.BackgroundTransparency = 1
+	heading.Font         = Enum.Font.GothamBold
+	heading.TextSize     = 80
+	heading.Text         = "VICTORY!"
+	heading.ZIndex       = 101
+	heading.Parent       = overlay
+
+	local sub            = Instance.new("TextLabel")
+	sub.Name             = "Sub"
+	sub.Size             = UDim2.new(1, 0, 0, 36)
+	sub.Position         = UDim2.new(0, 0, 0.5, 32)
+	sub.BackgroundTransparency = 1
+	sub.Font             = Enum.Font.Gotham
+	sub.TextSize         = 22
+	sub.TextColor3       = Color3.fromRGB(200, 220, 255)
+	sub.Text             = ""
+	sub.ZIndex           = 101
+	sub.Parent           = overlay
+end
+
+Network.onPlayerWon(function(winnerUserId: number)
+	winOverlay.Visible = true
+	local heading = winOverlay:FindFirstChild("Heading") :: TextLabel?
+	local sub     = winOverlay:FindFirstChild("Sub")     :: TextLabel?
+	if winnerUserId == localUserId then
+		if heading then heading.Text = "VICTORY!";           heading.TextColor3 = Color3.fromRGB(255, 215, 0)  end
+		if sub     then sub.Text     = "Your monument stood for 5 minutes." end
+	else
+		if heading then heading.Text = "DEFEAT";             heading.TextColor3 = Color3.fromRGB(210, 50, 50)  end
+		if sub     then sub.Text     = "The enemy's monument has been completed." end
+	end
 end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ local C_MINER       = Color3.fromRGB( 90, 200, 110)
 local C_VIEWPORT    = Color3.fromRGB(255, 255, 255)
 local C_CC_OWN      = Color3.fromRGB(255, 200,  40)
 local C_CC_ENEMY    = Color3.fromRGB(220, 100,  30)
+local C_MONUMENT    = Color3.fromRGB(255, 215,   0)  -- gold — always shown
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -154,17 +155,21 @@ local function syncBuildingDots(folder: Instance?, pool: { [string]: Frame }, my
 			local bp    = base :: BasePart
 			local isOwn = ov.Value == myStr
 
-			-- Hide fully-fogged enemy buildings
-			if not isOwn and bp.LocalTransparencyModifier >= 1 then continue end
+			-- Determine building type first (Monument bypasses fog check)
+			local btv   = model:FindFirstChild("BuildingType") :: StringValue?
+			local btype = btv and btv.Value or ""
+
+			-- Hide fully-fogged enemy buildings (Monuments are always shown)
+			if not isOwn and bp.LocalTransparencyModifier >= 1 and btype ~= "Monument" then continue end
 
 			local id  = model.Name
 			seen[id]  = true
 
-			-- Determine color — CC gets a distinct gold/orange
-			local btv   = model:FindFirstChild("BuildingType") :: StringValue?
-			local btype = btv and btv.Value or ""
+			-- Color — Monument is gold, CC gets distinct gold/orange, others normal
 			local color: Color3
-			if isOwn then
+			if btype == "Monument" then
+				color = C_MONUMENT
+			elseif isOwn then
 				color = btype == "CommandCenter" and C_CC_OWN or C_OWN_BLD
 			else
 				color = btype == "CommandCenter" and C_CC_ENEMY or C_ENEMY_BLD

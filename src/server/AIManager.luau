@@ -691,6 +691,12 @@ function AIManager.resetBot(userId: number)
 	print("[AIManager] Bot", userId, "eliminated — resetting to rebuild")
 end
 
+function AIManager.resetAllBots()
+	for userId, _ in botByUserId do
+		AIManager.resetBot(userId)
+	end
+end
+
 function AIManager.spawnAI(difficulty: string): boolean
 	local diff = DIFFICULTY[difficulty]
 	if not diff then

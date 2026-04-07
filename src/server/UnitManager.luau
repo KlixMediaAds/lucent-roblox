@@ -358,6 +358,13 @@ function UnitManager.removeAllUnitsFor(player: any)
 	end
 end
 
+function UnitManager.resetAll()
+	for id, data in units do
+		if data.part and data.part.Parent then data.part:Destroy() end
+	end
+	units = {}
+end
+
 function UnitManager.setBuildingManager(bm: any)
 	buildingManagerRef = bm
 end

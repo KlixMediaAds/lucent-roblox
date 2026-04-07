@@ -99,4 +99,18 @@ function Network.onResearchCompleted(fn: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.ResearchCompleted).OnClientEvent:Connect(fn)
 end
 
+function Network.buildMonument()
+	RemoteHandler.get(Config.REMOTES.BuildMonument):FireServer()
+end
+
+-- ownerUserId, timeRemaining: nil = destroyed, -1 = constructing, >0 = seconds left
+function Network.onMonumentProgress(fn: (number, number?) -> ())
+	RemoteHandler.get(Config.REMOTES.MonumentProgress).OnClientEvent:Connect(fn)
+end
+
+-- winnerUserId
+function Network.onPlayerWon(fn: (number) -> ())
+	RemoteHandler.get(Config.REMOTES.PlayerWon).OnClientEvent:Connect(fn)
+end
+
 return Network

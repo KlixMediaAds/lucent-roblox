@@ -48,8 +48,8 @@ end
 
 local function playSoldierVoice() playSound(SOLDIER_VOICE_IDS[math.random(#SOLDIER_VOICE_IDS)], 0.2, 1) end
 local function playSoldierDeath() playSound(SOLDIER_DEATH_ID, 0.12, 1) end
-local function playTankVoice()    playSound(TANK_VOICE_IDS[math.random(#TANK_VOICE_IDS)],       0.1, 2) end
-local function playTankDeath()    playSound(TANK_DEATH_ID, 0.06, 2) end
+local function playTankVoice()    playSound(TANK_VOICE_IDS[math.random(#TANK_VOICE_IDS)],       0.1, 7) end
+local function playTankDeath()    playSound(TANK_DEATH_ID, 0.06, 7) end
 
 -- ── Move-order ping ───────────────────────────────────────────────────────────
 local function spawnMovePing(pos: Vector3, isAtkMove: boolean)

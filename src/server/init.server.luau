@@ -67,4 +67,31 @@ Players.PlayerAdded:Connect(function(player)
 	end)
 end)
 
+-- ── Game reset after a player wins ───────────────────────────────────────────
+local gameResetInProgress = false
+
+BuildingManager.setOnPlayerWon(function()
+	if gameResetInProgress then return end
+	gameResetInProgress = true
+
+	task.wait(8)   -- let players read the victory/defeat screen
+
+	UnitManager.resetAll()
+	BuildingManager.resetAll()
+
+	for _, player in Players:GetPlayers() do
+		ResourceManager.reset(player)
+		ResearchManager.resetPlayer(player)
+	end
+
+	MineralManager.resetAll()
+	AIManager.resetAllBots()
+
+	for _, player in Players:GetPlayers() do
+		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+	end
+
+	gameResetInProgress = false
+end)
+
 print("[Server] RTS initialized")
