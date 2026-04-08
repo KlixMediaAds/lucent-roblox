@@ -644,7 +644,8 @@ function UnitManager.init(resourceManager)
 				if flatDir.Magnitude > 0.1 then
 					data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
 				end
-				unitHitRemote:FireAllClients(myPos, hitPos, data.unitType)
+				-- Lift hit point to target surface so impacts don't render inside models
+			unitHitRemote:FireAllClients(myPos, hitPos + Vector3.new(0, 2.0, 0), data.unitType)
 			end
 		end
 

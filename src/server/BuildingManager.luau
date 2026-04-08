@@ -10,9 +10,10 @@ local counter            = 0
 local mineralManager: any
 local resourceManagerRef: any
 local unitManagerRef: any
+local researchManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
-type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean }
+type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean, turretUpgrade: string? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
@@ -247,6 +248,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		head           = buildingType == "Turret" and (model:FindFirstChild("Head") :: BasePart?) or nil,
 		barrel         = buildingType == "Turret" and (model:FindFirstChild("Barrel") :: BasePart?) or nil,
 		isConstructing = buildTime > 0,
+		turretUpgrade  = nil,
 	}
 	applyHP(buildingData[id])
 
@@ -305,6 +307,60 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	return id
 end
 
+-- ── Turret upgrade visuals ────────────────────────────────────────────────────
+
+local function applyTurretUpgradeVisuals(id: string, upgradeType: string)
+	local model = buildingsFolder:FindFirstChild(id)
+	if not model then return end
+
+	local head   = model:FindFirstChild("Head")   :: BasePart?
+	local barrel = model:FindFirstChild("Barrel") :: BasePart?
+	local ring   = model:FindFirstChild("Ring")   :: BasePart?
+
+	if upgradeType == "Flamethrower" then
+		if head then
+			head.BrickColor = BrickColor.new("Bright orange")
+			head.Material   = Enum.Material.Neon
+		end
+		if barrel then
+			-- Shorter, wider nozzle
+			barrel.BrickColor = BrickColor.new("Bright orange")
+			barrel.Material   = Enum.Material.Neon
+			barrel.Size       = Vector3.new(2.4, 2.4, 5)
+		end
+		if ring then
+			ring.BrickColor = BrickColor.new("Deep orange")
+			ring.Size       = ring.Size + Vector3.new(0, 0.4, 0)
+		end
+
+	elseif upgradeType == "RocketLauncher" then
+		if head then
+			head.BrickColor = BrickColor.new("Dark indigo")
+			head.Material   = Enum.Material.SmoothPlastic
+			head.Size       = head.Size + Vector3.new(1, 0.5, 1)
+		end
+		if barrel then
+			-- Long, wide missile tube
+			barrel.BrickColor = BrickColor.new("Medium blue")
+			barrel.Material   = Enum.Material.Metal
+			barrel.Size       = Vector3.new(2.4, 2.4, 11)
+		end
+		if ring then
+			ring.BrickColor = BrickColor.new("Medium blue")
+			ring.Material   = Enum.Material.Neon
+		end
+	end
+
+	-- Tag the model so clients can read upgrade state
+	local existing = model:FindFirstChild("Upgrade")
+	if not existing then
+		local uv  = Instance.new("StringValue")
+		uv.Name   = "Upgrade"
+		uv.Value  = upgradeType
+		uv.Parent = model
+	end
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuildingManager.hasCommandCenter(player: any): boolean
@@ -331,6 +387,10 @@ end
 
 function BuildingManager.setUnitManager(um: any)
 	unitManagerRef = um
+end
+
+function BuildingManager.setResearchManager(rm: any)
+	researchManagerRef = rm
 end
 
 function BuildingManager.damage(id: string, amount: number)
@@ -460,9 +520,21 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if data.buildingType ~= "Turret" then continue end
 			if data.isConstructing then continue end   -- still under construction
 
+			-- Per-turret stats (may be upgraded)
+			local upg     = data.turretUpgrade
+			local tRate   = upg == "Flamethrower"   and Config.TURRET_FLAME.rate
+			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.rate
+			             or Config.TURRET_ATTACK_RATE
+			local tRange  = upg == "Flamethrower"   and Config.TURRET_FLAME.range
+			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.range
+			             or Config.TURRET_RANGE
+			local tDamage = upg == "Flamethrower"   and Config.TURRET_FLAME.damage
+			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.damage
+			             or Config.TURRET_DAMAGE
+
 			turretTimers[id] = (turretTimers[id] or 0) + dt
-			if turretTimers[id] < Config.TURRET_ATTACK_RATE then continue end
-			turretTimers[id] -= Config.TURRET_ATTACK_RATE
+			if turretTimers[id] < tRate then continue end
+			turretTimers[id] -= tRate
 
 			local myPos      = data.base.Position
 			local myOwnerStr = tostring(data.owner.UserId)
@@ -470,25 +542,29 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 			-- Prefer hitting units; fall back to enemy buildings
 			if unitManagerRef then
-				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, Config.TURRET_RANGE, Config.TURRET_DAMAGE)
+				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
 				if hitUnit then targetPos = unitHitPos end
 			end
 			if not targetPos then
-				local bId, bPos = BuildingManager.getNearestEnemyBuilding(myPos, myOwnerStr, Config.TURRET_RANGE)
+				local bId, bPos = BuildingManager.getNearestEnemyBuilding(myPos, myOwnerStr, tRange)
 				if bId then
-					BuildingManager.damage(bId, Config.TURRET_DAMAGE)
+					BuildingManager.damage(bId, tDamage)
 					targetPos = bPos
 				end
 			end
 
 			if targetPos then
-				-- Aim head + barrel at the target
-				local head   = data.head
-				local barrel = data.barrel
+				-- Lift aim point to target surface so projectiles/explosions
+				-- don't mesh inside the model centre.
+				local visualTarget = targetPos + Vector3.new(0, 2.0, 0)
+
+				-- Aim head + barrel at the visual target
+				local head    = data.head
+				local barrel  = data.barrel
 				local headPos = head and head.Position
 					or (myPos + Vector3.new(0, Config.BUILDING_SIZE.Y + 1.5, 0))
 
-				local aimDir = targetPos - headPos
+				local aimDir    = visualTarget - headPos
 				local barrelTip = headPos   -- fallback
 
 				if aimDir.Magnitude > 0.1 then
@@ -496,7 +572,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					barrelTip = headPos + aimUnit * 7
 
 					if head then
-						local flatDir = (targetPos - headPos) * Vector3.new(1, 0, 1)
+						local flatDir = (visualTarget - headPos) * Vector3.new(1, 0, 1)
 						if flatDir.Magnitude > 0.1 then
 							head.CFrame = CFrame.new(headPos, headPos + flatDir.Unit)
 						end
@@ -508,7 +584,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				end
 
 				-- Tell all clients to show a projectile
-				RemoteHandler.get(Config.REMOTES.TurretShot):FireAllClients(barrelTip, targetPos)
+				RemoteHandler.get(Config.REMOTES.TurretShot):FireAllClients(barrelTip, visualTarget, data.turretUpgrade)
 			end
 		end
 
@@ -595,6 +671,27 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.BuildMonument).OnServerEvent:Connect(function(player)
 		BuildingManager.buildMonument(player)
 	end)
+
+	-- ── UpgradeTurret remote ──────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.UpgradeTurret).OnServerEvent:Connect(
+		function(player, turretId, upgradeType)
+			if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return end
+			if upgradeType ~= "Flamethrower" and upgradeType ~= "RocketLauncher" then return end
+			local data = buildingData[turretId]
+			if not data or data.buildingType ~= "Turret" then return end
+			if data.owner ~= player then return end
+			if data.turretUpgrade then return end  -- already upgraded
+			if data.isConstructing then return end
+
+			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
+
+			local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
+			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
+
+			data.turretUpgrade = upgradeType
+			applyTurretUpgradeVisuals(turretId, upgradeType)
+		end
+	)
 end
 
 -- ── Monument upgrade ──────────────────────────────────────────────────────────

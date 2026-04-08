@@ -61,6 +61,11 @@ function Network.onMinerSpawned(fn: (string, number, number) -> ())
 	RemoteHandler.get(Config.REMOTES.MinerSpawned).OnClientEvent:Connect(fn)
 end
 
+-- mineId, income amount produced this tick
+function Network.onMineIncome(fn: (string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.MineIncome).OnClientEvent:Connect(fn)
+end
+
 -- Fired when the player needs to (re)place their Command Center
 function Network.onNeedCommandCenter(fn: () -> ())
 	RemoteHandler.get(Config.REMOTES.NeedCommandCenter).OnClientEvent:Connect(fn)
@@ -71,8 +76,8 @@ function Network.onTrainingUpdate(fn: (string, {string}, number) -> ())
 	RemoteHandler.get(Config.REMOTES.TrainingUpdate).OnClientEvent:Connect(fn)
 end
 
--- barrelTip, targetPos: spawn a projectile visual
-function Network.onTurretShot(fn: (Vector3, Vector3) -> ())
+-- barrelTip, targetPos, upgradeType (nil = base turret)
+function Network.onTurretShot(fn: (Vector3, Vector3, string?) -> ())
 	RemoteHandler.get(Config.REMOTES.TurretShot).OnClientEvent:Connect(fn)
 end
 
@@ -83,6 +88,10 @@ end
 
 function Network.upgradeMine(mineId: string, upgradeType: string)
 	RemoteHandler.get(Config.REMOTES.UpgradeMine):FireServer(mineId, upgradeType)
+end
+
+function Network.upgradeTurret(turretId: string, upgradeType: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeTurret):FireServer(turretId, upgradeType)
 end
 
 function Network.startResearch(workshopId: string, techName: string)

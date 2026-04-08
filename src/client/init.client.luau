@@ -14,6 +14,7 @@ local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
+local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
@@ -84,6 +85,9 @@ WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function(techName) return researchProgress[techName] end,
 	function() return currentResources end)
+TurretPanel.init(Network,
+	function() return currentResources end,
+	function(techName) return researchedTechs[techName] == true end)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
@@ -99,6 +103,7 @@ local function hideBuildingPanels()
 	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
+	TurretPanel.hide()
 end
 buildBtn.MouseButton1Click:Connect(hideBuildingPanels)
 mineBtn.MouseButton1Click:Connect(hideBuildingPanels)
@@ -118,6 +123,7 @@ local function enterCCMode()
 	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
+	TurretPanel.hide()
 	WorkshopPanel.resetMonument()
 	if winOverlay then winOverlay.Visible = false end
 	monumentBuildingId = {}
@@ -193,9 +199,22 @@ UnitController.onCCSelected(function(ccId: string?)
 	if ccId then
 		BarracksPanel.hide()
 		MinePanel.hide()
+		TurretPanel.hide()
 		WorkshopPanel.show(ccId)
 	else
 		WorkshopPanel.hide()
+	end
+end)
+
+-- ── Turret upgrade panel ──────────────────────────────────────────────────────
+UnitController.onTurretSelected(function(turretId: string?)
+	if turretId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.show(turretId)
+	else
+		TurretPanel.hide()
 	end
 end)
 
@@ -236,6 +255,73 @@ Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount:
 	MinePanel.refreshIfVisible()
 end)
 
+Network.onMineIncome(function(mineId: string, income: number)
+	local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
+	if not buildingsF then return end
+	local model = buildingsF:FindFirstChild(mineId)
+	if not model then return end
+	local crystal = model:FindFirstChild("Crystal") :: BasePart?
+	if not crystal then return end
+
+	-- Floating "+X res" label
+	local bb           = Instance.new("BillboardGui")
+	bb.Name            = "_MineIncomeBB"
+	bb.Size            = UDim2.fromOffset(80, 22)
+	bb.StudsOffset     = Vector3.new(0, 4, 0)
+	bb.AlwaysOnTop     = false
+	bb.MaxDistance     = 120
+	bb.Parent          = crystal
+
+	local lbl                    = Instance.new("TextLabel")
+	lbl.Size                     = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency   = 1
+	lbl.Font                     = Enum.Font.GothamBold
+	lbl.TextSize                 = 15
+	lbl.TextColor3               = Color3.fromRGB(255, 215, 0)
+	lbl.TextStrokeTransparency   = 0.35
+	lbl.Text                     = "+" .. income .. " res"
+	lbl.Parent                   = bb
+
+	-- Crystal pulse: briefly enlarge then restore
+	local originalSize = crystal.Size
+	local PULSE_IN     = 0.12   -- seconds to grow
+	local PULSE_OUT    = 0.32   -- seconds to shrink back
+	local RISE_DUR     = 1.4    -- total float duration
+	local PULSE_ADD    = Vector3.new(0.8, 1.6, 0.8)
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+
+		-- Float label upward and fade
+		if bb.Parent then
+			local t        = math.min(elapsed / RISE_DUR, 1)
+			bb.StudsOffset = Vector3.new(0, 4 + t * 3.5, 0)
+			lbl.TextTransparency = math.clamp((t - 0.4) / 0.6, 0, 1)
+		end
+
+		-- Crystal size pulse
+		if crystal.Parent then
+			if elapsed < PULSE_IN then
+				local t      = elapsed / PULSE_IN
+				crystal.Size = originalSize + PULSE_ADD * t
+			elseif elapsed < PULSE_IN + PULSE_OUT then
+				local t      = (elapsed - PULSE_IN) / PULSE_OUT
+				crystal.Size = (originalSize + PULSE_ADD) - PULSE_ADD * t
+			else
+				crystal.Size = originalSize
+			end
+		end
+
+		if elapsed >= RISE_DUR then
+			conn:Disconnect()
+			if bb.Parent then bb:Destroy() end
+			if crystal.Parent then crystal.Size = originalSize end
+		end
+	end)
+end)
+
 Network.onResourceSync(function(amount: number)
 	currentResources = amount
 	MinePanel.refreshIfVisible()
@@ -254,6 +340,7 @@ Network.onResearchCompleted(function(techName: string)
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
+	TurretPanel.refreshIfVisible()
 end)
 
 -- ── Monument & win condition ──────────────────────────────────────────────────
@@ -702,7 +789,8 @@ end)
 
 -- ── Turret projectile VFX ─────────────────────────────────────────────────────
 
-Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3)
+-- Base turret: small red ball + flash (unchanged)
+local function spawnBaseTurretShot(fromPos: Vector3, toPos: Vector3)
 	local proj              = Instance.new("Part")
 	proj.Name               = "_TurretProjectile"
 	proj.Size               = Vector3.new(0.45, 0.45, 0.45)
@@ -716,21 +804,16 @@ Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3)
 	proj.Position           = fromPos
 	proj.Parent             = workspace
 
-	local TRAVEL  = 0.22   -- seconds to reach target
+	local TRAVEL = 0.22
 	local elapsed = 0
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function(dt)
 		elapsed += dt
 		local t = math.min(elapsed / TRAVEL, 1)
-		-- Lerp with a slight upward arc
-		local p = fromPos:Lerp(toPos, t)
-		proj.Position = p + Vector3.new(0, math.sin(t * math.pi) * 2, 0)
-
+		proj.Position = fromPos:Lerp(toPos, t) + Vector3.new(0, math.sin(t * math.pi) * 2, 0)
 		if t >= 1 then
 			conn:Disconnect()
 			proj:Destroy()
-
-			-- Small impact flash
 			local flash             = Instance.new("Part")
 			flash.Name              = "_TurretImpact"
 			flash.Size              = Vector3.new(1.8, 1.8, 1.8)
@@ -746,4 +829,281 @@ Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3)
 			task.delay(0.1, function() flash:Destroy() end)
 		end
 	end)
+end
+
+-- Flamethrower: fast oriented bolt → orange burst + flat ring on hit
+-- Part budget: 1 projectile + 2 impact parts = 3 max per shot
+-- Flamethrower: instant beam + 4 fire blobs → burst + ring on hit
+-- Part budget: 1 beam + 4 blobs + 2 impact = 7, all gone within 0.22s
+local function spawnFlamethrowerShot(fromPos: Vector3, toPos: Vector3)
+	local dest = toPos + Vector3.new(0, 0.5, 0)
+	local dir  = dest - fromPos
+	local len  = dir.Magnitude
+	if len < 0.5 then return end
+
+	local FADE = 0.22
+
+	-- Thin neon beam spanning full path
+	local mid          = (fromPos + dest) * 0.5
+	local beam         = Instance.new("Part")
+	beam.Name          = "_FlameBeam"
+	beam.Size          = Vector3.new(0.35, 0.35, len)
+	beam.Color         = Color3.fromRGB(255, 160, 30)
+	beam.Material      = Enum.Material.Neon
+	beam.Anchored      = true
+	beam.CanCollide    = false
+	beam.CanQuery      = false
+	beam.CastShadow    = false
+	beam.CFrame        = CFrame.new(mid, dest)
+	beam.Parent        = workspace
+
+	-- 4 fire blobs: small near barrel, large near target, yellow→deep orange
+	local BLOB_DEFS = {
+		{ t = 0.12, sz = 0.70, r = 255, g = 230, b = 40,  offY =  0.10 },
+		{ t = 0.35, sz = 0.95, r = 255, g = 160, b = 20,  offY = -0.15 },
+		{ t = 0.60, sz = 1.25, r = 255, g = 100, b = 10,  offY =  0.20 },
+		{ t = 0.83, sz = 1.55, r = 230, g = 60,  b =  5,  offY = -0.10 },
+	}
+	local blobs: { Part } = {}
+	local rng = Random.new()
+	for _, def in BLOB_DEFS do
+		local pos    = fromPos:Lerp(dest, def.t)
+		local randOff = Vector3.new(
+			(rng:NextNumber() - 0.5) * 0.8,
+			def.offY,
+			(rng:NextNumber() - 0.5) * 0.8
+		)
+		local b        = Instance.new("Part")
+		b.Name         = "_FlameBlob"
+		b.Shape        = Enum.PartType.Ball
+		b.Size         = Vector3.new(def.sz, def.sz, def.sz)
+		b.Color        = Color3.fromRGB(def.r, def.g, def.b)
+		b.Material     = Enum.Material.Neon
+		b.Anchored     = true
+		b.CanCollide   = false
+		b.CanQuery     = false
+		b.CastShadow   = false
+		b.Position     = pos + randOff
+		b.Parent       = workspace
+		table.insert(blobs, b)
+	end
+
+	-- Impact: burst sphere + flat ring
+	local burst        = Instance.new("Part")
+	burst.Name         = "_FlameBurst"
+	burst.Shape        = Enum.PartType.Ball
+	burst.Size         = Vector3.new(1.2, 1.2, 1.2)
+	burst.Color        = Color3.fromRGB(255, 120, 15)
+	burst.Material     = Enum.Material.Neon
+	burst.Position     = dest
+	burst.Anchored     = true
+	burst.CanCollide   = false
+	burst.CanQuery     = false
+	burst.CastShadow   = false
+	burst.Parent       = workspace
+
+	local ring         = Instance.new("Part")
+	ring.Name          = "_FlameRing"
+	ring.Shape         = Enum.PartType.Cylinder
+	ring.Size          = Vector3.new(0.22, 0.8, 0.8)
+	ring.Color         = Color3.fromRGB(200, 55, 5)
+	ring.Material      = Enum.Material.Neon
+	ring.Anchored      = true
+	ring.CanCollide    = false
+	ring.CanQuery      = false
+	ring.CastShadow    = false
+	ring.CFrame        = CFrame.new(dest) * CFrame.Angles(0, 0, math.pi / 2)
+	ring.Parent        = workspace
+
+	local RING_DUR = 0.19
+	local elapsed  = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local ft = math.min(elapsed / FADE, 1)
+
+		-- fade beam
+		if beam.Parent then
+			beam.Transparency = ft
+			if ft >= 1 then beam:Destroy() end
+		end
+		-- fade blobs
+		for _, b in blobs do
+			if b.Parent then
+				b.Transparency = ft
+				if ft >= 1 then b:Destroy() end
+			end
+		end
+		-- burst expands + fades
+		if burst.Parent then
+			local s = 1.2 + ft * 3.8
+			burst.Size         = Vector3.new(s, s, s)
+			burst.Transparency = ft * 0.9
+			if ft >= 1 then burst:Destroy() end
+		end
+		-- ring expands + fades
+		if ring.Parent then
+			local rt = math.min(elapsed / RING_DUR, 1)
+			local d  = 0.8 + rt * 5.0
+			ring.Size         = Vector3.new(0.22, d, d)
+			ring.Transparency = 0.1 + rt * 0.9
+			if rt >= 1 then ring:Destroy() end
+		end
+
+		if elapsed >= FADE then conn:Disconnect() end
+	end)
+end
+
+-- Rocket Launcher: oriented rocket body + exhaust glow → white core + expanding
+-- ring + smoke cloud.
+-- Part budget: 2 projectile + 3 impact = 5 max per shot (rockets fire rarely)
+local function spawnRocketShot(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL = 0.32
+	local ARC    = 1.2
+	local origin = fromPos
+	local dest   = toPos + Vector3.new(0, 0.8, 0)
+	local dir    = dest - origin
+
+	-- Rocket body: elongated dark part oriented toward target
+	local body        = Instance.new("Part")
+	body.Name         = "_RocketBody"
+	body.Size         = Vector3.new(1.3, 1.3, 4.5)
+	body.BrickColor   = BrickColor.new("Dark stone grey")
+	body.Material     = Enum.Material.Metal
+	body.Anchored     = true
+	body.CanCollide   = false
+	body.CanQuery     = false
+	body.CastShadow   = false
+	body.CFrame       = dir.Magnitude > 0.1
+		and CFrame.new(origin, origin + dir.Unit)
+		or  CFrame.new(origin)
+	body.Parent       = workspace
+
+	-- Exhaust glow: small neon orange orb at rear of body
+	local exhaust        = Instance.new("Part")
+	exhaust.Name         = "_RocketExhaust"
+	exhaust.Shape        = Enum.PartType.Ball
+	exhaust.Size         = Vector3.new(1.1, 1.1, 1.1)
+	exhaust.BrickColor   = BrickColor.new("Bright orange")
+	exhaust.Material     = Enum.Material.Neon
+	exhaust.Anchored     = true
+	exhaust.CanCollide   = false
+	exhaust.CanQuery     = false
+	exhaust.CastShadow   = false
+	exhaust.Position     = origin
+	exhaust.Parent       = workspace
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t   = math.min(elapsed / TRAVEL, 1)
+		local cur = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+		local lookDir = dest - cur
+
+		body.CFrame = lookDir.Magnitude > 0.1
+			and CFrame.new(cur, dest)
+			or  CFrame.new(cur)
+		-- Keep exhaust at the back of the body (-Z tail)
+		local back = lookDir.Magnitude > 0.1
+			and (lookDir.Unit * -2.25)
+			or  Vector3.new(0, 0, 2.25)
+		exhaust.Position = cur + back
+
+		if t >= 1 then
+			conn:Disconnect()
+			body:Destroy()
+			exhaust:Destroy()
+
+			-- White core flash: instant bright burst
+			local core        = Instance.new("Part")
+			core.Name         = "_RocketCore"
+			core.Shape        = Enum.PartType.Ball
+			core.Size         = Vector3.new(2.8, 2.8, 2.8)
+			core.BrickColor   = BrickColor.new("White")
+			core.Material     = Enum.Material.Neon
+			core.Position     = dest
+			core.Anchored     = true
+			core.CanCollide   = false
+			core.CanQuery     = false
+			core.CastShadow   = false
+			core.Parent       = workspace
+
+			-- Expanding shockwave ring: yellow-orange
+			local ring        = Instance.new("Part")
+			ring.Name         = "_RocketRing"
+			ring.Shape        = Enum.PartType.Cylinder
+			ring.Size         = Vector3.new(0.35, 1, 1)
+			ring.BrickColor   = BrickColor.new("Bright yellow")
+			ring.Material     = Enum.Material.Neon
+			ring.Anchored     = true
+			ring.CanCollide   = false
+			ring.CanQuery     = false
+			ring.CastShadow   = false
+			ring.CFrame       = CFrame.new(dest + Vector3.new(0, 0.4, 0))
+				* CFrame.Angles(0, 0, math.pi / 2)
+			ring.Parent       = workspace
+
+			-- Smoke/dust cloud: grey sphere that expands and fades slowly
+			local smoke       = Instance.new("Part")
+			smoke.Name        = "_RocketSmoke"
+			smoke.Shape       = Enum.PartType.Ball
+			smoke.Size        = Vector3.new(2, 2, 2)
+			smoke.Color       = Color3.fromRGB(90, 80, 70)
+			smoke.Material    = Enum.Material.SmoothPlastic
+			smoke.Anchored    = true
+			smoke.CanCollide  = false
+			smoke.CanQuery    = false
+			smoke.CastShadow  = false
+			smoke.Position    = dest
+			smoke.Parent      = workspace
+
+			local CORE_DUR  = 0.09
+			local RING_DUR  = 0.30
+			local SMOKE_DUR = 0.42
+			local e2        = 0
+			local ic: RBXScriptConnection
+			ic = RunService.RenderStepped:Connect(function(idt)
+				e2 += idt
+				if core.Parent then
+					if e2 < CORE_DUR then
+						core.Transparency = e2 / CORE_DUR
+					else
+						core:Destroy()
+					end
+				end
+				if ring.Parent then
+					if e2 < RING_DUR then
+						local rt = e2 / RING_DUR
+						local d  = 1 + rt * 13
+						ring.Size         = Vector3.new(0.35, d, d)
+						ring.Transparency = 0.1 + rt * 0.9
+					else
+						ring:Destroy()
+					end
+				end
+				if smoke.Parent then
+					if e2 < SMOKE_DUR then
+						local st = e2 / SMOKE_DUR
+						local s  = 2 + st * 7
+						smoke.Size         = Vector3.new(s, s, s)
+						smoke.Transparency = 0.15 + st * 0.80
+					else
+						smoke:Destroy()
+					end
+				end
+				if e2 >= SMOKE_DUR then ic:Disconnect() end
+			end)
+		end
+	end)
+end
+
+Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: string?)
+	if upgradeType == "Flamethrower" then
+		spawnFlamethrowerShot(fromPos, toPos)
+	elseif upgradeType == "RocketLauncher" then
+		spawnRocketShot(fromPos, toPos)
+	else
+		spawnBaseTurretShot(fromPos, toPos)
+	end
 end)

@@ -486,6 +486,7 @@ function MineralManager.init(rm)
 
 				local income = data.miners * Config.MINI_MINER_INCOME * data.incomeMultiplier
 				resourceManager.add(data.owner, income)
+				RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(data.owner, mineId, income)
 
 				data.depositTotal -= income
 				if data.depositTotal <= 0 then

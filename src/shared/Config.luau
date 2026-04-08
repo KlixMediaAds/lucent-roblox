@@ -69,9 +69,15 @@ Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
 
 -- Research techs (time in seconds; no resource cost)
 Config.RESEARCH = {
-	BetterMines = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
-	EliteUnits  = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
+	BetterMines    = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
+	EliteUnits     = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
+	TurretUpgrades = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
 }
+
+-- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
+Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225 }
+Config.TURRET_FLAME  = { range = 28, damage = 35, rate = 0.6  }   -- short range, rapid fire
+Config.TURRET_ROCKET = { range = 70, damage = 80, rate = 3.5  }   -- long range, high damage
 
 -- Turret
 Config.TURRET_COST        = 100
@@ -119,12 +125,14 @@ Config.REMOTES = {
 	UnitDied          = "UnitDied",
 	UnitHit           = "UnitHit",
 	UpgradeMine       = "UpgradeMine",
+	UpgradeTurret     = "UpgradeTurret",
 	StartResearch     = "StartResearch",
 	ResearchUpdate    = "ResearchUpdate",
 	ResearchCompleted = "ResearchCompleted",
 	BuildMonument    = "BuildMonument",
 	MonumentProgress = "MonumentProgress",
 	PlayerWon        = "PlayerWon",
+	MineIncome       = "MineIncome",
 }
 
 return Config
