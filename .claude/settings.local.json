@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where wally:*)",
+      "Bash(wally --version)",
+      "Read(//usr/local/bin/**)",
+      "Read(//c/Users/ohkod/.cargo/bin/**)"
+    ]
+  }
+}

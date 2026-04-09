@@ -1,75 +1,83 @@
-local Players = game:GetService("Players")
+--!strict
+--[[
+    MinePanel — Radial bubble node-graph for mine upgrades.
+
+    Root node "MINE" auto-expands to two children when show() is called:
+      Efficiency (-135°)  ·  Capacity (-45°)
+
+    Miner count is shown inline on the root node label.
+    Upgrade state is shown directly on child nodes.
+    All network calls and logic are preserved unchanged.
+]]
+
+local Players      = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 
 local MinePanel   = {}
 local localPlayer = Players.LocalPlayer
 local C           = UILib.C
 
-local panel:          Frame?
-local activeMineId:   string? = nil
-local networkRef:     any
-local getResources:   (() -> number)?
-local getMinerCount:  ((string) -> number)?
-local hasResearchFn:  ((string) -> boolean)?
+-- ── State ─────────────────────────────────────────────────────────────────────
+local activeMineId:  string? = nil
+local networkRef:    any
+local getResources:  (() -> number)?
+local getMinerCount: ((string) -> number)?
+local hasResearchFn: ((string) -> boolean)?
 
--- Button refs for state updates
-local effBtn:    TextButton?
-local capBtn:    TextButton?
-local statusLbl: TextLabel?
-local infoLbl:   TextLabel?
+-- Root node label ref (shows miner count inline)
+local rootLbl: TextLabel?
 
--- ── Upgrade card builder ──────────────────────────────────────────────────────
+-- Overlay instances
+local overlay: Frame?
 
-local function makeUpgradeCard(
-	parent:  Instance,
-	name:    string,
-	desc:    string,
-	cost:    string,
-	color:   Color3,
-	zi:      number
-): TextButton
-	local btn                  = Instance.new("TextButton")
-	btn.Size                   = UDim2.fromOffset(171, 78)
-	btn.BackgroundColor3       = color
-	btn.BackgroundTransparency = 0.14
-	btn.Text                   = ""
-	btn.AutoButtonColor        = true
-	btn.BorderSizePixel        = 0
-	btn.ZIndex                 = zi
-	btn.Parent                 = parent
-	UILib.corner(btn, 9)
-	UILib.stroke(btn, C.BORDER, 1)
+local RADIUS   = 155
+local ROOT_POS = UDim2.new(0.5, 0, 0.68, 0)
 
-	-- Accent bar
-	local bar                  = Instance.new("Frame")
-	bar.Size                   = UDim2.new(1, -2, 0, 4)
-	bar.Position               = UDim2.fromOffset(1, 1)
-	bar.BackgroundColor3       = color
-	bar.BorderSizePixel        = 0
-	bar.ZIndex                 = zi + 1
-	bar.Parent                 = btn
-	UILib.corner(bar, 6)
+-- ── Radial node refs ──────────────────────────────────────────────────────────
+type ChildNode = {
+	wrapper:  Frame,
+	btn:      TextButton,
+	line:     Frame,
+	stroke:   UIStroke,
+	label:    TextLabel,
+	key:      string,
+	finalPos: UDim2,
+	startPos: UDim2,
+}
+local childNodes: { ChildNode } = {}
 
-	UILib.lbl(btn, name:upper(),
-		UDim2.fromOffset(151, 20), UDim2.fromOffset(10, 10),
-		{ bold = true, size = 13, color = C.TEXT, zIndex = zi + 1 })
+-- ── Expand / collapse ─────────────────────────────────────────────────────────
+local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
-	UILib.lbl(btn, desc,
-		UDim2.fromOffset(151, 16), UDim2.fromOffset(10, 32),
-		{ size = 11, color = C.SUBTEXT, zIndex = zi + 1 })
+local function expandNodes()
+	for _, c in childNodes do
+		c.wrapper.Visible             = true
+		c.wrapper.Position            = c.startPos
+		c.btn.BackgroundTransparency  = 1
+		c.line.BackgroundTransparency = 1
+		TweenService:Create(c.wrapper, EXPAND_TI, { Position = c.finalPos }):Play()
+		TweenService:Create(c.btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
+		TweenService:Create(c.line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+	end
+end
 
-	UILib.lbl(btn, cost,
-		UDim2.fromOffset(151, 16), UDim2.fromOffset(10, 52),
-		{ size = 11, color = C.GOLD, zIndex = zi + 1 })
-
-	return btn
+local function collapseNodes(then_: (() -> ())?)
+	for _, c in childNodes do
+		TweenService:Create(c.wrapper, COLLAPSE_TI, { Position = c.startPos }):Play()
+		TweenService:Create(c.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(c.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+	end
+	task.delay(COLLAPSE_TI.Time, function()
+		for _, c in childNodes do c.wrapper.Visible = false end
+		if then_ then then_() end
+	end)
 end
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
-
 local function getUpgradeState(mineId: string): string?
 	local bf = workspace:FindFirstChild("Buildings")
 	if not bf then return nil end
@@ -79,130 +87,67 @@ local function getUpgradeState(mineId: string): string?
 	return uv and uv.Value or nil
 end
 
--- ── Refresh ───────────────────────────────────────────────────────────────────
-
+-- ── Refresh node & root label states ─────────────────────────────────────────
 local function refresh()
 	if not activeMineId then return end
-	local mineId      = activeMineId
-	local upgrade     = getUpgradeState(mineId)
-	local res         = getResources and getResources() or 0
-	local hasResearch = hasResearchFn and hasResearchFn("BetterMines") or false
-	local miners      = getMinerCount and getMinerCount(mineId) or 0
-	local cap         = if upgrade == "Capacity" then 10 else 6
-	local mult        = if upgrade == "Efficiency" then 2.0 else 1.0
-	local incMin      = miners * 5 * (60 / 10) * mult
+	local mineId     = activeMineId
+	local upgrade    = getUpgradeState(mineId)
+	local res        = getResources and getResources() or 0
+	local hasRes     = hasResearchFn and hasResearchFn("BetterMines") or false
+	local miners     = getMinerCount and getMinerCount(mineId) or 0
+	local cap        = if upgrade == "Capacity"   then 10 else 6
+	local mult       = if upgrade == "Efficiency" then 2.0 else 1.0
+	local incMin     = miners * 5 * (60 / 10) * mult
 
-	if infoLbl then
-		infoLbl.Text = string.format(
-			"Miners  %d / %d    ·    Income  %.0f / min", miners, cap, incMin)
+	-- Root label: miner count + income
+	if rootLbl then
+		rootLbl.Text = string.format("MINE\n%d/%d  ·  %.0f/min", miners, cap, incMin)
 	end
 
-	-- ── Efficiency button ─────────────────────────────────────────────────
-	if effBtn then
-		-- Get child labels (by index order: name, desc, cost — children 3-5 since 1=AccentBar, 2=NameLbl... )
-		-- Actually find by scanning for TextLabels
-		local labels: {TextLabel} = {}
-		for _, ch in effBtn:GetChildren() do
-			if ch:IsA("TextLabel") then table.insert(labels, ch) end
-		end
-		local nameLbl = #labels >= 1 and labels[1] or nil
-		local descLbl = #labels >= 2 and labels[2] or nil
-		local costLbl = #labels >= 3 and labels[3] or nil
+	-- Node visual states
+	for _, c in childNodes do
+		if upgrade == c.key then
+			c.btn.BackgroundColor3       = C.GREEN
+			c.btn.BackgroundTransparency = 0.15
+			c.stroke.Color               = C.GREEN
+			c.stroke.Thickness           = 2.5
+			c.label.Text                 = c.key .. "\n✓ ACTIVE"
+			c.label.TextColor3           = C.GREEN
+			c.btn.Active                 = false
 
-		if upgrade == "Efficiency" then
-			effBtn.BackgroundColor3       = C.GREEN
-			effBtn.BackgroundTransparency = 0.08
-			effBtn.Active                 = false
-			if nameLbl then nameLbl.Text = "EFFICIENCY" end
-			if descLbl then descLbl.Text = "Double income" end
-			if costLbl then costLbl.Text = "✓  ACTIVE"; costLbl.TextColor3 = C.GREEN end
 		elseif upgrade ~= nil then
-			effBtn.BackgroundColor3       = C.BG_LOCKED
-			effBtn.BackgroundTransparency = 0
-			effBtn.Active                 = false
-			if nameLbl then nameLbl.TextColor3 = C.DIM; nameLbl.Text = "EFFICIENCY" end
-			if descLbl then descLbl.TextColor3 = C.DIM; descLbl.Text = "Double income" end
-			if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "LOCKED" end
-		elseif not hasResearch then
-			effBtn.BackgroundColor3       = C.BG_LOCKED
-			effBtn.BackgroundTransparency = 0
-			effBtn.Active                 = false
-			if nameLbl then nameLbl.TextColor3 = C.DIM; nameLbl.Text = "EFFICIENCY" end
-			if descLbl then descLbl.TextColor3 = C.DIM; descLbl.Text = "Double income" end
-			if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "Needs: Better Mines" end
-		else
-			local ok = res >= 150
-			effBtn.BackgroundColor3       = ok and C.MINE or C.BG_LOCKED
-			effBtn.BackgroundTransparency = ok and 0.14 or 0
-			effBtn.Active                 = ok
-			if nameLbl then nameLbl.TextColor3 = ok and C.TEXT or C.DIM; nameLbl.Text = "EFFICIENCY" end
-			if descLbl then descLbl.TextColor3 = C.SUBTEXT; descLbl.Text = "Double income" end
-			if costLbl then
-				costLbl.Text       = ok and "◆ 150 res" or "◆ 150 res  (need more)"
-				costLbl.TextColor3 = ok and C.GOLD or C.DIM
-			end
-		end
-	end
+			c.btn.BackgroundColor3       = C.BG_LOCKED
+			c.btn.BackgroundTransparency = 0.35
+			c.stroke.Color               = C.BORDER_LO
+			c.stroke.Thickness           = 1.5
+			c.label.Text                 = c.key .. "\nLOCKED"
+			c.label.TextColor3           = C.DIM
+			c.btn.Active                 = false
 
-	-- ── Capacity button ───────────────────────────────────────────────────
-	if capBtn then
-		local labels: {TextLabel} = {}
-		for _, ch in capBtn:GetChildren() do
-			if ch:IsA("TextLabel") then table.insert(labels, ch) end
-		end
-		local nameLbl = #labels >= 1 and labels[1] or nil
-		local descLbl = #labels >= 2 and labels[2] or nil
-		local costLbl = #labels >= 3 and labels[3] or nil
+		elseif not hasRes then
+			c.btn.BackgroundColor3       = C.BG_LOCKED
+			c.btn.BackgroundTransparency = 0.35
+			c.stroke.Color               = C.BORDER_LO
+			c.stroke.Thickness           = 1.5
+			c.label.Text                 = c.key .. "\nNeeds Research"
+			c.label.TextColor3           = C.DIM
+			c.btn.Active                 = false
 
-		if upgrade == "Capacity" then
-			capBtn.BackgroundColor3       = C.GREEN
-			capBtn.BackgroundTransparency = 0.08
-			capBtn.Active                 = false
-			if nameLbl then nameLbl.Text = "CAPACITY" end
-			if descLbl then descLbl.Text = "+4 miner slots" end
-			if costLbl then costLbl.Text = "✓  ACTIVE"; costLbl.TextColor3 = C.GREEN end
-		elseif upgrade ~= nil then
-			capBtn.BackgroundColor3       = C.BG_LOCKED
-			capBtn.BackgroundTransparency = 0
-			capBtn.Active                 = false
-			if nameLbl then nameLbl.TextColor3 = C.DIM; nameLbl.Text = "CAPACITY" end
-			if descLbl then descLbl.TextColor3 = C.DIM; descLbl.Text = "+4 miner slots" end
-			if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "LOCKED" end
-		elseif not hasResearch then
-			capBtn.BackgroundColor3       = C.BG_LOCKED
-			capBtn.BackgroundTransparency = 0
-			capBtn.Active                 = false
-			if nameLbl then nameLbl.TextColor3 = C.DIM; nameLbl.Text = "CAPACITY" end
-			if descLbl then descLbl.TextColor3 = C.DIM; descLbl.Text = "+4 miner slots" end
-			if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "Needs: Better Mines" end
 		else
-			local ok = res >= 125
-			capBtn.BackgroundColor3       = ok and C.TURRET or C.BG_LOCKED
-			capBtn.BackgroundTransparency = ok and 0.14 or 0
-			capBtn.Active                 = ok
-			if nameLbl then nameLbl.TextColor3 = ok and C.TEXT or C.DIM; nameLbl.Text = "CAPACITY" end
-			if descLbl then descLbl.TextColor3 = C.SUBTEXT; descLbl.Text = "+4 miner slots" end
-			if costLbl then
-				costLbl.Text       = ok and "◆ 125 res" or "◆ 125 res  (need more)"
-				costLbl.TextColor3 = ok and C.GOLD or C.DIM
-			end
-		end
-	end
-
-	-- ── Status label ──────────────────────────────────────────────────────
-	if statusLbl then
-		if not hasResearch then
-			statusLbl.Text = "Research 'Better Mines' at your Command Center to unlock upgrades."
-		elseif upgrade then
-			statusLbl.Text = upgrade .. " upgrade active.  The other option is permanently locked."
-		else
-			statusLbl.Text = "Choose one upgrade — your choice is permanent."
+			local cost = c.key == "Efficiency" and 150 or 125
+			local ok   = res >= cost
+			c.btn.BackgroundColor3       = ok and (c.key == "Efficiency" and C.MINE or C.TURRET) or C.BG_LOCKED
+			c.btn.BackgroundTransparency = ok and 0.35 or 0.45
+			c.stroke.Color               = ok and c.btn.BackgroundColor3 or C.BORDER_LO
+			c.stroke.Thickness           = 2
+			c.label.Text                 = c.key .. "\n◆ " .. cost
+			c.label.TextColor3           = ok and C.TEXT or C.DIM
+			c.btn.Active                 = ok
 		end
 	end
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-
 function MinePanel.init(network, getResourcesFn, getMinerCountFn, hasResearchFn_)
 	networkRef    = network
 	getResources  = getResourcesFn
@@ -211,70 +156,70 @@ function MinePanel.init(network, getResourcesFn, getMinerCountFn, hasResearchFn_
 
 	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
-	local p = UILib.panel(sg,
-		UDim2.fromOffset(370, 172),
-		UDim2.new(0.5, -185, 1, -320), 10)
-	p.Name    = "MinePanel"
-	p.Visible = false
-	panel     = p
+	-- Full-screen transparent overlay
+	local ov                         = Instance.new("Frame")
+	ov.Name                          = "MineOverlay"
+	ov.Size                          = UDim2.new(1, 0, 1, 0)
+	ov.BackgroundTransparency        = 1
+	ov.BorderSizePixel               = 0
+	ov.ZIndex                        = 10
+	ov.Visible                       = false
+	ov.Parent                        = sg
+	overlay = ov
 
-	UILib.titleBar(p, "MINE — UPGRADES", function() MinePanel.hide() end, C.MINE)
-
-	-- Miner info row
-	local iLbl = UILib.lbl(p, "",
-		UDim2.fromOffset(350, 16), UDim2.fromOffset(10, 40),
-		{ size = 11, color = C.SUBTEXT, zIndex = 11 })
-	iLbl.Name = "InfoLabel"
-	infoLbl   = iLbl
-
-	-- Upgrade buttons row
-	local row                        = Instance.new("Frame")
-	row.Name                         = "UpgradeRow"
-	row.Size                         = UDim2.fromOffset(354, 78)
-	row.Position                     = UDim2.fromOffset(8, 58)
-	row.BackgroundTransparency       = 1
-	row.ZIndex                       = 10
-	row.Parent                       = p
-
-	local rl                         = Instance.new("UIListLayout")
-	rl.FillDirection                 = Enum.FillDirection.Horizontal
-	rl.HorizontalAlignment           = Enum.HorizontalAlignment.Center
-	rl.VerticalAlignment             = Enum.VerticalAlignment.Center
-	rl.Padding                       = UDim.new(0, 10)
-	rl.Parent                        = row
-
-	effBtn = makeUpgradeCard(row, "Efficiency", "Double income", "◆ 150 res", C.MINE,   11)
-	capBtn = makeUpgradeCard(row, "Capacity",  "+4 miner slots", "◆ 125 res", C.TURRET, 11)
-
-	-- Divider + status
-	UILib.divider(p, 142, 10, 10)
-
-	local sLbl = UILib.lbl(p, "",
-		UDim2.fromOffset(350, 26), UDim2.fromOffset(10, 146),
-		{ size = 11, color = C.SUBTEXT, wrap = true, zIndex = 11 })
-	sLbl.Name = "StatusLabel"
-	statusLbl = sLbl
-
-	-- ── Button clicks ─────────────────────────────────────────────────────
-	effBtn.MouseButton1Click:Connect(function()
-		if not activeMineId or not effBtn or not effBtn.Active then return end
-		networkRef.upgradeMine(activeMineId, "Efficiency")
-		task.delay(0.35, refresh)
+	-- Root "MINE" node
+	local rootWrapper, rBtn = UILib.radialNode(ov, "MINE", "⛏", C.MINE, ROOT_POS, 70, 11)
+	rootLbl = rootWrapper:FindFirstChild("NodeLabel") :: TextLabel?
+	rBtn.MouseButton1Click:Connect(function()
+		MinePanel.hide()
 	end)
 
-	capBtn.MouseButton1Click:Connect(function()
-		if not activeMineId or not capBtn or not capBtn.Active then return end
-		networkRef.upgradeMine(activeMineId, "Capacity")
-		task.delay(0.35, refresh)
-	end)
+	-- Child nodes: Efficiency (-135°) and Capacity (-45°)
+	local UPGRADES = {
+		{ key = "Efficiency", icon = "⛏", color = C.MINE,   angle = -135 },
+		{ key = "Capacity",   icon = "◆",  color = C.TURRET, angle = -45  },
+	}
+
+	for _, def in UPGRADES do
+		local rad = math.rad(def.angle)
+		local dx  = math.cos(rad) * RADIUS
+		local dy  = math.sin(rad) * RADIUS
+		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
+
+		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
+		local wrapper, btn = UILib.radialNode(ov, def.key, def.icon, def.color, ROOT_POS, 70, 11)
+		wrapper.Visible    = false
+
+		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
+
+		local key = def.key
+		btn.MouseButton1Click:Connect(function()
+			if not activeMineId or not btn.Active then return end
+			networkRef.upgradeMine(activeMineId, key)
+			task.delay(0.35, refresh)
+		end)
+
+		table.insert(childNodes, {
+			wrapper  = wrapper,
+			btn      = btn,
+			line     = line,
+			stroke   = stroke,
+			label    = label,
+			key      = key,
+			finalPos = finalPos,
+			startPos = ROOT_POS,
+		})
+	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function MinePanel.show(mineId: string)
 	activeMineId = mineId
-	if panel then panel.Visible = true end
+	if overlay then overlay.Visible = true end
 	refresh()
+	expandNodes()
 
 	task.spawn(function()
 		local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
@@ -289,11 +234,14 @@ end
 
 function MinePanel.hide()
 	activeMineId = nil
-	if panel then panel.Visible = false end
+	if rootLbl then rootLbl.Text = "MINE" end
+	collapseNodes(function()
+		if overlay then overlay.Visible = false end
+	end)
 end
 
 function MinePanel.refreshIfVisible()
-	if panel and (panel :: Frame).Visible then refresh() end
+	if overlay and (overlay :: Frame).Visible then refresh() end
 end
 
 return MinePanel

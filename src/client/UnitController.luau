@@ -15,6 +15,7 @@ local onBarracksSelectedCb:  ((string?) -> ())?
 local onMineSelectedCb:      ((string?) -> ())?
 local onCCSelectedCb:        ((string?) -> ())?
 local onTurretSelectedCb:    ((string?) -> ())?
+local onMoveIssuedCb:        (() -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
 
@@ -322,8 +323,16 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	end)
 
 	-- Hover highlight: update whenever the mouse moves.
+	-- Skip when cursor is over any GUI element to avoid highlighting buildings
+	-- that are visually beneath panels.
 	mouse.Move:Connect(function()
 		if isBlockedFn and isBlockedFn() then
+			setHover(nil)
+			return
+		end
+		local mp  = UserInputService:GetMouseLocation()
+		local gui = localPlayer.PlayerGui:GetGuiObjectsAtPosition(mp.X, mp.Y)
+		if #gui > 0 then
 			setHover(nil)
 			return
 		end
@@ -408,6 +417,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					network.moveUnits(selected, ground)
 				end
 				spawnMovePing(ground, atkMoveHeld)
+				if onMoveIssuedCb then onMoveIssuedCb() end
 			end
 
 		elseif input.KeyCode == Enum.KeyCode.Escape then
@@ -540,6 +550,10 @@ end
 
 function UnitController.onTurretSelected(fn: (string?) -> ())
 	onTurretSelectedCb = fn
+end
+
+function UnitController.onMoveIssued(fn: () -> ())
+	onMoveIssuedCb = fn
 end
 
 return UnitController

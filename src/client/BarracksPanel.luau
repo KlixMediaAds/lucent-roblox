@@ -1,31 +1,134 @@
-local Players = game:GetService("Players")
+--!strict
+--[[
+    BarracksPanel — Radial bubble node-graph for training units.
+
+    Root node "BARRACKS" auto-expands to three children when show() is called:
+      Soldier (-135°)  ·  Tank (-90°)  ·  Elite (-45°)
+
+    Training state is shown inline on the root node label.
+    All network calls and logic are preserved unchanged.
+]]
+
+local Players      = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 
 local BarracksPanel  = {}
 local localPlayer    = Players.LocalPlayer
 local C              = UILib.C
 
-local panel:            Frame?
+-- ── State ─────────────────────────────────────────────────────────────────────
 local activeBarracksId: string? = nil
 local networkRef:       any
 local hasResearchFn:    ((string) -> boolean)?
 
 local lastTrainingState: { [string]: { queue: {string}, progress: number } } = {}
 
--- Screen-panel training refs
-local progFill:   Frame?
-local progLabel:  TextLabel?
-local queueLabel: TextLabel?
-local statusSection: Frame?
+-- Root node label ref (shows training state inline)
+local rootLbl: TextLabel?
 
--- Elite button ref (for research-gate refresh)
-local eliteBtn: TextButton?
+-- Overlay instances
+local overlay:  Frame?
+local rootNode: TextButton?
+
+-- ── Unit definitions ──────────────────────────────────────────────────────────
+local PURPLE = Color3.fromRGB(160, 80, 230)
+
+type UnitDef = {
+	key:   string,
+	label: string,
+	icon:  string,
+	color: Color3,
+	cost:  number,
+	angle: number,
+}
+
+local UNIT_DEFS: { UnitDef } = {
+	{ key = "Soldier", label = "Soldier\n◆ 25",  icon = "⚔", color = C.GREEN,    cost = 25,  angle = -135 },
+	{ key = "Tank",    label = "Tank\n◆ 60",      icon = "⬡", color = C.BARRACKS, cost = 60,  angle = -90  },
+	{ key = "Elite",   label = "Elite\n◆ 100",    icon = "★", color = PURPLE,     cost = 100, angle = -45  },
+}
+
+local RADIUS   = 155  -- px from root centre to child centre
+local ROOT_POS = UDim2.new(0.5, 0, 0.68, 0)
+
+-- ── Radial node refs ──────────────────────────────────────────────────────────
+type ChildNode = {
+	wrapper:  Frame,
+	btn:      TextButton,
+	line:     Frame,
+	stroke:   UIStroke,
+	label:    TextLabel,
+	key:      string,
+	finalPos: UDim2,
+	startPos: UDim2,
+}
+local childNodes: { ChildNode } = {}
+
+-- ── Expand / collapse ─────────────────────────────────────────────────────────
+local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+local function expandNodes()
+	for _, c in childNodes do
+		c.wrapper.Visible             = true
+		c.wrapper.Position            = c.startPos
+		c.btn.BackgroundTransparency  = 1
+		c.line.BackgroundTransparency = 1
+		TweenService:Create(c.wrapper, EXPAND_TI, { Position = c.finalPos }):Play()
+		TweenService:Create(c.btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
+		TweenService:Create(c.line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+	end
+end
+
+local function collapseNodes(then_: (() -> ())?)
+	for _, c in childNodes do
+		TweenService:Create(c.wrapper, COLLAPSE_TI, { Position = c.startPos }):Play()
+		TweenService:Create(c.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(c.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+	end
+	task.delay(COLLAPSE_TI.Time, function()
+		for _, c in childNodes do c.wrapper.Visible = false end
+		if then_ then then_() end
+	end)
+end
+
+-- ── Elite node state refresh ──────────────────────────────────────────────────
+local function refreshEliteNode()
+	for _, c in childNodes do
+		if c.key == "Elite" then
+			local unlocked = hasResearchFn and hasResearchFn("EliteUnits") or false
+			if unlocked then
+				c.btn.BackgroundColor3       = PURPLE
+				c.btn.BackgroundTransparency = 0.35
+				c.stroke.Color               = PURPLE
+				c.stroke.Thickness           = 2
+				c.label.TextColor3           = C.TEXT
+			else
+				c.btn.BackgroundColor3       = C.BG_LOCKED
+				c.btn.BackgroundTransparency = 0.3
+				c.stroke.Color               = C.BORDER_LO
+				c.stroke.Thickness           = 1.5
+				c.label.Text                 = "Elite\nLocked"
+				c.label.TextColor3           = C.DIM
+			end
+		end
+	end
+end
+
+-- ── Root label update ─────────────────────────────────────────────────────────
+local function updateRootLabel(queue: {string}, progress: number)
+	if not rootLbl then return end
+	if #queue > 0 then
+		rootLbl.Text = "BARRACKS\n" .. queue[1] .. " " .. math.floor(progress * 100) .. "%"
+	else
+		rootLbl.Text = "BARRACKS"
+	end
+end
 
 -- ── World-space training bar (above barracks in 3D) ───────────────────────────
-
 local function updateWorldTrainBar(barrackId: string, queue: {string}, progress: number)
 	local bf = workspace:FindFirstChild("Buildings")
 	if not bf then return end
@@ -42,26 +145,26 @@ local function updateWorldTrainBar(barrackId: string, queue: {string}, progress:
 	end
 
 	if not bb then
-		bb            = Instance.new("BillboardGui")
-		bb.Name       = "TrainBar"
-		bb.Size       = UDim2.fromOffset(70, 6)
+		bb             = Instance.new("BillboardGui")
+		bb.Name        = "TrainBar"
+		bb.Size        = UDim2.fromOffset(70, 6)
 		bb.StudsOffset = Vector3.new(0, base.Size.Y / 2 + 4.5, 0)
 		bb.AlwaysOnTop = false
-		bb.Parent     = base
+		bb.Parent      = base
 
-		local track              = Instance.new("Frame")
-		track.Size               = UDim2.new(1, 0, 1, 0)
-		track.BackgroundColor3   = Color3.fromRGB(10, 12, 22)
-		track.BorderSizePixel    = 0
-		track.Parent             = bb
+		local track                = Instance.new("Frame")
+		track.Size                 = UDim2.new(1, 0, 1, 0)
+		track.BackgroundColor3     = Color3.fromRGB(10, 12, 22)
+		track.BorderSizePixel      = 0
+		track.Parent               = bb
 		UILib.corner(track, 2)
 
-		local fill               = Instance.new("Frame")
-		fill.Name                = "Fill"
-		fill.Size                = UDim2.new(0, 0, 1, 0)
-		fill.BackgroundColor3    = C.ACCENT
-		fill.BorderSizePixel     = 0
-		fill.Parent              = track
+		local fill                 = Instance.new("Frame")
+		fill.Name                  = "Fill"
+		fill.Size                  = UDim2.new(0, 0, 1, 0)
+		fill.BackgroundColor3      = C.ACCENT
+		fill.BorderSizePixel       = 0
+		fill.Parent                = track
 		UILib.corner(fill, 2)
 	end
 
@@ -72,195 +175,75 @@ local function updateWorldTrainBar(barrackId: string, queue: {string}, progress:
 	end
 end
 
--- ── Screen panel update ───────────────────────────────────────────────────────
-
-local function updateScreenUI(queue: {string}, progress: number)
-	if not statusSection then return end
-	local training = #queue > 0
-	statusSection.Visible = training
-	if not training then return end
-
-	if progLabel then
-		progLabel.Text = "Training:  " .. queue[1]
-	end
-	if progFill then
-		progFill.Size = UDim2.new(math.clamp(progress, 0, 1), 0, 1, 0)
-	end
-	if queueLabel then
-		if #queue > 1 then
-			local rest = {}
-			for i = 2, #queue do table.insert(rest, queue[i]) end
-			queueLabel.Text = "Next:  " .. table.concat(rest, "  →  ")
-		else
-			queueLabel.Text = "Queue empty after this"
-		end
-	end
-end
-
--- ── Elite button state refresh ────────────────────────────────────────────────
-
-local function refreshEliteBtn()
-	if not eliteBtn then return end
-	local unlocked = hasResearchFn and hasResearchFn("EliteUnits") or false
-
-	local labels: {TextLabel} = {}
-	for _, ch in eliteBtn:GetChildren() do
-		if ch:IsA("TextLabel") then table.insert(labels, ch) end
-	end
-	local nameLbl = labels[1]
-	local costLbl = labels[2]
-
-	if unlocked then
-		eliteBtn.BackgroundColor3       = Color3.fromRGB(180, 80, 230)
-		eliteBtn.BackgroundTransparency = 0.12
-		eliteBtn.Active                 = true
-		if nameLbl then nameLbl.TextColor3 = C.TEXT end
-		if costLbl then costLbl.TextColor3 = C.GOLD; costLbl.Text = "◆ 100 res" end
-	else
-		eliteBtn.BackgroundColor3       = C.BG_LOCKED
-		eliteBtn.BackgroundTransparency = 0
-		eliteBtn.Active                 = false
-		if nameLbl then nameLbl.TextColor3 = C.DIM end
-		if costLbl then costLbl.TextColor3 = C.DIM; costLbl.Text = "Needs: Elite Units research" end
-	end
-end
-
--- ── Train button (custom multi-label card) ────────────────────────────────────
-
-local function makeTrainBtn(parent: Instance, name: string, cost: string, color: Color3, zi: number): TextButton
-	local btn                  = Instance.new("TextButton")
-	btn.Name                   = name .. "Btn"
-	btn.Size                   = UDim2.fromOffset(108, 68)
-	btn.BackgroundColor3       = color
-	btn.BackgroundTransparency = 0.12
-	btn.Text                   = ""
-	btn.AutoButtonColor        = true
-	btn.BorderSizePixel        = 0
-	btn.ZIndex                 = zi
-	btn.Parent                 = parent
-	UILib.corner(btn, 9)
-	UILib.stroke(btn, C.BORDER, 1)
-
-	-- Accent bar at top
-	local bar                  = Instance.new("Frame")
-	bar.Size                   = UDim2.new(1, -2, 0, 4)
-	bar.Position               = UDim2.fromOffset(1, 1)
-	bar.BackgroundColor3       = color
-	bar.BackgroundTransparency = 0
-	bar.BorderSizePixel        = 0
-	bar.ZIndex                 = zi + 1
-	bar.Parent                 = btn
-	UILib.corner(bar, 6)
-
-	-- Unit name
-	UILib.lbl(btn, name:upper(),
-		UDim2.fromOffset(88, 22), UDim2.fromOffset(10, 14),
-		{ bold = true, size = 13, color = C.TEXT, zIndex = zi + 1 })
-
-	-- Cost
-	UILib.lbl(btn, "◆ " .. cost,
-		UDim2.fromOffset(88, 16), UDim2.fromOffset(10, 38),
-		{ size = 11, color = C.GOLD, zIndex = zi + 1 })
-
-	return btn
-end
-
 -- ── Init ──────────────────────────────────────────────────────────────────────
-
 function BarracksPanel.init(network, hasResearch)
 	networkRef    = network
 	hasResearchFn = hasResearch
-	local sg      = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
-	-- Panel frame
-	local p = UILib.panel(sg,
-		UDim2.fromOffset(370, 172),
-		UDim2.new(0.5, -185, 1, -320), 10)
-	p.Name = "BarracksPanel"
-	p.Visible = false
-	panel = p
+	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
-	-- Title bar
-	UILib.titleBar(p, "BARRACKS", function() BarracksPanel.hide() end, C.BARRACKS)
+	-- Full-screen transparent overlay
+	local ov                         = Instance.new("Frame")
+	ov.Name                          = "BarracksOverlay"
+	ov.Size                          = UDim2.new(1, 0, 1, 0)
+	ov.BackgroundTransparency        = 1
+	ov.BorderSizePixel               = 0
+	ov.ZIndex                        = 10
+	ov.Visible                       = false
+	ov.Parent                        = sg
+	overlay = ov
 
-	-- Train buttons row (3 buttons)
-	local trainRow                   = Instance.new("Frame")
-	trainRow.Name                    = "TrainRow"
-	trainRow.Size                    = UDim2.fromOffset(354, 68)
-	trainRow.Position                = UDim2.fromOffset(8, 42)
-	trainRow.BackgroundTransparency  = 1
-	trainRow.ZIndex                  = 10
-	trainRow.Parent                  = p
+	-- Root "BARRACKS" node — centre of screen, slightly lower
+	local rootWrapper, rBtn = UILib.radialNode(ov, "BARRACKS", "⚔", C.BARRACKS, ROOT_POS, 70, 11)
+	rootNode = rBtn
+	rootLbl  = rootWrapper:FindFirstChild("NodeLabel") :: TextLabel?
 
-	local rowLayout                  = Instance.new("UIListLayout")
-	rowLayout.FillDirection          = Enum.FillDirection.Horizontal
-	rowLayout.HorizontalAlignment    = Enum.HorizontalAlignment.Center
-	rowLayout.VerticalAlignment      = Enum.VerticalAlignment.Center
-	rowLayout.Padding                = UDim.new(0, 8)
-	rowLayout.Parent                 = trainRow
-
-	local soldierBtn = makeTrainBtn(trainRow, "Soldier", "25 res",  C.GREEN,    11)
-	local tankBtn    = makeTrainBtn(trainRow, "Tank",    "60 res",  C.BARRACKS, 11)
-	local eliteBtnL  = makeTrainBtn(trainRow, "Elite",   "100 res", Color3.fromRGB(180, 80, 230), 11)
-	eliteBtn         = eliteBtnL
-
-	refreshEliteBtn()
-
-	-- Divider
-	UILib.divider(p, 118, 10, 10)
-
-	-- Training status section
-	local sec                        = Instance.new("Frame")
-	sec.Name                         = "StatusSection"
-	sec.Size                         = UDim2.fromOffset(350, 48)
-	sec.Position                     = UDim2.fromOffset(10, 122)
-	sec.BackgroundTransparency       = 1
-	sec.ZIndex                       = 10
-	sec.Visible                      = false
-	sec.Parent                       = p
-	statusSection = sec
-
-	-- Progress label
-	local pl = UILib.lbl(sec, "Training:  —",
-		UDim2.fromOffset(350, 16), UDim2.fromOffset(0, 0),
-		{ size = 13, color = C.TEXT, bold = true, zIndex = 11 })
-	pl.Name  = "ProgressLabel"
-	progLabel = pl
-
-	-- Progress bar
-	local pb = UILib.progressBar(sec,
-		UDim2.fromOffset(350, 10), UDim2.fromOffset(0, 20),
-		C.ACCENT, 11)
-	progFill = pb.fill
-
-	-- Queue label
-	local ql = UILib.lbl(sec, "",
-		UDim2.fromOffset(350, 16), UDim2.fromOffset(0, 34),
-		{ size = 11, color = C.SUBTEXT, zIndex = 11 })
-	ql.Name   = "QueueLabel"
-	queueLabel = ql
-
-	-- ── Button callbacks ──────────────────────────────────────────────────
-	soldierBtn.MouseButton1Click:Connect(function()
-		if activeBarracksId then networkRef.trainUnit(activeBarracksId, "Soldier") end
+	-- Close on root click
+	rBtn.MouseButton1Click:Connect(function()
+		BarracksPanel.hide()
 	end)
 
-	tankBtn.MouseButton1Click:Connect(function()
-		if activeBarracksId then networkRef.trainUnit(activeBarracksId, "Tank") end
-	end)
+	-- Child nodes
+	for _, def in UNIT_DEFS do
+		local rad = math.rad(def.angle)
+		local dx  = math.cos(rad) * RADIUS
+		local dy  = math.sin(rad) * RADIUS
+		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
 
-	eliteBtnL.MouseButton1Click:Connect(function()
-		if activeBarracksId and eliteBtnL.Active then
-			networkRef.trainUnit(activeBarracksId, "Elite")
-		end
-	end)
+		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
+		local wrapper, btn = UILib.radialNode(ov, def.label, def.icon, def.color, ROOT_POS, 70, 11)
+		wrapper.Visible    = false
 
-	-- Training update listener
+		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
+
+		local key = def.key
+		btn.MouseButton1Click:Connect(function()
+			if not activeBarracksId then return end
+			if key == "Elite" then
+				if not (hasResearchFn and hasResearchFn("EliteUnits")) then return end
+			end
+			networkRef.trainUnit(activeBarracksId, key)
+		end)
+
+		table.insert(childNodes, {
+			wrapper  = wrapper,
+			btn      = btn,
+			line     = line,
+			stroke   = stroke,
+			label    = label,
+			key      = key,
+			finalPos = finalPos,
+			startPos = ROOT_POS,
+		})
+	end
+
+	-- ── Training update listener ───────────────────────────────────────────────
 	network.onTrainingUpdate(function(barrackId: string, queue: {string}, progress: number)
 		lastTrainingState[barrackId] = { queue = queue, progress = progress }
 		updateWorldTrainBar(barrackId, queue, progress)
 		if barrackId == activeBarracksId then
-			updateScreenUI(queue, progress)
+			updateRootLabel(queue, progress)
 		end
 	end)
 end
@@ -269,27 +252,32 @@ end
 
 function BarracksPanel.show(barrackId: string)
 	activeBarracksId = barrackId
-	if panel then panel.Visible = true end
-	refreshEliteBtn()
+	if overlay then overlay.Visible = true end
+	refreshEliteNode()
+	expandNodes()
+
 	local state = lastTrainingState[barrackId]
 	if state then
-		updateScreenUI(state.queue, state.progress)
+		updateRootLabel(state.queue, state.progress)
 	else
-		if statusSection then statusSection.Visible = false end
+		updateRootLabel({}, 0)
 	end
 end
 
 function BarracksPanel.hide()
 	activeBarracksId = nil
-	if panel then panel.Visible = false end
+	if rootLbl then rootLbl.Text = "BARRACKS" end
+	collapseNodes(function()
+		if overlay then overlay.Visible = false end
+	end)
 end
 
 function BarracksPanel.refreshIfVisible()
-	if panel and (panel :: Frame).Visible then refreshEliteBtn() end
+	if overlay and (overlay :: Frame).Visible then refreshEliteNode() end
 end
 
 function BarracksPanel.isVisible(): boolean
-	return panel ~= nil and (panel :: Frame).Visible
+	return overlay ~= nil and (overlay :: Frame).Visible
 end
 
 return BarracksPanel

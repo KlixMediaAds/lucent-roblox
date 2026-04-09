@@ -16,6 +16,7 @@ local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
+local Tutorial       = require(script:WaitForChild("Tutorial"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -72,9 +73,11 @@ CameraModule.init()
 SpiderLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 
-local dragFrame, buildBtn, mineBtn, turretBtn, cancelBtn, ccBtn = HUD.create()
+local dragFrame, ccBtn = HUD.create()
+Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
+UnitController.onMoveIssued(function() Tutorial.notify("move_issued") end)
 BarracksPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 MinePanel.init(Network,
@@ -91,23 +94,18 @@ TurretPanel.init(Network,
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
-HUD.wire(Network, UnitController, BuildingPlacer, buildBtn, mineBtn, turretBtn, cancelBtn)
-
 -- ── Hide building panels when entering placement mode ─────────────────────────
--- If a panel (BarracksPanel, MinePanel, WorkshopPanel) is visible when the
--- player enters placement mode, it sits on top of the map and intercepts the
--- placement click (gpe = true), silently swallowing the click and leaving
--- isPlacing = true forever (until Escape/right-click).  Hiding panels on every
--- build-card click prevents this.
+-- Called by HUD when a build node is clicked, and also wired to the CC button.
+-- Prevents open panels from intercepting placement clicks (they consume the click
+-- through GPE = true, leaving isPlacing stuck until Escape / right-click).
 local function hideBuildingPanels()
 	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 end
-buildBtn.MouseButton1Click:Connect(hideBuildingPanels)
-mineBtn.MouseButton1Click:Connect(hideBuildingPanels)
-turretBtn.MouseButton1Click:Connect(hideBuildingPanels)
+
+HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
@@ -141,6 +139,7 @@ end)
 Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
 		HUD.setCommandCenterMode(false)
+		Tutorial.notify("cc_placed")
 	end
 
 	if buildingType == "Monument" then
@@ -151,6 +150,8 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, bu
 	if ownerId == localUserId and buildingType ~= "CommandCenter" then
 		ownedBuildingCounts[buildingType] = (ownedBuildingCounts[buildingType] or 0) + 1
 		refreshRequirements()
+		if buildingType == "Mine"     then Tutorial.notify("mine_placed")     end
+		if buildingType == "Barracks" then Tutorial.notify("barracks_placed") end
 
 		-- Decrement when the building is destroyed
 		task.spawn(function()
@@ -201,6 +202,7 @@ UnitController.onCCSelected(function(ccId: string?)
 		MinePanel.hide()
 		TurretPanel.hide()
 		WorkshopPanel.show(ccId)
+		Tutorial.notify("cc_selected")
 	else
 		WorkshopPanel.hide()
 	end
@@ -236,6 +238,7 @@ end)
 -- ── Spider legs for Elite units ───────────────────────────────────────────────
 
 Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
+	if _ownerId == localUserId then Tutorial.notify("unit_trained") end
 	task.spawn(function()
 		local unitsFolder = workspace:WaitForChild("Units", 10) :: Folder?
 		if not unitsFolder then return end
@@ -505,6 +508,14 @@ do
 	sub.ZIndex           = 101
 	sub.Parent           = overlay
 end
+
+Network.onCCAttacked(function()
+	HUD.showNotification("⚠ Command Center is under attack!", Color3.fromRGB(230, 60, 60))
+end)
+
+Network.onMineDepletionWarning(function(_mineId: string)
+	HUD.showNotification("⛏ A Mine has been depleted.", Color3.fromRGB(220, 150, 30))
+end)
 
 Network.onPlayerWon(function(winnerUserId: number)
 	winOverlay.Visible = true

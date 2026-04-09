@@ -132,7 +132,9 @@ Config.REMOTES = {
 	BuildMonument    = "BuildMonument",
 	MonumentProgress = "MonumentProgress",
 	PlayerWon        = "PlayerWon",
-	MineIncome       = "MineIncome",
+	MineIncome              = "MineIncome",
+	CCAttacked              = "CCAttacked",
+	MineDepletionWarning    = "MineDepletionWarning",
 }
 
 return Config

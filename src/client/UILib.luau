@@ -304,4 +304,113 @@ function UILib.divider(parent: Instance, yOff: number, xPad: number?, zIndex: nu
 	return d
 end
 
+-- ── Radial node & connector line (shared by all radial menus) ─────────────────
+
+UILib.NODE_D = 80  -- default node circle diameter
+
+--[[
+    Build a circular bubble node.
+    Returns (wrapper: Frame, btn: TextButton).
+    Wrapper AnchorPoint = (0.5, 0.5) — Position is the node centre.
+    btn has a UIStroke as its first UIStroke child.
+]]
+function UILib.radialNode(
+	parent:   Instance,
+	label:    string,
+	icon:     string,
+	color:    Color3,
+	position: UDim2,
+	diameter: number?,
+	zIndex:   number?
+): (Frame, TextButton)
+	local d     = diameter or UILib.NODE_D
+	local zi    = zIndex   or 12
+	local halfD = math.floor(d / 2)
+
+	local wrapper                    = Instance.new("Frame")
+	wrapper.Name                     = "RadialNode"
+	wrapper.Size                     = UDim2.fromOffset(d, d + 40)
+	wrapper.Position                 = position
+	wrapper.AnchorPoint              = Vector2.new(0.5, 0.5)
+	wrapper.BackgroundTransparency   = 1
+	wrapper.BorderSizePixel          = 0
+	wrapper.ZIndex                   = zi
+	wrapper.Parent                   = parent
+
+	local btn                        = Instance.new("TextButton")
+	btn.Name                         = "NodeBtn"
+	btn.Size                         = UDim2.fromOffset(d, d)
+	btn.BackgroundColor3             = color
+	btn.BackgroundTransparency       = 0.35
+	btn.Text                         = icon
+	btn.TextSize                     = math.max(20, math.floor(d * 0.40))
+	btn.TextColor3                   = UILib.C.TEXT
+	btn.TextStrokeTransparency       = 0.65
+	btn.TextStrokeColor3             = Color3.new(0, 0, 0)
+	btn.Font                         = Enum.Font.GothamBold
+	btn.AutoButtonColor              = false
+	btn.BorderSizePixel              = 0
+	btn.ZIndex                       = zi + 1
+	btn.Parent                       = wrapper
+	UILib.corner(btn, halfD)
+	UILib.stroke(btn, color, 2)
+
+	local lbl                        = Instance.new("TextLabel")
+	lbl.Name                         = "NodeLabel"
+	lbl.Size                         = UDim2.fromOffset(d + 36, 38)
+	lbl.Position                     = UDim2.fromOffset(-18, d + 2)
+	lbl.BackgroundTransparency       = 1
+	lbl.Text                         = label
+	lbl.Font                         = Enum.Font.GothamBold
+	lbl.TextSize                     = 13
+	lbl.TextColor3                   = UILib.C.TEXT
+	lbl.TextStrokeTransparency       = 0.6
+	lbl.TextStrokeColor3             = Color3.new(0, 0, 0)
+	lbl.TextXAlignment               = Enum.TextXAlignment.Center
+	lbl.TextWrapped                  = true
+	lbl.ZIndex                       = zi + 1
+	lbl.Parent                       = wrapper
+
+	return wrapper, btn
+end
+
+--[[
+    Build a thin connector line from fromPos outward at angleDeg.
+    Starts invisible (BackgroundTransparency = 1); fade in via TweenService.
+    AnchorPoint = (0, 0.5) so the left edge is the origin.
+]]
+function UILib.connectorLine(
+	parent:   Instance,
+	fromPos:  UDim2,
+	angleDeg: number,
+	radius:   number?,
+	zIndex:   number?
+): Frame
+	local r  = radius or 160
+	local zi = zIndex or 11
+
+	-- The wrapper that contains each node is (d + 40)px tall, centred at fromPos.
+	-- The circle button occupies the top d px, so its centre sits 20px above the
+	-- wrapper centre.  Shift the line origin up by 20 px so it starts from the
+	-- circle centre rather than the mid-point of circle + label.
+	local LABEL_HALF = 20
+
+	local line                       = Instance.new("Frame")
+	line.Name                        = "ConnectorLine"
+	line.Size                        = UDim2.fromOffset(r, 2)
+	line.Position                    = UDim2.new(
+		fromPos.X.Scale,  fromPos.X.Offset,
+		fromPos.Y.Scale,  fromPos.Y.Offset - LABEL_HALF
+	)
+	line.AnchorPoint                 = Vector2.new(0, 0.5)
+	line.BackgroundColor3            = UILib.C.BORDER
+	line.BackgroundTransparency      = 1
+	line.BorderSizePixel             = 0
+	line.Rotation                    = angleDeg
+	line.ZIndex                      = zi
+	line.Parent                      = parent
+
+	return line
+end
+
 return UILib

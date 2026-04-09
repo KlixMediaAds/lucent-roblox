@@ -122,4 +122,14 @@ function Network.onPlayerWon(fn: (number) -> ())
 	RemoteHandler.get(Config.REMOTES.PlayerWon).OnClientEvent:Connect(fn)
 end
 
+-- Fired by server when the local player's CC takes damage (throttled ~5 s)
+function Network.onCCAttacked(fn: () -> ())
+	RemoteHandler.get(Config.REMOTES.CCAttacked).OnClientEvent:Connect(fn)
+end
+
+-- Fired by server when a mine owned by the local player is depleted
+function Network.onMineDepletionWarning(fn: (mineId: string) -> ())
+	RemoteHandler.get(Config.REMOTES.MineDepletionWarning).OnClientEvent:Connect(fn)
+end
+
 return Network

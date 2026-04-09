@@ -383,7 +383,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	end
 	if not bestId then return false, nil end
 	local data   = units[bestId]
-	local hitPos = data.part.Position
+	local hitPos = data.part.Position + Vector3.new(0, data.part.Size.Y * 0.5, 0)
 	data.hp -= damage
 	applyHP(data)
 	if data.hp <= 0 then
@@ -554,7 +554,7 @@ function UnitManager.init(resourceManager)
 						if base and (base :: BasePart).Parent then
 							local bp = base :: BasePart
 							if (bp.Position - myPos).Magnitude <= atkRange then
-								bId = data.focusBldId; bPos = bp.Position
+								bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
 							end
 						else
 							data.focusBldId = nil
@@ -590,7 +590,7 @@ function UnitManager.init(resourceManager)
 					end
 					if bestId2 then
 						local other = units[bestId2]
-						hitPos = other.part.Position
+						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= data.attackDmg
 						applyHP(other)
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
@@ -609,7 +609,7 @@ function UnitManager.init(resourceManager)
 				end
 				if bestId2 then
 					local other = units[bestId2]
-					hitPos = other.part.Position
+					hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 					other.hp -= data.attackDmg
 					applyHP(other)
 					if other.hp <= 0 then table.insert(toRemove, bestId2) end
@@ -622,7 +622,7 @@ function UnitManager.init(resourceManager)
 						if base and (base :: BasePart).Parent then
 							local bp = base :: BasePart
 							if (bp.Position - myPos).Magnitude <= atkRange then
-								bId = data.focusBldId; bPos = bp.Position
+								bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
 							end
 						else
 							data.focusBldId = nil
@@ -644,8 +644,7 @@ function UnitManager.init(resourceManager)
 				if flatDir.Magnitude > 0.1 then
 					data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
 				end
-				-- Lift hit point to target surface so impacts don't render inside models
-			unitHitRemote:FireAllClients(myPos, hitPos + Vector3.new(0, 2.0, 0), data.unitType)
+			unitHitRemote:FireAllClients(myPos, hitPos, data.unitType)
 			end
 		end
 

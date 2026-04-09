@@ -206,6 +206,8 @@ local function depleteMineSite(mineId: string)
 	applyDepletedVisuals(mineId)
 	startMineDecay(mineId)
 	spawnReplacementDeposit()
+	-- Notify the mine owner
+	RemoteHandler.get(Config.REMOTES.MineDepletionWarning):FireClient(data.owner, mineId)
 end
 
 -- ── Miner spawning (module-level so applyUpgrade can call it) ────────────────

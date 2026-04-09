@@ -23,6 +23,9 @@ local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
 local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
 local monumentHeartbeatAccum = 0
 
+local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
+local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
@@ -398,6 +401,17 @@ function BuildingManager.damage(id: string, amount: number)
 	if not data then return end
 	data.hp = math.max(0, data.hp - amount)
 	applyHP(data)
+
+	-- Notify owner when their CC is being attacked (throttled)
+	if data.buildingType == "CommandCenter" and data.hp > 0 then
+		local uid  = data.owner.UserId
+		local now  = os.clock()
+		if (ccAttackThrottle[uid] or 0) + CC_ATTACK_THROTTLE < now then
+			ccAttackThrottle[uid] = now
+			RemoteHandler.get(Config.REMOTES.CCAttacked):FireClient(data.owner)
+		end
+	end
+
 	if data.hp > 0 then return end
 
 	local wasCC       = data.buildingType == "CommandCenter"
@@ -431,7 +445,7 @@ function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwner
 		if tostring(data.owner.UserId) == attackerOwnerIdStr then continue end
 		local d = (data.base.Position - fromPos).Magnitude
 		if d < range and d < bestDist then
-			bestDist = d; bestId = id; bestPos = data.base.Position
+			bestDist = d; bestId = id; bestPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
 		end
 	end
 	return bestId, bestPos
@@ -554,9 +568,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 
 			if targetPos then
-				-- Lift aim point to target surface so projectiles/explosions
-				-- don't mesh inside the model centre.
-				local visualTarget = targetPos + Vector3.new(0, 2.0, 0)
+				local visualTarget = targetPos
 
 				-- Aim head + barrel at the visual target
 				local head    = data.head
