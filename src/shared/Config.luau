@@ -31,6 +31,7 @@ Config.DEPOSIT_SPREAD        = 150   -- half-extent of random placement area
 
 -- Mini Miners (spawned automatically by Mine buildings)
 Config.MINI_MINER_SIZE           = Vector3.new(5, 4, 5)
+Config.MINI_MINER_HP             = 100   -- health points per mini miner
 Config.MINI_MINER_MAX            = 6
 Config.MINI_MINER_SPAWN_INTERVAL = 30   -- seconds between new spawns
 Config.MINI_MINER_INCOME         = 5    -- resources per tick per miner

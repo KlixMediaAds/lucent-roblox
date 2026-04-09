@@ -489,7 +489,6 @@ function HUD.wire(
 				return
 			end
 			hidePanelsFn()
-			collapseMenu()
 			buildingPlacer.enterPlacementMode(n.btype)
 		end)
 	end
@@ -505,7 +504,6 @@ function HUD.wire(
 	buildingPlacer.onModeChanged(function(active: boolean, buildingType: string?)
 		currentActivePlacing = active and buildingType or nil
 		updateAllNodes()
-		if active then collapseMenu() end
 		if cancelBtnRef then
 			cancelBtnRef.Visible = active and buildingType ~= "CommandCenter"
 		end

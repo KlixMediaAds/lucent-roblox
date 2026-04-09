@@ -138,14 +138,92 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		spire.Parent       = model
 
 	elseif buildingType == "Mine" then
+		-- Thin foundation platform (2 studs tall; sits flush with the ground)
+		base.Size     = Vector3.new(10, 2, 10)
+		base.Position = position + Vector3.new(0, 1, 0)   -- center Y=1, bottom Y=0
+		base.Material = Enum.Material.Metal
+
+		-- 4 corner support pillars rising from the platform to Y=8
+		for _, corner in {
+			Vector3.new(-3.5, 0, -3.5), Vector3.new( 3.5, 0, -3.5),
+			Vector3.new(-3.5, 0,  3.5), Vector3.new( 3.5, 0,  3.5),
+		} do
+			local pillar      = Instance.new("Part")
+			pillar.Name       = "Pillar"
+			pillar.Size       = Vector3.new(1, 7, 1)
+			pillar.Position   = position + Vector3.new(corner.X, 4.5, corner.Z)
+			pillar.BrickColor = BrickColor.new("Dark stone grey")
+			pillar.Material   = Enum.Material.Metal
+			pillar.Anchored   = true
+			pillar.CastShadow = false
+			pillar.CanCollide = false
+			pillar.Parent     = model
+		end
+
+		-- Top crossbeams forming a square frame at Y=8 (crystal rises through it)
+		for _, beam in {
+			{ off = Vector3.new(0, 0, -3.5), sz = Vector3.new(7,   0.8, 0.8) },
+			{ off = Vector3.new(0, 0,  3.5), sz = Vector3.new(7,   0.8, 0.8) },
+			{ off = Vector3.new(-3.5, 0, 0), sz = Vector3.new(0.8, 0.8, 7  ) },
+			{ off = Vector3.new( 3.5, 0, 0), sz = Vector3.new(0.8, 0.8, 7  ) },
+		} do
+			local bar      = Instance.new("Part")
+			bar.Name       = "Beam"
+			bar.Size       = beam.sz
+			bar.Position   = position + Vector3.new(beam.off.X, 8, beam.off.Z)
+			bar.BrickColor = BrickColor.new("Dark stone grey")
+			bar.Material   = Enum.Material.Metal
+			bar.Anchored   = true
+			bar.CastShadow = false
+			bar.CanCollide = false
+			bar.Parent     = model
+		end
+
+		-- Central crystal cluster — "Crystal" Part kept for code compatibility
+		-- (depletion greys it; upgrade visuals enlarge/recolour it; income popup anchors here)
 		local crystal      = Instance.new("Part")
 		crystal.Name       = "Crystal"
-		crystal.Size       = Vector3.new(2, 4, 2)
-		crystal.Position   = position + Vector3.new(0, size.Y + 2, 0)
+		crystal.Size       = Vector3.new(1.8, 7.5, 1.8)
+		crystal.CFrame     = CFrame.new(position + Vector3.new(0, 5.75, 0))
+		                   * CFrame.Angles(math.rad(5), math.rad(15), math.rad(-8))
 		crystal.BrickColor = BrickColor.new("Bright yellow")
 		crystal.Material   = Enum.Material.Neon
 		crystal.Anchored   = true
+		crystal.CastShadow = false
+		crystal.CanCollide = false
 		crystal.Parent     = model
+
+		-- Smaller decorative side shards around the main crystal
+		local function shard(sz: Vector3, off: Vector3, rx: number, ry: number, rz: number)
+			local p         = Instance.new("Part")
+			p.Size          = sz
+			p.CFrame        = CFrame.new(position + off) * CFrame.Angles(rx, ry, rz)
+			p.BrickColor    = BrickColor.new("Bright yellow")
+			p.Material      = Enum.Material.Neon
+			p.Anchored      = true
+			p.CastShadow    = false
+			p.CanCollide    = false
+			p.Parent        = model
+		end
+		local r = math.rad
+		shard(Vector3.new(1.2, 5.5, 1.2), Vector3.new(-1.6, 4.75,  0.6), r(0),  r(20), r(18))
+		shard(Vector3.new(1.0, 4.5, 1.0), Vector3.new( 1.5, 4.25, -0.9), r(-5), r(-15), r(-22))
+		shard(Vector3.new(0.8, 3.5, 0.8), Vector3.new( 0.4, 3.75, -1.7), r(12), r(5),  r(6))
+
+		-- Neon extraction disk at platform level (marks the resource extraction zone)
+		local disk      = Instance.new("Part")
+		disk.Name       = "ExtractionDisk"
+		disk.Shape      = Enum.PartType.Cylinder
+		disk.Size       = Vector3.new(0.28, 8, 8)
+		disk.CFrame     = CFrame.new(position + Vector3.new(0, 2.15, 0))
+		                * CFrame.Angles(0, 0, math.pi / 2)
+		disk.BrickColor = BrickColor.new("Bright yellow")
+		disk.Material   = Enum.Material.Neon
+		disk.Transparency = 0.55
+		disk.Anchored   = true
+		disk.CastShadow = false
+		disk.CanCollide = false
+		disk.Parent     = model
 
 	elseif buildingType == "Turret" then
 		-- Rotating head on top of the base
@@ -272,7 +350,8 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 		task.spawn(function()
 			local elapsed   = 0
-			local finalY    = size.Y / 2
+			-- Mine uses a thin platform (center Y=1) instead of the full BUILDING_SIZE height
+			local finalY    = buildingType == "Mine" and 1.0 or size.Y / 2
 
 			while elapsed < buildTime do
 				local dt = task.wait(0.05)
@@ -554,7 +633,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local myOwnerStr = tostring(data.owner.UserId)
 			local targetPos: Vector3? = nil
 
-			-- Prefer hitting units; fall back to enemy buildings
+			-- Prefer hitting units → buildings → miners
 			if unitManagerRef then
 				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
 				if hitUnit then targetPos = unitHitPos end
@@ -565,6 +644,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					BuildingManager.damage(bId, tDamage)
 					targetPos = bPos
 				end
+			end
+			if not targetPos and mineralManager then
+				local hit, mPos = mineralManager.damageNearestMiner(myPos, myOwnerStr, tRange, tDamage)
+				if hit then targetPos = mPos end
 			end
 
 			if targetPos then

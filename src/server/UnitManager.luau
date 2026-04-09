@@ -35,6 +35,7 @@ local unitsFolder: Folder
 local buildingManagerRef:  any
 local resourceManagerRef:  any
 local researchManagerRef:  any
+local mineralManagerRef:   any
 
 local barrackQueues:     { [string]: { QueueItem } } = {}
 local barrackIsTraining: { [string]: boolean }       = {}
@@ -373,6 +374,10 @@ function UnitManager.setResearchManager(rm: any)
 	researchManagerRef = rm
 end
 
+function UnitManager.setMineralManager(mm: any)
+	mineralManagerRef = mm
+end
+
 function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number): (boolean, Vector3?)
 	local bestId, bestDist = nil :: string?, math.huge
 	for id, data in units do
@@ -636,6 +641,13 @@ function UnitManager.init(resourceManager)
 						hitPos = bPos
 					end
 				end
+			end
+
+			-- Last resort: attack nearest enemy miner if no unit/building in range
+			if not hitPos and mineralManagerRef then
+				local hit, mPos = mineralManagerRef.damageNearestMiner(
+					myPos, myOwnerStr, atkRange, data.attackDmg)
+				if hit then hitPos = mPos end
 			end
 
 			-- Face attack target, then fire VFX

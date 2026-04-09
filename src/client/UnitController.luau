@@ -157,9 +157,15 @@ local function hitBuilding(): string?
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
 	if not result then return nil end
+	local inst = result.Instance
 	for id, info in knownBuildings do
-		if info.base == result.Instance and info.ownerId == localPlayer.UserId then
-			return id
+		if info.ownerId == localPlayer.UserId then
+			-- Match the base itself OR any part that shares the same model parent
+			-- (handles multi-part buildings like the new mine with pillars/crystal/beams)
+			local model = info.base.Parent
+			if inst == info.base or (model and inst.Parent == model) then
+				return id
+			end
 		end
 	end
 	return nil
@@ -441,11 +447,16 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if dragFrame then
 				-- GetMouseLocation() is in raw viewport space; ScreenGui positions
 				-- are offset by the GUI inset (top bar), so subtract it.
-				local inset = GuiService:GetGuiInset()
-				local x0 = math.min(dragStart.X, dragEnd.X) - inset.X
-				local y0 = math.min(dragStart.Y, dragEnd.Y) - inset.Y
+				-- Then divide by UIScale so design-unit positions land on the cursor
+				-- at any resolution (RTSHUD applies a UIScale for scaling).
+				local inset      = GuiService:GetGuiInset()
+				local sg         = dragFrame.Parent
+				local scaleObj   = sg and sg:FindFirstChildWhichIsA("UIScale")
+				local scale      = (scaleObj and scaleObj.Scale > 0) and scaleObj.Scale or 1
+				local x0 = (math.min(dragStart.X, dragEnd.X) - inset.X) / scale
+				local y0 = (math.min(dragStart.Y, dragEnd.Y) - inset.Y) / scale
 				dragFrame.Position = UDim2.fromOffset(x0, y0)
-				dragFrame.Size     = UDim2.fromOffset(math.abs(d.X), math.abs(d.Y))
+				dragFrame.Size     = UDim2.fromOffset(math.abs(d.X) / scale, math.abs(d.Y) / scale)
 				dragFrame.Visible  = true
 			end
 		end

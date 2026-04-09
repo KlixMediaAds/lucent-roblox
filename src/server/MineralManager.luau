@@ -20,6 +20,7 @@ type MineData = {
 local depositClaimed: { [string]: boolean } = {}
 local depositList:    { Vector3 }           = {}
 local mines:          { [string]: MineData } = {}
+local minerHpTable:   { [any]: number }      = {}   -- miner Model → current HP
 
 local depositsFolder: Folder
 local minersFolder:   Folder
@@ -147,13 +148,21 @@ local function applyDepletedVisuals(mineId: string)
 	local model = buildingsFolder:FindFirstChild(mineId)
 	if not model then return end
 
-	local crystal = model:FindFirstChild("Crystal") :: BasePart?
-	if crystal then
-		crystal.BrickColor = BrickColor.new("Dark stone grey")
-		crystal.Material   = Enum.Material.SmoothPlastic
+	-- Grey out crystals and dim the extraction disk
+	for _, part in model:GetChildren() do
+		if part.Name == "Crystal" or part:IsA("BasePart") and (part :: BasePart).Material == Enum.Material.Neon
+			and part.Name ~= "UpgradeRing" and part.Name ~= "ExtractionDisk" then
+			if part:IsA("BasePart") then
+				local bp = part :: BasePart
+				bp.BrickColor = BrickColor.new("Dark stone grey")
+				bp.Material   = Enum.Material.SmoothPlastic
+			end
+		end
 	end
+	local disk = model:FindFirstChild("ExtractionDisk") :: BasePart?
+	if disk then disk.Transparency = 0.92 end
 
-	-- Remove upgrade ring if present (depleted mine loses its glow)
+	-- Remove upgrade ring (depleted mine loses its glow)
 	local ring = model:FindFirstChild("UpgradeRing")
 	if ring then ring:Destroy() end
 
@@ -163,10 +172,14 @@ local function applyDepletedVisuals(mineId: string)
 	local existing = base:FindFirstChild("DepletedSign")
 	if existing then return end
 
+	-- Sign floats above the structure; for the new open-frame mine use a higher offset
+	local isFrameMine = model:FindFirstChild("ExtractionDisk") ~= nil
+	local signOffset  = isFrameMine and 11 or (base.Size.Y / 2 + 5.5)
+
 	local bb              = Instance.new("BillboardGui")
 	bb.Name               = "DepletedSign"
 	bb.Size               = UDim2.fromOffset(110, 28)
-	bb.StudsOffset        = Vector3.new(0, base.Size.Y / 2 + 5.5, 0)
+	bb.StudsOffset        = Vector3.new(0, signOffset, 0)
 	bb.AlwaysOnTop        = false
 	bb.Parent             = base
 
@@ -210,6 +223,78 @@ local function depleteMineSite(mineId: string)
 	RemoteHandler.get(Config.REMOTES.MineDepletionWarning):FireClient(data.owner, mineId)
 end
 
+-- ── Miner health helpers ─────────────────────────────────────────────────────
+
+local MINER_MAX_HP = Config.MINI_MINER_HP
+
+local function addMinerHealthBar(body: BasePart)
+	local bb            = Instance.new("BillboardGui")
+	bb.Name             = "HealthBar"
+	bb.Size             = UDim2.fromOffset(50, 6)
+	bb.StudsOffset      = Vector3.new(0, body.Size.Y / 2 + 1, 0)
+	bb.AlwaysOnTop      = false
+	bb.Enabled          = false
+	bb.Parent           = body
+
+	local bg            = Instance.new("Frame")
+	bg.Size             = UDim2.new(1, 0, 1, 0)
+	bg.BackgroundColor3 = Color3.fromRGB(40, 0, 0)
+	bg.BorderSizePixel  = 0
+	bg.Parent           = bb
+
+	local fill          = Instance.new("Frame")
+	fill.Name           = "Fill"
+	fill.Size           = UDim2.new(1, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(0, 200, 50)
+	fill.BorderSizePixel  = 0
+	fill.Parent         = bg
+end
+
+local function applyMinerHP(model: any, hp: number)
+	local body = model:FindFirstChild("Body") :: BasePart?
+	if not body then return end
+	local bb = body:FindFirstChild("HealthBar") :: BillboardGui?
+	if not bb then return end
+	local ratio = math.clamp(hp / MINER_MAX_HP, 0, 1)
+	local bg    = bb:FindFirstChildWhichIsA("Frame")
+	if not bg then return end
+	local fill  = bg:FindFirstChild("Fill") :: Frame?
+	if fill then
+		fill.Size = UDim2.new(ratio, 0, 1, 0)
+		local r = math.clamp(2 * (1 - ratio), 0, 1)
+		local g = math.clamp(2 * ratio, 0, 1)
+		fill.BackgroundColor3 = Color3.new(r, g, 0)
+	end
+	bb.Enabled = hp < MINER_MAX_HP
+end
+
+-- ── Miner visual constants ────────────────────────────────────────────────────
+
+local MINER_BASE_SIZE  = Vector3.new(4,   1.5, 4)
+local MINER_BODY_SIZE  = Vector3.new(2.5, 3.5, 2.5)
+local MINER_ARM_W      = 1.2   -- arm cross-section (square)
+local MINER_BODY_HALF  = MINER_BODY_SIZE.X / 2
+local MINER_ARM_MIN    = 0.1   -- fully retracted length
+
+-- Move the extraction arm to the given extension length.
+-- bodyEdge   : world pos of the body's face nearest to the mine (at arm height)
+-- toMineDir  : unit XZ vector pointing from miner toward mine center
+-- mineTarget : Vector3 of mine center at arm height (used for CFrame orientation)
+local function setArmExtension(
+	arm: Part,
+	bodyEdge: Vector3,
+	toMineDir: Vector3,
+	mineTarget: Vector3,
+	armLen: number
+)
+	local safeLen  = math.max(armLen, 0.01)
+	local armCenter = bodyEdge + toMineDir * (safeLen / 2)
+	arm.Size   = Vector3.new(MINER_ARM_W, MINER_ARM_W, safeLen)
+	-- CFrame.new(pos, lookAt): front face (-Z local) faces toward mineTarget,
+	-- so the arm's length extends between the miner body and the mine.
+	arm.CFrame = CFrame.new(armCenter, Vector3.new(mineTarget.X, armCenter.Y, mineTarget.Z))
+end
+
 -- ── Miner spawning (module-level so applyUpgrade can call it) ────────────────
 
 local function spawnMiner(mineId: string)
@@ -221,31 +306,168 @@ local function spawnMiner(mineId: string)
 	local spacing = Config.BUILDING_SIZE.X
 	local slot    = data.miners + 1
 	local offset  = Config.MINER_OFFSETS[slot]
-	if not offset then return end   -- no offset defined for this slot
+	if not offset then return end
 
 	local minerPos = data.pos + Vector3.new(offset.X * spacing, 0, offset.Z * spacing)
 
-	local p           = Instance.new("Part")
-	p.Name            = mineId .. "_miner" .. slot
-	p.Size            = Config.MINI_MINER_SIZE
-	p.Position        = Vector3.new(minerPos.X, Config.MINI_MINER_SIZE.Y / 2 + 0.1, minerPos.Z)
-	p.BrickColor      = player.TeamColor
-	p.Material        = Enum.Material.DiamondPlate
-	p.Anchored        = true
-	p.CastShadow      = false
-	p.Parent          = minersFolder
+	-- Direction from this miner toward the mine center (XZ only)
+	local toMineXZ   = Vector3.new(data.pos.X - minerPos.X, 0, data.pos.Z - minerPos.Z)
+	local distToMine = toMineXZ.Magnitude
+	local toMineDir  = distToMine > 0.001 and toMineXZ.Unit or Vector3.new(0, 0, 1)
 
+	-- Arm geometry
+	local groundY     = 0.1
+	local armY        = groundY + MINER_BASE_SIZE.Y + MINER_BODY_SIZE.Y * 0.65
+	local bodyEdge    = Vector3.new(
+		minerPos.X + toMineDir.X * MINER_BODY_HALF,
+		armY,
+		minerPos.Z + toMineDir.Z * MINER_BODY_HALF
+	)
+	local mineTarget = Vector3.new(data.pos.X, armY, data.pos.Z)
+	local ARM_MAX    = (distToMine - MINER_BODY_HALF) * 0.85
+
+	-- ── Build the miner model ─────────────────────────────────────────────────
+
+	local model     = Instance.new("Model")
+	model.Name      = mineId .. "_miner" .. slot
+
+	-- Flat base slab
+	local base      = Instance.new("Part")
+	base.Name       = "Base"
+	base.Size       = MINER_BASE_SIZE
+	base.Position   = Vector3.new(minerPos.X, groundY + MINER_BASE_SIZE.Y / 2, minerPos.Z)
+	base.BrickColor = player.TeamColor
+	base.Material   = Enum.Material.DiamondPlate
+	base.Anchored   = true
+	base.CastShadow = false
+	base.CanCollide = false
+	base.Parent     = model
+
+	-- Boxy machine body
+	local body      = Instance.new("Part")
+	body.Name       = "Body"
+	body.Size       = MINER_BODY_SIZE
+	body.Position   = Vector3.new(
+		minerPos.X,
+		groundY + MINER_BASE_SIZE.Y + MINER_BODY_SIZE.Y / 2,
+		minerPos.Z
+	)
+	body.BrickColor = BrickColor.new("Dark stone grey")
+	body.Material   = Enum.Material.Metal
+	body.Anchored   = true
+	body.CastShadow = false
+	body.CanCollide = false
+	body.Parent     = model
+
+	-- Extraction arm (neon team-colour, starts fully retracted)
+	local arm       = Instance.new("Part")
+	arm.Name        = "Arm"
+	arm.BrickColor  = player.TeamColor
+	arm.Material    = Enum.Material.Neon
+	arm.Anchored    = true
+	arm.CastShadow  = false
+	arm.CanCollide  = false
+	arm.Parent      = model
+	setArmExtension(arm, bodyEdge, toMineDir, mineTarget, MINER_ARM_MIN)
+
+	-- Metadata
 	local ov = Instance.new("StringValue"); ov.Name = "OwnerId"
-	ov.Value = tostring(player.UserId); ov.Parent = p
+	ov.Value = tostring(player.UserId); ov.Parent = model
 
 	local mv = Instance.new("StringValue"); mv.Name = "MineId"
-	mv.Value = mineId; mv.Parent = p
+	mv.Value = mineId; mv.Parent = model
+
+	addMinerHealthBar(body)
+
+	model.PrimaryPart = base
+	model.Parent      = minersFolder
+
+	-- Initialise HP and clean up on destruction
+	minerHpTable[model] = MINER_MAX_HP
+	model.Destroying:Connect(function()
+		minerHpTable[model] = nil
+	end)
 
 	data.miners += 1
 
 	RemoteHandler.get(Config.REMOTES.MinerSpawned):FireAllClients(
 		mineId, player.UserId, data.miners
 	)
+
+	-- ── Per-miner extraction coroutine ────────────────────────────────────────
+	-- Phases (fractions of MINI_MINER_INCOME_INTERVAL):
+	--   40 % extend → 15 % hold/jitter → give income → 30 % retract → 15 % pause
+	-- Miners are staggered by their slot index so they collect independently.
+
+	local CYCLE       = Config.MINI_MINER_INCOME_INTERVAL
+	local staggerFrac = (slot - 1) / math.max(data.minerCap, 1)
+	local stagger     = staggerFrac * CYCLE
+
+	task.spawn(function()
+		if stagger > 0 then task.wait(stagger) end
+
+		local function alive(): boolean
+			local d = mines[mineId]
+			return arm.Parent ~= nil and d ~= nil and not d.depleted
+		end
+
+		while alive() do
+			-- Extend ──────────────────────────────────────────────────────────
+			local extendDur = CYCLE * 0.40
+			local t0 = os.clock()
+			while alive() and (os.clock() - t0) < extendDur do
+				local t = math.clamp((os.clock() - t0) / extendDur, 0, 1)
+				setArmExtension(arm, bodyEdge, toMineDir, mineTarget,
+					MINER_ARM_MIN + (ARM_MAX - MINER_ARM_MIN) * t)
+				task.wait(0.05)
+			end
+			if not alive() then break end
+
+			-- Hold / drill jitter ─────────────────────────────────────────────
+			local holdDur = CYCLE * 0.15
+			t0 = os.clock()
+			while alive() and (os.clock() - t0) < holdDur do
+				local jitter = math.sin((os.clock() - t0) * 22) * 0.15
+				setArmExtension(arm, bodyEdge, toMineDir, mineTarget, ARM_MAX + jitter)
+				task.wait(0.05)
+			end
+			if not alive() then break end
+
+			-- Give income ─────────────────────────────────────────────────────
+			local mdata = mines[mineId]
+			if mdata and mdata.owner.Parent then
+				local income = Config.MINI_MINER_INCOME * mdata.incomeMultiplier
+				resourceManager.add(mdata.owner, income)
+				if typeof(mdata.owner) == "Instance" and mdata.owner:IsA("Player") then
+					RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(
+						mdata.owner, mineId, income
+					)
+				end
+				mdata.depositTotal -= income
+				if mdata.depositTotal <= 0 then
+					depleteMineSite(mineId)
+					break
+				end
+			else
+				break
+			end
+
+			-- Retract ─────────────────────────────────────────────────────────
+			local retractDur = CYCLE * 0.30
+			t0 = os.clock()
+			while alive() and (os.clock() - t0) < retractDur do
+				local t = math.clamp((os.clock() - t0) / retractDur, 0, 1)
+				setArmExtension(arm, bodyEdge, toMineDir, mineTarget,
+					ARM_MAX + (MINER_ARM_MIN - ARM_MAX) * t)
+				task.wait(0.05)
+			end
+			if not alive() then break end
+			setArmExtension(arm, bodyEdge, toMineDir, mineTarget, MINER_ARM_MIN)
+
+			-- Pause ───────────────────────────────────────────────────────────
+			task.wait(CYCLE * 0.15)
+		end
+	end)
 end
 
 -- ── Upgrade visuals ───────────────────────────────────────────────────────────
@@ -256,43 +478,46 @@ local function applyUpgradeVisuals(mineId: string, upgradeType: string)
 	local model = buildingsFolder:FindFirstChild(mineId)
 	if not model then return end
 
-	local crystal = model:FindFirstChild("Crystal") :: BasePart?
-	local base    = model:FindFirstChild("Base")    :: BasePart?
-
 	-- Remove any previous upgrade ring
 	local oldRing = model:FindFirstChild("UpgradeRing")
 	if oldRing then oldRing:Destroy() end
 
-	local ringColor: BrickColor
+	local upgradeColor: BrickColor
+	local upgradeMat: Enum.Material
 	if upgradeType == "Efficiency" then
-		ringColor = BrickColor.new("Cyan")
-		if crystal then
-			crystal.BrickColor = BrickColor.new("Cyan")
-			crystal.Material   = Enum.Material.Neon
-			crystal.Size       = crystal.Size + Vector3.new(0, 1, 0)
-		end
+		upgradeColor = BrickColor.new("Sand blue")
+		upgradeMat   = Enum.Material.Metal
 	else  -- Capacity
-		ringColor = BrickColor.new("Bright orange")
-		if crystal then
-			crystal.BrickColor = BrickColor.new("Bright orange")
-			crystal.Material   = Enum.Material.Neon
-			crystal.Size       = crystal.Size + Vector3.new(1, 2, 1)
+		upgradeColor = BrickColor.new("Sand red")
+		upgradeMat   = Enum.Material.DiamondPlate
+	end
+
+	-- Recolor the 4 frame pillars to a structural painted-metal look.
+	-- Crystal is untouched so the yellow shard stays visible.
+	for _, child in model:GetChildren() do
+		if child.Name == "Pillar" and child:IsA("BasePart") then
+			local bp = child :: BasePart
+			bp.BrickColor = upgradeColor
+			bp.Material   = upgradeMat
 		end
 	end
 
-	-- Glowing ring around the base (same style as turret ring)
-	if base then
-		local ring        = Instance.new("Part")
-		ring.Name         = "UpgradeRing"
-		ring.Size         = Vector3.new(base.Size.X + 2, 0.4, base.Size.Z + 2)
-		ring.Position     = base.Position - Vector3.new(0, base.Size.Y / 2 - 0.2, 0)
-		ring.BrickColor   = ringColor
-		ring.Material     = Enum.Material.Neon
-		ring.Anchored     = true
-		ring.CanCollide   = false
-		ring.CastShadow   = false
-		ring.Parent       = model
-	end
+	-- Solid structural band around the base platform.
+	local base    = model:FindFirstChild("Base") :: BasePart?
+	local centerX = base and base.Position.X or 0
+	local centerZ = base and base.Position.Z or 0
+	local ringY   = base and (base.Position.Y + base.Size.Y / 2 + 0.25) or 1.25
+
+	local ring        = Instance.new("Part")
+	ring.Name         = "UpgradeRing"
+	ring.Size         = Vector3.new(11, 0.5, 11)
+	ring.Position     = Vector3.new(centerX, ringY, centerZ)
+	ring.BrickColor   = upgradeColor
+	ring.Material     = upgradeMat
+	ring.Anchored     = true
+	ring.CanCollide   = false
+	ring.CastShadow   = false
+	ring.Parent       = model
 
 	-- StringValue so clients can read upgrade state from the workspace model
 	local existing = model:FindFirstChild("Upgrade")
@@ -326,22 +551,67 @@ function MineralManager.applyUpgrade(mineId: string, upgradeType: string, player
 	if upgradeType == "Efficiency" then
 		data.incomeMultiplier = Config.MINE_UPGRADE_EFFICIENCY_MULT
 	else
+		-- Raise the cap; the persistent spawn loop in registerMine will fill the new slots.
 		data.minerCap += Config.MINE_UPGRADE_CAPACITY_EXTRA
-		-- Kick off a new spawning loop for the extra miner slots
-		task.spawn(function()
-			while true do
-				task.wait(Config.MINI_MINER_SPAWN_INTERVAL)
-				local d = mines[mineId]
-				if not d then break end
-				if d.depleted then break end
-				if d.miners >= d.minerCap then break end
-				spawnMiner(mineId)
-			end
-		end)
 	end
 
 	applyUpgradeVisuals(mineId, upgradeType)
 	return true
+end
+
+-- ── Miner combat API ─────────────────────────────────────────────────────────
+
+-- Damage the nearest enemy miner within range. Returns (hit, hitPos).
+function MineralManager.damageNearestMiner(
+	fromPos: Vector3,
+	attackerOwnerIdStr: string,
+	range: number,
+	damage: number
+): (boolean, Vector3?)
+	local bestModel: any = nil
+	local bestDist  = math.huge
+
+	for model, hp in minerHpTable do
+		if hp <= 0 then continue end
+		local ov = model:FindFirstChild("OwnerId")
+		if not ov then continue end
+		if ov.Value == attackerOwnerIdStr then continue end   -- same team
+		local base = model:FindFirstChild("Base") :: BasePart?
+		if not base or not base.Parent then continue end
+		local d = (base.Position - fromPos).Magnitude
+		if d <= range and d < bestDist then
+			bestDist  = d
+			bestModel = model
+		end
+	end
+
+	if not bestModel then return false, nil end
+
+	local base   = bestModel:FindFirstChild("Base") :: BasePart
+	local hitPos = base.Position + Vector3.new(0, MINER_BASE_SIZE.Y + MINER_BODY_SIZE.Y * 0.5, 0)
+
+	local newHp = math.max(0, (minerHpTable[bestModel] or 0) - damage)
+	minerHpTable[bestModel] = newHp
+	applyMinerHP(bestModel, newHp)
+
+	if newHp <= 0 then
+		local mv = bestModel:FindFirstChild("MineId")
+		if mv then
+			local mineId = mv.Value
+			local mdata  = mines[mineId]
+			if mdata then
+				mdata.miners = math.max(0, mdata.miners - 1)
+				-- Sync client miner count so HUD income display stays accurate
+				RemoteHandler.get(Config.REMOTES.MinerSpawned):FireAllClients(
+					mineId, mdata.owner.UserId, mdata.miners
+				)
+			end
+		end
+		minerHpTable[bestModel] = nil
+		bestModel:Destroy()
+	end
+
+	return true, hitPos
 end
 
 -- ── Deposit API ───────────────────────────────────────────────────────────────
@@ -382,14 +652,16 @@ function MineralManager.registerMine(mineId: string, minePos: Vector3, player: P
 
 	spawnMiner(mineId)
 
+	-- Persistent loop: fills slots up to cap on initial spawn AND after combat losses.
 	task.spawn(function()
 		while true do
 			task.wait(Config.MINI_MINER_SPAWN_INTERVAL)
 			local data = mines[mineId]
 			if not data then break end
 			if data.depleted then break end
-			if data.miners >= data.minerCap then break end
-			spawnMiner(mineId)
+			if data.miners < data.minerCap then
+				spawnMiner(mineId)
+			end
 		end
 	end)
 end
@@ -475,27 +747,6 @@ function MineralManager.init(rm)
 			if data.owner == player then table.insert(toRemove, id) end
 		end
 		for _, id in toRemove do mines[id] = nil end
-	end)
-
-	-- Passive income + depletion loop
-	task.spawn(function()
-		while true do
-			task.wait(Config.MINI_MINER_INCOME_INTERVAL)
-			for mineId, data in mines do
-				if data.depleted then continue end
-				if data.miners <= 0 then continue end
-				if not data.owner.Parent then continue end
-
-				local income = data.miners * Config.MINI_MINER_INCOME * data.incomeMultiplier
-				resourceManager.add(data.owner, income)
-				RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(data.owner, mineId, income)
-
-				data.depositTotal -= income
-				if data.depositTotal <= 0 then
-					depleteMineSite(mineId)
-				end
-			end
-		end
 	end)
 
 	-- Upgrade remote

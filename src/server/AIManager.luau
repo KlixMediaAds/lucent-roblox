@@ -697,12 +697,32 @@ function AIManager.resetAllBots()
 	end
 end
 
+local function correctDifficulty(input: string): string?
+	if DIFFICULTY[input] then return input end
+	-- Anagram-based correction: "ahrd" → "hard", "mdeimu" → "medium", etc.
+	local function sortChars(s: string): string
+		local t = {}
+		for c in s:gmatch(".") do table.insert(t, c) end
+		table.sort(t)
+		return table.concat(t)
+	end
+	local sortedInput = sortChars(input)
+	for key in DIFFICULTY do
+		if sortChars(key) == sortedInput then return key end
+	end
+	return nil
+end
+
 function AIManager.spawnAI(difficulty: string): boolean
-	local diff = DIFFICULTY[difficulty]
-	if not diff then
+	local corrected = correctDifficulty(difficulty)
+	if not corrected then
 		warn("[AIManager] Unknown difficulty:", difficulty, "— use easy / medium / hard")
 		return false
 	end
+	if corrected ~= difficulty then
+		warn("[AIManager] Auto-corrected difficulty:", difficulty, "→", corrected)
+	end
+	local diff = DIFFICULTY[corrected]
 
 	aiCounter += 1
 	local idx = ((aiCounter - 1) % #AI_BASES) + 1
