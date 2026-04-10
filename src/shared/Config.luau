@@ -10,11 +10,12 @@ Config.UNIT_TYPES = {
 	Soldier = { cost = 25, size = Vector3.new(4, 4, 4) },
 	Tank    = { cost = 60, size = Vector3.new(7, 5, 9)  },
 	Elite   = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
+	Medic   = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20 }  -- per-type max speed
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8  }  -- velocity lerp factor
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20, Medic = 22 }  -- per-type max speed
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8,  Medic = 10 }  -- velocity lerp factor
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -75,9 +76,21 @@ Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
 Config.RESEARCH = {
 	BetterMines       = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
 	EliteUnits        = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
+	MedicUnit         = { time = 15, desc = "Unlocks the Medic unit at Barracks. Medics automatically heal damaged friendly units nearby." },
 	TurretUpgrades    = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
 	ConcussionShells  = { time = 10, desc = "Tank shells slow enemy units on impact." },
+	CombatStims       = { time = 12, desc = "Soldiers automatically boost speed and attack rate when engaging enemies." },
+	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
 }
+
+-- Soldier: Combat Stims
+Config.SOLDIER_STIM_DURATION  = 8    -- seconds stims stay active
+Config.SOLDIER_STIM_COOLDOWN  = 20   -- seconds before stims can reactivate
+Config.SOLDIER_STIM_SPEED     = 1.5  -- move speed multiplier while stimmed
+Config.SOLDIER_STIM_RATE      = 0.55 -- attack-rate period multiplier while stimmed (lower = faster)
+
+-- Soldier: Hardened Armor
+Config.SOLDIER_ARMOR          = 6    -- flat damage absorbed per incoming hit
 
 -- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
 Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225 }
@@ -92,14 +105,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180  }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70   }
 Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25   }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 45, Elite = 30 }  -- studs per type
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0  }  -- seconds between attacks
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22   }  -- Medic value = heal per tick
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 45, Elite = 30, Medic = 22 }  -- studs per type
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2  }  -- seconds between attacks
 
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
@@ -140,6 +153,7 @@ Config.REMOTES = {
 	MineIncome              = "MineIncome",
 	CCAttacked              = "CCAttacked",
 	MineDepletionWarning    = "MineDepletionWarning",
+	HealBeam                = "HealBeam",
 }
 
 return Config

@@ -235,6 +235,145 @@ Network.onDepositClaimed(function(pos: Vector3)
 	BuildingPlacer.removeDeposit(pos)
 end)
 
+-- ── Tank Concussion Shells visual upgrade ────────────────────────────────────
+-- Adds a glowing orange neon orb + two top-surface stripes to a tank body part.
+-- Parts are unanchored + WeldConstrained so they follow the moving tank.
+local function applyTankConcussionVisual(body: BasePart)
+	-- Guard: don't add twice
+	if body:FindFirstChild("_ConcussionOrb") then return end
+
+	local halfY = body.Size.Y / 2
+
+	local function weld(p: BasePart)
+		local w   = Instance.new("WeldConstraint")
+		w.Part0   = body
+		w.Part1   = p
+		w.Parent  = body
+	end
+
+	-- Glowing orb floating just above the top centre
+	local orb        = Instance.new("Part")
+	orb.Name         = "_ConcussionOrb"
+	orb.Shape        = Enum.PartType.Ball
+	orb.Size         = Vector3.new(1.6, 1.6, 1.6)
+	orb.BrickColor   = BrickColor.new("Bright orange")
+	orb.Material     = Enum.Material.Metal
+	orb.Anchored     = false
+	orb.CanCollide   = false
+	orb.CanQuery     = false
+	orb.CastShadow   = false
+	orb.CFrame       = body.CFrame * CFrame.new(0, halfY + 1.1, 0)
+	orb.Parent       = body
+	weld(orb)
+
+	-- Two lengthwise neon stripes along the top edges
+	for _, sideX in { -(body.Size.X / 2 - 0.6), (body.Size.X / 2 - 0.6) } do
+		local stripe       = Instance.new("Part")
+		stripe.Name        = "_ConcussionStripe"
+		stripe.Size        = Vector3.new(0.55, 0.3, body.Size.Z + 0.5)
+		stripe.BrickColor  = BrickColor.new("Bright orange")
+		stripe.Material    = Enum.Material.Metal
+		stripe.Anchored    = false
+		stripe.CanCollide  = false
+		stripe.CanQuery    = false
+		stripe.CastShadow  = false
+		stripe.CFrame      = body.CFrame * CFrame.new(sideX, halfY + 0.15, 0)
+		stripe.Parent      = body
+		weld(stripe)
+	end
+end
+
+-- ── Soldier upgrade visuals ───────────────────────────────────────────────────
+-- CombatStims: two small green cylinders on the back (stim injectors)
+local function applySoldierStimVisual(body: BasePart)
+	if body:FindFirstChild("_StimInjector") then return end
+	local halfY = body.Size.Y / 2
+	local halfZ = body.Size.Z / 2
+
+	local function weld(p: BasePart)
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = body
+		w.Part1 = p
+		w.Parent = body
+	end
+
+	for _, sideX in { -0.8, 0.8 } do
+		local inj           = Instance.new("Part")
+		inj.Name            = "_StimInjector"
+		inj.Shape           = Enum.PartType.Cylinder
+		inj.Size            = Vector3.new(1.4, 0.45, 0.45)
+		inj.BrickColor      = BrickColor.new("Bright green")
+		inj.Material        = Enum.Material.Metal
+		inj.Anchored        = false
+		inj.CanCollide      = false
+		inj.CanQuery        = false
+		inj.CastShadow      = false
+		-- Position on the back-upper area, rotated so the cylinder stands upright
+		inj.CFrame          = body.CFrame
+			* CFrame.new(sideX, halfY - 0.5, halfZ - 0.25)
+			* CFrame.Angles(0, 0, math.rad(90))
+		inj.Parent          = body
+		weld(inj)
+
+		-- Green tip cap
+		local cap           = Instance.new("Part")
+		cap.Name            = "_StimCap"
+		cap.Shape           = Enum.PartType.Ball
+		cap.Size            = Vector3.new(0.5, 0.5, 0.5)
+		cap.BrickColor      = BrickColor.new("Lime green")
+		cap.Material        = Enum.Material.Neon
+		cap.Anchored        = false
+		cap.CanCollide      = false
+		cap.CanQuery        = false
+		cap.CastShadow      = false
+		cap.CFrame          = body.CFrame * CFrame.new(sideX, halfY + 0.25, halfZ - 0.25)
+		cap.Parent          = body
+		weld(cap)
+	end
+end
+
+-- HardenedArmor: flat grey plate on the front face of the soldier
+local function applySoldierArmorVisual(body: BasePart)
+	if body:FindFirstChild("_ArmorPlate") then return end
+	local halfY = body.Size.Y / 2
+	local halfZ = body.Size.Z / 2
+
+	local function weld(p: BasePart)
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = body
+		w.Part1 = p
+		w.Parent = body
+	end
+
+	-- Main chest plate
+	local plate           = Instance.new("Part")
+	plate.Name            = "_ArmorPlate"
+	plate.Size            = Vector3.new(body.Size.X - 0.6, body.Size.Y * 0.55, 0.3)
+	plate.BrickColor      = BrickColor.new("Medium stone grey")
+	plate.Material        = Enum.Material.Metal
+	plate.Anchored        = false
+	plate.CanCollide      = false
+	plate.CanQuery        = false
+	plate.CastShadow      = false
+	plate.CFrame          = body.CFrame * CFrame.new(0, halfY * 0.1, -(halfZ + 0.15))
+	plate.Parent          = body
+	weld(plate)
+
+	-- Rivet-strip accent across the top of the plate
+	local strip           = Instance.new("Part")
+	strip.Name            = "_ArmorStrip"
+	strip.Size            = Vector3.new(body.Size.X - 0.6, 0.25, 0.32)
+	strip.BrickColor      = BrickColor.new("Dark stone grey")
+	strip.Material        = Enum.Material.Metal
+	strip.Anchored        = false
+	strip.CanCollide      = false
+	strip.CanQuery        = false
+	strip.CastShadow      = false
+	strip.CFrame          = body.CFrame * CFrame.new(0, halfY * 0.1 + plate.Size.Y / 2 - 0.12, -(halfZ + 0.16))
+	strip.Parent          = body
+	weld(strip)
+end
+
 -- ── Spider legs for Elite units ───────────────────────────────────────────────
 
 Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
@@ -247,6 +386,17 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 		local tv = part:FindFirstChild("UnitType") :: StringValue?
 		if tv and tv.Value == "Elite" then
 			SpiderLegs.attach(unitId, part)
+		end
+		-- Apply upgrade visuals if already researched
+		if _ownerId == localUserId then
+			local p = part :: BasePart
+			if tv and tv.Value == "Tank" and researchedTechs["ConcussionShells"] then
+				applyTankConcussionVisual(p)
+			end
+			if tv and tv.Value == "Soldier" then
+				if researchedTechs["CombatStims"]   then applySoldierStimVisual(p)  end
+				if researchedTechs["HardenedArmor"] then applySoldierArmorVisual(p) end
+			end
 		end
 	end)
 end)
@@ -344,6 +494,26 @@ Network.onResearchCompleted(function(techName: string)
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
+
+	-- Apply visuals to all existing own units when relevant research completes
+	if techName == "ConcussionShells" or techName == "CombatStims" or techName == "HardenedArmor" then
+		local unitsFolder = workspace:FindFirstChild("Units") :: Folder?
+		if unitsFolder then
+			for _, child in unitsFolder:GetChildren() do
+				if not child:IsA("BasePart") then continue end
+				local ov = child:FindFirstChild("OwnerId") :: StringValue?
+				if not ov or ov.Value ~= tostring(localUserId) then continue end
+				local tv = child:FindFirstChild("UnitType") :: StringValue?
+				if not tv then continue end
+				if tv.Value == "Tank" and techName == "ConcussionShells" then
+					applyTankConcussionVisual(child :: BasePart)
+				elseif tv.Value == "Soldier" then
+					if techName == "CombatStims"   then applySoldierStimVisual(child :: BasePart)  end
+					if techName == "HardenedArmor" then applySoldierArmorVisual(child :: BasePart) end
+				end
+			end
+		end
+	end
 end)
 
 -- ── Monument & win condition ──────────────────────────────────────────────────
@@ -952,6 +1122,62 @@ local function spawnEliteProjectile(fromPos: Vector3, toPos: Vector3)
 		end
 	end)
 end
+
+-- ── Medic heal beam VFX ──────────────────────────────────────────────────────
+-- A semi-transparent green neon beam that fades out over ~0.45 s.
+local function spawnHealBeam(fromPos: Vector3, toPos: Vector3)
+	local dist = (toPos - fromPos).Magnitude
+	if dist < 0.5 then return end
+
+	local beam              = Instance.new("Part")
+	beam.Name               = "_HealBeam"
+	beam.Size               = Vector3.new(0.22, 0.22, dist)
+	-- CFrame.lookAt positions at fromPos facing toPos (-Z forward);
+	-- shift dist/2 along -Z to centre the beam between the two points.
+	beam.CFrame             = CFrame.lookAt(fromPos, toPos) * CFrame.new(0, 0, -dist / 2)
+	beam.Color              = Color3.fromRGB(80, 220, 120)
+	beam.Material           = Enum.Material.Neon
+	beam.Transparency       = 0.25
+	beam.Anchored           = true
+	beam.CanCollide         = false
+	beam.CastShadow         = false
+	beam.CanQuery           = false
+	beam.Parent             = workspace
+
+	-- Small glow sphere at the target end
+	local glow              = Instance.new("Part")
+	glow.Name               = "_HealGlow"
+	glow.Shape              = Enum.PartType.Ball
+	glow.Size               = Vector3.new(0.8, 0.8, 0.8)
+	glow.Color              = Color3.fromRGB(140, 255, 170)
+	glow.Material           = Enum.Material.Neon
+	glow.Transparency       = 0.3
+	glow.Anchored           = true
+	glow.CanCollide         = false
+	glow.CastShadow         = false
+	glow.CanQuery           = false
+	glow.Position           = toPos
+	glow.Parent             = workspace
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t = math.clamp(elapsed / 0.45, 0, 1)
+		local alpha = t * t   -- ease-in fade
+		beam.Transparency = 0.25 + alpha * 0.75
+		glow.Transparency = 0.30 + alpha * 0.70
+		if t >= 1 then
+			conn:Disconnect()
+			beam:Destroy()
+			glow:Destroy()
+		end
+	end)
+end
+
+Network.onHealBeam(function(fromPos: Vector3, toPos: Vector3)
+	spawnHealBeam(fromPos, toPos)
+end)
 
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then

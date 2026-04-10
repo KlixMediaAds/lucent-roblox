@@ -25,8 +25,11 @@ local C             = UILib.C
 local peek          = Fusion.peek
 
 -- ── Palette ───────────────────────────────────────────────────────────────────
-local PURPLE = Color3.fromRGB(160, 80, 230)
-local ORANGE = Color3.fromRGB(220, 120, 30)
+local PURPLE     = Color3.fromRGB(160, 80, 230)
+local ORANGE     = Color3.fromRGB(220, 120, 30)
+local STIM_GREEN = Color3.fromRGB(60, 200, 90)
+local ARMOR_BLUE = Color3.fromRGB(80, 150, 210)
+local MEDIC_TEAL = Color3.fromRGB(50, 200, 160)
 
 -- ── Layout constants ──────────────────────────────────────────────────────────
 local NODE_D = UILib.NODE_D  -- 80 — keep in sync with UILib
@@ -67,6 +70,27 @@ local TECHS = {
 		tip   = "Tank shells slow all hit enemies to 40% speed for 1.5 s.\n\nApplies to both the primary target and AoE splash victims.\nStacks with repeated hits — ideal against blob attacks.\n\n⏱ 10 sec",
 	},
 	{
+		key   = "MedicUnit",
+		name  = "Medic Unit",
+		icon  = "✚",
+		color = MEDIC_TEAL,
+		tip   = "Trains Medic units at your Barracks.\n\nMedics automatically scan for the most-injured friendly unit nearby and fire a healing beam to restore HP.\n\nCost per unit: 60 res   ⏱ 15 sec",
+	},
+	{
+		key   = "CombatStims",
+		name  = "Combat Stims",
+		icon  = "⚡",
+		color = STIM_GREEN,
+		tip   = "Soldiers automatically inject combat stimulants when they engage an enemy.\n\n+50% move speed and faster attack rate for 8 s.\nCooldown: 20 s between activations.\n\n⏱ 12 sec",
+	},
+	{
+		key   = "HardenedArmor",
+		name  = "Hardened Armor",
+		icon  = "🛡",
+		color = ARMOR_BLUE,
+		tip   = "Soldiers wear reinforced plating that absorbs a flat 6 damage per incoming hit.\n\nStacks with Combat Stims.\n\n⏱ 10 sec",
+	},
+	{
 		key   = "TurretUpgrades",
 		name  = "Turret Upgrades",
 		icon  = "⚙",
@@ -89,10 +113,16 @@ type ChildDef = {
 }
 
 local UNITS_CHILDREN: { ChildDef } = {
-	{ key = "EliteUnits",        icon = "⚔", color = PURPLE, angle = 210,
+	{ key = "EliteUnits",        icon = "⚔", color = PURPLE,     angle = 210,
 	  tip = (techByKey["EliteUnits"] or { tip = "" }).tip },
-	{ key = "ConcussionShells",  icon = "◈", color = ORANGE, angle = 150,
+	{ key = "ConcussionShells",  icon = "◈", color = ORANGE,     angle = 150,
 	  tip = (techByKey["ConcussionShells"] or { tip = "" }).tip },
+	{ key = "CombatStims",       icon = "⚡", color = STIM_GREEN, angle = 90,
+	  tip = (techByKey["CombatStims"] or { tip = "" }).tip },
+	{ key = "HardenedArmor",     icon = "🛡", color = ARMOR_BLUE, angle = 270,
+	  tip = (techByKey["HardenedArmor"] or { tip = "" }).tip },
+	{ key = "MedicUnit",         icon = "✚", color = MEDIC_TEAL,  angle = 330,
+	  tip = (techByKey["MedicUnit"] or { tip = "" }).tip },
 }
 
 local STRUCTURES_CHILDREN: { ChildDef } = {
@@ -107,9 +137,11 @@ local STRUCTURES_CHILDREN: { ChildDef } = {
 -- ── Per-node live refs ────────────────────────────────────────────────────────
 -- Populated during init; refresh() reads these to update node appearance.
 type NodeRef = {
-	btn:    TextButton,
-	stroke: UIStroke,
-	label:  TextLabel,
+	btn:       TextButton,
+	stroke:    UIStroke,
+	label:     TextLabel,
+	progTrack: Frame,
+	progFill:  Frame,
 }
 local nodeRefs: { [string]: NodeRef } = {}
 
@@ -243,14 +275,19 @@ local function refreshTechNode(key: string)
 		ref.label.Text                 = tech.name .. "\n✓ Done"
 		ref.label.TextColor3           = C.GREEN
 		ref.btn.Active                 = false
+		ref.progTrack.Visible          = false
 	elseif inProg then
+		local pct = math.floor((progress :: number) * 100)
 		ref.btn.BackgroundColor3       = C.ACCENT
-		ref.btn.BackgroundTransparency = 0.15
+		ref.btn.BackgroundTransparency = 0.1
 		ref.stroke.Color               = C.ACCENT
-		ref.stroke.Thickness           = 2.5
-		ref.label.Text                 = tech.name .. "\n" .. math.floor((progress :: number) * 100) .. "%"
+		ref.stroke.Thickness           = 4
+		ref.label.Text                 = tech.name .. "\n" .. pct .. "%"
 		ref.label.TextColor3           = C.ACCENT
 		ref.btn.Active                 = false
+		ref.progTrack.Visible          = true
+		ref.progFill.Size              = UDim2.new(progress :: number, 0, 1, 0)
+		ref.progFill.BackgroundColor3  = C.ACCENT
 	else
 		ref.btn.BackgroundColor3       = tech.color
 		ref.btn.BackgroundTransparency = 0.35
@@ -259,6 +296,7 @@ local function refreshTechNode(key: string)
 		ref.label.Text                 = tech.name
 		ref.label.TextColor3           = C.TEXT
 		ref.btn.Active                 = true
+		ref.progTrack.Visible          = false
 	end
 end
 
@@ -329,8 +367,32 @@ local function buildChildNodes(
 		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
 
+		-- Progress bar — sits at the bottom of the circle button, hidden until research starts
+		local barTrack                      = Instance.new("Frame")
+		barTrack.Name                       = "ProgressTrack"
+		barTrack.Size                       = UDim2.new(1, -14, 0, 7)
+		barTrack.Position                   = UDim2.new(0, 7, 1, -14)
+		barTrack.BackgroundColor3           = Color3.fromRGB(5, 8, 18)
+		barTrack.BackgroundTransparency     = 0.1
+		barTrack.BorderSizePixel            = 0
+		barTrack.ZIndex                     = 16
+		barTrack.Visible                    = false
+		barTrack.ClipsDescendants           = true
+		barTrack.Parent                     = btn
+		UILib.corner(barTrack, 3)
+
+		local barFill                       = Instance.new("Frame")
+		barFill.Name                        = "Fill"
+		barFill.Size                        = UDim2.new(0, 0, 1, 0)
+		barFill.BackgroundColor3            = C.ACCENT
+		barFill.BorderSizePixel             = 0
+		barFill.ZIndex                      = 17
+		barFill.Parent                      = barTrack
+		UILib.corner(barFill, 3)
+
 		-- Store ref for refresh()
-		nodeRefs[def.key] = { btn = btn, stroke = stroke, label = label }
+		nodeRefs[def.key] = { btn = btn, stroke = stroke, label = label,
+		                       progTrack = barTrack, progFill = barFill }
 
 		-- Tooltip on hover
 		local tipTitle = techByKey[def.key] and techByKey[def.key].name or "Monument"

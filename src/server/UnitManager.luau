@@ -25,7 +25,9 @@ type UnitData = {
 	moveSpeed   : number,    -- max speed in studs/s
 	accel       : number,    -- velocity lerp factor (higher = snappier)
 	focusBldId  : string?,   -- building ID to focus-fire (nil = none)
-	slowUntil   : number?,   -- tick() timestamp; unit moves at TANK_SLOW_MULT speed until then
+	slowUntil          : number?,  -- tick() timestamp; unit moves at TANK_SLOW_MULT speed until then
+	stimUntil          : number?,  -- tick() timestamp; soldier stims active until then
+	stimCooldownUntil  : number?,  -- tick() timestamp; stims cannot reactivate until then
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -78,6 +80,29 @@ local function addTankTreads(body: BasePart)
 	end
 end
 
+local function addMedicCross(body: BasePart)
+	-- Two white bars forming a "+" on top of the medic body so it's visually distinct.
+	local topY = body.Size.Y / 2 + 0.18
+	local function makeBar(sx: number, sz: number)
+		local bar         = Instance.new("Part")
+		bar.Size          = Vector3.new(sx, 0.3, sz)
+		bar.BrickColor    = BrickColor.new("White")
+		bar.Material      = Enum.Material.SmoothPlastic
+		bar.Anchored      = false
+		bar.CanCollide    = false
+		bar.CastShadow    = false
+		bar.CanQuery      = false
+		bar.CFrame        = body.CFrame * CFrame.new(0, topY, 0)
+		bar.Parent        = body
+		local w           = Instance.new("WeldConstraint")
+		w.Part0           = body
+		w.Part1           = bar
+		w.Parent          = body
+	end
+	makeBar(body.Size.X * 0.55, 0.7)  -- horizontal
+	makeBar(0.7, body.Size.Z * 0.55)  -- vertical
+end
+
 local function addHealthBar(part: BasePart)
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "HealthBar"
@@ -117,6 +142,15 @@ local function applyHP(data: UnitData)
 	bb.Enabled = data.hp < data.maxHp
 end
 
+-- Returns the effective damage dealt to a unit after applying Hardened Armor.
+local function calcDamage(targetData: UnitData, rawDmg: number): number
+	if targetData.unitType == "Soldier" and researchManagerRef
+		and researchManagerRef.hasResearch(targetData.owner, "HardenedArmor") then
+		return math.max(1, rawDmg - Config.SOLDIER_ARMOR)
+	end
+	return rawDmg
+end
+
 -- ── Spawn ─────────────────────────────────────────────────────────────────────
 
 local function spawnUnit(player: Player, position: Vector3, unitType: string)
@@ -154,7 +188,8 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
-	if unitType == "Tank" then addTankTreads(part) end
+	if unitType == "Tank"  then addTankTreads(part)  end
+	if unitType == "Medic" then addMedicCross(part)  end
 
 	units[id] = {
 		part        = part,
@@ -417,7 +452,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	if not bestId then return false, nil end
 	local data   = units[bestId]
 	local hitPos = data.part.Position + Vector3.new(0, data.part.Size.Y * 0.5, 0)
-	data.hp -= damage
+	data.hp -= calcDamage(data, damage)
 	applyHP(data)
 	if data.hp <= 0 then
 		if (data.unitType == "Tank" or data.unitType == "Soldier") and data.owner.Parent then
@@ -439,8 +474,9 @@ function UnitManager.init(resourceManager)
 
 	local LEASH         = Config.UNIT_LEASH_RANGE
 	local AGGRO         = Config.UNIT_AGGRO_RADIUS
-	local unitHitRemote = RemoteHandler.get(Config.REMOTES.UnitHit)
+	local unitHitRemote  = RemoteHandler.get(Config.REMOTES.UnitHit)
 	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
+	local healBeamRemote = RemoteHandler.get(Config.REMOTES.HealBeam)
 
 	RunService.Heartbeat:Connect(function(dt)
 		local toRemove: { string } = {}
@@ -522,8 +558,12 @@ function UnitManager.init(resourceManager)
 					end
 				else
 					local effSpeed = data.moveSpeed
-					if data.slowUntil and tick() < (data.slowUntil :: number) then
+					local t = tick()
+					if data.slowUntil and t < (data.slowUntil :: number) then
 						effSpeed = effSpeed * Config.TANK_SLOW_MULT
+					end
+					if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
+						effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
 					end
 					desired = delta.Unit * effSpeed
 				end
@@ -547,8 +587,8 @@ function UnitManager.init(resourceManager)
 				end
 			end
 
-			-- ── 3. Aggro scan (idle + A-moving units only) ─────────────────────
-			if doAggro and not data.aggroId and not data.focusBldId then
+			-- ── 3. Aggro scan (idle + A-moving units only; Medics never chase enemies) ──
+			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic" then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
 					local myPos = data.part.Position
@@ -564,6 +604,15 @@ function UnitManager.init(resourceManager)
 					if bestId2 then
 						data.aggroId   = bestId2
 						data.aggroHome = data.part.Position
+						-- Auto-trigger Combat Stims on engagement
+						if data.unitType == "Soldier" and researchManagerRef
+							and researchManagerRef.hasResearch(data.owner, "CombatStims") then
+							local t = tick()
+							if not data.stimCooldownUntil or t >= (data.stimCooldownUntil :: number) then
+								data.stimUntil         = t + Config.SOLDIER_STIM_DURATION
+								data.stimCooldownUntil = t + Config.SOLDIER_STIM_DURATION + Config.SOLDIER_STIM_COOLDOWN
+							end
+						end
 					end
 				end
 			end
@@ -571,14 +620,49 @@ function UnitManager.init(resourceManager)
 			-- ── 4. Combat ─────────────────────────────────────────────────────
 			if data.hp <= 0 then continue end
 			data.attackTimer += dt
-			if data.attackTimer < data.attackRate then continue end
-			data.attackTimer -= data.attackRate
+			local effectiveRate = data.attackRate
+			if data.unitType == "Soldier" and data.stimUntil and tick() < (data.stimUntil :: number) then
+				effectiveRate = effectiveRate * Config.SOLDIER_STIM_RATE
+			end
+			if data.attackTimer < effectiveRate then continue end
+			data.attackTimer -= effectiveRate
 
 			local myPos      = data.part.Position
 			local myOwnerStr = tostring(data.owner.UserId)
 			local hitPos: Vector3? = nil
 
 			local atkRange = data.attackRange
+
+			-- ── Medic: heal most-damaged nearby friendly unit ──────────────────
+			if data.unitType == "Medic" then
+				local bestId2: string?  = nil
+				local lowestRatio       = 1.0   -- only heal units that aren't full
+				for otherId, other in units do
+					if other.hp <= 0 then continue end
+					if tostring(other.owner.UserId) ~= myOwnerStr then continue end
+					if otherId == id then continue end
+					local ratio = other.hp / other.maxHp
+					if ratio >= 1.0 then continue end
+					local d = (other.part.Position - myPos).Magnitude
+					if d <= atkRange and ratio < lowestRatio then
+						lowestRatio = ratio; bestId2 = otherId
+					end
+				end
+				if bestId2 then
+					local other    = units[bestId2]
+					other.hp       = math.min(other.maxHp, other.hp + data.attackDmg)
+					applyHP(other)
+					local targetTop = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+					local myTop     = myPos + Vector3.new(0, data.part.Size.Y * 0.5, 0)
+					-- Face the patient
+					local flatDir = Vector3.new(targetTop.X - myPos.X, 0, targetTop.Z - myPos.Z)
+					if flatDir.Magnitude > 0.1 then
+						data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
+					end
+					healBeamRemote:FireAllClients(myTop, targetTop)
+				end
+				continue  -- Medics never attack buildings or miners
+			end
 
 			if data.unitType == "Tank" then
 				-- Tanks: buildings first (+ AoE splash on nearby units), fall back to units
@@ -594,7 +678,7 @@ function UnitManager.init(resourceManager)
 						if skipId and otherId == skipId then continue end
 						if tostring(other.owner.UserId) == myOwnerStr then continue end
 						if (other.part.Position - centre).Magnitude <= splashR then
-							other.hp -= splashDmg
+							other.hp -= calcDamage(other, splashDmg)
 							applyHP(other)
 							if hasConcussion then other.slowUntil = slowEnd end
 							if other.hp <= 0 then table.insert(toRemove, otherId) end
@@ -639,7 +723,7 @@ function UnitManager.init(resourceManager)
 					if bestId2 then
 						local other = units[bestId2]
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
-						other.hp -= data.attackDmg
+						other.hp -= calcDamage(other, data.attackDmg)
 						applyHP(other)
 						if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
@@ -660,7 +744,7 @@ function UnitManager.init(resourceManager)
 				if bestId2 then
 					local other = units[bestId2]
 					hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
-					other.hp -= data.attackDmg
+					other.hp -= calcDamage(other, data.attackDmg)
 					applyHP(other)
 					if other.hp <= 0 then table.insert(toRemove, bestId2) end
 				elseif buildingManagerRef then

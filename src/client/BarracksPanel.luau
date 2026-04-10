@@ -34,7 +34,8 @@ local overlay:  Frame?
 local rootNode: TextButton?
 
 -- ── Unit definitions ──────────────────────────────────────────────────────────
-local PURPLE = Color3.fromRGB(160, 80, 230)
+local PURPLE     = Color3.fromRGB(160, 80, 230)
+local MEDIC_TEAL = Color3.fromRGB(50, 200, 160)
 
 type UnitDef = {
 	key:   string,
@@ -49,6 +50,7 @@ local UNIT_DEFS: { UnitDef } = {
 	{ key = "Soldier", label = "Soldier\n◆ 25",  icon = "⚔", color = C.GREEN,    cost = 25,  angle = -135 },
 	{ key = "Tank",    label = "Tank\n◆ 60",      icon = "⬡", color = C.BARRACKS, cost = 60,  angle = -90  },
 	{ key = "Elite",   label = "Elite\n◆ 100",    icon = "★", color = PURPLE,     cost = 100, angle = -45  },
+	{ key = "Medic",   label = "Medic\n◆ 60",     icon = "✚", color = MEDIC_TEAL, cost = 60,  angle = 0    },
 }
 
 local RADIUS   = 155  -- px from root centre to child centre
@@ -95,8 +97,9 @@ local function collapseNodes(then_: (() -> ())?)
 	end)
 end
 
--- ── Elite node state refresh ──────────────────────────────────────────────────
-local function refreshEliteNode()
+-- ── Research-gated node refresh ───────────────────────────────────────────────
+-- Refreshes the locked/unlocked appearance of Elite and Medic nodes.
+local function refreshResearchNodes()
 	for _, c in childNodes do
 		if c.key == "Elite" then
 			local unlocked = hasResearchFn and hasResearchFn("EliteUnits") or false
@@ -112,6 +115,22 @@ local function refreshEliteNode()
 				c.stroke.Color               = C.BORDER_LO
 				c.stroke.Thickness           = 1.5
 				c.label.Text                 = "Elite\nLocked"
+				c.label.TextColor3           = C.DIM
+			end
+		elseif c.key == "Medic" then
+			local unlocked = hasResearchFn and hasResearchFn("MedicUnit") or false
+			if unlocked then
+				c.btn.BackgroundColor3       = MEDIC_TEAL
+				c.btn.BackgroundTransparency = 0.35
+				c.stroke.Color               = MEDIC_TEAL
+				c.stroke.Thickness           = 2
+				c.label.TextColor3           = C.TEXT
+			else
+				c.btn.BackgroundColor3       = C.BG_LOCKED
+				c.btn.BackgroundTransparency = 0.3
+				c.stroke.Color               = C.BORDER_LO
+				c.stroke.Thickness           = 1.5
+				c.label.Text                 = "Medic\nLocked"
 				c.label.TextColor3           = C.DIM
 			end
 		end
@@ -220,9 +239,8 @@ function BarracksPanel.init(network, hasResearch)
 		local key = def.key
 		btn.MouseButton1Click:Connect(function()
 			if not activeBarracksId then return end
-			if key == "Elite" then
-				if not (hasResearchFn and hasResearchFn("EliteUnits")) then return end
-			end
+			if key == "Elite" and not (hasResearchFn and hasResearchFn("EliteUnits")) then return end
+			if key == "Medic" and not (hasResearchFn and hasResearchFn("MedicUnit"))  then return end
 			networkRef.trainUnit(activeBarracksId, key)
 		end)
 
@@ -253,7 +271,7 @@ end
 function BarracksPanel.show(barrackId: string)
 	activeBarracksId = barrackId
 	if overlay then overlay.Visible = true end
-	refreshEliteNode()
+	refreshResearchNodes()
 	expandNodes()
 
 	local state = lastTrainingState[barrackId]
@@ -273,7 +291,7 @@ function BarracksPanel.hide()
 end
 
 function BarracksPanel.refreshIfVisible()
-	if overlay and (overlay :: Frame).Visible then refreshEliteNode() end
+	if overlay and (overlay :: Frame).Visible then refreshResearchNodes() end
 end
 
 function BarracksPanel.isVisible(): boolean

@@ -132,4 +132,9 @@ function Network.onMineDepletionWarning(fn: (mineId: string) -> ())
 	RemoteHandler.get(Config.REMOTES.MineDepletionWarning).OnClientEvent:Connect(fn)
 end
 
+-- fromPos, toPos: medic heal beam VFX
+function Network.onHealBeam(fn: (Vector3, Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.HealBeam).OnClientEvent:Connect(fn)
+end
+
 return Network
