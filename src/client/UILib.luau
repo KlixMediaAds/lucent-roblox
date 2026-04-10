@@ -413,4 +413,53 @@ function UILib.connectorLine(
 	return line
 end
 
+--[[
+    Build a connector line between two node wrapper positions.
+
+    fromPos / toPos are the UDim2 wrapper centres (AnchorPoint 0.5, 0.5).
+    Each node's circle button sits 20 px above the wrapper centre, so both
+    endpoints are shifted by -20 px on Y before computing the midpoint and angle.
+
+    The line is placed at the midpoint with AnchorPoint (0.5, 0.5) and rotated
+    with atan2 — this gives a pixel-perfect connection regardless of direction.
+    Starts invisible (BackgroundTransparency = 1); caller fades it in.
+]]
+function UILib.connectorLineBetween(
+	parent:  Instance,
+	fromPos: UDim2,
+	toPos:   UDim2,
+	zIndex:  number?
+): Frame
+	local zi        = zIndex or 11
+	local CIRC_OFF  = 20   -- circle centre is 20 px above the wrapper centre
+
+	-- Circle-centre positions in offset-space.
+	-- Both fromPos and toPos are assumed to share the same Scale (0.5, 0.5).
+	local ax = fromPos.X.Offset
+	local ay = fromPos.Y.Offset - CIRC_OFF
+	local bx = toPos.X.Offset
+	local by = toPos.Y.Offset - CIRC_OFF
+
+	local dx     = bx - ax
+	local dy     = by - ay
+	local length = math.sqrt(dx * dx + dy * dy)
+	local midX   = (ax + bx) * 0.5
+	local midY   = (ay + by) * 0.5
+	local angle  = math.deg(math.atan2(dy, dx))
+
+	local line                  = Instance.new("Frame")
+	line.Name                   = "ConnectorLine"
+	line.Size                   = UDim2.fromOffset(length, 2)
+	line.Position               = UDim2.new(fromPos.X.Scale, midX, fromPos.Y.Scale, midY)
+	line.AnchorPoint            = Vector2.new(0.5, 0.5)
+	line.BackgroundColor3       = UILib.C.BORDER
+	line.BackgroundTransparency = 1
+	line.BorderSizePixel        = 0
+	line.Rotation               = angle
+	line.ZIndex                 = zi
+	line.Parent                 = parent
+
+	return line
+end
+
 return UILib

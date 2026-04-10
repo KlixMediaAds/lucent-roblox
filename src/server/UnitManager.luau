@@ -629,7 +629,8 @@ function UnitManager.init(resourceManager)
 
 			local myPos      = data.part.Position
 			local myOwnerStr = tostring(data.owner.UserId)
-			local hitPos: Vector3? = nil
+			local hitPos:  Vector3? = nil
+			local vfxType: string   = data.unitType
 
 			local atkRange = data.attackRange
 
@@ -665,14 +666,25 @@ function UnitManager.init(resourceManager)
 			end
 
 			if data.unitType == "Tank" then
-				-- Tanks: buildings first (+ AoE splash on nearby units), fall back to units
+				-- Tanks: buildings first (+ AoE splash on nearby units), fall back to units.
+				-- With RocketBarrage researched: fires 3 rockets (each 65% damage) instead of
+				-- one shell, with random landing spread and individual splash per rocket.
 				local hasConcussion = researchManagerRef
 					and researchManagerRef.hasResearch(data.owner, "ConcussionShells")
-				local slowEnd = tick() + Config.TANK_SLOW_DURATION
+				local hasBarrage    = researchManagerRef
+					and researchManagerRef.hasResearch(data.owner, "RocketBarrage")
+				local slowEnd       = tick() + Config.TANK_SLOW_DURATION
+
+				-- Per-shot stats: barrage = 3 rockets × 65%; normal = 1 shell × 100%
+				local shotCount = hasBarrage and Config.ROCKET_BARRAGE_COUNT    or 1
+				local shotDmg   = hasBarrage
+					and math.floor(data.attackDmg * Config.ROCKET_BARRAGE_DMG_MULT)
+					or  data.attackDmg
+				local spreadR   = hasBarrage and Config.ROCKET_BARRAGE_SPREAD or 0.0
 
 				local function applySplash(centre: Vector3, skipId: string?)
 					local splashR   = Config.TANK_SPLASH_RANGE
-					local splashDmg = math.floor(data.attackDmg * Config.TANK_SPLASH_DAMAGE_MULT)
+					local splashDmg = math.floor(shotDmg * Config.TANK_SPLASH_DAMAGE_MULT)
 					for otherId, other in units do
 						if other.hp <= 0 then continue end
 						if skipId and otherId == skipId then continue end
@@ -705,9 +717,13 @@ function UnitManager.init(resourceManager)
 						bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
 					end
 					if bId and bPos then
-						buildingManagerRef.damage(bId, data.attackDmg)
+						buildingManagerRef.damage(bId, shotDmg)
 						hitPos = bPos
-						applySplash(bPos, nil)
+						for _ = 1, shotCount do
+							local ox = (math.random() - 0.5) * 2 * spreadR
+							local oz = (math.random() - 0.5) * 2 * spreadR
+							applySplash(bPos + Vector3.new(ox, 0, oz), nil)
+						end
 					end
 				end
 				if not hitPos then
@@ -723,13 +739,19 @@ function UnitManager.init(resourceManager)
 					if bestId2 then
 						local other = units[bestId2]
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
-						other.hp -= calcDamage(other, data.attackDmg)
+						other.hp -= calcDamage(other, shotDmg)
 						applyHP(other)
 						if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
-						applySplash(hitPos, bestId2)
+						for _ = 1, shotCount do
+							local ox = (math.random() - 0.5) * 2 * spreadR
+							local oz = (math.random() - 0.5) * 2 * spreadR
+							applySplash(hitPos + Vector3.new(ox, 0, oz), bestId2)
+						end
 					end
 				end
+
+				if hasBarrage and hitPos then vfxType = "TankBarrage" end
 			else
 				-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
 				local bestId2, bestDist2 = nil :: string?, math.huge
@@ -785,7 +807,7 @@ function UnitManager.init(resourceManager)
 				if flatDir.Magnitude > 0.1 then
 					data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
 				end
-			unitHitRemote:FireAllClients(myPos, hitPos, data.unitType)
+			unitHitRemote:FireAllClients(myPos, hitPos, vfxType)
 			end
 		end
 

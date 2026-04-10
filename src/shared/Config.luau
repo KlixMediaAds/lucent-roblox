@@ -73,15 +73,22 @@ Config.MINE_UPGRADE_EFFICIENCY_MULT  = 2.0   -- income per miner × this
 Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
 
 -- Research techs (time in seconds; no resource cost)
+-- `requires`: if set, that tech must be done before this one can start.
 Config.RESEARCH = {
 	BetterMines       = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
 	EliteUnits        = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
 	MedicUnit         = { time = 15, desc = "Unlocks the Medic unit at Barracks. Medics automatically heal damaged friendly units nearby." },
 	TurretUpgrades    = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
 	ConcussionShells  = { time = 10, desc = "Tank shells slow enemy units on impact." },
+	RocketBarrage     = { time = 18, requires = "ConcussionShells", desc = "Replaces the tank's attack with 3 spiraling rockets, each dealing AoE splash damage." },
 	CombatStims       = { time = 12, desc = "Soldiers automatically boost speed and attack rate when engaging enemies." },
 	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
 }
+
+-- Tank: Rocket Barrage (requires ConcussionShells)
+Config.ROCKET_BARRAGE_COUNT    = 3     -- rockets fired per attack cycle
+Config.ROCKET_BARRAGE_DMG_MULT = 0.65  -- each rocket deals this fraction of base attack damage
+Config.ROCKET_BARRAGE_SPREAD   = 5.0   -- max random landing offset per rocket in studs
 
 -- Soldier: Combat Stims
 Config.SOLDIER_STIM_DURATION  = 8    -- seconds stims stay active

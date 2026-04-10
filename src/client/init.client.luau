@@ -1000,6 +1000,114 @@ local function spawnTankExplosion(pos: Vector3)
 	end)
 end
 
+-- Rocket Barrage: 3 small rockets that spiral toward the target before impact.
+-- Each rocket has a random landing offset and converging helix animation.
+local function spawnRocketBarrage(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL  = 0.55   -- seconds per rocket
+	local ARC     = 3.5    -- height of the ballistic arc
+	local HELIX_R = 2.8    -- helix radius at launch; shrinks to 0 at impact
+	local TWISTS  = 2      -- full rotations during flight
+
+	for i = 1, 3 do
+		local launchDelay = (i - 1) * 0.13
+		local phase       = (i - 1) * (math.pi * 2 / 3)  -- 120° apart
+
+		-- Small random landing spread per rocket (server mirrors this for damage)
+		local lx = (math.random() - 0.5) * 6
+		local lz = (math.random() - 0.5) * 6
+
+		task.delay(launchDelay, function()
+			local origin = fromPos + Vector3.new(0, 2.2, 0)
+			local dest   = toPos   + Vector3.new(lx, 0.4, lz)
+
+			local rocket        = Instance.new("Part")
+			rocket.Name         = "_BarrageRocket"
+			rocket.Shape        = Enum.PartType.Block
+			rocket.Size         = Vector3.new(0.5, 0.5, 1.4)
+			rocket.Color        = Color3.fromRGB(220, 60, 30)
+			rocket.Material     = Enum.Material.Neon
+			rocket.Anchored     = true
+			rocket.CanCollide   = false
+			rocket.CanQuery     = false
+			rocket.CastShadow   = false
+			rocket.Position     = origin
+			rocket.Parent       = workspace
+
+			local a0            = Instance.new("Attachment", rocket)
+			a0.Position         = Vector3.new(0, 0, 0.6)
+			local a1            = Instance.new("Attachment", rocket)
+			a1.Position         = Vector3.new(0, 0, -0.6)
+
+			local trail             = Instance.new("Trail", rocket)
+			trail.Attachment0       = a0
+			trail.Attachment1       = a1
+			trail.Lifetime          = 0.20
+			trail.MinLength         = 0
+			trail.FaceCamera        = true
+			trail.Color             = ColorSequence.new({
+				ColorSequenceKeypoint.new(0,   Color3.fromRGB(255, 120,  30)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(200,  50,  10)),
+				ColorSequenceKeypoint.new(1,   Color3.fromRGB( 60,  10,   0)),
+			})
+			trail.Transparency  = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.0),
+				NumberSequenceKeypoint.new(1, 1.0),
+			})
+			trail.WidthScale    = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.9),
+				NumberSequenceKeypoint.new(1, 0.0),
+			})
+
+			local elapsed = 0
+			local conn: RBXScriptConnection
+			conn = RunService.RenderStepped:Connect(function(dt)
+				elapsed += dt
+				local t = math.min(elapsed / TRAVEL, 1)
+
+				-- Ballistic arc lerp
+				local basePath = origin:Lerp(dest, t)
+					+ Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+
+				-- Helix: radius collapses to 0 as rocket converges on target
+				local helixRadius = HELIX_R * (1 - t)
+				local angle       = phase + t * TWISTS * math.pi * 2
+				local helixOffset = Vector3.new(
+					math.cos(angle) * helixRadius,
+					0,
+					math.sin(angle) * helixRadius
+				)
+				local newPos = basePath + helixOffset
+
+				-- Orient nose toward next position
+				if t < 0.97 then
+					local tN    = math.min(t + 0.04, 0.97)
+					local baseN = origin:Lerp(dest, tN)
+						+ Vector3.new(0, math.sin(tN * math.pi) * ARC, 0)
+					local helN  = Vector3.new(
+						math.cos(phase + tN * TWISTS * math.pi * 2) * HELIX_R * (1 - tN),
+						0,
+						math.sin(phase + tN * TWISTS * math.pi * 2) * HELIX_R * (1 - tN)
+					)
+					local dir = (baseN + helN) - newPos
+					if dir.Magnitude > 0.05 then
+						rocket.CFrame = CFrame.lookAt(newPos, newPos + dir)
+					else
+						rocket.Position = newPos
+					end
+				else
+					rocket.Position = newPos
+				end
+
+				if t >= 1 then
+					conn:Disconnect()
+					rocket:Destroy()
+					spawnTankExplosion(dest - Vector3.new(0, 0.2, 0))
+				end
+			end)
+		end)
+	end
+end
+
 -- Tank shell: heavy arcing projectile with an orange-to-red trail.
 local function spawnTankShell(fromPos: Vector3, toPos: Vector3)
 	local TRAVEL = 0.48
@@ -1182,6 +1290,11 @@ end)
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then
 		spawnEliteProjectile(fromPos, toPos)
+		return
+	end
+
+	if unitType == "TankBarrage" then
+		spawnRocketBarrage(fromPos, toPos)
 		return
 	end
 

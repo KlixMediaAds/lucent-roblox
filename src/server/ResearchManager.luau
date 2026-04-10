@@ -38,6 +38,7 @@ function ResearchManager.startForPlayer(player: any, _workshopId: string, techNa
 	local state = getState(player)
 	if state.done[techName] then return end
 	if state.inProgress[techName] then return end
+	if tech.requires and not state.done[tech.requires :: string] then return end
 
 	state.inProgress[techName] = true
 
@@ -64,6 +65,8 @@ function ResearchManager.init()
 			local state = getState(player)
 			if state.done[techName] then return end
 			if state.inProgress[techName] then return end
+			-- Check prerequisite (e.g. RocketBarrage requires ConcussionShells)
+			if tech.requires and not state.done[tech.requires :: string] then return end
 
 			state.inProgress[techName] = true
 
