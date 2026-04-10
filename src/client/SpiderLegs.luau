@@ -110,6 +110,7 @@ function SpiderLegs.attach(unitId: string, body: BasePart)
 			p.CanCollide    = false
 			p.CastShadow    = false
 			p.CanQuery      = false
+			p:SetAttribute("UnitId", unitId)
 			p.Parent        = legsFolder
 			table.insert(parts, p)
 		end

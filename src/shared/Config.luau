@@ -18,7 +18,10 @@ Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8  }  -- velo
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
-Config.TANK_SPLASH_RANGE      = 10   -- studs AoE around building target on tank hit
+Config.TANK_SPLASH_RANGE      = 12   -- studs AoE radius on tank hit
+Config.TANK_SPLASH_DAMAGE_MULT = 0.5  -- splash deals this fraction of primary damage
+Config.TANK_SLOW_DURATION     = 1.5  -- seconds units are slowed after a tank shell hit
+Config.TANK_SLOW_MULT         = 0.4  -- speed multiplier while slowed (requires ConcussionShells)
 
 -- Buildings
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
@@ -70,9 +73,10 @@ Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
 
 -- Research techs (time in seconds; no resource cost)
 Config.RESEARCH = {
-	BetterMines    = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
-	EliteUnits     = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
-	TurretUpgrades = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
+	BetterMines       = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
+	EliteUnits        = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
+	TurretUpgrades    = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
+	ConcussionShells  = { time = 10, desc = "Tank shells slow enemy units on impact." },
 }
 
 -- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
@@ -94,7 +98,7 @@ Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18 }
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180  }
 Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25   }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 15, Elite = 30 }  -- studs per type
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 45, Elite = 30 }  -- studs per type
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0  }  -- seconds between attacks
 
 -- Camera

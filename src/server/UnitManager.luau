@@ -25,6 +25,7 @@ type UnitData = {
 	moveSpeed   : number,    -- max speed in studs/s
 	accel       : number,    -- velocity lerp factor (higher = snappier)
 	focusBldId  : string?,   -- building ID to focus-fire (nil = none)
+	slowUntil   : number?,   -- tick() timestamp; unit moves at TANK_SLOW_MULT speed until then
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -50,6 +51,32 @@ local SEP_DIST = 5.5   -- studs: same-team separation trigger radius
 local SEP_PUSH = 0.18  -- studs pushed per frame per overlapping neighbour
 
 -- ── Health bar ────────────────────────────────────────────────────────────────
+
+local function addTankTreads(body: BasePart)
+	-- Body is 7 × 5 × 9.  Treads sit flush with the bottom, just outside each side.
+	-- Unanchored + WeldConstraint so they follow the anchored body automatically.
+	local halfX    = body.Size.X / 2 + 0.75   -- 3.5 + 0.75 = 4.25
+	local offsetY  = -(body.Size.Y / 2) + 1.1  -- flush with bottom edge
+
+	for _, side in { -1, 1 } do
+		local tread        = Instance.new("Part")
+		tread.Name         = "Tread"
+		tread.Size         = Vector3.new(1.5, 2.2, body.Size.Z + 1.5)
+		tread.BrickColor   = BrickColor.new("Dark stone grey")
+		tread.Material     = Enum.Material.SmoothPlastic
+		tread.Anchored     = false
+		tread.CanCollide   = false
+		tread.CastShadow   = false
+		tread.CanQuery     = false
+		tread.CFrame       = body.CFrame * CFrame.new(side * halfX, offsetY, 0)
+		tread.Parent       = body
+
+		local weld         = Instance.new("WeldConstraint")
+		weld.Part0         = body
+		weld.Part1         = tread
+		weld.Parent        = body
+	end
+end
 
 local function addHealthBar(part: BasePart)
 	local bb            = Instance.new("BillboardGui")
@@ -127,6 +154,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
+	if unitType == "Tank" then addTankTreads(part) end
 
 	units[id] = {
 		part        = part,
@@ -493,7 +521,11 @@ function UnitManager.init(resourceManager)
 						end
 					end
 				else
-					desired = delta.Unit * data.moveSpeed
+					local effSpeed = data.moveSpeed
+					if data.slowUntil and tick() < (data.slowUntil :: number) then
+						effSpeed = effSpeed * Config.TANK_SLOW_MULT
+					end
+					desired = delta.Unit * effSpeed
 				end
 			end
 
@@ -549,7 +581,27 @@ function UnitManager.init(resourceManager)
 			local atkRange = data.attackRange
 
 			if data.unitType == "Tank" then
-				-- Tanks: buildings first (+ splash on nearby units), fall back to units
+				-- Tanks: buildings first (+ AoE splash on nearby units), fall back to units
+				local hasConcussion = researchManagerRef
+					and researchManagerRef.hasResearch(data.owner, "ConcussionShells")
+				local slowEnd = tick() + Config.TANK_SLOW_DURATION
+
+				local function applySplash(centre: Vector3, skipId: string?)
+					local splashR   = Config.TANK_SPLASH_RANGE
+					local splashDmg = math.floor(data.attackDmg * Config.TANK_SPLASH_DAMAGE_MULT)
+					for otherId, other in units do
+						if other.hp <= 0 then continue end
+						if skipId and otherId == skipId then continue end
+						if tostring(other.owner.UserId) == myOwnerStr then continue end
+						if (other.part.Position - centre).Magnitude <= splashR then
+							other.hp -= splashDmg
+							applyHP(other)
+							if hasConcussion then other.slowUntil = slowEnd end
+							if other.hp <= 0 then table.insert(toRemove, otherId) end
+						end
+					end
+				end
+
 				if buildingManagerRef then
 					local bId: string?, bPos: Vector3?
 					if data.focusBldId then
@@ -571,16 +623,7 @@ function UnitManager.init(resourceManager)
 					if bId and bPos then
 						buildingManagerRef.damage(bId, data.attackDmg)
 						hitPos = bPos
-						local splashR = Config.TANK_SPLASH_RANGE
-						for otherId, other in units do
-							if other.hp <= 0 then continue end
-							if tostring(other.owner.UserId) == myOwnerStr then continue end
-							if (other.part.Position - bPos).Magnitude <= splashR then
-								other.hp -= math.floor(data.attackDmg * 0.5)
-								applyHP(other)
-								if other.hp <= 0 then table.insert(toRemove, otherId) end
-							end
-						end
+						applySplash(bPos, nil)
 					end
 				end
 				if not hitPos then
@@ -598,7 +641,9 @@ function UnitManager.init(resourceManager)
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= data.attackDmg
 						applyHP(other)
+						if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+						applySplash(hitPos, bestId2)
 					end
 				end
 			else
@@ -698,7 +743,8 @@ function UnitManager.init(resourceManager)
 		for _, id in toRemove do
 			local d = units[id]
 			if d then
-				if (d.unitType == "Tank" or d.unitType == "Soldier") and d.owner.Parent then
+				if (d.unitType == "Tank" or d.unitType == "Soldier")
+					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
 				end
 				d.part:Destroy()

@@ -26,6 +26,7 @@ local peek          = Fusion.peek
 
 -- ── Palette ───────────────────────────────────────────────────────────────────
 local PURPLE = Color3.fromRGB(160, 80, 230)
+local ORANGE = Color3.fromRGB(220, 120, 30)
 
 -- ── Layout constants ──────────────────────────────────────────────────────────
 local NODE_D = UILib.NODE_D  -- 80 — keep in sync with UILib
@@ -59,6 +60,13 @@ local TECHS = {
 		tip   = "Trains Elite units at your Barracks.\n\nLong range, high damage, spider-leg movement.\nIdeal counter to turret-heavy bases.\n\nCost per unit: 100 res   ⏱ 15 sec",
 	},
 	{
+		key   = "ConcussionShells",
+		name  = "Concussion Shells",
+		icon  = "◈",
+		color = ORANGE,
+		tip   = "Tank shells slow all hit enemies to 40% speed for 1.5 s.\n\nApplies to both the primary target and AoE splash victims.\nStacks with repeated hits — ideal against blob attacks.\n\n⏱ 10 sec",
+	},
+	{
 		key   = "TurretUpgrades",
 		name  = "Turret Upgrades",
 		icon  = "⚙",
@@ -81,8 +89,10 @@ type ChildDef = {
 }
 
 local UNITS_CHILDREN: { ChildDef } = {
-	{ key = "EliteUnits",     icon = "⚔", color = PURPLE,   angle = 180,
+	{ key = "EliteUnits",        icon = "⚔", color = PURPLE, angle = 210,
 	  tip = (techByKey["EliteUnits"] or { tip = "" }).tip },
+	{ key = "ConcussionShells",  icon = "◈", color = ORANGE, angle = 150,
+	  tip = (techByKey["ConcussionShells"] or { tip = "" }).tip },
 }
 
 local STRUCTURES_CHILDREN: { ChildDef } = {

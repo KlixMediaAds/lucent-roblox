@@ -675,6 +675,222 @@ local function spawnEliteExplosion(pos: Vector3)
 	end)
 end
 
+-- Tank shell explosion: orange fireball, shockwave ring, debris chunks.
+local function spawnTankExplosion(pos: Vector3)
+	-- Core: instant white burst
+	local core       = Instance.new("Part")
+	core.Name        = "_TCore"
+	core.Shape       = Enum.PartType.Ball
+	core.Size        = Vector3.new(4, 4, 4)
+	core.BrickColor  = BrickColor.new("White")
+	core.Material    = Enum.Material.Neon
+	core.Anchored    = true
+	core.CanCollide  = false
+	core.CanQuery    = false
+	core.CastShadow  = false
+	core.Position    = pos
+	core.Parent      = workspace
+
+	-- Fireball: expands 3 → 18 studs, orange → dark orange fade
+	local fire       = Instance.new("Part")
+	fire.Name        = "_TFire"
+	fire.Shape       = Enum.PartType.Ball
+	fire.Size        = Vector3.new(3, 3, 3)
+	fire.BrickColor  = BrickColor.new("Bright orange")
+	fire.Material    = Enum.Material.Neon
+	fire.Anchored    = true
+	fire.CanCollide  = false
+	fire.CanQuery    = false
+	fire.CastShadow  = false
+	fire.Position    = pos
+	fire.Parent      = workspace
+
+	-- Inner ember: smaller, persists slightly longer for depth
+	local ember      = Instance.new("Part")
+	ember.Name       = "_TEmber"
+	ember.Shape      = Enum.PartType.Ball
+	ember.Size       = Vector3.new(2, 2, 2)
+	ember.BrickColor = BrickColor.new("Bright yellow")
+	ember.Material   = Enum.Material.Neon
+	ember.Anchored   = true
+	ember.CanCollide = false
+	ember.CanQuery   = false
+	ember.CastShadow = false
+	ember.Position   = pos
+	ember.Parent     = workspace
+
+	-- Shockwave ring: horizontal disc expanding outward
+	local ring       = Instance.new("Part")
+	ring.Name        = "_TRing"
+	ring.Shape       = Enum.PartType.Cylinder
+	ring.Size        = Vector3.new(0.4, 1, 1)
+	ring.BrickColor  = BrickColor.new("Bright orange")
+	ring.Material    = Enum.Material.Neon
+	ring.Anchored    = true
+	ring.CanCollide  = false
+	ring.CanQuery    = false
+	ring.CastShadow  = false
+	ring.CFrame      = CFrame.new(pos + Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+	ring.Parent      = workspace
+
+	-- Debris: 7 chunks fly outward under gravity
+	type DebrisData = { part: Part, vx: number, vy: number, vz: number }
+	local debris: { DebrisData } = {}
+	for i = 1, 7 do
+		local angle = (i - 1) / 7 * math.pi * 2 + math.random() * 0.5
+		local spd   = 12 + math.random() * 9
+		local d: Part = Instance.new("Part")
+		d.Name        = "_TDeb"
+		d.Size        = Vector3.new(0.7 + math.random() * 0.6, 0.7 + math.random() * 0.6, 0.7 + math.random() * 0.6)
+		d.BrickColor  = (i % 3 == 0) and BrickColor.new("Bright yellow")
+			or (i % 3 == 1) and BrickColor.new("Bright orange")
+			or BrickColor.new("Reddish brown")
+		d.Material    = Enum.Material.Neon
+		d.Anchored    = true
+		d.CanCollide  = false
+		d.CanQuery    = false
+		d.CastShadow  = false
+		d.Position    = pos
+		d.Parent      = workspace
+		table.insert(debris, {
+			part = d,
+			vx   = math.cos(angle) * spd,
+			vy   = 9 + math.random() * 6,
+			vz   = math.sin(angle) * spd,
+		})
+	end
+
+	local CORE_DUR   = 0.08
+	local FIRE_DUR   = 0.40
+	local EMBER_DUR  = 0.25
+	local RING_DUR   = 0.28
+	local DEBRIS_DUR = 0.65
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+
+		if core then
+			if elapsed < CORE_DUR then
+				core.Transparency = elapsed / CORE_DUR
+			else
+				core:Destroy(); core = nil :: any
+			end
+		end
+
+		if fire then
+			if elapsed < FIRE_DUR then
+				local t = elapsed / FIRE_DUR
+				local s = 3 + t * 15
+				fire.Size         = Vector3.new(s, s, s)
+				fire.Transparency = 0.1 + t * 0.9
+			else
+				fire:Destroy(); fire = nil :: any
+			end
+		end
+
+		if ember then
+			if elapsed < EMBER_DUR then
+				local t = elapsed / EMBER_DUR
+				local s = 2 + t * 4
+				ember.Size         = Vector3.new(s, s, s)
+				ember.Transparency = t
+			else
+				ember:Destroy(); ember = nil :: any
+			end
+		end
+
+		if ring then
+			if elapsed < RING_DUR then
+				local t = elapsed / RING_DUR
+				local d = 1 + t * 20
+				ring.Size         = Vector3.new(0.4, d, d)
+				ring.Transparency = 0.15 + t * 0.85
+			else
+				ring:Destroy(); ring = nil :: any
+			end
+		end
+
+		for _, db in debris do
+			if db.part then
+				if elapsed < DEBRIS_DUR then
+					local t = elapsed / DEBRIS_DUR
+					db.vy -= 35 * dt
+					db.part.Position = db.part.Position
+						+ Vector3.new(db.vx * dt, db.vy * dt, db.vz * dt)
+					db.part.Transparency = math.max(0, t - 0.2) / 0.8
+				else
+					db.part:Destroy(); db.part = nil :: any
+				end
+			end
+		end
+
+		if elapsed >= DEBRIS_DUR then conn:Disconnect() end
+	end)
+end
+
+-- Tank shell: heavy arcing projectile with an orange-to-red trail.
+local function spawnTankShell(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL = 0.48
+	local ARC    = 6.0
+
+	local origin = fromPos + Vector3.new(0, 2.0, 0)
+	local dest   = toPos   + Vector3.new(0, 0.5, 0)
+
+	local shell        = Instance.new("Part")
+	shell.Name         = "_TankShell"
+	shell.Shape        = Enum.PartType.Ball
+	shell.Size         = Vector3.new(1.1, 1.1, 1.1)
+	shell.BrickColor   = BrickColor.new("Bright orange")
+	shell.Material     = Enum.Material.Neon
+	shell.Anchored     = true
+	shell.CanCollide   = false
+	shell.CanQuery     = false
+	shell.CastShadow   = false
+	shell.Position     = origin
+	shell.Parent       = workspace
+
+	local a0           = Instance.new("Attachment", shell)
+	a0.Position        = Vector3.new(0,  0.35, 0)
+	local a1           = Instance.new("Attachment", shell)
+	a1.Position        = Vector3.new(0, -0.35, 0)
+
+	local trail              = Instance.new("Trail", shell)
+	trail.Attachment0        = a0
+	trail.Attachment1        = a1
+	trail.Lifetime           = 0.30
+	trail.MinLength          = 0
+	trail.FaceCamera         = true
+	trail.Color              = ColorSequence.new({
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB(255, 200,  60)),
+		ColorSequenceKeypoint.new(0.4, Color3.fromRGB(230, 100,  20)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB( 80,  20,   0)),
+	})
+	trail.Transparency       = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.0),
+		NumberSequenceKeypoint.new(1, 1.0),
+	})
+	trail.WidthScale         = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1.0),
+		NumberSequenceKeypoint.new(1, 0.0),
+	})
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t = math.min(elapsed / TRAVEL, 1)
+		shell.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+
+		if t >= 1 then
+			conn:Disconnect()
+			shell:Destroy()
+			spawnTankExplosion(dest)
+		end
+	end)
+end
+
 -- Elite lobbed orb: large arc, purple, with a color trail.
 local function spawnEliteProjectile(fromPos: Vector3, toPos: Vector3)
 	local TRAVEL = 0.55
@@ -738,27 +954,25 @@ local function spawnEliteProjectile(fromPos: Vector3, toPos: Vector3)
 end
 
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
-	-- Elite gets its own lobbed projectile with trail + explosion.
 	if unitType == "Elite" then
 		spawnEliteProjectile(fromPos, toPos)
 		return
 	end
 
-	local isTank   = unitType == "Tank"
-	local projSize = isTank and Vector3.new(0.9, 0.9, 0.9) or Vector3.new(0.45, 0.45, 0.45)
-	local color    = isTank and BrickColor.new("Bright orange") or BrickColor.new("Bright yellow")
-	local travel   = isTank and 0.26 or 0.14   -- seconds to reach target
-	local arc      = isTank and 3.5 or 0.8     -- peak height of trajectory
+	if unitType == "Tank" then
+		spawnTankShell(fromPos, toPos)
+		return
+	end
 
-	-- Offset origin to unit's approximate gun height
+	-- Soldier: small fast yellow bullet with simple impact flash
 	local origin = fromPos + Vector3.new(0, 1.5, 0)
 	local dest   = toPos   + Vector3.new(0, 1.0, 0)
 
 	local proj          = Instance.new("Part")
 	proj.Name           = "_UnitProj"
-	proj.Size           = projSize
+	proj.Size           = Vector3.new(0.45, 0.45, 0.45)
 	proj.Shape          = Enum.PartType.Ball
-	proj.BrickColor     = color
+	proj.BrickColor     = BrickColor.new("Bright yellow")
 	proj.Material       = Enum.Material.Neon
 	proj.Position       = origin
 	proj.Anchored       = true
@@ -771,21 +985,17 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function(dt)
 		elapsed += dt
-		local t = math.min(elapsed / travel, 1)
-		proj.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * arc, 0)
+		local t = math.min(elapsed / 0.14, 1)
+		proj.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * 0.8, 0)
 
 		if t >= 1 then
 			conn:Disconnect()
 			proj:Destroy()
-
-			-- Impact flash
 			local flash         = Instance.new("Part")
 			flash.Name          = "_UnitImpact"
-			flash.Size          = isTank
-				and Vector3.new(2.8, 2.8, 2.8)
-				or  Vector3.new(1.5, 1.5, 1.5)
+			flash.Size          = Vector3.new(1.5, 1.5, 1.5)
 			flash.Shape         = Enum.PartType.Ball
-			flash.BrickColor    = color
+			flash.BrickColor    = BrickColor.new("Bright yellow")
 			flash.Material      = Enum.Material.Neon
 			flash.Position      = dest
 			flash.Anchored      = true

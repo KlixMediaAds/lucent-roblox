@@ -214,9 +214,14 @@ local function rebuildSourceList()
 	if minersF then
 		for _, c in minersF:GetChildren() do
 			local ov = c:FindFirstChild("OwnerId")
-			if ov and ov.Value == myStr and c:IsA("BasePart") then
-				table.insert(ownMinerParts, c :: BasePart)
+			if not ov or ov.Value ~= myStr then continue end
+			local root: BasePart?
+			if c:IsA("BasePart") then
+				root = c :: BasePart
+			elseif c:IsA("Model") then
+				root = (c :: Model).PrimaryPart or c:FindFirstChildWhichIsA("BasePart") :: BasePart?
 			end
+			if root then table.insert(ownMinerParts, root) end
 		end
 	end
 
@@ -328,14 +333,23 @@ local function updateFog()
 				unitLastVis[uid] = vis
 				local prev = activeTweens[uid]
 				if prev then prev:Cancel() end
+				local modifier = if vis then 0 else 1
 				local tw = TweenService:Create(bp, FADE_INFO, {
-					LocalTransparencyModifier = if vis then 0 else 1
+					LocalTransparencyModifier = modifier
 				})
 				activeTweens[uid] = tw
 				tw:Play()
 				tw.Completed:Connect(function(ps)
 					if ps == Enum.PlaybackState.Completed then activeTweens[uid] = nil end
 				end)
+				-- Also fade any visual sub-parts (e.g. tank treads)
+				for _, desc in bp:GetDescendants() do
+					if desc:IsA("BasePart") then
+						TweenService:Create(desc :: BasePart, FADE_INFO, {
+							LocalTransparencyModifier = modifier
+						}):Play()
+					end
+				end
 			end
 
 			-- BillboardGuis hard-cut (no benefit tweening UI opacity)
@@ -411,11 +425,38 @@ local function updateFog()
 	local minersF = workspace:FindFirstChild("Miners")
 	if minersF then
 		for _, child in minersF:GetChildren() do
-			if not child:IsA("BasePart") then continue end
 			local ov = child:FindFirstChild("OwnerId")
 			if not ov or ov.Value == myStr then continue end
-			local bp = child :: BasePart
-			bp.LocalTransparencyModifier = if posIsVisible(bp.Position, visGrid) then 0 else 1
+			if child:IsA("BasePart") then
+				local bp = child :: BasePart
+				local modifier = if posIsVisible(bp.Position, visGrid) then 0 else 1
+				bp.LocalTransparencyModifier = modifier
+			elseif child:IsA("Model") then
+				local model = child :: Model
+				local root = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart") :: BasePart?
+				local vis = root and posIsVisible(root.Position, visGrid) or false
+				local modifier = if vis then 0 else 1
+				for _, desc in model:GetDescendants() do
+					if desc:IsA("BasePart") then
+						(desc :: BasePart).LocalTransparencyModifier = modifier
+					elseif desc:IsA("BillboardGui") then
+						(desc :: BillboardGui).Enabled = vis
+					end
+				end
+			end
+		end
+	end
+
+	-- ── 5. Elite unit legs — mirror owning unit's visibility ──────────────
+	local legsF = workspace:FindFirstChild("_EliteLegs")
+	if legsF then
+		for _, legPart in legsF:GetChildren() do
+			if not legPart:IsA("BasePart") then continue end
+			local uid = legPart:GetAttribute("UnitId") :: string?
+			if not uid then continue end
+			local vis = unitLastVis[uid]  -- nil = not yet seen → stay hidden
+			local lp = legPart :: BasePart
+			lp.LocalTransparencyModifier = if vis then 0 else 1
 		end
 	end
 
