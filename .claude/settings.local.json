@@ -5,7 +5,9 @@
       "Bash(wally --version)",
       "Read(//usr/local/bin/**)",
       "Read(//c/Users/ohkod/.cargo/bin/**)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)"
     ]
   }
 }

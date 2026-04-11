@@ -28,10 +28,25 @@ Config.TANK_SLOW_MULT         = 0.4  -- speed multiplier while slowed (requires 
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
 Config.BUILDING_GRID         = 5     -- snap grid in studs
 
--- Mineral Deposits
-Config.DEPOSIT_COUNT         = 8
+-- Mineral Deposits — cluster spawning
 Config.DEPOSIT_SIZE          = Vector3.new(5, 10, 5)
-Config.DEPOSIT_SPREAD        = 150   -- half-extent of random placement area
+Config.DEPOSIT_SPREAD        = 380   -- half-extent of placement area (2× map)
+
+-- Ore clusters (initial generation)
+Config.CLUSTER_COUNT         = 6     -- number of initial ore clusters (must be even for mirror symmetry)
+Config.CLUSTER_SIZE_MIN      = 3     -- minimum deposits per cluster
+Config.CLUSTER_SIZE_MAX      = 5     -- maximum deposits per cluster
+Config.CLUSTER_RADIUS        = 55    -- max scatter radius within a cluster (studs)
+Config.CLUSTER_MIN_DIST      = 130   -- min distance between cluster centers (studs)
+
+-- Ore wave (comet respawn system)
+Config.ORE_WAVE_MAX_DEPOSITS    = 20   -- cap; no wave fires while unclaimed count >= this
+Config.ORE_WAVE_MIN_INTERVAL    = 25   -- seconds between depletion and wave when ores are scarce
+Config.ORE_WAVE_MAX_INTERVAL    = 180  -- seconds when plenty of ores remain
+Config.ORE_COMET_CLUSTER_SIZE_MIN = 2  -- deposits spawned per wave (min)
+Config.ORE_COMET_CLUSTER_SIZE_MAX = 4  -- deposits spawned per wave (max)
+Config.ORE_COMET_HEIGHT         = 220  -- studs above ground comets spawn
+Config.ORE_COMET_SPEED          = 85   -- studs per second fall speed
 
 -- Mini Miners (spawned automatically by Mine buildings)
 Config.MINI_MINER_SIZE           = Vector3.new(5, 4, 5)
@@ -161,6 +176,11 @@ Config.REMOTES = {
 	CCAttacked              = "CCAttacked",
 	MineDepletionWarning    = "MineDepletionWarning",
 	HealBeam                = "HealBeam",
+	CometWave               = "CometWave",
+	LobbySync               = "LobbySync",
+	LobbyReady              = "LobbyReady",
+	LobbyReroll             = "LobbyReroll",
+	LobbyStart              = "LobbyStart",
 }
 
 return Config

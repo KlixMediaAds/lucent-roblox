@@ -28,7 +28,7 @@ local localPlayer = Players.LocalPlayer
 
 -- ── Config ────────────────────────────────────────────────────────────────────
 local CELL_SIZE  = 12     -- studs per fog tile
-local GRID_CELLS = 36     -- tiles per axis  →  ±216 stud coverage
+local GRID_CELLS = 72     -- tiles per axis  →  ±432 stud coverage
 local HALF       = GRID_CELLS / 2  -- 18
 
 local FOG_Y        = 0.15

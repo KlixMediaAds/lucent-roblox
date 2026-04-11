@@ -20,6 +20,7 @@ type MineData = {
 local depositClaimed: { [string]: boolean } = {}
 local depositList:    { Vector3 }           = {}
 local mines:          { [string]: MineData } = {}
+local waveScheduled   = false
 local minerHpTable:   { [any]: number }      = {}   -- miner Model → current HP
 
 local depositsFolder: Folder
@@ -81,45 +82,146 @@ end
 local function generateDeposits()
 	local GRID     = Config.BUILDING_SIZE.X
 	local SPREAD   = Config.DEPOSIT_SPREAD
-	local MIN_DIST = GRID * 3
+	local MIN_DIST = GRID * 2
 
-	local attempts = 0
-	while #depositList < Config.DEPOSIT_COUNT and attempts < 3000 do
-		attempts += 1
+	-- Mirror symmetry across the X axis (Z = 0 line).
+	-- We generate pairCount cluster centres in the Z > 0 half, then reflect
+	-- every deposit to Z < 0 so the map is exactly symmetric north/south.
+	local pairCount = math.floor(Config.CLUSTER_COUNT / 2)
+
+	-- 1. Pick cluster centres in the positive-Z half.
+	--    Minimum starting Z keeps each centre far enough from the mirror line
+	--    so its reflected twin stays CLUSTER_MIN_DIST away.
+	local zMin = math.ceil(Config.CLUSTER_MIN_DIST / 2 / GRID) * GRID  -- e.g. 70
+	local halfCenters: { Vector3 } = {}
+	for _ = 1, 3000 do
+		if #halfCenters >= pairCount then break end
 		local x         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
-		local z         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
+		local z         = math.round(math.random(zMin, SPREAD)    / GRID) * GRID
 		local candidate = Vector3.new(x, 0, z)
-
-		if candidate.Magnitude < 45 then continue end
+		if candidate.Magnitude < 60 then continue end
 
 		local valid = true
-		for _, p in depositList do
-			if (Vector3.new(p.X, 0, p.Z) - candidate).Magnitude < MIN_DIST then
-				valid = false; break
-			end
+		for _, c in halfCenters do
+			-- Enforce spacing vs. both the original and its Z-reflected twin
+			if (c                             - candidate).Magnitude < Config.CLUSTER_MIN_DIST then valid = false; break end
+			if (Vector3.new(c.X, 0, -c.Z)    - candidate).Magnitude < Config.CLUSTER_MIN_DIST then valid = false; break end
 		end
+		if valid then table.insert(halfCenters, candidate) end
+	end
 
-		if valid then
-			table.insert(depositList, candidate)
-			depositClaimed[posKey(candidate)] = false
+	-- 2. Scatter deposits around each centre and simultaneously place the mirror.
+	for _, center in halfCenters do
+		local clusterSize = math.random(Config.CLUSTER_SIZE_MIN, Config.CLUSTER_SIZE_MAX)
+		local placed      = 0
+		for _ = 1, 1000 do
+			if placed >= clusterSize then break end
+			local angle = math.random() * math.pi * 2
+			local dist  = math.random() * Config.CLUSTER_RADIUS
+			local x     = math.round((center.X + math.cos(angle) * dist) / GRID) * GRID
+			local z     = math.round((center.Z + math.sin(angle) * dist) / GRID) * GRID
+
+			-- Reject z ≈ 0: the mirror would land almost on top of the original
+			if math.abs(z) < GRID * 2 then continue end
+
+			local candidate = Vector3.new(x, 0,  z)
+			local mirrored  = Vector3.new(x, 0, -z)
+			if candidate.Magnitude < 60 then continue end
+			if mirrored.Magnitude  < 60 then continue end
+
+			local valid = true
+			for _, p in depositList do
+				local pf = Vector3.new(p.X, 0, p.Z)
+				if (pf - candidate).Magnitude < MIN_DIST then valid = false; break end
+				if (pf - mirrored).Magnitude  < MIN_DIST then valid = false; break end
+			end
+
+			if valid then
+				table.insert(depositList, candidate)
+				depositClaimed[posKey(candidate)] = false
+				table.insert(depositList, mirrored)
+				depositClaimed[posKey(mirrored)]  = false
+				placed += 1
+			end
 		end
 	end
 end
 
-local function spawnReplacementDeposit()
+-- ── Ore wave system ───────────────────────────────────────────────────────────
+
+-- Returns how many unclaimed (unbuilt-on) deposits currently exist.
+local function countUnclaimedDeposits(): number
+	local n = 0
+	for _, pos in depositList do
+		if depositClaimed[posKey(pos)] == false then n += 1 end
+	end
+	return n
+end
+
+-- Returns true if the XZ position is far enough from all placed buildings.
+local function isClearOfBuildings(pos: Vector3): boolean
+	local safe = Config.BUILDING_SIZE.X * 1.5
+	local buildingsFolder = workspace:FindFirstChild("Buildings")
+	if not buildingsFolder then return true end
+	for _, model in buildingsFolder:GetChildren() do
+		local base = model:FindFirstChild("Base") :: BasePart?
+		if base then
+			local dx = base.Position.X - pos.X
+			local dz = base.Position.Z - pos.Z
+			if dx * dx + dz * dz < safe * safe then return false end
+		end
+	end
+	return true
+end
+
+-- Fires a comet wave: picks a new cluster center, validates positions,
+-- fires the visual remote, then adds deposits after the travel time.
+local function spawnCometWave()
+	waveScheduled = false
+
+	-- Bail if already near the deposit cap
+	if countUnclaimedDeposits() >= Config.ORE_WAVE_MAX_DEPOSITS then return end
+
 	local GRID     = Config.BUILDING_SIZE.X
 	local SPREAD   = Config.DEPOSIT_SPREAD
-	local MIN_DIST = GRID * 3
+	local MIN_DIST = GRID * 2
 
-	for _ = 1, 500 do
+	-- Find a valid cluster center
+	local center: Vector3? = nil
+	for _ = 1, 600 do
 		local x         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
 		local z         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
 		local candidate = Vector3.new(x, 0, z)
+		if candidate.Magnitude < 60 then continue end
+		if not isClearOfBuildings(candidate) then continue end
 
-		if candidate.Magnitude < 45 then continue end
+		-- Not too close to existing unclaimed clusters
+		local valid = true
+		for _, p in depositList do
+			if depositClaimed[posKey(p)] == false then
+				if (Vector3.new(p.X, 0, p.Z) - candidate).Magnitude < Config.CLUSTER_MIN_DIST then
+					valid = false; break
+				end
+			end
+		end
+		if valid then center = candidate; break end
+	end
+	if not center then return end
 
+	-- Scatter comet targets around the center
+	local clusterSize    = math.random(Config.ORE_COMET_CLUSTER_SIZE_MIN, Config.ORE_COMET_CLUSTER_SIZE_MAX)
+	local newPositions: { Vector3 } = {}
+	for _ = 1, 600 do
+		if #newPositions >= clusterSize then break end
+		local angle     = math.random() * math.pi * 2
+		local dist      = math.random() * Config.CLUSTER_RADIUS
+		local x         = math.round(((center :: Vector3).X + math.cos(angle) * dist) / GRID) * GRID
+		local z         = math.round(((center :: Vector3).Z + math.sin(angle) * dist) / GRID) * GRID
+		local candidate = Vector3.new(x, 0, z)
+		if candidate.Magnitude < 60 then continue end
 		local key = posKey(candidate)
 		if depositClaimed[key] ~= nil then continue end
+		if not isClearOfBuildings(candidate) then continue end
 
 		local valid = true
 		for _, p in depositList do
@@ -127,17 +229,52 @@ local function spawnReplacementDeposit()
 				valid = false; break
 			end
 		end
+		for _, np in newPositions do
+			if (np - candidate).Magnitude < MIN_DIST then valid = false; break end
+		end
+		if valid then table.insert(newPositions, candidate) end
+	end
+	if #newPositions == 0 then return end
 
-		if valid then
-			table.insert(depositList, candidate)
+	-- Build comet data for clients: stagger each comet 0.4 s apart
+	local cometData: { { pos: Vector3, stagger: number } } = {}
+	for i, pos in newPositions do
+		table.insert(cometData, { pos = pos, stagger = (i - 1) * 0.4 })
+	end
+	RemoteHandler.get(Config.REMOTES.CometWave):FireAllClients(cometData)
+
+	-- After each comet lands, add the deposit (re-check buildings in case one was built during flight)
+	local travelTime = Config.ORE_COMET_HEIGHT / Config.ORE_COMET_SPEED
+	for i, pos in newPositions do
+		local stagger = (i - 1) * 0.4
+		task.delay(travelTime + stagger, function()
+			if not isClearOfBuildings(pos) then return end
+			local key = posKey(pos)
+			if depositClaimed[key] ~= nil then return end
+			table.insert(depositList, pos)
 			depositClaimed[key] = false
-			makeDepositPart(candidate)
+			makeDepositPart(pos)
 			RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
 				MineralManager.getUnclaimedPositions()
 			)
-			return
-		end
+		end)
 	end
+end
+
+-- Schedules a comet wave after a delay based on current unclaimed ore count.
+-- Only one wave can be pending at a time.
+local function scheduleOreWave()
+	if waveScheduled then return end
+	local current = countUnclaimedDeposits()
+	if current >= Config.ORE_WAVE_MAX_DEPOSITS then return end
+
+	-- Fewer ores → shorter interval
+	local t        = current / Config.ORE_WAVE_MAX_DEPOSITS
+	local interval = Config.ORE_WAVE_MIN_INTERVAL
+		+ (Config.ORE_WAVE_MAX_INTERVAL - Config.ORE_WAVE_MIN_INTERVAL) * t
+
+	waveScheduled = true
+	task.delay(interval, spawnCometWave)
 end
 
 -- ── Depletion ─────────────────────────────────────────────────────────────────
@@ -218,7 +355,7 @@ local function depleteMineSite(mineId: string)
 	data.depositTotal = 0
 	applyDepletedVisuals(mineId)
 	startMineDecay(mineId)
-	spawnReplacementDeposit()
+	scheduleOreWave()
 	-- Notify the mine owner
 	RemoteHandler.get(Config.REMOTES.MineDepletionWarning):FireClient(data.owner, mineId)
 end
@@ -626,6 +763,20 @@ function MineralManager.tryClaimDeposit(pos: Vector3): boolean
 	return true
 end
 
+-- Regenerates the deposit layout (used by the lobby re-roll).
+-- Safe to call before any mines exist.
+function MineralManager.rerollDeposits()
+	depositList    = {}
+	depositClaimed = {}
+	waveScheduled  = false
+	for _, model in depositsFolder:GetChildren() do model:Destroy() end
+	generateDeposits()
+	for _, pos in depositList do makeDepositPart(pos) end
+	RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
+		MineralManager.getUnclaimedPositions()
+	)
+end
+
 function MineralManager.getUnclaimedPositions(): { Vector3 }
 	local out = {}
 	for _, pos in depositList do
@@ -700,6 +851,7 @@ function MineralManager.resetAll()
 	-- Clear deposit state and visuals
 	depositList    = {}
 	depositClaimed = {}
+	waveScheduled  = false
 	for _, model in depositsFolder:GetChildren() do model:Destroy() end
 
 	-- Regenerate fresh deposits and sync to all clients

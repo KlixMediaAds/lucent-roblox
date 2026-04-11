@@ -17,6 +17,8 @@ local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
+local CometManager   = require(script:WaitForChild("CometManager"))
+local LobbyUI        = require(script:WaitForChild("LobbyUI"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -68,6 +70,8 @@ end
 local function isBlocked(): boolean
 	return BuildingPlacer.isActive()
 end
+
+local function startGame()
 
 CameraModule.init()
 SpiderLegs.init(workspace.CurrentCamera)
@@ -1667,3 +1671,8 @@ Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: str
 		spawnBaseTurretShot(fromPos, toPos)
 	end
 end)
+
+end -- startGame
+
+CometManager.init()
+LobbyUI.init(startGame)

@@ -8,13 +8,14 @@ local localPlayer = Players.LocalPlayer
 -- ── Constants ────────────────────────────────────────────────────────────────
 
 local MAP_SIZE   = 180    -- minimap square pixel size
-local WORLD_HALF = 216    -- studs from center to edge (matches FogManager: 36×12/2)
+local WORLD_HALF = 432    -- studs from center to edge (matches FogManager: 72×12/2)
 local PADDING    = 10     -- px gap from screen edge
 
 -- Dot sizes (diameter)
-local DOT_UNIT   = 5
-local DOT_BLD    = 8
-local DOT_MINER  = 3
+local DOT_UNIT    = 5
+local DOT_BLD     = 8
+local DOT_MINER   = 3
+local DOT_DEPOSIT = 4   -- ore deposit square side length
 
 local LINE_T     = 1      -- viewport rectangle line thickness (px)
 
@@ -31,6 +32,7 @@ local C_VIEWPORT    = Color3.fromRGB(255, 255, 255)
 local C_CC_OWN      = Color3.fromRGB(255, 200,  40)
 local C_CC_ENEMY    = Color3.fromRGB(220, 100,  30)
 local C_MONUMENT    = Color3.fromRGB(255, 215,   0)  -- gold — always shown
+local C_DEPOSIT     = Color3.fromRGB(255, 248, 160)  -- light yellow — ore deposits
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,7 @@ local localUserId: number
 local unitDots:    { [string]: Frame } = {}
 local buildingDots:{ [string]: Frame } = {}
 local minerDots:   { [string]: Frame } = {}
+local depositDots: { [string]: Frame } = {}
 local vpLines:     { Frame }           = {}  -- 4 viewport rectangle edges
 
 -- ── World ↔ minimap conversion ────────────────────────────────────────────────
@@ -189,6 +192,44 @@ local function syncBuildingDots(folder: Instance?, pool: { [string]: Frame }, my
 
 	for id, dot in pool do
 		if not seen[id] then dot:Destroy(); pool[id] = nil end
+	end
+end
+
+-- ── Deposit dots (squares, always visible) ────────────────────────────────────
+
+-- Reads unclaimed deposits from the server-created workspace.Deposits folder.
+-- Deposits show regardless of fog — resource nodes are global map knowledge.
+local function syncDepositDots()
+	local seen: { [string]: true } = {}
+	local depositsF = workspace:FindFirstChild("Deposits")
+
+	if depositsF then
+		for _, model in depositsF:GetChildren() do
+			if not model:IsA("Model") then continue end
+			local primary = (model :: Model).PrimaryPart
+			if not primary then continue end
+
+			local id = model.Name  -- posKey string, unique per deposit
+			seen[id] = true
+
+			local dot = depositDots[id]
+			if not dot then
+				dot                   = Instance.new("Frame")
+				dot.Size              = UDim2.fromOffset(DOT_DEPOSIT, DOT_DEPOSIT)
+				dot.AnchorPoint       = Vector2.new(0.5, 0.5)
+				dot.BackgroundColor3  = C_DEPOSIT
+				dot.BorderSizePixel   = 0
+				dot.ZIndex            = 2   -- behind units/buildings, above background
+				dot.Parent            = canvas
+				depositDots[id]       = dot
+			end
+
+			placeDot(dot, primary.Position.X, primary.Position.Z)
+		end
+	end
+
+	for id, dot in depositDots do
+		if not seen[id] then dot:Destroy(); depositDots[id] = nil end
 	end
 end
 
@@ -354,6 +395,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 		local buildingsF = workspace:FindFirstChild("Buildings")
 		local minersF    = workspace:FindFirstChild("Miners")
 
+		syncDepositDots()
 		syncPartDots(unitsF,    unitDots,    myStr, DOT_UNIT,  C_OWN_UNIT, C_ENEMY_UNIT)
 		syncBuildingDots(buildingsF, buildingDots, myStr)
 		syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
