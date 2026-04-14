@@ -29,6 +29,7 @@ local Players           = game:GetService("Players")
 local TweenService      = game:GetService("TweenService")
 local UserInputService  = game:GetService("UserInputService")
 local GuiService        = game:GetService("GuiService")
+local Lighting          = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -41,23 +42,29 @@ local C             = UILib.C
 -- ── Layout constants ──────────────────────────────────────────────────────────
 local NODE_D  = UILib.NODE_D   -- 80 px diameter
 
-local COL0_X = -420   -- root category column
-local COL1_X = -210   -- tier-1 tech column
+local COL0_X = -490   -- root category column
+local COL1_X = -260   -- tier-1 tech column
 local COL2_X =    0   -- tier-2 tech column
 
 -- Root node Y offsets from screen centre
-local UNITS_ROOT_Y   = -150
-local STRUCTS_ROOT_Y =  165
-local MONUMENT_Y     =  335
+local UNITS_ROOT_Y   = -120
+local STRUCTS_ROOT_Y =  240
+local MONUMENT_Y     =  415
 
 -- Tier-1 Y positions (Units branch)
-local Y_COMBAT  = -260   -- CombatStims
-local Y_CONC    = -150   -- ConcussionShells
-local Y_MEDIC   =  -40   -- MedicUnit
+local Y_COMBAT  = -310   -- CombatStims
+local Y_CONC    = -140   -- ConcussionShells
+local Y_MEDIC   =   70   -- MedicUnit
+
+-- Tier-2 Y positions for the ConcussionShells split (RocketBarrage vs Trapper)
+-- ±60 gives a 120 px gap between them while keeping each ≥110 px clear of its
+-- COL2 neighbours (HardenedArmor above, EliteUnits below).
+local Y_BARRAGE = Y_CONC - 60   -- = -200, RocketBarrage sits above ConcussionShells
+local Y_TRAPPER = Y_CONC + 60   -- =  -80, Trapper sits below ConcussionShells
 
 -- Tier-1 Y positions (Structures branch)
-local Y_MINES   =  110   -- BetterMines
-local Y_TURRET  =  220   -- TurretUpgrades
+local Y_MINES   =  185   -- BetterMines
+local Y_TURRET  =  300   -- TurretUpgrades
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeCCId        : string?
@@ -69,6 +76,7 @@ local showNotificationFn: ((string, Color3?) -> ())?
 local localMonumentTime : number?
 local screenGui         : ScreenGui?
 local overlay           : Frame?
+local workshopBlur      : BlurEffect?
 
 
 -- ── Tech data ─────────────────────────────────────────────────────────────────
@@ -88,6 +96,10 @@ local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: st
 	RocketBarrage = {
 		name = "Rocket Barrage", icon = "🚀", time = 18,
 		tip  = "Replaces tank attacks with 3 spiraling AoE rockets, each dealing 65% base damage.",
+	},
+	Trapper = {
+		name = "Trapper", icon = "⚓", time = 20,
+		tip  = "Replaces tank attacks with harpoons that slow enemies by 90% for 7 s. Carries 5 harpoons, restocking one every 10 s.",
 	},
 	MedicUnit = {
 		name = "Medic Unit", icon = "✚", time = 15,
@@ -111,7 +123,14 @@ local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: st
 local TIER2_PARENT: { [string]: string } = {
 	HardenedArmor = "CombatStims",
 	RocketBarrage  = "ConcussionShells",
+	Trapper        = "ConcussionShells",
 	EliteUnits     = "MedicUnit",
+}
+
+-- Mutually exclusive pairs: researching one locks the other permanently
+local MUTEX_SIBLING: { [string]: string } = {
+	RocketBarrage = "Trapper",
+	Trapper       = "RocketBarrage",
 }
 
 -- Tier-1 key → root category key
@@ -338,6 +357,11 @@ local function refreshTechNode(key: string)
 	local progress = getProgressFn   and getProgressFn(key)   or nil
 	local inProg   = progress ~= nil and not done
 
+	-- Check if a mutually exclusive sibling has been chosen — lock this node if so
+	local siblingKey = MUTEX_SIBLING[key]
+	local siblingTaken = siblingKey ~= nil
+		and ((getResearchedFn and getResearchedFn(siblingKey)) or (getProgressFn and getProgressFn(siblingKey) ~= nil))
+
 	if done then
 		applyState(ref, "DONE")
 		ref.stroke.Thickness  = 2
@@ -353,6 +377,12 @@ local function refreshTechNode(key: string)
 		ref.progTrack.Visible       = true
 		ref.progFill.Size           = UDim2.new(progress :: number, 0, 1, 0)
 		ref.progFill.BackgroundColor3 = C.ACCENT
+	elseif siblingTaken then
+		applyState(ref, "CANT_AFFORD")
+		ref.stroke.Thickness  = 2
+		ref.label.Text        = tech.name .. "\n⊘ Locked"
+		ref.btn.Active        = false
+		ref.progTrack.Visible = false
 	else
 		applyState(ref, "AVAILABLE")
 		ref.stroke.Thickness  = 2
@@ -555,7 +585,7 @@ local function buildTechNode(
 	wrapper.Visible = false
 
 	local label = wrapper:FindFirstChild("NodeLabel") :: TextLabel
-	label.Size  = UDim2.fromOffset(NODE_D + 40, 52)
+	label.Size  = UDim2.fromOffset(NODE_D + 52, 52)
 
 	local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	stroke.Color = STATE_STROKE["AVAILABLE"]
@@ -643,7 +673,7 @@ function WorkshopPanel.init(
 	local structStroke = structBtn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	local monStroke    = monBtn:FindFirstChildWhichIsA("UIStroke")    :: UIStroke
 	local monLabel     = _mw:FindFirstChild("NodeLabel")              :: TextLabel
-	monLabel.Size      = UDim2.fromOffset(NODE_D + 40, 52)
+	monLabel.Size      = UDim2.fromOffset(NODE_D + 52, 52)
 
 	-- Monument progress bar
 	local monBarTrack, monBarFill = makeProgressBar(monBtn, 14)
@@ -676,10 +706,12 @@ function WorkshopPanel.init(
 	buildTechNode(ov, "MedicUnit",        cp(COL1_X, Y_MEDIC),  unitsPos, 13)
 
 	-- ── Units tier-2 nodes ──────────────────────────────────────────────────
-	-- Hidden until their tier-1 parent is DONE; slide out from tier-1 position
-	buildTechNode(ov, "HardenedArmor", cp(COL2_X, Y_COMBAT), cp(COL1_X, Y_COMBAT), 14)
-	buildTechNode(ov, "RocketBarrage", cp(COL2_X, Y_CONC),   cp(COL1_X, Y_CONC),   14)
-	buildTechNode(ov, "EliteUnits",    cp(COL2_X, Y_MEDIC),  cp(COL1_X, Y_MEDIC),  14)
+	-- Hidden until their tier-1 parent is DONE; slide out from tier-1 position.
+	-- ConcussionShells splits into RocketBarrage (above) and Trapper (below).
+	buildTechNode(ov, "HardenedArmor", cp(COL2_X, Y_COMBAT),  cp(COL1_X, Y_COMBAT), 14)
+	buildTechNode(ov, "RocketBarrage", cp(COL2_X, Y_BARRAGE),  cp(COL1_X, Y_CONC),   14)
+	buildTechNode(ov, "Trapper",       cp(COL2_X, Y_TRAPPER),  cp(COL1_X, Y_CONC),   14)
+	buildTechNode(ov, "EliteUnits",    cp(COL2_X, Y_MEDIC),   cp(COL1_X, Y_MEDIC),  14)
 
 	-- ── Structures tier-1 nodes ─────────────────────────────────────────────
 	buildTechNode(ov, "BetterMines",    cp(COL1_X, Y_MINES),  structsPos, 13)
@@ -710,6 +742,14 @@ function WorkshopPanel.init(
 	end)
 
 	buildTooltip(sg)
+
+	-- Blur effect — created once, toggled on show/hide
+	local blur          = Instance.new("BlurEffect")
+	blur.Name           = "WorkshopBlur"
+	blur.Size           = 0
+	blur.Enabled        = false
+	blur.Parent         = Lighting
+	workshopBlur        = blur
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -718,6 +758,11 @@ function WorkshopPanel.show(ccId: string)
 	activeCCId = ccId
 	resetAllRoots()
 	if overlay then overlay.Visible = true end
+	if workshopBlur then
+		workshopBlur.Enabled = true
+		workshopBlur.Size    = 0
+		TweenService:Create(workshopBlur, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = 22 }):Play()
+	end
 	refresh()
 end
 
@@ -725,6 +770,13 @@ function WorkshopPanel.hide()
 	activeCCId = nil
 	if overlay then overlay.Visible = false end
 	resetAllRoots()
+	if workshopBlur then
+		local b = workshopBlur
+		TweenService:Create(b, TweenInfo.new(0.20, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = 0 }):Play()
+		task.delay(0.22, function()
+			if b.Parent then b.Enabled = false end
+		end)
+	end
 end
 
 function WorkshopPanel.refreshIfVisible()

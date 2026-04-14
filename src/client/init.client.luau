@@ -288,6 +288,113 @@ local function applyTankConcussionVisual(body: BasePart)
 	end
 end
 
+-- ── Trapper visual upgrade ────────────────────────────────────────────────────
+-- Adds a harpoon rack on top of the tank and a BillboardGui with 5 white squares
+-- showing the current harpoon count. The squares go dark as harpoons are consumed.
+local function applyTrapperVisual(body: BasePart)
+	if body:FindFirstChild("_HarpoonRack") then return end
+
+	local halfY = body.Size.Y / 2
+
+	local function weld(p: BasePart)
+		local w   = Instance.new("WeldConstraint")
+		w.Part0   = body
+		w.Part1   = p
+		w.Parent  = body
+	end
+
+	-- Rack base plate centered on top of the tank
+	local rack         = Instance.new("Part")
+	rack.Name          = "_HarpoonRack"
+	rack.Size          = Vector3.new(4.8, 0.35, 1.8)
+	rack.Color         = Color3.fromRGB(50, 52, 58)
+	rack.Material      = Enum.Material.Metal
+	rack.Anchored      = false
+	rack.CanCollide    = false
+	rack.CanQuery      = false
+	rack.CastShadow    = false
+	rack.CFrame        = body.CFrame * CFrame.new(0, halfY + 0.18, 0)
+	rack.Parent        = body
+	weld(rack)
+
+	-- Two side rails of the rack
+	for _, sideZ in { -0.7, 0.7 } do
+		local rail        = Instance.new("Part")
+		rail.Name         = "_HarpoonRail"
+		rail.Size         = Vector3.new(4.8, 0.3, 0.2)
+		rail.Color        = Color3.fromRGB(80, 82, 90)
+		rail.Material     = Enum.Material.Metal
+		rail.Anchored     = false
+		rail.CanCollide   = false
+		rail.CanQuery     = false
+		rail.CastShadow   = false
+		rail.CFrame       = body.CFrame * CFrame.new(0, halfY + 0.55, sideZ)
+		rail.Parent       = body
+		weld(rail)
+	end
+
+	-- 5 harpoon bolts resting in the rack (thin silver rods pointing forward)
+	for i = 1, 5 do
+		local xOff       = -1.8 + (i - 1) * 0.9
+		local bolt       = Instance.new("Part")
+		bolt.Name        = "_HarpoonBolt"
+		bolt.Size        = Vector3.new(0.25, 0.25, 2.0)
+		bolt.Color       = Color3.fromRGB(185, 188, 195)
+		bolt.Material    = Enum.Material.Metal
+		bolt.Anchored    = false
+		bolt.CanCollide  = false
+		bolt.CanQuery    = false
+		bolt.CastShadow  = false
+		bolt.CFrame      = body.CFrame * CFrame.new(xOff, halfY + 0.52, 0)
+		bolt.Parent      = body
+		weld(bolt)
+	end
+
+	-- BillboardGui: 5 small squares showing harpoon count (compact, 30% of original)
+	local bb               = Instance.new("BillboardGui")
+	bb.Name                = "_HarpoonCountBB"
+	bb.Size                = UDim2.fromOffset(30, 6)
+	bb.StudsOffset         = Vector3.new(0, body.Size.Y / 2 + 1.8, 0)
+	bb.AlwaysOnTop         = false
+	bb.MaxDistance         = 80
+	bb.LightInfluence      = 0
+	bb.Parent              = body
+
+	local squares: { Frame } = {}
+	for i = 1, 5 do
+		local sq                   = Instance.new("Frame")
+		sq.Name                    = "HarpoonSq" .. i
+		sq.Size                    = UDim2.fromOffset(4, 4)
+		sq.Position                = UDim2.fromOffset((i - 1) * 6, 1)
+		sq.BackgroundColor3        = Color3.fromRGB(255, 255, 255)
+		sq.BackgroundTransparency  = 0.08
+		sq.BorderSizePixel         = 0
+		sq.Parent                  = bb
+		local corner               = Instance.new("UICorner")
+		corner.CornerRadius        = UDim.new(0, 1)
+		corner.Parent              = sq
+		squares[i] = sq
+	end
+
+	local function updateSquares(count: number)
+		for i = 1, 5 do
+			if i <= count then
+				squares[i].BackgroundColor3       = Color3.fromRGB(255, 255, 255)
+				squares[i].BackgroundTransparency = 0.08
+			else
+				squares[i].BackgroundColor3       = Color3.fromRGB(55, 55, 60)
+				squares[i].BackgroundTransparency = 0.35
+			end
+		end
+	end
+
+	local hv = body:FindFirstChild("HarpoonCount") :: NumberValue?
+	if hv then
+		updateSquares(hv.Value)
+		hv.Changed:Connect(updateSquares)
+	end
+end
+
 -- ── Soldier upgrade visuals ───────────────────────────────────────────────────
 -- CombatStims: two small green cylinders on the back (stim injectors)
 local function applySoldierStimVisual(body: BasePart)
@@ -398,6 +505,9 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			if tv and tv.Value == "Tank" and researchedTechs["ConcussionShells"] then
 				applyTankConcussionVisual(p)
 			end
+			if tv and tv.Value == "Tank" and researchedTechs["Trapper"] then
+				applyTrapperVisual(p)
+			end
 			if tv and tv.Value == "Soldier" then
 				if researchedTechs["CombatStims"]   then applySoldierStimVisual(p)  end
 				if researchedTechs["HardenedArmor"] then applySoldierArmorVisual(p) end
@@ -501,7 +611,7 @@ Network.onResearchCompleted(function(techName: string)
 	TurretPanel.refreshIfVisible()
 
 	-- Apply visuals to all existing own units when relevant research completes
-	if techName == "ConcussionShells" or techName == "CombatStims" or techName == "HardenedArmor" then
+	if techName == "ConcussionShells" or techName == "CombatStims" or techName == "HardenedArmor" or techName == "Trapper" then
 		local unitsFolder = workspace:FindFirstChild("Units") :: Folder?
 		if unitsFolder then
 			for _, child in unitsFolder:GetChildren() do
@@ -512,6 +622,8 @@ Network.onResearchCompleted(function(techName: string)
 				if not tv then continue end
 				if tv.Value == "Tank" and techName == "ConcussionShells" then
 					applyTankConcussionVisual(child :: BasePart)
+				elseif tv.Value == "Tank" and techName == "Trapper" then
+					applyTrapperVisual(child :: BasePart)
 				elseif tv.Value == "Soldier" then
 					if techName == "CombatStims"   then applySoldierStimVisual(child :: BasePart)  end
 					if techName == "HardenedArmor" then applySoldierArmorVisual(child :: BasePart) end
@@ -1237,6 +1349,132 @@ local function spawnEliteProjectile(fromPos: Vector3, toPos: Vector3)
 end
 
 -- ── Medic heal beam VFX ──────────────────────────────────────────────────────
+-- Trapper zip-wire: a black shiny cable that bolts onto the target and stays taut for
+-- TRAPPER_SLOW_DURATION seconds while units are slowed, then snaps back to the trapper.
+-- The wire follows both units as they move.
+local function spawnTrapperHarpoon(fromPos: Vector3, toPos: Vector3)
+	if (toPos - fromPos).Magnitude < 0.5 then return end
+
+	local SLOW_DUR  = Config.TRAPPER_SLOW_DURATION  -- 7 s taut
+	local RETRACT_T = 0.4                           -- retraction animation duration
+
+	-- Spatial lookup: find the actual BasePart closest to a world position
+	local function findNearestUnit(searchPos: Vector3): BasePart?
+		local unitsF = workspace:FindFirstChild("Units") :: Folder?
+		if not unitsF then return nil end
+		local best: BasePart? = nil
+		local bestDist = 12
+		for _, child in unitsF:GetChildren() do
+			if not child:IsA("BasePart") then continue end
+			local d = (child.Position - searchPos).Magnitude
+			if d < bestDist then bestDist = d; best = child :: BasePart end
+		end
+		return best
+	end
+
+	-- fromPos is the trapper's centre; toPos is target top-centre (part.Position + sizeY/2).
+	-- Tank sizeY = 5, so target part centre is ~2.5 below toPos.
+	local trapperPart = findNearestUnit(fromPos)
+	local targetPart  = findNearestUnit(toPos - Vector3.new(0, 2.5, 0))
+
+	-- Wire: thin black SmoothPlastic cable
+	local wire         = Instance.new("Part")
+	wire.Name          = "_HarpoonWire"
+	wire.Color         = Color3.fromRGB(12, 12, 16)
+	wire.Material      = Enum.Material.SmoothPlastic
+	wire.CastShadow    = false
+	wire.Anchored      = true
+	wire.CanCollide    = false
+	wire.CanQuery      = false
+	wire.Parent        = workspace
+
+	-- Bolt: small dark metal cylinder clamped onto the target's side
+	local bolt         = Instance.new("Part")
+	bolt.Name          = "_HarpoonBolt"
+	bolt.Shape         = Enum.PartType.Cylinder
+	bolt.Size          = Vector3.new(0.5, 0.6, 0.6)
+	bolt.Color         = Color3.fromRGB(25, 25, 30)
+	bolt.Material      = Enum.Material.Metal
+	bolt.CastShadow    = false
+	bolt.Anchored      = true
+	bolt.CanCollide    = false
+	bolt.CanQuery      = false
+	bolt.Parent        = workspace
+
+	local elapsed    = 0
+	local retracting = false
+	local retractT   = 0
+	local anchorTip  = toPos  -- last known bolt position when retraction begins
+
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+
+		-- Resolve live positions — follow moving parts
+		local basePos = (trapperPart and trapperPart.Parent)
+			and (trapperPart.Position + Vector3.new(0, trapperPart.Size.Y * 0.25, 0))
+			or  fromPos
+
+		local tipPos = (targetPart and targetPart.Parent)
+			and (targetPart.Position + Vector3.new(0, targetPart.Size.Y * 0.35, 0))
+			or  anchorTip
+
+		-- Target was destroyed early — start retraction from its last position
+		if not retracting and targetPart and not targetPart.Parent then
+			retracting = true
+			anchorTip  = tipPos
+		end
+
+		-- Trapper was destroyed — remove wire immediately
+		if trapperPart and not trapperPart.Parent then
+			conn:Disconnect()
+			wire:Destroy()
+			bolt:Destroy()
+			return
+		end
+
+		if not retracting then
+			-- Stay taut: update wire and bolt each frame
+			local d = (tipPos - basePos).Magnitude
+			if d > 0.2 then
+				wire.Size  = Vector3.new(0.18, 0.18, d)
+				wire.CFrame = CFrame.lookAt(basePos, tipPos) * CFrame.new(0, 0, -d / 2)
+			end
+			-- Bolt cylinder axis points along the wire toward the trapper
+			bolt.Position = tipPos
+			bolt.CFrame   = CFrame.lookAt(tipPos, basePos) * CFrame.Angles(0, 0, math.pi / 2)
+
+			if elapsed >= SLOW_DUR then
+				retracting = true
+				anchorTip  = tipPos
+			end
+		else
+			-- Retraction: bolt slides from anchorTip back toward basePos
+			retractT += dt
+			local t    = math.clamp(retractT / RETRACT_T, 0, 1)
+			local ease = t * (2 - t)  -- ease-out
+
+			local boltNow = anchorTip:Lerp(basePos, ease)
+			bolt.Position = boltNow
+			bolt.CFrame   = CFrame.lookAt(boltNow, basePos) * CFrame.Angles(0, 0, math.pi / 2)
+
+			local d = (boltNow - basePos).Magnitude
+			if d > 0.25 then
+				wire.Size  = Vector3.new(0.18, 0.18, d)
+				wire.CFrame = CFrame.lookAt(basePos, boltNow) * CFrame.new(0, 0, -d / 2)
+			else
+				wire.Size = Vector3.new(0.18, 0.18, 0.25)
+			end
+
+			if t >= 1 then
+				conn:Disconnect()
+				wire:Destroy()
+				bolt:Destroy()
+			end
+		end
+	end)
+end
+
 -- A semi-transparent green neon beam that fades out over ~0.45 s.
 local function spawnHealBeam(fromPos: Vector3, toPos: Vector3)
 	local dist = (toPos - fromPos).Magnitude
@@ -1300,6 +1538,11 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 
 	if unitType == "TankBarrage" then
 		spawnRocketBarrage(fromPos, toPos)
+		return
+	end
+
+	if unitType == "TankHarpoon" then
+		spawnTrapperHarpoon(fromPos, toPos)
 		return
 	end
 

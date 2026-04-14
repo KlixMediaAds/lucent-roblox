@@ -28,6 +28,10 @@ type UnitData = {
 	slowUntil          : number?,  -- tick() timestamp; unit moves at TANK_SLOW_MULT speed until then
 	stimUntil          : number?,  -- tick() timestamp; soldier stims active until then
 	stimCooldownUntil  : number?,  -- tick() timestamp; stims cannot reactivate until then
+	incomingHarpoons   : number?,  -- count of active harpoons embedded in this unit (stacks slow)
+	harpoonCount       : number?,  -- nil for non-trappers; current available harpoons (0–5)
+	harpoonRestockAt   : number?,  -- tick() timestamp when next harpoon restocks
+	trapperHarpooned   : {[string]: number}?,  -- unitId → expiry tick() for active harpoons this trapper fired
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -188,7 +192,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
-	if unitType == "Tank"  then addTankTreads(part)  end
+	if unitType == "Tank"  then
+		addTankTreads(part)
+		local hv   = Instance.new("NumberValue")
+		hv.Name    = "HarpoonCount"
+		hv.Value   = 0
+		hv.Parent  = part
+	end
 	if unitType == "Medic" then addMedicCross(part)  end
 
 	units[id] = {
@@ -455,7 +465,18 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	data.hp -= calcDamage(data, damage)
 	applyHP(data)
 	if data.hp <= 0 then
-		if (data.unitType == "Tank" or data.unitType == "Soldier") and data.owner.Parent then
+		-- If this was a trapper, release slow on any units it had harpooned
+		if data.trapperHarpooned then
+			for tId, _ in data.trapperHarpooned do
+				local tgt = units[tId]
+				if tgt then
+					local n = (tgt.incomingHarpoons or 1) - 1
+					tgt.incomingHarpoons = if n > 0 then n else nil
+				end
+			end
+		end
+		if (data.unitType == "Tank" or data.unitType == "Soldier")
+			and data.owner.UserId > 0 and data.owner.Parent then
 			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
 		end
 		data.part:Destroy()
@@ -562,6 +583,9 @@ function UnitManager.init(resourceManager)
 					if data.slowUntil and t < (data.slowUntil :: number) then
 						effSpeed = effSpeed * Config.TANK_SLOW_MULT
 					end
+					if data.incomingHarpoons and (data.incomingHarpoons :: number) > 0 then
+						effSpeed = effSpeed * (Config.TRAPPER_SLOW_MULT ^ (data.incomingHarpoons :: number))
+					end
 					if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
 						effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
 					end
@@ -624,6 +648,11 @@ function UnitManager.init(resourceManager)
 			if data.unitType == "Soldier" and data.stimUntil and tick() < (data.stimUntil :: number) then
 				effectiveRate = effectiveRate * Config.SOLDIER_STIM_RATE
 			end
+			-- Trapper uses a fast check interval so it reacts quickly when a harpoon slot opens
+			if data.unitType == "Tank" and researchManagerRef
+				and researchManagerRef.hasResearch(data.owner, "Trapper") then
+				effectiveRate = math.min(effectiveRate, 0.5)
+			end
 			if data.attackTimer < effectiveRate then continue end
 			data.attackTimer -= effectiveRate
 
@@ -669,89 +698,166 @@ function UnitManager.init(resourceManager)
 				-- Tanks: buildings first (+ AoE splash on nearby units), fall back to units.
 				-- With RocketBarrage researched: fires 3 rockets (each 65% damage) instead of
 				-- one shell, with random landing spread and individual splash per rocket.
+				-- With Trapper researched (mutually exclusive with RocketBarrage): fires harpoons
+				-- that slow enemies by 90% for 7 s without dealing damage.
 				local hasConcussion = researchManagerRef
 					and researchManagerRef.hasResearch(data.owner, "ConcussionShells")
 				local hasBarrage    = researchManagerRef
 					and researchManagerRef.hasResearch(data.owner, "RocketBarrage")
-				local slowEnd       = tick() + Config.TANK_SLOW_DURATION
+				local hasTrapper    = not hasBarrage and researchManagerRef
+					and researchManagerRef.hasResearch(data.owner, "Trapper")
 
-				-- Per-shot stats: barrage = 3 rockets × 65%; normal = 1 shell × 100%
-				local shotCount = hasBarrage and Config.ROCKET_BARRAGE_COUNT    or 1
-				local shotDmg   = hasBarrage
-					and math.floor(data.attackDmg * Config.ROCKET_BARRAGE_DMG_MULT)
-					or  data.attackDmg
-				local spreadR   = hasBarrage and Config.ROCKET_BARRAGE_SPREAD or 0.0
-
-				local function applySplash(centre: Vector3, skipId: string?)
-					local splashR   = Config.TANK_SPLASH_RANGE
-					local splashDmg = math.floor(shotDmg * Config.TANK_SPLASH_DAMAGE_MULT)
-					for otherId, other in units do
-						if other.hp <= 0 then continue end
-						if skipId and otherId == skipId then continue end
-						if tostring(other.owner.UserId) == myOwnerStr then continue end
-						if (other.part.Position - centre).Magnitude <= splashR then
-							other.hp -= calcDamage(other, splashDmg)
-							applyHP(other)
-							if hasConcussion then other.slowUntil = slowEnd end
-							if other.hp <= 0 then table.insert(toRemove, otherId) end
-						end
+				if hasTrapper then
+					-- ── Trapper: harpoon launcher ────────────────────────────────
+					-- Initialize harpoon state the first time this tank fires as a trapper
+					if not data.harpoonCount then
+						data.harpoonCount     = Config.TRAPPER_HARPOON_MAX
+						data.harpoonRestockAt = 0
+						data.trapperHarpooned = {}
+						local hv = data.part:FindFirstChild("HarpoonCount") :: NumberValue?
+						if hv then hv.Value = Config.TRAPPER_HARPOON_MAX end
 					end
-				end
 
-				if buildingManagerRef then
-					local bId: string?, bPos: Vector3?
-					if data.focusBldId then
-						local bf    = workspace:FindFirstChild("Buildings")
-						local model = bf and bf:FindFirstChild(data.focusBldId)
-						local base  = model and model:FindFirstChild("Base")
-						if base and (base :: BasePart).Parent then
-							local bp = base :: BasePart
-							if (bp.Position - myPos).Magnitude <= atkRange then
-								bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
+					local t      = tick()
+					local hrp    = data.trapperHarpooned :: {[string]: number}
+					local hCount = data.harpoonCount :: number
+					local restAt = data.harpoonRestockAt :: number
+
+					-- Expire old harpoons and decrement the target's incoming-harpoon counter
+					for tId, exp in hrp do
+						if t >= exp then
+							hrp[tId] = nil
+							local tgt = units[tId]
+							if tgt then
+								local n = (tgt.incomingHarpoons or 1) - 1
+								tgt.incomingHarpoons = if n > 0 then n else nil
 							end
-						else
-							data.focusBldId = nil
 						end
 					end
-					if not bId then
-						bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
-					end
-					if bId and bPos then
-						buildingManagerRef.damage(bId, shotDmg)
-						hitPos = bPos
-						for _ = 1, shotCount do
-							local ox = (math.random() - 0.5) * 2 * spreadR
-							local oz = (math.random() - 0.5) * 2 * spreadR
-							applySplash(bPos + Vector3.new(ox, 0, oz), nil)
-						end
-					end
-				end
-				if not hitPos then
-					local bestId2, bestDist2 = nil :: string?, math.huge
-					for otherId, other in units do
-						if other.hp <= 0 then continue end
-						if tostring(other.owner.UserId) == myOwnerStr then continue end
-						local d = (other.part.Position - myPos).Magnitude
-						if d <= atkRange and d < bestDist2 then
-							bestDist2 = d; bestId2 = otherId
-						end
-					end
-					if bestId2 then
-						local other = units[bestId2]
-						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
-						other.hp -= calcDamage(other, shotDmg)
-						applyHP(other)
-						if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
-						if other.hp <= 0 then table.insert(toRemove, bestId2) end
-						for _ = 1, shotCount do
-							local ox = (math.random() - 0.5) * 2 * spreadR
-							local oz = (math.random() - 0.5) * 2 * spreadR
-							applySplash(hitPos + Vector3.new(ox, 0, oz), bestId2)
-						end
-					end
-				end
 
-				if hasBarrage and hitPos then vfxType = "TankBarrage" end
+					-- Restock one harpoon if the timer has elapsed
+					if hCount < Config.TRAPPER_HARPOON_MAX and t >= restAt then
+						hCount += 1
+						data.harpoonCount = hCount
+						if hCount < Config.TRAPPER_HARPOON_MAX then
+							data.harpoonRestockAt = t + Config.TRAPPER_RESTOCK_TIME
+						end
+						local hv = data.part:FindFirstChild("HarpoonCount") :: NumberValue?
+						if hv then hv.Value = hCount end
+					end
+
+					-- Fire a harpoon at the nearest enemy unit not already harpooned
+					if hCount > 0 then
+						local bestId2: string? = nil
+						local bestDist2 = math.huge
+						for otherId, other in units do
+							if other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == myOwnerStr then continue end
+							if hrp[otherId] then continue end  -- already harpooned by this trapper
+							local d = (other.part.Position - myPos).Magnitude
+							if d <= atkRange and d < bestDist2 then
+								bestDist2 = d; bestId2 = otherId
+							end
+						end
+						if bestId2 then
+							local other = units[bestId2]
+							hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+							-- Increment stacking slow counter on target
+							other.incomingHarpoons = (other.incomingHarpoons or 0) + 1
+							hrp[bestId2] = t + Config.TRAPPER_SLOW_DURATION
+							hCount -= 1
+							data.harpoonCount = hCount
+							-- Start restock countdown for the consumed harpoon
+							if hCount < Config.TRAPPER_HARPOON_MAX and t >= restAt then
+								data.harpoonRestockAt = t + Config.TRAPPER_RESTOCK_TIME
+							end
+							local hv = data.part:FindFirstChild("HarpoonCount") :: NumberValue?
+							if hv then hv.Value = hCount end
+							vfxType = "TankHarpoon"
+						end
+					end
+				else
+					-- ── Normal tank / Rocket Barrage ─────────────────────────────
+					local slowEnd = tick() + Config.TANK_SLOW_DURATION
+
+					-- Per-shot stats: barrage = 3 rockets × 65%; normal = 1 shell × 100%
+					local shotCount = hasBarrage and Config.ROCKET_BARRAGE_COUNT    or 1
+					local shotDmg   = hasBarrage
+						and math.floor(data.attackDmg * Config.ROCKET_BARRAGE_DMG_MULT)
+						or  data.attackDmg
+					local spreadR   = hasBarrage and Config.ROCKET_BARRAGE_SPREAD or 0.0
+
+					local function applySplash(centre: Vector3, skipId: string?)
+						local splashR   = Config.TANK_SPLASH_RANGE
+						local splashDmg = math.floor(shotDmg * Config.TANK_SPLASH_DAMAGE_MULT)
+						for otherId, other in units do
+							if other.hp <= 0 then continue end
+							if skipId and otherId == skipId then continue end
+							if tostring(other.owner.UserId) == myOwnerStr then continue end
+							if (other.part.Position - centre).Magnitude <= splashR then
+								other.hp -= calcDamage(other, splashDmg)
+								applyHP(other)
+								if hasConcussion then other.slowUntil = slowEnd end
+								if other.hp <= 0 then table.insert(toRemove, otherId) end
+							end
+						end
+					end
+
+					if buildingManagerRef then
+						local bId: string?, bPos: Vector3?
+						if data.focusBldId then
+							local bf    = workspace:FindFirstChild("Buildings")
+							local model = bf and bf:FindFirstChild(data.focusBldId)
+							local base  = model and model:FindFirstChild("Base")
+							if base and (base :: BasePart).Parent then
+								local bp = base :: BasePart
+								if (bp.Position - myPos).Magnitude <= atkRange then
+									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
+								end
+							else
+								data.focusBldId = nil
+							end
+						end
+						if not bId then
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+						end
+						if bId and bPos then
+							buildingManagerRef.damage(bId, shotDmg)
+							hitPos = bPos
+							for _ = 1, shotCount do
+								local ox = (math.random() - 0.5) * 2 * spreadR
+								local oz = (math.random() - 0.5) * 2 * spreadR
+								applySplash(bPos + Vector3.new(ox, 0, oz), nil)
+							end
+						end
+					end
+					if not hitPos then
+						local bestId2, bestDist2 = nil :: string?, math.huge
+						for otherId, other in units do
+							if other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == myOwnerStr then continue end
+							local d = (other.part.Position - myPos).Magnitude
+							if d <= atkRange and d < bestDist2 then
+								bestDist2 = d; bestId2 = otherId
+							end
+						end
+						if bestId2 then
+							local other = units[bestId2]
+							hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+							other.hp -= calcDamage(other, shotDmg)
+							applyHP(other)
+							if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
+							if other.hp <= 0 then table.insert(toRemove, bestId2) end
+							for _ = 1, shotCount do
+								local ox = (math.random() - 0.5) * 2 * spreadR
+								local oz = (math.random() - 0.5) * 2 * spreadR
+								applySplash(hitPos + Vector3.new(ox, 0, oz), bestId2)
+							end
+						end
+					end
+
+					if hasBarrage and hitPos then vfxType = "TankBarrage" end
+				end
 			else
 				-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
 				local bestId2, bestDist2 = nil :: string?, math.huge
@@ -849,6 +955,16 @@ function UnitManager.init(resourceManager)
 		for _, id in toRemove do
 			local d = units[id]
 			if d then
+				-- If this was a trapper, release slow on any units it had harpooned
+				if d.trapperHarpooned then
+					for tId, _ in d.trapperHarpooned do
+						local tgt = units[tId]
+						if tgt then
+							local n = (tgt.incomingHarpoons or 1) - 1
+							tgt.incomingHarpoons = if n > 0 then n else nil
+						end
+					end
+				end
 				if (d.unitType == "Tank" or d.unitType == "Soldier")
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)

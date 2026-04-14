@@ -306,7 +306,7 @@ end
 
 -- ── Radial node & connector line (shared by all radial menus) ─────────────────
 
-UILib.NODE_D = 80  -- default node circle diameter
+UILib.NODE_D = 96  -- default node circle diameter
 
 --[[
     Build a circular bubble node.
@@ -357,12 +357,12 @@ function UILib.radialNode(
 
 	local lbl                        = Instance.new("TextLabel")
 	lbl.Name                         = "NodeLabel"
-	lbl.Size                         = UDim2.fromOffset(d + 36, 38)
-	lbl.Position                     = UDim2.fromOffset(-18, d + 2)
+	lbl.Size                         = UDim2.fromOffset(d + 44, 44)
+	lbl.Position                     = UDim2.fromOffset(-22, d + 2)
 	lbl.BackgroundTransparency       = 1
 	lbl.Text                         = label
 	lbl.Font                         = Enum.Font.GothamBold
-	lbl.TextSize                     = 13
+	lbl.TextSize                     = 16
 	lbl.TextColor3                   = UILib.C.TEXT
 	lbl.TextStrokeTransparency       = 0.6
 	lbl.TextStrokeColor3             = Color3.new(0, 0, 0)

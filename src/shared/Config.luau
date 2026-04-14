@@ -96,6 +96,7 @@ Config.RESEARCH = {
 	TurretUpgrades    = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
 	ConcussionShells  = { time = 10, desc = "Tank shells slow enemy units on impact." },
 	RocketBarrage     = { time = 18, requires = "ConcussionShells", desc = "Replaces the tank's attack with 3 spiraling rockets, each dealing AoE splash damage." },
+	Trapper           = { time = 20, requires = "ConcussionShells", desc = "Replaces the tank's weapon with a harpoon launcher. Each harpoon slows an enemy by 90% for 7 s. Carries 5 harpoons, restocking one every 10 s." },
 	CombatStims       = { time = 12, desc = "Soldiers automatically boost speed and attack rate when engaging enemies." },
 	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
 }
@@ -104,6 +105,12 @@ Config.RESEARCH = {
 Config.ROCKET_BARRAGE_COUNT    = 3     -- rockets fired per attack cycle
 Config.ROCKET_BARRAGE_DMG_MULT = 0.65  -- each rocket deals this fraction of base attack damage
 Config.ROCKET_BARRAGE_SPREAD   = 5.0   -- max random landing offset per rocket in studs
+
+-- Tank: Trapper (requires ConcussionShells, mutually exclusive with RocketBarrage)
+Config.TRAPPER_HARPOON_MAX   = 5    -- maximum harpoons carried at once
+Config.TRAPPER_SLOW_MULT     = 0.1  -- speed multiplier while harpooned (90% slow)
+Config.TRAPPER_SLOW_DURATION = 7    -- seconds the harpoon slow lasts
+Config.TRAPPER_RESTOCK_TIME  = 10   -- seconds to restock one harpoon
 
 -- Soldier: Combat Stims
 Config.SOLDIER_STIM_DURATION  = 8    -- seconds stims stay active
