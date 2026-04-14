@@ -1,30 +1,38 @@
 --!strict
 --[[
-    WorkshopPanel — Radial bubble node-graph (Fusion 0.3.0).
+    WorkshopPanel — Left-to-right drip-feed tech tree.
 
-    Root nodes: Units | Monument | Structures (always visible at screen centre).
-    Monument is a standalone root-level node (no children).
-    Click Units / Structures → children fan outward.
-    Click a child            → starts research.
-    Hover any node           → tooltip near the cursor.
+    Columns (X offset from screen centre):
+      Col 0  x = -420  root category buttons  (Units, Structures, Monument)
+      Col 1  x = -210  tier-1 researchable techs   — revealed on root click
+      Col 2  x =    0  tier-2 techs                — revealed when tier-1 parent DONE
 
-    Node colours are state-driven (not per-tech):
-      AVAILABLE   – ready to research (mid-blue)
-      CANT_AFFORD – not enough resources, Monument only (dimmed)
-      IN_PROGRESS – currently researching / building (bright cyan)
-      DONE        – research / build complete (green)
+    Units root → 3 tier-1 branches:
+      CombatStims      → HardenedArmor
+      ConcussionShells → RocketBarrage
+      MedicUnit        → EliteUnits
 
-    Branches are always collapsed when the menu opens or closes.
+    Structures root → 2 tier-1 branches:
+      BetterMines   (no tier-2)
+      TurretUpgrades (no tier-2)
+
+    Monument — standalone root node (no children, builds a win-condition structure).
+
+    Node state colours:
+      AVAILABLE   – blue,  ready to research
+      CANT_AFFORD – dim,   Monument only (not enough resources)
+      IN_PROGRESS – cyan,  currently researching
+      DONE        – green, research complete
 ]]
 
-local Players          = game:GetService("Players")
-local TweenService     = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local GuiService       = game:GetService("GuiService")
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+local GuiService        = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Shared           = ReplicatedStorage:WaitForChild("Shared")
-local Config           = require(Shared:WaitForChild("Config"))
-local UILib            = require(script.Parent:WaitForChild("UILib"))
+local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local Config            = require(Shared:WaitForChild("Config"))
+local UILib             = require(script.Parent:WaitForChild("UILib"))
 
 local WorkshopPanel = {}
 local localPlayer   = Players.LocalPlayer
@@ -32,121 +40,94 @@ local C             = UILib.C
 
 -- ── Layout constants ──────────────────────────────────────────────────────────
 local NODE_D  = UILib.NODE_D   -- 80 px diameter
-local RADIUS  = 230            -- distance from root node to child node
 
--- Root node X-offsets from screen centre.
--- Three nodes in a row: Units (-200) | Monument (0) | Structures (+200)
-local UNITS_X     = -200
-local MONUMENT_X  =    0
-local STRUCTS_X   =  200
+local COL0_X = -420   -- root category column
+local COL1_X = -210   -- tier-1 tech column
+local COL2_X =    0   -- tier-2 tech column
+
+-- Root node Y offsets from screen centre
+local UNITS_ROOT_Y   = -150
+local STRUCTS_ROOT_Y =  165
+local MONUMENT_Y     =  335
+
+-- Tier-1 Y positions (Units branch)
+local Y_COMBAT  = -260   -- CombatStims
+local Y_CONC    = -150   -- ConcussionShells
+local Y_MEDIC   =  -40   -- MedicUnit
+
+-- Tier-1 Y positions (Structures branch)
+local Y_MINES   =  110   -- BetterMines
+local Y_TURRET  =  220   -- TurretUpgrades
 
 -- ── State ─────────────────────────────────────────────────────────────────────
-local activeCCId:      string?
-local networkRef:      any
-local getResearchedFn: ((string) -> boolean)?
-local getProgressFn:   ((string) -> number?)?
-local getResourcesFn:  (() -> number)?
-local localMonumentTime: number?
-local screenGui:       ScreenGui?
-local overlay:         Frame?
+local activeCCId        : string?
+local networkRef        : any
+local getResearchedFn   : ((string) -> boolean)?
+local getProgressFn     : ((string) -> number?)?
+local getResourcesFn    : (() -> number)?
+local showNotificationFn: ((string, Color3?) -> ())?
+local localMonumentTime : number?
+local screenGui         : ScreenGui?
+local overlay           : Frame?
 
--- ── Tech definitions ──────────────────────────────────────────────────────────
-local TECHS = {
-	{
-		key  = "BetterMines",
-		name = "Better Mines",
-		icon = "⛏",
-		time = 5,
-		tip  = "Unlocks upgrade buttons on your mines.\n\nEfficiency — ×2 income per miner\nCapacity — +4 extra miner slots\n\nBoth upgrades are mutually exclusive per mine.",
+
+-- ── Tech data ─────────────────────────────────────────────────────────────────
+local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: string } } = {
+	CombatStims = {
+		name = "Combat Stims", icon = "⚡", time = 12,
+		tip  = "Soldiers gain +50% speed and faster attacks for 8 s after engaging an enemy.",
 	},
-	{
-		key  = "EliteUnits",
-		name = "Elite Units",
-		icon = "⚔",
-		time = 15,
-		tip  = "Trains Elite units at your Barracks.\n\nLong range, high damage, spider-leg movement.\nIdeal counter to turret-heavy bases.\n\nCost per unit: 100 res",
+	HardenedArmor = {
+		name = "Hardened Armor", icon = "🛡", time = 10,
+		tip  = "Soldiers absorb a flat 6 damage per incoming hit.",
 	},
-	{
-		key  = "ConcussionShells",
-		name = "Concussion Shells",
-		icon = "◈",
-		time = 10,
-		tip  = "Tank shells slow all hit enemies to 40% speed for 1.5 s.\n\nApplies to both the primary target and AoE splash victims.\nStacks with repeated hits — ideal against blob attacks.",
+	ConcussionShells = {
+		name = "Concussion Shells", icon = "◈", time = 10,
+		tip  = "Tank shells slow all hit enemies to 40% speed for 1.5 s.",
 	},
-	{
-		key  = "MedicUnit",
-		name = "Medic Unit",
-		icon = "✚",
-		time = 15,
-		tip  = "Trains Medic units at your Barracks.\n\nMedics automatically heal the most-injured friendly unit nearby.\n\nCost per unit: 60 res",
+	RocketBarrage = {
+		name = "Rocket Barrage", icon = "🚀", time = 18,
+		tip  = "Replaces tank attacks with 3 spiraling AoE rockets, each dealing 65% base damage.",
 	},
-	{
-		key  = "CombatStims",
-		name = "Combat Stims",
-		icon = "⚡",
-		time = 12,
-		tip  = "Soldiers inject combat stimulants when engaging an enemy.\n\n+50% move speed and faster attack rate for 8 s.\nCooldown: 20 s between activations.",
+	MedicUnit = {
+		name = "Medic Unit", icon = "✚", time = 15,
+		tip  = "Unlocks Medic units that automatically heal the most-injured nearby ally (60 res each).",
 	},
-	{
-		key  = "HardenedArmor",
-		name = "Hardened Armor",
-		icon = "🛡",
-		time = 10,
-		tip  = "Soldiers wear reinforced plating that absorbs a flat 6 damage per incoming hit.\n\nStacks with Combat Stims.",
+	EliteUnits = {
+		name = "Elite Units", icon = "⚔", time = 15,
+		tip  = "Unlocks Elite units with long range and high damage (100 res each).",
 	},
-	{
-		key  = "TurretUpgrades",
-		name = "Turret Upgrades",
-		icon = "⚙",
-		time = 20,
-		tip  = "Unlocks two upgrade paths for each turret.\n\nFlamethrower — short range (28), rapid fire\nRocket Launcher — long range (70), high damage\n\nMutually exclusive per turret.",
+	BetterMines = {
+		name = "Better Mines", icon = "⛏", time = 5,
+		tip  = "Unlocks Efficiency (×2 income) and Capacity (+4 slots) upgrade paths on your mines.",
+	},
+	TurretUpgrades = {
+		name = "Turret Upgrades", icon = "⚙", time = 20,
+		tip  = "Unlocks Flamethrower and Rocket Launcher upgrade paths for each turret.",
 	},
 }
 
-local techByKey: { [string]: typeof(TECHS[1]) } = {}
-for _, t in TECHS do techByKey[t.key] = t end
-
--- RocketBarrage is a second-level node (child of ConcussionShells), not part of
--- the main TECHS loop.  Its data lives here for tooltip / label use.
-local RB_TECH = {
-	key  = "RocketBarrage",
-	name = "Rocket Barrage",
-	icon = "🚀",
-	time = 18,
-	tip  = "Replaces the tank's attack with 3 spiraling rockets.\n\nEach rocket deals 65% base damage with AoE splash.\nRockets swirl before converging on the target.\n\nRequires: Concussion Shells",
+-- Tier-2 key → its tier-1 parent key (drip-feed gating)
+local TIER2_PARENT: { [string]: string } = {
+	HardenedArmor = "CombatStims",
+	RocketBarrage  = "ConcussionShells",
+	EliteUnits     = "MedicUnit",
 }
 
--- ── Child node definitions ─────────────────────────────────────────────────────
-type ChildDef = {
-	key:   string,
-	icon:  string,
-	angle: number,   -- degrees; 0° = right, 90° = down
-	tip:   string,
-}
-
--- Units children fan to the LEFT.
--- 5 nodes spread over a 148° arc (37° steps) centred on 180°.
--- 37° steps at RADIUS=230 give ~148 px chord — enough gap for labels.
-local UNITS_CHILDREN: { ChildDef } = {
-	{ key = "EliteUnits",       icon = "⚔", angle = 106, tip = (techByKey["EliteUnits"]      or {tip=""}).tip },
-	{ key = "CombatStims",      icon = "⚡", angle = 143, tip = (techByKey["CombatStims"]     or {tip=""}).tip },
-	{ key = "MedicUnit",        icon = "✚", angle = 180, tip = (techByKey["MedicUnit"]        or {tip=""}).tip },
-	{ key = "HardenedArmor",    icon = "🛡", angle = 217, tip = (techByKey["HardenedArmor"]   or {tip=""}).tip },
-	{ key = "ConcussionShells", icon = "◈", angle = 254, tip = (techByKey["ConcussionShells"] or {tip=""}).tip },
-}
-
--- Structures children fan to the RIGHT.
--- 2 nodes at ±62° give ~230 px vertical separation — no overlap possible.
-local STRUCTURES_CHILDREN: { ChildDef } = {
-	{ key = "BetterMines",    icon = "⛏", angle = -62, tip = (techByKey["BetterMines"]    or {tip=""}).tip },
-	{ key = "TurretUpgrades", icon = "⚙", angle =  62, tip = (techByKey["TurretUpgrades"] or {tip=""}).tip },
+-- Tier-1 key → root category key
+local TIER1_ROOT: { [string]: string } = {
+	CombatStims      = "Units",
+	ConcussionShells = "Units",
+	MedicUnit        = "Units",
+	BetterMines      = "Structures",
+	TurretUpgrades   = "Structures",
 }
 
 -- ── Semantic state colours ────────────────────────────────────────────────────
 local STATE_BG = {
-	AVAILABLE   = Color3.fromRGB(40,  90, 175),  -- blue-ish, ready to research
-	CANT_AFFORD = Color3.fromRGB(28,  34,  54),  -- dark dim, can't afford
-	IN_PROGRESS = C.ACCENT,                       -- bright cyan
+	AVAILABLE   = Color3.fromRGB(40,  90, 175),
+	CANT_AFFORD = Color3.fromRGB(28,  34,  54),
+	IN_PROGRESS = C.ACCENT,
 	DONE        = C.GREEN,
 }
 local STATE_STROKE = {
@@ -168,33 +149,50 @@ local STATE_TRANSP = {
 	DONE        = 0.20,
 }
 
--- ── Per-node live refs ────────────────────────────────────────────────────────
+-- ── Node refs ─────────────────────────────────────────────────────────────────
 type NodeRef = {
-	btn:       TextButton,
-	stroke:    UIStroke,
-	label:     TextLabel,
+	btn      : TextButton,
+	stroke   : UIStroke,
+	label    : TextLabel,
 	progTrack: Frame,
-	progFill:  Frame,
+	progFill : Frame,
+	wrapper  : Frame,
 }
 local nodeRefs: { [string]: NodeRef } = {}
 
--- ── Second-level node: RocketBarrage branching from ConcussionShells ──────────
-local isHoveringCS = false   -- true while cursor is over ConcussionShells
-local rbWrapper:   Frame?
-local rbBtn:       TextButton?
-local rbLine:      Frame?
+-- Per-tech layout data (set during init)
+type TechNode = {
+	pos      : UDim2,   -- final resting position
+	startPos : UDim2,   -- slide-in origin (parent position)
+	connector: Frame,   -- line from parent to this node
+}
+local techNodes: { [string]: TechNode } = {}
+
+-- Root category tracking
+type RootInfo = {
+	btn      : TextButton,
+	stroke   : UIStroke,
+	isOpen   : boolean,
+	tier1Keys: { string },
+}
+local roots: { [string]: RootInfo } = {}
+
+-- ── Tween constants ───────────────────────────────────────────────────────────
+local EXPAND_TI  = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local COLLAPSE_TI = TweenInfo.new(0.20, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local REVEAL_TI  = TweenInfo.new(0.30, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 
 -- ── Tooltip ───────────────────────────────────────────────────────────────────
 local ttFrame: Frame?
 local ttTitle: TextLabel?
-local ttCost:  TextLabel?
-local ttBody:  TextLabel?
+local ttCost : TextLabel?
+local ttBody : TextLabel?
 
 local function buildTooltip(sg: ScreenGui)
 	local f                      = Instance.new("Frame")
 	f.Name                       = "WorkshopTooltip"
 	f.Size                       = UDim2.fromOffset(272, 200)
-	f.Position                   = UDim2.fromOffset(0, 0)  -- repositioned dynamically
+	f.Position                   = UDim2.fromOffset(0, 0)
 	f.BackgroundColor3           = Color3.fromRGB(8, 11, 22)
 	f.BackgroundTransparency     = 0.06
 	f.BorderSizePixel            = 0
@@ -204,7 +202,6 @@ local function buildTooltip(sg: ScreenGui)
 	UILib.corner(f, 10)
 	UILib.stroke(f, C.BORDER, 1.5)
 
-	-- Top accent bar
 	local accent                 = Instance.new("Frame")
 	accent.Size                  = UDim2.new(1, -2, 0, 3)
 	accent.Position              = UDim2.fromOffset(1, 1)
@@ -214,7 +211,6 @@ local function buildTooltip(sg: ScreenGui)
 	accent.Parent                = f
 	UILib.corner(accent, 8)
 
-	-- Tech / node name
 	local title                  = Instance.new("TextLabel")
 	title.Name                   = "TipTitle"
 	title.Size                   = UDim2.new(1, -16, 0, 22)
@@ -228,7 +224,6 @@ local function buildTooltip(sg: ScreenGui)
 	title.ZIndex                 = 31
 	title.Parent                 = f
 
-	-- Cost / time line
 	local cost                   = Instance.new("TextLabel")
 	cost.Name                    = "TipCost"
 	cost.Size                    = UDim2.new(1, -16, 0, 18)
@@ -242,7 +237,6 @@ local function buildTooltip(sg: ScreenGui)
 	cost.ZIndex                  = 31
 	cost.Parent                  = f
 
-	-- Separator
 	local sep                    = Instance.new("Frame")
 	sep.Size                     = UDim2.new(1, -20, 0, 1)
 	sep.Position                 = UDim2.fromOffset(10, 55)
@@ -251,7 +245,6 @@ local function buildTooltip(sg: ScreenGui)
 	sep.ZIndex                   = 31
 	sep.Parent                   = f
 
-	-- Description body
 	local body                   = Instance.new("TextLabel")
 	body.Name                    = "TipBody"
 	body.Size                    = UDim2.new(1, -20, 1, -68)
@@ -267,36 +260,31 @@ local function buildTooltip(sg: ScreenGui)
 	body.ZIndex                  = 31
 	body.Parent                  = f
 
-	ttFrame = f
-	ttTitle = title
-	ttCost  = cost
-	ttBody  = body
+	ttFrame = f ; ttTitle = title ; ttCost = cost ; ttBody = body
 end
 
+local TT_W = 272   -- matches buildTooltip UDim2.fromOffset(272, 200)
+local TT_H = 200
+
 local function positionTooltipAtMouse()
-	local f = ttFrame
-	local sg = screenGui
+	local f = ttFrame ; local sg = screenGui
 	if not f or not sg then return end
-	local mouse  = UserInputService:GetMouseLocation()
-	local inset  = GuiService:GetGuiInset()
-	-- Convert screen coordinates to ScreenGui space
-	local mx = mouse.X - inset.X + 16
-	local my = mouse.Y - inset.Y + 12
-	-- Clamp so the tooltip stays on-screen
-	local sw = sg.AbsoluteSize.X
+	local mouse = UserInputService:GetMouseLocation()
+	local inset = GuiService:GetGuiInset()
 	local sh = sg.AbsoluteSize.Y
-	local tw = f.AbsoluteSize.X
-	local th = f.AbsoluteSize.Y
-	if mx + tw > sw then mx = mouse.X - inset.X - tw - 8 end
-	if my + th > sh then my = mouse.Y - inset.Y - th - 8 end
+
+	-- Left of cursor (Minecraft-style); use fixed size to avoid AbsoluteSize = 0 on first frame
+	local mx = mouse.X - inset.X - TT_W - 12
+	local my = mouse.Y - inset.Y + 4
+	if mx < 4 then mx = mouse.X - inset.X + 16 end               -- flip right if off left edge
+	if my + TT_H > sh - 4 then my = sh - TT_H - 4 end            -- clamp bottom
+
 	f.Position = UDim2.fromOffset(mx, my)
 end
 
 local function showTooltip(name: string, costLine: string, body: string)
 	if not ttFrame or not ttTitle or not ttCost or not ttBody then return end
-	ttTitle.Text    = name
-	ttCost.Text     = costLine
-	ttBody.Text     = body
+	ttTitle.Text = name ; ttCost.Text = costLine ; ttBody.Text = body
 	positionTooltipAtMouse()
 	ttFrame.Visible = true
 end
@@ -305,39 +293,73 @@ local function hideTooltip()
 	if ttFrame then ttFrame.Visible = false end
 end
 
--- ── Progress bar helper ───────────────────────────────────────────────────────
+-- ── Progress bar ──────────────────────────────────────────────────────────────
 local function makeProgressBar(parent: Instance, zi: number): (Frame, Frame)
-	local barTrack                      = Instance.new("Frame")
-	barTrack.Name                       = "ProgressTrack"
-	barTrack.Size                       = UDim2.new(1, -14, 0, 7)
-	barTrack.Position                   = UDim2.new(0, 7, 1, -14)
-	barTrack.BackgroundColor3           = Color3.fromRGB(5, 8, 18)
-	barTrack.BackgroundTransparency     = 0.1
-	barTrack.BorderSizePixel            = 0
-	barTrack.ZIndex                     = zi
-	barTrack.Visible                    = false
-	barTrack.ClipsDescendants           = true
-	barTrack.Parent                     = parent
-	UILib.corner(barTrack, 3)
+	local track                      = Instance.new("Frame")
+	track.Name                       = "ProgressTrack"
+	track.Size                       = UDim2.new(1, -14, 0, 7)
+	track.Position                   = UDim2.new(0, 7, 1, -14)
+	track.BackgroundColor3           = Color3.fromRGB(5, 8, 18)
+	track.BackgroundTransparency     = 0.1
+	track.BorderSizePixel            = 0
+	track.ZIndex                     = zi
+	track.Visible                    = false
+	track.ClipsDescendants           = true
+	track.Parent                     = parent
+	UILib.corner(track, 3)
 
-	local barFill                       = Instance.new("Frame")
-	barFill.Name                        = "Fill"
-	barFill.Size                        = UDim2.new(0, 0, 1, 0)
-	barFill.BackgroundColor3            = C.ACCENT
-	barFill.BorderSizePixel             = 0
-	barFill.ZIndex                      = zi + 1
-	barFill.Parent                      = barTrack
-	UILib.corner(barFill, 3)
+	local fill                       = Instance.new("Frame")
+	fill.Name                        = "Fill"
+	fill.Size                        = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3            = C.ACCENT
+	fill.BorderSizePixel             = 0
+	fill.ZIndex                      = zi + 1
+	fill.Parent                      = track
+	UILib.corner(fill, 3)
 
-	return barTrack, barFill
+	return track, fill
 end
 
--- ── Node state refresh ────────────────────────────────────────────────────────
+-- ── State application ─────────────────────────────────────────────────────────
 local function applyState(ref: NodeRef, state: string)
 	ref.btn.BackgroundColor3       = STATE_BG[state]
 	ref.btn.BackgroundTransparency = STATE_TRANSP[state]
 	ref.stroke.Color               = STATE_STROKE[state]
 	ref.label.TextColor3           = STATE_TEXT[state]
+end
+
+-- ── Node refresh ──────────────────────────────────────────────────────────────
+local function refreshTechNode(key: string)
+	local ref  = nodeRefs[key]
+	local tech = TECH_DATA[key]
+	if not ref or not tech then return end
+
+	local done     = getResearchedFn and getResearchedFn(key) or false
+	local progress = getProgressFn   and getProgressFn(key)   or nil
+	local inProg   = progress ~= nil and not done
+
+	if done then
+		applyState(ref, "DONE")
+		ref.stroke.Thickness  = 2
+		ref.label.Text        = tech.name .. "\n✓ Done"
+		ref.btn.Active        = false
+		ref.progTrack.Visible = false
+	elseif inProg then
+		local pct = math.floor((progress :: number) * 100)
+		applyState(ref, "IN_PROGRESS")
+		ref.stroke.Thickness        = 4
+		ref.label.Text              = tech.name .. "\n" .. pct .. "%"
+		ref.btn.Active              = false
+		ref.progTrack.Visible       = true
+		ref.progFill.Size           = UDim2.new(progress :: number, 0, 1, 0)
+		ref.progFill.BackgroundColor3 = C.ACCENT
+	else
+		applyState(ref, "AVAILABLE")
+		ref.stroke.Thickness  = 2
+		ref.label.Text        = tech.name .. "\n⏱ " .. tech.time .. "s"
+		ref.btn.Active        = true
+		ref.progTrack.Visible = false
+	end
 end
 
 local function refreshMonumentNode()
@@ -368,282 +390,251 @@ local function refreshMonumentNode()
 	end
 end
 
-local function refreshTechNode(key: string)
-	local ref  = nodeRefs[key]
-	local tech = techByKey[key]
-	if not ref or not tech then return end
+-- ── Tier-2 drip-feed reveal / hide ───────────────────────────────────────────
+local function revealTier2(key: string)
+	local tn  = techNodes[key]
+	local ref = nodeRefs[key]
+	if not tn or not ref or ref.wrapper.Visible then return end
 
-	local done     = getResearchedFn and getResearchedFn(key) or false
-	local progress = getProgressFn   and getProgressFn(key)   or nil
-	local inProg   = progress ~= nil and not done
+	ref.wrapper.Visible                = true
+	ref.wrapper.Position               = tn.startPos
+	ref.btn.BackgroundTransparency     = 1
+	tn.connector.BackgroundTransparency = 1
 
-	if done then
-		applyState(ref, "DONE")
-		ref.stroke.Thickness  = 2
-		ref.label.Text        = tech.name .. "\n✓ Done"
-		ref.btn.Active        = false
-		ref.progTrack.Visible = false
-	elseif inProg then
-		local pct = math.floor((progress :: number) * 100)
-		applyState(ref, "IN_PROGRESS")
-		ref.stroke.Thickness  = 4
-		ref.label.Text        = tech.name .. "\n" .. pct .. "%"
-		ref.btn.Active        = false
-		ref.progTrack.Visible = true
-		ref.progFill.Size     = UDim2.new(progress :: number, 0, 1, 0)
-		ref.progFill.BackgroundColor3 = C.ACCENT
-	else
-		applyState(ref, "AVAILABLE")
-		ref.stroke.Thickness  = 2
-		ref.label.Text        = tech.name .. "\n⏱ " .. tech.time .. "s"
-		ref.btn.Active        = true
-		ref.progTrack.Visible = false
-	end
+	TweenService:Create(ref.wrapper,  REVEAL_TI, { Position = tn.pos }):Play()
+	TweenService:Create(ref.btn,      REVEAL_TI, { BackgroundTransparency = STATE_TRANSP["AVAILABLE"] }):Play()
+	TweenService:Create(tn.connector, REVEAL_TI, { BackgroundTransparency = 0.65 }):Play()
 end
 
--- Handles the RocketBarrage second-level node visibility and appearance.
--- Three states:
---   1. ConcussionShells done  → real RocketBarrage node (AVAILABLE/IN_PROGRESS/DONE)
---   2. Hovering CS, CS not done → ghost "???" preview (locked indicator)
---   3. Otherwise              → hidden
-local function refreshRocketBarrageNode()
-	if not rbWrapper or not rbLine then return end
-	local ref = nodeRefs["RocketBarrage"]
-	if not ref then return end
-
-	local csDone = getResearchedFn and getResearchedFn("ConcussionShells") or false
-
-	if csDone then
-		-- ── Real node ───────────────────────────────────────────────────────
-		rbWrapper.Visible             = true
-		rbLine.BackgroundTransparency = 0.60
-
-		local done     = getResearchedFn and getResearchedFn("RocketBarrage") or false
-		local progress = getProgressFn   and getProgressFn("RocketBarrage")   or nil
-		local inProg   = progress ~= nil and not done
-
-		if done then
-			applyState(ref, "DONE")
-			ref.stroke.Thickness  = 2
-			ref.label.Text        = RB_TECH.name .. "\n✓ Done"
-			ref.btn.Active        = false
-			ref.progTrack.Visible = false
-		elseif inProg then
-			local pct = math.floor((progress :: number) * 100)
-			applyState(ref, "IN_PROGRESS")
-			ref.stroke.Thickness  = 4
-			ref.label.Text        = RB_TECH.name .. "\n" .. pct .. "%"
-			ref.btn.Active        = false
-			ref.progTrack.Visible = true
-			ref.progFill.Size     = UDim2.new(progress :: number, 0, 1, 0)
-			ref.progFill.BackgroundColor3 = C.ACCENT
-		else
-			applyState(ref, "AVAILABLE")
-			ref.stroke.Thickness  = 2
-			ref.label.Text        = RB_TECH.name .. "\n⏱ " .. RB_TECH.time .. "s"
-			ref.btn.Active        = true
-			ref.progTrack.Visible = false
-		end
-
-	elseif isHoveringCS then
-		-- ── Ghost "???" preview ─────────────────────────────────────────────
-		rbWrapper.Visible                = true
-		rbLine.BackgroundTransparency    = 0.80
-		ref.btn.BackgroundColor3         = Color3.fromRGB(28, 32, 50)
-		ref.btn.BackgroundTransparency   = 0.50
-		ref.stroke.Color                 = C.DIM
-		ref.stroke.Thickness             = 1.5
-		ref.label.Text                   = "???"
-		ref.label.TextColor3             = Color3.fromRGB(65, 75, 100)
-		ref.btn.Active                   = false
-		ref.progTrack.Visible            = false
-
-	else
-		-- ── Hidden ─────────────────────────────────────────────────────────
-		rbWrapper.Visible             = false
-		rbLine.BackgroundTransparency = 1
-	end
+local function hideTier2Instant(key: string)
+	local tn  = techNodes[key]
+	local ref = nodeRefs[key]
+	if not tn or not ref then return end
+	ref.wrapper.Visible                = false
+	ref.wrapper.Position               = tn.startPos
+	ref.btn.BackgroundTransparency     = 1
+	tn.connector.BackgroundTransparency = 1
 end
 
+-- ── Global refresh ────────────────────────────────────────────────────────────
 local function refresh()
 	if not activeCCId then return end
-	for _, tech in TECHS do refreshTechNode(tech.key) end
+
+	for key in TECH_DATA do
+		refreshTechNode(key)
+	end
 	refreshMonumentNode()
-	refreshRocketBarrageNode()
+
+	-- Drip-feed: reveal tier-2 nodes whose tier-1 parent is DONE (and root is open)
+	for t2key, t1key in TIER2_PARENT do
+		local rootKey = TIER1_ROOT[t1key]
+		local root    = roots[rootKey]
+		if root and root.isOpen then
+			local parentDone = getResearchedFn and getResearchedFn(t1key) or false
+			if parentDone then
+				local ref = nodeRefs[t2key]
+				if ref and not ref.wrapper.Visible then
+					revealTier2(t2key)
+				end
+			end
+		end
+	end
+
 end
 
--- ── Expand / collapse ─────────────────────────────────────────────────────────
-local EXPAND_TI   = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local COLLAPSE_TI = TweenInfo.new(0.20, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- ── Expand / collapse roots ───────────────────────────────────────────────────
+local function expandRoot(rootKey: string)
+	local root = roots[rootKey]
+	if not root or root.isOpen then return end
+	root.isOpen = true
+	TweenService:Create(root.stroke, TweenInfo.new(0.15), { Thickness = 4 }):Play()
 
-type ChildNode = {
-	wrapper:  Frame,
-	btn:      TextButton,
-	line:     Frame,
-	key:      string,
-	finalPos: UDim2,
-	startPos: UDim2,
-}
+	for _, t1key in root.tier1Keys do
+		local tn  = techNodes[t1key]
+		local ref = nodeRefs[t1key]
+		if not tn or not ref then continue end
 
-local function expandChildren(children: { ChildNode }, stroke: UIStroke)
-	TweenService:Create(stroke, TweenInfo.new(0.15), { Thickness = 4 }):Play()
-	for _, c in children do
-		c.wrapper.Visible             = true
-		c.wrapper.Position            = c.startPos
-		c.btn.BackgroundTransparency  = 1
-		c.line.BackgroundTransparency = 1
-		TweenService:Create(c.wrapper, EXPAND_TI, { Position = c.finalPos }):Play()
-		TweenService:Create(c.btn,     EXPAND_TI, { BackgroundTransparency = STATE_TRANSP["AVAILABLE"] }):Play()
-		TweenService:Create(c.line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+		ref.wrapper.Visible                = true
+		ref.wrapper.Position               = tn.startPos
+		ref.btn.BackgroundTransparency     = 1
+		tn.connector.BackgroundTransparency = 1
+
+		TweenService:Create(ref.wrapper,  EXPAND_TI, { Position = tn.pos }):Play()
+		TweenService:Create(ref.btn,      EXPAND_TI, { BackgroundTransparency = STATE_TRANSP["AVAILABLE"] }):Play()
+		TweenService:Create(tn.connector, EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+
+		-- If this tier-1 is already done, reveal its tier-2 child after a short lag
+		local parentDone = getResearchedFn and getResearchedFn(t1key) or false
+		if parentDone then
+			for t2key, parentKey in TIER2_PARENT do
+				if parentKey == t1key then
+					task.delay(EXPAND_TI.Time * 0.6, function()
+						revealTier2(t2key)
+					end)
+				end
+			end
+		end
 	end
 end
 
-local function collapseChildren(children: { ChildNode }, stroke: UIStroke)
-	TweenService:Create(stroke, TweenInfo.new(0.15), { Thickness = 2 }):Play()
+local function collapseRoot(rootKey: string)
+	local root = roots[rootKey]
+	if not root or not root.isOpen then return end
+	root.isOpen = false
 	hideTooltip()
-	for _, c in children do
-		TweenService:Create(c.wrapper, COLLAPSE_TI, { Position = c.startPos }):Play()
-		TweenService:Create(c.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
-		TweenService:Create(c.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+	TweenService:Create(root.stroke, TweenInfo.new(0.15), { Thickness = 2 }):Play()
+
+	-- Instantly hide tier-2 nodes before tier-1 animates out
+	for t2key, t1key in TIER2_PARENT do
+		if TIER1_ROOT[t1key] == rootKey then
+			hideTier2Instant(t2key)
+		end
+	end
+
+	-- Animate tier-1 back to root position
+	for _, t1key in root.tier1Keys do
+		local tn  = techNodes[t1key]
+		local ref = nodeRefs[t1key]
+		if not tn or not ref then continue end
+
+		TweenService:Create(ref.wrapper,  COLLAPSE_TI, { Position = tn.startPos }):Play()
+		TweenService:Create(ref.btn,      COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(tn.connector, COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
 	end
 	task.delay(COLLAPSE_TI.Time, function()
-		for _, c in children do c.wrapper.Visible = false end
+		if root.isOpen then return end  -- re-opened during the tween
+		for _, t1key in root.tier1Keys do
+			local ref = nodeRefs[t1key]
+			if ref then ref.wrapper.Visible = false end
+		end
 	end)
 end
 
--- ── Open / closed tracking ────────────────────────────────────────────────────
-local unitsIsOpen      = false
-local structuresIsOpen = false
-local unitsChildrenRef:  { ChildNode } = {}
-local structChildrenRef: { ChildNode } = {}
-local unitsStrokeRef:    UIStroke?
-local structStrokeRef:   UIStroke?
+local function resetAllRoots()
+	hideTooltip()
+	for rootKey, root in roots do
+		root.isOpen       = false
+		root.stroke.Thickness = 2
 
--- Instantly reset all children — no animation. Used on show/hide.
-local function resetAllChildren()
-	for _, c in unitsChildrenRef do
-		c.wrapper.Visible             = false
-		c.wrapper.Position            = c.startPos
-		c.btn.BackgroundTransparency  = 1
-		c.line.BackgroundTransparency = 1
+		for _, t1key in root.tier1Keys do
+			local tn  = techNodes[t1key]
+			local ref = nodeRefs[t1key]
+			if tn and ref then
+				ref.wrapper.Visible                = false
+				ref.wrapper.Position               = tn.startPos
+				ref.btn.BackgroundTransparency     = 1
+				tn.connector.BackgroundTransparency = 1
+			end
+		end
+
+		for t2key, t1key in TIER2_PARENT do
+			if TIER1_ROOT[t1key] == rootKey then
+				hideTier2Instant(t2key)
+			end
+		end
 	end
-	for _, c in structChildrenRef do
-		c.wrapper.Visible             = false
-		c.wrapper.Position            = c.startPos
-		c.btn.BackgroundTransparency  = 1
-		c.line.BackgroundTransparency = 1
-	end
-	unitsIsOpen      = false
-	structuresIsOpen = false
-	if unitsStrokeRef  then unitsStrokeRef.Thickness  = 2 end
-	if structStrokeRef then structStrokeRef.Thickness  = 2 end
-	-- Reset second-level node
-	isHoveringCS = false
-	if rbWrapper then rbWrapper.Visible = false end
-	if rbLine    then rbLine.BackgroundTransparency = 1 end
 end
 
--- ── Build child node group ────────────────────────────────────────────────────
-local function buildChildNodes(
-	parent:  Frame,
-	defs:    { ChildDef },
-	rootPos: UDim2
-): { ChildNode }
-	local nodes: { ChildNode } = {}
-	for _, def in defs do
-		local rad = math.rad(def.angle)
-		local dx  = math.cos(rad) * RADIUS
-		local dy  = math.sin(rad) * RADIUS
-
-		local finalPos = UDim2.new(
-			rootPos.X.Scale,  rootPos.X.Offset + dx,
-			rootPos.Y.Scale,  rootPos.Y.Offset + dy
-		)
-
-		local line             = UILib.connectorLineBetween(parent, rootPos, finalPos, 11)
-		local wrapper, btn     = UILib.radialNode(parent, def.key, def.icon, STATE_BG["AVAILABLE"], rootPos, nil, 13)
-		wrapper.Visible        = false
-
-		-- Widen the label slightly to handle longer names (with wrapping)
-		local label = wrapper:FindFirstChild("NodeLabel") :: TextLabel
-		label.Size  = UDim2.fromOffset(NODE_D + 40, 52)
-
-		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
-		stroke.Color = STATE_STROKE["AVAILABLE"]
-
-		local barTrack, barFill = makeProgressBar(btn, 16)
-
-		nodeRefs[def.key] = {
-			btn       = btn,
-			stroke    = stroke,
-			label     = label,
-			progTrack = barTrack,
-			progFill  = barFill,
-		}
-
-		-- Tooltip wiring
-		local tech    = techByKey[def.key]
-		local tipName = tech and tech.name or def.key
-		local tipCost = tech and ("⏱ " .. tech.time .. " seconds") or ""
-		local tipBody = def.tip
-
-		btn.MouseEnter:Connect(function()
-			showTooltip(tipName, tipCost, tipBody)
-		end)
-		btn.MouseMoved:Connect(positionTooltipAtMouse)
-		btn.MouseLeave:Connect(hideTooltip)
-
-		-- Click
-		local key = def.key
-		btn.MouseButton1Click:Connect(function()
-			if not activeCCId or not btn.Active then return end
-			networkRef.startResearch(activeCCId, key)
-		end)
-
-		table.insert(nodes, {
-			wrapper  = wrapper,
-			btn      = btn,
-			line     = line,
-			key      = key,
-			finalPos = finalPos,
-			startPos = rootPos,
-		})
-	end
-	return nodes
-end
-
--- ── Init ─────────────────────────────────────────────────────────────────────
-function WorkshopPanel.init(
-	network,
-	getResearched: (string) -> boolean,
-	getProgress:   (string) -> number?,
-	getResources:  (() -> number)?
+-- ── Build a researchable tech node ────────────────────────────────────────────
+local function buildTechNode(
+	parent  : Frame,
+	key     : string,
+	pos     : UDim2,   -- final position
+	startPos: UDim2,   -- slide animation origin (= parent node position)
+	zi      : number
 )
-	networkRef      = network
-	getResearchedFn = getResearched
-	getProgressFn   = getProgress
-	getResourcesFn  = getResources
+	local tech = TECH_DATA[key]
+	if not tech then return end
+
+	-- Connector line from parent to this node (starts invisible)
+	local connector = UILib.connectorLineBetween(parent, startPos, pos, zi - 1)
+	connector.BackgroundTransparency = 1
+
+	-- Circular node
+	local wrapper, btn = UILib.radialNode(parent, key, tech.icon, STATE_BG["AVAILABLE"], pos, nil, zi)
+	wrapper.Visible = false
+
+	local label = wrapper:FindFirstChild("NodeLabel") :: TextLabel
+	label.Size  = UDim2.fromOffset(NODE_D + 40, 52)
+
+	local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+	stroke.Color = STATE_STROKE["AVAILABLE"]
+
+	local barTrack, barFill = makeProgressBar(btn, zi + 2)
+
+	nodeRefs[key] = {
+		btn       = btn,
+		stroke    = stroke,
+		label     = label,
+		progTrack = barTrack,
+		progFill  = barFill,
+		wrapper   = wrapper,
+	}
+	techNodes[key] = {
+		pos       = pos,
+		startPos  = startPos,
+		connector = connector,
+	}
+
+	-- Tooltip
+	local tipCost = "⏱ " .. tech.time .. " seconds"
+	btn.MouseEnter:Connect(function() showTooltip(tech.name, tipCost, tech.tip) end)
+	btn.MouseMoved:Connect(positionTooltipAtMouse)
+	btn.MouseLeave:Connect(hideTooltip)
+
+	-- Research click — enforce one research at a time
+	btn.MouseButton1Click:Connect(function()
+		if not activeCCId or not btn.Active then return end
+		for k in TECH_DATA do
+			if getProgressFn and getProgressFn(k) ~= nil then
+				if showNotificationFn then
+					showNotificationFn("⚗ Only one research at a time.", C.ACCENT)
+				end
+				return
+			end
+		end
+		networkRef.startResearch(activeCCId, key)
+	end)
+end
+
+-- ── Init ──────────────────────────────────────────────────────────────────────
+function WorkshopPanel.init(
+	network         : any,
+	getResearched   : (string) -> boolean,
+	getProgress     : (string) -> number?,
+	getResources    : (() -> number)?,
+	showNotification: ((string, Color3?) -> ())?
+)
+	networkRef         = network
+	getResearchedFn    = getResearched
+	getProgressFn      = getProgress
+	getResourcesFn     = getResources
+	showNotificationFn = showNotification
 
 	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 	screenGui = sg
 
-	-- Full-screen overlay (intercepts no clicks — transparent, just a container)
-	local ov                         = Instance.new("Frame")
-	ov.Name                          = "WorkshopOverlay"
-	ov.Size                          = UDim2.new(1, 0, 1, 0)
-	ov.BackgroundTransparency        = 1
-	ov.BorderSizePixel               = 0
-	ov.ZIndex                        = 10
-	ov.Visible                       = false
-	ov.Parent                        = sg
+	local ov                      = Instance.new("Frame")
+	ov.Name                       = "WorkshopOverlay"
+	ov.Size                       = UDim2.new(1, 0, 1, 0)
+	ov.BackgroundTransparency     = 1
+	ov.BorderSizePixel            = 0
+	ov.ZIndex                     = 10
+	ov.Visible                    = false
+	ov.Parent                     = sg
 	overlay = ov
 
-	-- ── Root node positions ─────────────────────────────────────────────────
-	local unitsPos   = UDim2.new(0.5, UNITS_X,    0.5, 0)
-	local monPos     = UDim2.new(0.5, MONUMENT_X, 0.5, 0)
-	local structsPos = UDim2.new(0.5, STRUCTS_X,  0.5, 0)
+	-- Shorthand: UDim2 offset from screen centre
+	local function cp(x: number, y: number): UDim2
+		return UDim2.new(0.5, x, 0.5, y)
+	end
 
-	-- ── Root nodes ──────────────────────────────────────────────────────────
+	-- ── Root category positions ─────────────────────────────────────────────
+	local unitsPos   = cp(COL0_X, UNITS_ROOT_Y)
+	local structsPos = cp(COL0_X, STRUCTS_ROOT_Y)
+	local monPos     = cp(COL0_X, MONUMENT_Y)
+
+	-- ── Root category nodes (expand/collapse only, not researchable) ────────
 	local _uw, unitsBtn  = UILib.radialNode(ov, "Units",      "⚔", C.ACCENT, unitsPos,   nil, 12)
 	local _sw, structBtn = UILib.radialNode(ov, "Structures", "⚒", C.ACCENT, structsPos, nil, 12)
 	local _mw, monBtn    = UILib.radialNode(ov, "Monument",   "★", C.GOLD,   monPos,     nil, 12)
@@ -654,8 +645,8 @@ function WorkshopPanel.init(
 	local monLabel     = _mw:FindFirstChild("NodeLabel")              :: TextLabel
 	monLabel.Size      = UDim2.fromOffset(NODE_D + 40, 52)
 
-	-- Monument progress bar (hosted in monBtn)
-	local monBarTrack, monBarFill = makeProgressBar(monBtn, 16)
+	-- Monument progress bar
+	local monBarTrack, monBarFill = makeProgressBar(monBtn, 14)
 	monBarFill.BackgroundColor3   = C.GOLD
 
 	nodeRefs["Monument"] = {
@@ -664,15 +655,12 @@ function WorkshopPanel.init(
 		label     = monLabel,
 		progTrack = monBarTrack,
 		progFill  = monBarFill,
+		wrapper   = _mw,
 	}
 
-	-- Monument tooltip + click
 	monBtn.MouseEnter:Connect(function()
-		showTooltip(
-			"Monument",
-			"💰 1 500 resources",
-			"Rises from your Command Center.\nDefend it for 5 minutes to win.\n\nVisible to all players — 3 000 HP."
-		)
+		showTooltip("Monument", "💰 1 500 resources",
+			"Rises from your Command Center.\nDefend it for 5 minutes to win.\n\nVisible to all players — 3 000 HP.")
 	end)
 	monBtn.MouseMoved:Connect(positionTooltipAtMouse)
 	monBtn.MouseLeave:Connect(hideTooltip)
@@ -681,130 +669,44 @@ function WorkshopPanel.init(
 		networkRef.buildMonument()
 	end)
 
-	-- ── Child node groups ───────────────────────────────────────────────────
-	unitsStrokeRef  = unitsStroke
-	structStrokeRef = structStroke
+	-- ── Units tier-1 nodes ──────────────────────────────────────────────────
+	-- All slide out from the Units root position
+	buildTechNode(ov, "CombatStims",      cp(COL1_X, Y_COMBAT), unitsPos, 13)
+	buildTechNode(ov, "ConcussionShells", cp(COL1_X, Y_CONC),   unitsPos, 13)
+	buildTechNode(ov, "MedicUnit",        cp(COL1_X, Y_MEDIC),  unitsPos, 13)
 
-	unitsChildrenRef  = buildChildNodes(ov, UNITS_CHILDREN,      unitsPos)
-	structChildrenRef = buildChildNodes(ov, STRUCTURES_CHILDREN, structsPos)
+	-- ── Units tier-2 nodes ──────────────────────────────────────────────────
+	-- Hidden until their tier-1 parent is DONE; slide out from tier-1 position
+	buildTechNode(ov, "HardenedArmor", cp(COL2_X, Y_COMBAT), cp(COL1_X, Y_COMBAT), 14)
+	buildTechNode(ov, "RocketBarrage", cp(COL2_X, Y_CONC),   cp(COL1_X, Y_CONC),   14)
+	buildTechNode(ov, "EliteUnits",    cp(COL2_X, Y_MEDIC),  cp(COL1_X, Y_MEDIC),  14)
 
-	-- ── Second-level node: RocketBarrage branches from ConcussionShells ─────
-	-- Angle 200° from ConcussionShells at SUB_RADIUS keeps it on-screen and
-	-- visually distinct from the Units fan.
-	do
-		local SUB_RADIUS = 128
-		local SUB_ANGLE  = 200   -- degrees
+	-- ── Structures tier-1 nodes ─────────────────────────────────────────────
+	buildTechNode(ov, "BetterMines",    cp(COL1_X, Y_MINES),  structsPos, 13)
+	buildTechNode(ov, "TurretUpgrades", cp(COL1_X, Y_TURRET), structsPos, 13)
 
-		local csFinalPos: UDim2?    = nil
-		local csBtnRef:   TextButton? = nil
-		for _, c in unitsChildrenRef do
-			if c.key == "ConcussionShells" then
-				csFinalPos = c.finalPos
-				csBtnRef   = c.btn
-				break
-			end
-		end
+	-- ── Register roots ──────────────────────────────────────────────────────
+	roots["Units"] = {
+		btn       = unitsBtn,
+		stroke    = unitsStroke,
+		isOpen    = false,
+		tier1Keys = { "CombatStims", "ConcussionShells", "MedicUnit" },
+	}
+	roots["Structures"] = {
+		btn       = structBtn,
+		stroke    = structStroke,
+		isOpen    = false,
+		tier1Keys = { "BetterMines", "TurretUpgrades" },
+	}
 
-		if csFinalPos then
-			local rad   = math.rad(SUB_ANGLE)
-			local rbPos = UDim2.new(
-				csFinalPos.X.Scale, csFinalPos.X.Offset + math.cos(rad) * SUB_RADIUS,
-				csFinalPos.Y.Scale, csFinalPos.Y.Offset + math.sin(rad) * SUB_RADIUS
-			)
-
-			-- Connector line (initially hidden; shown by refreshRocketBarrageNode)
-			rbLine = UILib.connectorLineBetween(ov, csFinalPos, rbPos, 11)
-			rbLine.BackgroundTransparency = 1
-
-			-- The node itself (one wrapper serves both ghost and real states)
-			local rbW, rbB = UILib.radialNode(ov, RB_TECH.key, RB_TECH.icon,
-				STATE_BG["AVAILABLE"], rbPos, nil, 14)
-			rbWrapper         = rbW
-			rbBtn             = rbB
-			rbWrapper.Visible = false
-
-			local rbLabel = rbW:FindFirstChild("NodeLabel") :: TextLabel
-			rbLabel.Size  = UDim2.fromOffset(NODE_D + 40, 52)
-
-			local rbStroke           = rbB:FindFirstChildWhichIsA("UIStroke") :: UIStroke
-			local rbTrack, rbFill    = makeProgressBar(rbB, 17)
-
-			nodeRefs["RocketBarrage"] = {
-				btn       = rbB,
-				stroke    = rbStroke,
-				label     = rbLabel,
-				progTrack = rbTrack,
-				progFill  = rbFill,
-			}
-
-			-- Tooltip — content depends on whether CS is done
-			rbB.MouseEnter:Connect(function()
-				local csDone = getResearchedFn and getResearchedFn("ConcussionShells") or false
-				if csDone then
-					showTooltip(RB_TECH.name, "⏱ " .. RB_TECH.time .. " seconds", RB_TECH.tip)
-				else
-					-- Hovering ghost: keep ghost visible + show locked tooltip
-					isHoveringCS = true
-					refreshRocketBarrageNode()
-					showTooltip("🔒 Locked Upgrade",
-						"Requires: Concussion Shells",
-						"Research Concussion Shells to unlock this upgrade path.")
-				end
-			end)
-			rbB.MouseMoved:Connect(positionTooltipAtMouse)
-			rbB.MouseLeave:Connect(function()
-				local csDone = getResearchedFn and getResearchedFn("ConcussionShells") or false
-				if not csDone then
-					isHoveringCS = false
-					refreshRocketBarrageNode()
-				end
-				hideTooltip()
-			end)
-
-			-- Click: only active when CS is done and RB is not yet researched
-			rbB.MouseButton1Click:Connect(function()
-				if not activeCCId or not rbB.Active then return end
-				networkRef.startResearch(activeCCId, "RocketBarrage")
-			end)
-
-			-- Wire CS hover → ghost appears/disappears
-			if csBtnRef then
-				csBtnRef.MouseEnter:Connect(function()
-					isHoveringCS = true
-					refreshRocketBarrageNode()
-				end)
-				csBtnRef.MouseLeave:Connect(function()
-					-- Small delay so the cursor can travel to the ghost node
-					-- without it disappearing mid-transit.
-					task.delay(0.14, function()
-						if not isHoveringCS then
-							refreshRocketBarrageNode()
-						end
-					end)
-				end)
-			end
-		end
-	end
-
-	-- ── Root button clicks ──────────────────────────────────────────────────
+	-- ── Root click handlers ─────────────────────────────────────────────────
 	unitsBtn.MouseButton1Click:Connect(function()
-		if unitsIsOpen then
-			unitsIsOpen = false
-			collapseChildren(unitsChildrenRef, unitsStroke)
-		else
-			unitsIsOpen = true
-			expandChildren(unitsChildrenRef, unitsStroke)
-		end
+		if roots["Units"].isOpen then collapseRoot("Units")
+		else expandRoot("Units") end
 	end)
-
 	structBtn.MouseButton1Click:Connect(function()
-		if structuresIsOpen then
-			structuresIsOpen = false
-			collapseChildren(structChildrenRef, structStroke)
-		else
-			structuresIsOpen = true
-			expandChildren(structChildrenRef, structStroke)
-		end
+		if roots["Structures"].isOpen then collapseRoot("Structures")
+		else expandRoot("Structures") end
 	end)
 
 	buildTooltip(sg)
@@ -814,7 +716,7 @@ end
 
 function WorkshopPanel.show(ccId: string)
 	activeCCId = ccId
-	resetAllChildren()   -- always start fully collapsed
+	resetAllRoots()
 	if overlay then overlay.Visible = true end
 	refresh()
 end
@@ -822,8 +724,7 @@ end
 function WorkshopPanel.hide()
 	activeCCId = nil
 	if overlay then overlay.Visible = false end
-	hideTooltip()
-	resetAllChildren()   -- reset so next open is always clean
+	resetAllRoots()
 end
 
 function WorkshopPanel.refreshIfVisible()

@@ -91,7 +91,8 @@ MinePanel.init(Network,
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function(techName) return researchProgress[techName] end,
-	function() return currentResources end)
+	function() return currentResources end,
+	HUD.showNotification)
 TurretPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
