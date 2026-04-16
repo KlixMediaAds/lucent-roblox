@@ -63,6 +63,7 @@ local Y_TRAPPER = Y_CONC + 70   -- =  -85, Trapper sits below ConcussionShells
 -- Tier-1 Y positions (Structures branch)
 local Y_MINES   =  110   -- BetterMines
 local Y_TURRET  =  225   -- TurretUpgrades
+local Y_RELAY   =  340   -- Relay
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeCCId        : string?
@@ -115,6 +116,10 @@ local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: st
 		name = "Turret Upgrades", icon = "⚙", time = 20,
 		tip  = "Flamethrower + rocket paths",
 	},
+	Relay = {
+		name = "Relay", icon = "📡", time = 20,
+		tip  = "Extends build zone by 65 studs",
+	},
 }
 
 -- Tier-2 key → its tier-1 parent key (drip-feed gating)
@@ -138,6 +143,7 @@ local TIER1_ROOT: { [string]: string } = {
 	MedicUnit        = "Units",
 	BetterMines      = "Structures",
 	TurretUpgrades   = "Structures",
+	Relay            = "Structures",
 }
 
 -- ── Semantic state colours ────────────────────────────────────────────────────
@@ -721,6 +727,7 @@ function WorkshopPanel.init(
 	-- ── Structures tier-1 nodes ─────────────────────────────────────────────
 	buildTechNode(ov, "BetterMines",    cp(COL1_X, Y_MINES),  structsPos, 13)
 	buildTechNode(ov, "TurretUpgrades", cp(COL1_X, Y_TURRET), structsPos, 13)
+	buildTechNode(ov, "Relay",          cp(COL1_X, Y_RELAY),  structsPos, 13)
 
 	-- ── Register roots ──────────────────────────────────────────────────────
 	roots["Units"] = {
@@ -733,7 +740,7 @@ function WorkshopPanel.init(
 		btn       = structBtn,
 		stroke    = structStroke,
 		isOpen    = false,
-		tier1Keys = { "BetterMines", "TurretUpgrades" },
+		tier1Keys = { "BetterMines", "TurretUpgrades", "Relay" },
 	}
 
 	-- ── Root click handlers ─────────────────────────────────────────────────

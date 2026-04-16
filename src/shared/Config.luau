@@ -71,6 +71,14 @@ Config.MINER_OFFSETS = {
 -- Command Center
 Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
 Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command centers
+Config.BUILD_RADIUS            = 85    -- studs; non-CC buildings must be within this distance of the player's CC
+
+-- Relay (build-zone extender, unlocked via Relay research)
+Config.RELAY_COST       = 175
+Config.RELAY_HP         = 250
+Config.RELAY_BUILD_TIME = 12
+Config.RELAY_RADIUS     = 65    -- studs; extends the build zone around this structure
+Config.RELAY_SIZE       = Vector3.new(6, 12, 6)
 
 -- Monument (win condition — upgrade from Command Center)
 Config.MONUMENT_COST         = 1500
@@ -96,6 +104,7 @@ Config.RESEARCH = {
 	Trapper           = { time = 20, requires = "ConcussionShells", desc = "Replaces the tank's weapon with a harpoon launcher. Each harpoon slows an enemy by 90% for 7 s. Carries 5 harpoons, restocking one every 10 s." },
 	CombatStims       = { time = 12, desc = "Soldiers automatically boost speed and attack rate when engaging enemies." },
 	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
+	Relay             = { time = 20, desc = "Unlocks the Relay building. Place it to extend your build zone by 65 studs in any direction." },
 }
 
 -- Tank: Rocket Barrage (requires ConcussionShells)
@@ -130,12 +139,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70   }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22   }  -- Medic value = heal per tick
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 45, Elite = 30, Medic = 22 }  -- studs per type
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2  }  -- seconds between attacks
@@ -186,6 +195,7 @@ Config.REMOTES = {
 	LobbyReady              = "LobbyReady",
 	LobbyReroll             = "LobbyReroll",
 	LobbyStart              = "LobbyStart",
+	LobbySetColor           = "LobbySetColor",
 }
 
 return Config

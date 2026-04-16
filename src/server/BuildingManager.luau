@@ -31,6 +31,7 @@ local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Monument"      then return Config.MONUMENT_SIZE end
+	if buildingType == "Relay"         then return Config.RELAY_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -244,6 +245,45 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			ring.CastShadow  = false
 			ring.Parent      = model
 		end
+
+	elseif buildingType == "Relay" then
+		-- Slim antenna pole
+		local pole       = Instance.new("Part")
+		pole.Name        = "Pole"
+		pole.Size        = Vector3.new(1, size.Y + 6, 1)
+		pole.Position    = position + Vector3.new(0, (size.Y + 6) / 2, 0)
+		pole.BrickColor  = BrickColor.new("Dark stone grey")
+		pole.Material    = Enum.Material.Metal
+		pole.Anchored    = true
+		pole.CastShadow  = false
+		pole.Parent      = model
+
+		-- Glowing orb at the top in team color
+		local orb        = Instance.new("Part")
+		orb.Name         = "Orb"
+		orb.Shape        = Enum.PartType.Ball
+		orb.Size         = Vector3.new(2.5, 2.5, 2.5)
+		orb.Position     = position + Vector3.new(0, size.Y + 7.25, 0)
+		orb.BrickColor   = player.TeamColor
+		orb.Material     = Enum.Material.Neon
+		orb.Anchored     = true
+		orb.CastShadow   = false
+		orb.CanCollide   = false
+		orb.Parent       = model
+
+		-- Small accent ring around orb base
+		local ring        = Instance.new("Part")
+		ring.Name         = "Ring"
+		ring.Shape        = Enum.PartType.Cylinder
+		ring.Size         = Vector3.new(0.3, 4, 4)
+		ring.CFrame       = CFrame.new(position + Vector3.new(0, size.Y + 6, 0))
+		                  * CFrame.Angles(0, 0, math.pi / 2)
+		ring.BrickColor   = player.TeamColor
+		ring.Material     = Enum.Material.Neon
+		ring.Anchored     = true
+		ring.CastShadow   = false
+		ring.CanCollide   = false
+		ring.Parent       = model
 
 	else
 		-- Barracks flag
@@ -533,17 +573,40 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 
 	if not playerHasCC[player.UserId] then return false end
 
+	-- Build zone: all non-CC buildings must be within BUILD_RADIUS of the player's CC
+	-- OR within RELAY_RADIUS of any owned Relay.
+	do
+		local inZone = false
+		for _, data in buildingData do
+			if data.owner ~= player then continue end
+			if data.buildingType == "CommandCenter" then
+				local d = Vector3.new(snapped.X, 0, snapped.Z)
+					- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+				if d.Magnitude <= Config.BUILD_RADIUS then inZone = true; break end
+			elseif data.buildingType == "Relay" then
+				local d = Vector3.new(snapped.X, 0, snapped.Z)
+					- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+				if d.Magnitude <= Config.RELAY_RADIUS then inZone = true; break end
+			end
+		end
+		if not inZone then return false end
+	end
+
 	-- Mine cap
 	if buildingType == "Mine" then
 		if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return false end
 	end
 
-	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks
+	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay needs research
 	if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	if buildingType == "Relay" then
+		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
+	end
 
 	local cost = buildingType == "Mine"   and Config.MINE_COST
 		or buildingType == "Turret" and Config.TURRET_COST
+		or buildingType == "Relay"  and Config.RELAY_COST
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
@@ -698,17 +761,39 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		if not playerHasCC[player.UserId] then return end
 
+		-- Build zone: CC radius OR any owned Relay radius
+		do
+			local inZone = false
+			for _, data in buildingData do
+				if data.owner ~= player then continue end
+				if data.buildingType == "CommandCenter" then
+					local d = Vector3.new(snapped.X, 0, snapped.Z)
+						- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+					if d.Magnitude <= Config.BUILD_RADIUS then inZone = true; break end
+				elseif data.buildingType == "Relay" then
+					local d = Vector3.new(snapped.X, 0, snapped.Z)
+						- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+					if d.Magnitude <= Config.RELAY_RADIUS then inZone = true; break end
+				end
+			end
+			if not inZone then return end
+		end
+
 		-- Mine cap
 		if buildingType == "Mine" then
 			if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return end
 		end
 
-		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks
+		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay needs research
 		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
+		if buildingType == "Relay" then
+			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
+		end
 
 		local cost = buildingType == "Mine"   and Config.MINE_COST
 			or buildingType == "Turret" and Config.TURRET_COST
+			or buildingType == "Relay"  and Config.RELAY_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
 

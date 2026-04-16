@@ -112,6 +112,12 @@ function LobbyManager.init(mineralManager, onLobbyEnd: () -> ())
 		task.delay(3, function() rerollCooldown = false end)
 	end)
 
+	-- Color picker
+	RemoteHandler.get(Config.REMOTES.LobbySetColor).OnServerEvent:Connect(function(player, colorName: string)
+		if not active then return end
+		player.TeamColor = BrickColor.new(colorName)
+	end)
+
 	-- Seed the ready map for players already in-server (e.g. solo testing)
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false

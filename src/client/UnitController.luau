@@ -1,6 +1,10 @@
 local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local GuiService       = game:GetService("GuiService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared           = ReplicatedStorage:WaitForChild("Shared")
+local Config           = require(Shared:WaitForChild("Config"))
+local RangeRing        = require(script.Parent:WaitForChild("RangeRing"))
 
 local UnitController = {}
 
@@ -24,6 +28,36 @@ local hoverBuildingId:     string?      = nil
 local hoverBox:            SelectionBox? = nil
 local selectedBuildingId:  string?      = nil
 local selectedBuildingBox: SelectionBox? = nil
+local multiBldBoxes:       { [string]: SelectionBox } = {}  -- extra boxes from double-click
+
+-- ── Double-click tracking ─────────────────────────────────────────────────────
+local lastClickTime:   number  = 0
+local lastClickTarget: string? = nil
+local DOUBLE_CLICK_SECS        = 0.35
+
+-- ── Range rings for turrets and mines ─────────────────────────────────────────
+local hoverRing:    Model? = nil
+local selectedRing: Model? = nil
+
+local function getBuildingRange(id: string): number?
+	local info = knownBuildings[id]
+	if not info then return nil end
+	local bt = info.buildingType
+	if bt == "Mine" then
+		return Config.MINE_EXTRACT_RANGE
+	elseif bt == "Turret" then
+		local model = info.base.Parent
+		if model and (model :: any):IsA("Model") then
+			local upg = model:FindFirstChild("Upgrade") :: StringValue?
+			if upg then
+				if upg.Value == "Flamethrower"   then return Config.TURRET_FLAME.range end
+				if upg.Value == "RocketLauncher" then return Config.TURRET_ROCKET.range end
+			end
+		end
+		return Config.TURRET_RANGE
+	end
+	return nil
+end
 
 local dragStart  = Vector2.zero
 local dragEnd    = Vector2.zero
@@ -211,10 +245,21 @@ end
 local function setHover(bid: string?)
 	if bid == hoverBuildingId then return end
 	if hoverBox then hoverBox:Destroy(); hoverBox = nil end
+	if hoverRing then hoverRing:Destroy(); hoverRing = nil end
 	hoverBuildingId = bid
 
 	-- Don't overlap with the selection box on the same building.
 	if not bid or bid == selectedBuildingId then return end
+
+	-- Range ring for turrets and mines
+	local range = getBuildingRange(bid)
+	if range then
+		local info = knownBuildings[bid]
+		if info then
+			local pos = info.base.Position
+			hoverRing = RangeRing.create(range, pos.X, pos.Z)
+		end
+	end
 
 	local model = buildingModel(bid)
 	if not model then return end
@@ -222,28 +267,46 @@ local function setHover(bid: string?)
 	local box                = Instance.new("SelectionBox")
 	box.Adornee              = model
 	box.Color3               = Color3.fromRGB(255, 255, 255)
-	box.LineThickness         = 0.05
-	box.SurfaceTransparency  = 1        -- outline only, no fill
+	box.LineThickness        = 0.05
+	box.SurfaceTransparency  = 1
 	box.Parent               = workspace
 	hoverBox                 = box
+end
+
+local function clearMultiBldBoxes()
+	for _, box in multiBldBoxes do box:Destroy() end
+	multiBldBoxes = {}
 end
 
 -- Show/clear the teal selection box with a slight surface fill.
 local function selectBuilding(bid: string?)
 	if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
+	if selectedRing then selectedRing:Destroy(); selectedRing = nil end
+	clearMultiBldBoxes()
 	selectedBuildingId = bid
 
 	-- Re-evaluate hover so it doesn't stack on the newly selected building.
 	setHover(hoverBuildingId == bid and nil or hoverBuildingId)
 
 	if not bid then return end
+
+	-- Range ring for turrets and mines
+	local range = getBuildingRange(bid)
+	if range then
+		local info = knownBuildings[bid]
+		if info then
+			local pos = info.base.Position
+			selectedRing = RangeRing.create(range, pos.X, pos.Z)
+		end
+	end
+
 	local model = buildingModel(bid)
 	if not model then return end
 
 	local box                = Instance.new("SelectionBox")
 	box.Adornee              = model
 	box.Color3               = Color3.fromRGB(80, 255, 180)
-	box.LineThickness         = 0.10
+	box.LineThickness        = 0.10
 	box.SurfaceTransparency  = 0.78
 	box.SurfaceColor3        = Color3.fromRGB(80, 255, 180)
 	box.Parent               = workspace
@@ -255,7 +318,66 @@ local function selectBuilding(bid: string?)
 		info.base.Destroying:Connect(function()
 			if selectedBuildingId ~= bid then return end
 			if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
+			if selectedRing then selectedRing:Destroy(); selectedRing = nil end
 			selectedBuildingId = nil
+		end)
+	end
+end
+
+-- Returns true if a world position is within the current viewport.
+local function isOnScreen(worldPos: Vector3): boolean
+	local sv = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
+	if sv.Z <= 0 then return false end
+	local vp = workspace.CurrentCamera.ViewportSize
+	return sv.X >= 0 and sv.X <= vp.X and sv.Y >= 0 and sv.Y <= vp.Y
+end
+
+-- Select all owned visible units of the same UnitType as the given id.
+local function selectAllSameUnitOnScreen(id: string)
+	local info = knownUnits[id]
+	if not info then return end
+	local ut = info.part:FindFirstChild("UnitType") :: StringValue?
+	local targetType = ut and ut.Value
+	selected = {}
+	for uid, uinfo in knownUnits do
+		if uinfo.ownerId ~= localPlayer.UserId then continue end
+		if not uinfo.part.Parent then continue end
+		local ut2 = uinfo.part:FindFirstChild("UnitType") :: StringValue?
+		if (ut2 and ut2.Value) ~= targetType then continue end
+		if isOnScreen(uinfo.part.Position) then
+			table.insert(selected, uid)
+		end
+	end
+	notify()
+end
+
+-- Show selection boxes on all owned visible buildings of the same type.
+-- The panel is opened for `primaryId` by the caller via selectBuilding().
+local function multiSelectBuildingsOnScreen(primaryId: string)
+	clearMultiBldBoxes()
+	local primary = knownBuildings[primaryId]
+	if not primary then return end
+	local cam = workspace.CurrentCamera
+	local vp  = cam.ViewportSize
+	for bid, binfo in knownBuildings do
+		if bid == primaryId then continue end
+		if binfo.ownerId ~= localPlayer.UserId then continue end
+		if binfo.buildingType ~= primary.buildingType then continue end
+		local sv = cam:WorldToViewportPoint(binfo.base.Position)
+		if sv.Z <= 0 or sv.X < 0 or sv.X > vp.X or sv.Y < 0 or sv.Y > vp.Y then continue end
+		local model2 = buildingModel(bid)
+		if not model2 then continue end
+		local box               = Instance.new("SelectionBox")
+		box.Adornee             = model2
+		box.Color3              = Color3.fromRGB(80, 255, 180)
+		box.LineThickness       = 0.10
+		box.SurfaceTransparency = 0.78
+		box.SurfaceColor3       = Color3.fromRGB(80, 255, 180)
+		box.Parent              = workspace
+		multiBldBoxes[bid]      = box
+		binfo.base.Destroying:Connect(function()
+			local b = multiBldBoxes[bid]
+			if b then b:Destroy(); multiBldBoxes[bid] = nil end
 		end)
 	end
 end
@@ -325,6 +447,15 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			local base = model:WaitForChild("Base", 5) :: BasePart
 			if not base then return end
 			knownBuildings[id] = { base = base, ownerId = ownerId, buildingType = buildingType or "Barracks" }
+
+			base.Destroying:Connect(function()
+				knownBuildings[id] = nil
+				if hoverBuildingId == id then
+					if hoverBox  then hoverBox:Destroy();  hoverBox  = nil end
+					if hoverRing then hoverRing:Destroy(); hoverRing = nil end
+					hoverBuildingId = nil
+				end
+			end)
 		end)
 	end)
 
@@ -473,6 +604,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		local d = dragEnd - dragStart
 		if math.abs(d.X) > MIN_DRAG or math.abs(d.Y) > MIN_DRAG then
 			-- Box select
+			lastClickTime   = 0
+			lastClickTarget = nil
 			clearSelection()
 			selectBuilding(nil)
 			boxSelect(
@@ -484,11 +617,19 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if onCCSelectedCb        then onCCSelectedCb(nil)        end
 			if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
 		else
-			-- Single click — check unit first, then buildings
+			-- Single / double click — check unit first, then buildings
+			local now = os.clock()
 			local uid = hitUnit()
 			if uid then
-				if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then clearSelection() end
-				addToSelection(uid)
+				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == uid
+				lastClickTime   = now
+				lastClickTarget = uid
+				if isDouble then
+					selectAllSameUnitOnScreen(uid)
+				else
+					if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then clearSelection() end
+					addToSelection(uid)
+				end
 				selectBuilding(nil)
 				if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 				if onMineSelectedCb      then onMineSelectedCb(nil)      end
@@ -497,8 +638,14 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			else
 				local bid = hitBuilding()
 				if bid then
+					local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == bid
+					lastClickTime   = now
+					lastClickTarget = bid
 					clearSelection()
 					selectBuilding(bid)
+					if isDouble then
+						multiSelectBuildingsOnScreen(bid)
+					end
 					local info = knownBuildings[bid]
 					if info and info.buildingType == "Barracks" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(bid)  end
@@ -527,6 +674,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
 					end
 				else
+					lastClickTime   = 0
+					lastClickTarget = nil
 					clearSelection()
 					selectBuilding(nil)
 					if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end

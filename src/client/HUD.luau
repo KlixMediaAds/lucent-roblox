@@ -71,12 +71,15 @@ local buildMenuOpen    = false
 local currentActivePlacing: string? = nil
 
 local playerCounts: { [string]: number } = {}
+local hasResearchFn: ((string) -> boolean)?
 
 -- ── Building metadata ─────────────────────────────────────────────────────────
-local BUILDING_INFO: { [string]: { cost: number, requires: { [string]: number } } } = {
-	Mine     = { cost = Config.MINE_COST,     requires = {} },
-	Barracks = { cost = Config.BUILDING_COST, requires = { Mine = 1 } },
-	Turret   = { cost = Config.TURRET_COST,   requires = { Barracks = 1 } },
+type BuildingInfo = { cost: number, requires: { [string]: number }, researchReq: string? }
+local BUILDING_INFO: { [string]: BuildingInfo } = {
+	Mine     = { cost = Config.MINE_COST,     requires = {},             researchReq = nil    },
+	Barracks = { cost = Config.BUILDING_COST, requires = { Mine = 1 },   researchReq = nil    },
+	Turret   = { cost = Config.TURRET_COST,   requires = { Barracks = 1 }, researchReq = nil  },
+	Relay    = { cost = Config.RELAY_COST,    requires = {},             researchReq = "Relay" },
 }
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
@@ -85,6 +88,7 @@ local CHILD_DEFS: { { btype: string, icon: string, color: Color3 } } = {
 	{ btype = "Mine",     icon = "⛏", color = C.MINE     },
 	{ btype = "Barracks", icon = "⚔", color = C.BARRACKS },
 	{ btype = "Turret",   icon = "⚙", color = C.TURRET   },
+	{ btype = "Relay",    icon = "📡", color = C.ACCENT   },
 }
 local CHILD_SPACING = 95   -- px between child centres
 
@@ -108,6 +112,15 @@ local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
+
+-- Returns false if this building's researchReq hasn't been completed yet.
+-- Such nodes are fully hidden from the tray until research is done.
+local function isResearchVisible(btype: string): boolean
+	local info = BUILDING_INFO[btype]
+	if not info or not info.researchReq then return true end
+	return hasResearchFn ~= nil and hasResearchFn(info.researchReq)
+end
+
 local function isUnlocked(btype: string): boolean
 	local info = BUILDING_INFO[btype]
 	if not info then return true end
@@ -132,6 +145,18 @@ end
 
 -- ── Build node visual state ───────────────────────────────────────────────────
 local function applyNodeState(node: ChildNode)
+	-- Hide completely if gated behind unfinished research
+	if not isResearchVisible(node.btype) then
+		node.wrapper.Visible = false
+		return
+	end
+
+	-- If the menu is open and this node just became research-visible, show it
+	if buildMenuOpen and not node.wrapper.Visible then
+		node.wrapper.Visible = true
+		node.wrapper.Position = node.finalPos
+	end
+
 	local locked  = not isUnlocked(node.btype)
 	local placing = currentActivePlacing == node.btype
 	local info    = BUILDING_INFO[node.btype]
@@ -145,11 +170,11 @@ local function applyNodeState(node: ChildNode)
 		node.label.Text               = node.btype:upper() .. "\nPLACING…"
 		node.label.TextColor3         = C.ACCENT
 	elseif locked then
-		local missingReq = ""
+		local lockReason = "LOCKED"
 		if info then
 			for req in info.requires do
 				if (playerCounts[req] or 0) < (info.requires[req] or 1) then
-					missingReq = req; break
+					lockReason = "Needs " .. req; break
 				end
 			end
 		end
@@ -157,7 +182,7 @@ local function applyNodeState(node: ChildNode)
 		node.btn.BackgroundTransparency = 0.4
 		node.stroke.Color             = C.BORDER_LO
 		node.stroke.Thickness         = 1.5
-		node.label.Text               = node.btype:upper() .. (missingReq ~= "" and ("\nNeeds " .. missingReq) or "\nLOCKED")
+		node.label.Text               = node.btype:upper() .. "\n" .. lockReason
 		node.label.TextColor3         = C.DIM
 	else
 		node.btn.BackgroundColor3     = BUILDING_INFO[node.btype] and
@@ -185,6 +210,7 @@ local function expandMenu()
 	if rootStroke then TweenService:Create(rootStroke, TweenInfo.new(0.12), { Thickness = 4 }):Play() end
 
 	for _, n in childNodes do
+		if not isResearchVisible(n.btype) then continue end
 		n.wrapper.Visible              = true
 		n.wrapper.Position             = n.startPos
 		n.btn.BackgroundTransparency   = 1
@@ -492,6 +518,11 @@ end
 
 function HUD.refreshTrayState(counts: { [string]: number })
 	playerCounts = counts
+	updateAllNodes()
+end
+
+function HUD.setHasResearch(fn: (string) -> boolean)
+	hasResearchFn = fn
 	updateAllNodes()
 end
 

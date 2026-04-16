@@ -213,12 +213,14 @@ local function hideBuildingPanels()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels)
+HUD.setHasResearch(function(techName: string) return researchedTechs[techName] == true end)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
 
 local function enterCCMode()
 	BuildingPlacer.exitPlacementMode()
+	BuildingPlacer.clearRelayPositions()
 	clearMineData()
 	ownedBuildingCounts = {}
 	researchedTechs    = {}
@@ -942,6 +944,7 @@ Network.onResearchCompleted(function(techName: string)
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
+	HUD.refreshTrayState(ownedBuildingCounts)  -- re-evaluate research-gated nodes (e.g. Relay)
 
 	-- Apply visuals to all existing own units when relevant research completes
 	if techName == "ConcussionShells" or techName == "CombatStims" or techName == "HardenedArmor" or techName == "Trapper" then

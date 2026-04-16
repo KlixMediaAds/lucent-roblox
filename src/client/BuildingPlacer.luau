@@ -4,6 +4,7 @@ local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
+local RangeRing         = require(script.Parent:WaitForChild("RangeRing"))
 
 local BuildingPlacer = {}
 local localPlayer    = Players.LocalPlayer
@@ -12,15 +13,48 @@ local isPlacing           = false
 local currentType         = "Barracks"
 local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping to
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
+local outOfBuildZone      = false          -- non-CC mode: ghost is outside build zone
 local depositPositions: {Vector3} = {}
 local ccPositions: {Vector3}      = {}     -- all known CC positions
-local ghost:     Part?
-local rangeRing: Part?
+local ownCcPosition: Vector3?     = nil    -- local player's own CC position
+local ownRelayPositions: {Vector3} = {}    -- local player's own Relay positions
+local ghost:          Part?
+local rangeRing:      Model?               -- mine extract-range ring (follows ghost)
+local buildZoneRing:  Model?               -- union build-zone ring (shown during placement)
 local modeCb: ((boolean, string?) -> ())?
 local networkRef: any
 local cameraRef:  any
 
 local GRID = Config.BUILDING_GRID
+
+-- Returns true if pos is within any owned build zone (CC or Relay).
+local function isInBuildZone(pos: Vector3): boolean
+	if ownCcPosition then
+		local d = Vector3.new(pos.X, 0, pos.Z) - Vector3.new(ownCcPosition.X, 0, ownCcPosition.Z)
+		if d.Magnitude <= Config.BUILD_RADIUS then return true end
+	end
+	for _, rp in ownRelayPositions do
+		local d = Vector3.new(pos.X, 0, pos.Z) - Vector3.new(rp.X, 0, rp.Z)
+		if d.Magnitude <= Config.RELAY_RADIUS then return true end
+	end
+	return false
+end
+
+-- Rebuilds the build-zone ring from all current CC + Relay positions.
+local function rebuildBuildZoneRing()
+	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
+	if currentType == "CommandCenter" then return end
+	local zones: { { cx: number, cz: number, radius: number } } = {}
+	if ownCcPosition then
+		table.insert(zones, { cx = ownCcPosition.X, cz = ownCcPosition.Z, radius = Config.BUILD_RADIUS })
+	end
+	for _, rp in ownRelayPositions do
+		table.insert(zones, { cx = rp.X, cz = rp.Z, radius = Config.RELAY_RADIUS })
+	end
+	if #zones > 0 then
+		buildZoneRing = RangeRing.createBuildZone(zones)
+	end
+end
 
 -- ── Deposit markers (Mine placement mode only) ────────────────────────────────
 -- When the player enters Mine placement mode every unclaimed deposit gets:
@@ -31,7 +65,6 @@ local GRID = Config.BUILDING_GRID
 local DEPOSIT_COLOR   = Color3.fromRGB(255, 205, 40)
 local RING_BASE_SIZE  = Vector3.new(0.22, 9, 9)   -- flat cylinder (length = diameter)
 local ARROW_MARGIN    = 50   -- px from screen edge for arrow anchor
-local MINE_RANGE_COLOR = Color3.fromRGB(80, 220, 255)  -- ghost tint when deposits in range
 
 type DepositMarker = {
     pos:   Vector3,
@@ -184,7 +217,9 @@ local function snap(v: Vector3): Vector3
 end
 
 local function ghostSize(buildingType: string): Vector3
-	return buildingType == "CommandCenter" and Config.COMMAND_CENTER_SIZE or Config.BUILDING_SIZE
+	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
+	if buildingType == "Relay"         then return Config.RELAY_SIZE end
+	return Config.BUILDING_SIZE
 end
 
 local function nearestDeposit(cursor: Vector3): Vector3?
@@ -223,10 +258,17 @@ function BuildingPlacer.init(network, cameraModule)
 	networkRef = network
 	cameraRef  = cameraModule
 
-	-- Track all CC positions for min-distance validation
-	network.onBuildingPlaced(function(_id: string, _ownerId: number, pos: Vector3, buildingType: string)
+	-- Track CC/Relay positions for min-distance validation and build-zone rings
+	network.onBuildingPlaced(function(_id: string, ownerId: number, pos: Vector3, buildingType: string)
 		if buildingType == "CommandCenter" then
 			table.insert(ccPositions, pos)
+			if ownerId == localPlayer.UserId then
+				ownCcPosition = pos
+				if isPlacing then rebuildBuildZoneRing() end
+			end
+		elseif buildingType == "Relay" and ownerId == localPlayer.UserId then
+			table.insert(ownRelayPositions, pos)
+			if isPlacing then rebuildBuildZoneRing() end
 		end
 	end)
 
@@ -235,6 +277,7 @@ function BuildingPlacer.init(network, cameraModule)
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
 			if currentType == "Mine" then
+				if outOfBuildZone then return end  -- blocked by build zone
 				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 				if pos then
 					network.placeBuilding(snap(pos), "Mine")
@@ -253,7 +296,8 @@ function BuildingPlacer.init(network, cameraModule)
 				-- Red = too close → do nothing (keeps mode open)
 
 			else
-				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
+				if outOfBuildZone then return end  -- blocked by build zone
+				local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
 				if pos then
 					network.placeBuilding(snap(pos), currentType)
 				end
@@ -274,22 +318,32 @@ function BuildingPlacer.init(network, cameraModule)
 			if cursor then
 				local snapped = snap(cursor)
 				ghost.Position = snapped
-				-- Ghost is team-colour when at least one deposit is within extract range,
-				-- orange when no deposits are reachable (mine would produce nothing).
-				local inRange = false
-				for _, dep in depositPositions do
-					if (Vector3.new(snapped.X, 0, snapped.Z) - Vector3.new(dep.X, 0, dep.Z)).Magnitude
-						<= Config.MINE_EXTRACT_RANGE then
-						inRange = true
-						break
+
+				-- Build zone check takes priority over extract-range colouring
+				outOfBuildZone = not isInBuildZone(snapped)
+
+				if outOfBuildZone then
+					ghost.BrickColor   = BrickColor.new("Bright red")
+					ghost.Transparency = 0.65
+				else
+					-- Ghost is team-colour when at least one deposit is within extract range,
+					-- orange when no deposits are reachable (mine would produce nothing).
+					local inRange = false
+					for _, dep in depositPositions do
+						if (Vector3.new(snapped.X, 0, snapped.Z)
+							- Vector3.new(dep.X, 0, dep.Z)).Magnitude
+							<= Config.MINE_EXTRACT_RANGE then
+							inRange = true
+							break
+						end
 					end
+					ghost.BrickColor   = inRange and localPlayer.TeamColor or BrickColor.new("Bright orange")
+					ghost.Transparency = inRange and 0.5 or 0.62
 				end
-				ghost.BrickColor   = inRange and localPlayer.TeamColor or BrickColor.new("Bright orange")
-				ghost.Transparency = inRange and 0.5 or 0.62
-				-- Keep range ring centred under ghost
+
+				-- Keep extract-range ring centred under ghost
 				if rangeRing then
-					rangeRing.CFrame = CFrame.new(snapped.X, 0.15, snapped.Z)
-						* CFrame.Angles(0, 0, math.pi / 2)
+					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z)
 				end
 			end
 			updateDepositMarkers()
@@ -306,10 +360,20 @@ function BuildingPlacer.init(network, cameraModule)
 			end
 
 		else
-			local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
+			local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
 			if pos then
-				ghost.Position   = snap(pos)
-				ghost.BrickColor = localPlayer.TeamColor
+				local snapped = snap(pos)
+				ghost.Position = snapped
+
+				outOfBuildZone = not isInBuildZone(snapped)
+
+				ghost.BrickColor   = outOfBuildZone and BrickColor.new("Bright red") or localPlayer.TeamColor
+				ghost.Transparency = outOfBuildZone and 0.65 or 0.5
+
+				-- Keep attack-range ring (e.g. turret) centred under ghost
+				if rangeRing then
+					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z)
+				end
 			end
 		end
 	end)
@@ -317,29 +381,25 @@ end
 
 function BuildingPlacer.enterPlacementMode(buildingType: string?)
 	if isPlacing then return end
-	currentType       = buildingType or "Barracks"
+	currentType      = buildingType or "Barracks"
 	currentSnapTarget = nil
-	ccTooClose        = false
-	isPlacing         = true
+	ccTooClose       = false
+	outOfBuildZone   = false
+	isPlacing        = true
 	makeGhost()
+
+	-- Build-zone ring: shown for all non-CC placements
+	rebuildBuildZoneRing()
+
 	if currentType == "Mine" then
-		-- Range indicator ring
-		local r             = Instance.new("Part")
-		r.Name              = "_MineRangeRing"
-		r.Shape             = Enum.PartType.Cylinder
-		r.Size              = Vector3.new(0.18, Config.MINE_EXTRACT_RANGE * 2, Config.MINE_EXTRACT_RANGE * 2)
-		r.CFrame            = CFrame.new(0, 0.15, 0) * CFrame.Angles(0, 0, math.pi / 2)
-		r.Color             = Color3.fromRGB(80, 220, 255)
-		r.Material          = Enum.Material.Neon
-		r.Transparency      = 0.72
-		r.Anchored          = true
-		r.CanCollide        = false
-		r.CanQuery          = false
-		r.CastShadow        = false
-		r.Parent            = workspace
-		rangeRing = r
+		-- Mine extract-range ring follows the ghost cursor
+		rangeRing = RangeRing.create(Config.MINE_EXTRACT_RANGE, 0, 0)
 		createDepositMarkers()
+	elseif currentType == "Turret" then
+		-- Turret attack-range ring follows the ghost cursor
+		rangeRing = RangeRing.create(Config.TURRET_RANGE, 0, 0)
 	end
+
 	if modeCb then modeCb(true, currentType) end
 end
 
@@ -348,8 +408,10 @@ function BuildingPlacer.exitPlacementMode()
 	isPlacing         = false
 	currentSnapTarget = nil
 	ccTooClose        = false
-	if ghost     then ghost:Destroy();     ghost     = nil end
-	if rangeRing then rangeRing:Destroy(); rangeRing = nil end
+	outOfBuildZone    = false
+	if ghost        then ghost:Destroy();              ghost        = nil end
+	if rangeRing    then RangeRing.destroy(rangeRing); rangeRing    = nil end
+	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
 	destroyDepositMarkers()
 	if modeCb then modeCb(false, nil) end
 end
@@ -364,6 +426,10 @@ end
 
 function BuildingPlacer.setDepositPositions(positions: {Vector3})
 	depositPositions = positions
+end
+
+function BuildingPlacer.clearRelayPositions()
+	ownRelayPositions = {}
 end
 
 function BuildingPlacer.removeDeposit(pos: Vector3)
