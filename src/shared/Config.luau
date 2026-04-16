@@ -77,15 +77,12 @@ Config.MONUMENT_COST         = 1500
 Config.MONUMENT_WIN_DURATION = 300    -- seconds to hold monument for victory (5 minutes)
 Config.MONUMENT_SIZE         = Vector3.new(5, 20, 5)
 
--- Mine limits & depletion
-Config.MAX_MINES                = 3     -- max mine buildings per player
+-- Mine limits & deposits
+Config.MAX_MINES                = 6     -- max mine buildings per player
 Config.DEPOSIT_TOTAL_RESOURCES  = 1000  -- total resources a deposit holds before depleting
-Config.MINE_DECAY_RATE          = 5     -- HP/second drained from a depleted mine
-
--- Mine upgrades (one per mine, mutually exclusive)
-Config.MINE_UPGRADE_COST = { Efficiency = 150, Capacity = 125 }
-Config.MINE_UPGRADE_EFFICIENCY_MULT  = 2.0   -- income per miner × this
-Config.MINE_UPGRADE_CAPACITY_EXTRA   = 4     -- extra miner slots added
+Config.MINE_EXTRACT_RANGE       = 60    -- studs; mine scans for deposits within this radius
+Config.MINE_EXTRACT_INTERVAL    = 5     -- seconds between extraction ticks
+Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources per deposit per extraction tick
 
 -- Research techs (time in seconds; no resource cost)
 -- `requires`: if set, that tech must be done before this one can start.
@@ -147,7 +144,7 @@ Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic =
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
 Config.CAMERA_MOVE_SPEED     = 60
 Config.CAMERA_ZOOM_MIN       = 20
-Config.CAMERA_ZOOM_MAX       = 150
+Config.CAMERA_ZOOM_MAX       = 280
 Config.CAMERA_ZOOM_STEP      = 12
 Config.CAMERA_ROTATE_SPEED   = 80   -- degrees/sec for Q/E
 Config.CAMERA_EDGE_THRESHOLD = 30   -- pixels from screen edge
@@ -180,6 +177,7 @@ Config.REMOTES = {
 	MonumentProgress = "MonumentProgress",
 	PlayerWon        = "PlayerWon",
 	MineIncome              = "MineIncome",
+	MineBeams               = "MineBeams",
 	CCAttacked              = "CCAttacked",
 	MineDepletionWarning    = "MineDepletionWarning",
 	HealBeam                = "HealBeam",

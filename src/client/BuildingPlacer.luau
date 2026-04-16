@@ -14,7 +14,8 @@ local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping t
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
 local depositPositions: {Vector3} = {}
 local ccPositions: {Vector3}      = {}     -- all known CC positions
-local ghost: Part?
+local ghost:     Part?
+local rangeRing: Part?
 local modeCb: ((boolean, string?) -> ())?
 local networkRef: any
 local cameraRef:  any
@@ -30,6 +31,7 @@ local GRID = Config.BUILDING_GRID
 local DEPOSIT_COLOR   = Color3.fromRGB(255, 205, 40)
 local RING_BASE_SIZE  = Vector3.new(0.22, 9, 9)   -- flat cylinder (length = diameter)
 local ARROW_MARGIN    = 50   -- px from screen edge for arrow anchor
+local MINE_RANGE_COLOR = Color3.fromRGB(80, 220, 255)  -- ghost tint when deposits in range
 
 type DepositMarker = {
     pos:   Vector3,
@@ -87,7 +89,7 @@ local function createDepositMarkers()
         bl.TextColor3           = DEPOSIT_COLOR
         bl.TextStrokeTransparency = 0.25
         bl.TextStrokeColor3     = Color3.new(0, 0, 0)
-        bl.Text                 = "⛏  Mine here"
+        bl.Text                 = "◆  Deposit"
         bl.Parent               = bb
 
         -- Screen-edge arrow (invisible until the deposit goes off-screen)
@@ -133,21 +135,9 @@ local function updateDepositMarkers()
     local t      = os.clock()
 
     for _, m in depositMarkers do
-        -- Determine if this is the currently snapped (nearest) deposit
-        local isSnapped = currentSnapTarget ~= nil
-            and math.abs(currentSnapTarget.X - m.pos.X) < 1
-            and math.abs(currentSnapTarget.Z - m.pos.Z) < 1
-
-        -- Animate ring: snapped deposit pulses fast + grows; others breathe slowly
-        if isSnapped then
-            local p = 0.5 + math.sin(t * 6) * 0.3
-            m.ring.Transparency = p
-            local d = 9 + math.abs(math.sin(t * 6)) * 2
-            m.ring.Size = Vector3.new(0.22, d, d)
-        else
-            m.ring.Transparency = 0.3 + math.sin(t * 1.8) * 0.12
-            m.ring.Size = RING_BASE_SIZE
-        end
+        -- All deposit rings breathe gently
+        m.ring.Transparency = 0.3 + math.sin(t * 1.8) * 0.12
+        m.ring.Size = RING_BASE_SIZE
 
         -- Screen-edge arrow: visible only when deposit is off-screen
         local sv, onScreen = cam:WorldToViewportPoint(m.pos + Vector3.new(0, 2, 0))
@@ -245,8 +235,9 @@ function BuildingPlacer.init(network, cameraModule)
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
 			if currentType == "Mine" then
-				if currentSnapTarget then
-					network.placeBuilding(currentSnapTarget, "Mine")
+				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
+				if pos then
+					network.placeBuilding(snap(pos), "Mine")
 					task.defer(BuildingPlacer.exitPlacementMode)
 				end
 
@@ -279,19 +270,26 @@ function BuildingPlacer.init(network, cameraModule)
 		if not isPlacing or not ghost then return end
 
 		if currentType == "Mine" then
-			local cursor = cameraModule.getPositionAtHeight(0)
+			local cursor = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 			if cursor then
-				local dep = nearestDeposit(cursor)
-				if dep then
-					currentSnapTarget  = dep
-					ghost.Position     = dep + Vector3.new(0, Config.BUILDING_SIZE.Y / 2, 0)
-					ghost.BrickColor   = localPlayer.TeamColor
-					ghost.Transparency = 0.5
-				else
-					currentSnapTarget  = nil
-					ghost.Position     = Vector3.new(cursor.X, Config.BUILDING_SIZE.Y / 2, cursor.Z)
-					ghost.BrickColor   = BrickColor.new("Bright red")
-					ghost.Transparency = 0.65
+				local snapped = snap(cursor)
+				ghost.Position = snapped
+				-- Ghost is team-colour when at least one deposit is within extract range,
+				-- orange when no deposits are reachable (mine would produce nothing).
+				local inRange = false
+				for _, dep in depositPositions do
+					if (Vector3.new(snapped.X, 0, snapped.Z) - Vector3.new(dep.X, 0, dep.Z)).Magnitude
+						<= Config.MINE_EXTRACT_RANGE then
+						inRange = true
+						break
+					end
+				end
+				ghost.BrickColor   = inRange and localPlayer.TeamColor or BrickColor.new("Bright orange")
+				ghost.Transparency = inRange and 0.5 or 0.62
+				-- Keep range ring centred under ghost
+				if rangeRing then
+					rangeRing.CFrame = CFrame.new(snapped.X, 0.15, snapped.Z)
+						* CFrame.Angles(0, 0, math.pi / 2)
 				end
 			end
 			updateDepositMarkers()
@@ -324,7 +322,24 @@ function BuildingPlacer.enterPlacementMode(buildingType: string?)
 	ccTooClose        = false
 	isPlacing         = true
 	makeGhost()
-	if currentType == "Mine" then createDepositMarkers() end
+	if currentType == "Mine" then
+		-- Range indicator ring
+		local r             = Instance.new("Part")
+		r.Name              = "_MineRangeRing"
+		r.Shape             = Enum.PartType.Cylinder
+		r.Size              = Vector3.new(0.18, Config.MINE_EXTRACT_RANGE * 2, Config.MINE_EXTRACT_RANGE * 2)
+		r.CFrame            = CFrame.new(0, 0.15, 0) * CFrame.Angles(0, 0, math.pi / 2)
+		r.Color             = Color3.fromRGB(80, 220, 255)
+		r.Material          = Enum.Material.Neon
+		r.Transparency      = 0.72
+		r.Anchored          = true
+		r.CanCollide        = false
+		r.CanQuery          = false
+		r.CastShadow        = false
+		r.Parent            = workspace
+		rangeRing = r
+		createDepositMarkers()
+	end
 	if modeCb then modeCb(true, currentType) end
 end
 
@@ -333,7 +348,8 @@ function BuildingPlacer.exitPlacementMode()
 	isPlacing         = false
 	currentSnapTarget = nil
 	ccTooClose        = false
-	if ghost then ghost:Destroy(); ghost = nil end
+	if ghost     then ghost:Destroy();     ghost     = nil end
+	if rangeRing then rangeRing:Destroy(); rangeRing = nil end
 	destroyDepositMarkers()
 	if modeCb then modeCb(false, nil) end
 end

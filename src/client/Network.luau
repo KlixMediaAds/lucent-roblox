@@ -66,6 +66,11 @@ function Network.onMineIncome(fn: (string, number) -> ())
 	RemoteHandler.get(Config.REMOTES.MineIncome).OnClientEvent:Connect(fn)
 end
 
+-- mineId, emitterPos, depositPositions: extraction beam VFX update
+function Network.onMineBeams(fn: (string, Vector3, {Vector3}) -> ())
+	RemoteHandler.get(Config.REMOTES.MineBeams).OnClientEvent:Connect(fn)
+end
+
 -- Fired when the player needs to (re)place their Command Center
 function Network.onNeedCommandCenter(fn: () -> ())
 	RemoteHandler.get(Config.REMOTES.NeedCommandCenter).OnClientEvent:Connect(fn)

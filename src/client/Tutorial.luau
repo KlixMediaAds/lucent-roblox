@@ -40,8 +40,7 @@ local STEPS: { Step } = {
     {
         icon    = "✦",
         title   = "Pan the Camera",
-        body    = "Use  W A S D  to move the camera around the map.\n"
-               .. "Scroll to zoom  ·  Q / E to rotate.",
+        body    = "WASD · scroll · Q/E rotate",
         color   = C.ACCENT,
         trigger = "camera_moved",
     },
@@ -49,8 +48,7 @@ local STEPS: { Step } = {
     {
         icon    = "⌂",
         title   = "Place Your Command Center",
-        body    = "Click the  ⌂ PLACE COMMAND CENTER  button at the bottom,\n"
-               .. "then click the map to place your base.",
+        body    = "Press button · click map",
         color   = C.TEAL,
         trigger = "cc_placed",
     },
@@ -58,9 +56,7 @@ local STEPS: { Step } = {
     {
         icon    = "⛏",
         title   = "Build a Mine  —  ◆ 75",
-        body    = "Open the  ⚒  build menu (bottom-left)  →  Mine.\n"
-               .. "Place it on a yellow crystal deposit.\n"
-               .. "Miners auto-spawn every 30 s and generate income.",
+        body    = "Build on yellow deposit",
         color   = C.MINE,
         trigger = "mine_placed",
     },
@@ -68,8 +64,7 @@ local STEPS: { Step } = {
     {
         icon    = "⚔",
         title   = "Build a Barracks  —  ◆ 50",
-        body    = "You need soldiers to protect your base.\n"
-               .. "Open  ⚒  →  Barracks  and place it near your Command Center.",
+        body    = "Trains soldiers, needs Mine",
         color   = C.BARRACKS,
         trigger = "barracks_placed",
     },
@@ -77,8 +72,7 @@ local STEPS: { Step } = {
     {
         icon    = "★",
         title   = "Train Your First Unit",
-        body    = "Click your Barracks building to open its panel.\n"
-               .. "Train a  Soldier  (◆ 25)  to start your army.",
+        body    = "Click Barracks · train Soldier",
         color   = C.GREEN,
         trigger = "unit_trained",
     },
@@ -86,9 +80,7 @@ local STEPS: { Step } = {
     {
         icon    = "➤",
         title   = "Command Your Units",
-        body    = "Left-click drag  to box-select units.\n"
-               .. "Right-click  to move them to a position.\n"
-               .. "A  +  click  to attack-move toward enemies.",
+        body    = "Drag select · right-click move",
         color   = C.TURRET,
         trigger = "move_issued",
     },
@@ -96,9 +88,7 @@ local STEPS: { Step } = {
     {
         icon    = "⚙",
         title   = "Research Upgrades",
-        body    = "Click your Command Center to open the Workshop.\n"
-               .. "Research  Better Mines,  Elite Units,  or  Turret Upgrades\n"
-               .. "to strengthen your forces.",
+        body    = "Click CC · open Workshop",
         color   = C.WORKSHOP,
         trigger = "cc_selected",
     },
@@ -106,9 +96,7 @@ local STEPS: { Step } = {
     {
         icon    = "◆",
         title   = "How to Win",
-        body    = "Build a  Monument  from your Command Center  (◆ 1 500).\n"
-               .. "Defend it for  5 minutes  to win the match.\n"
-               .. "Good luck, Commander!",
+        body    = "Build Monument · defend 5 min",
         color   = C.GOLD,
         trigger = "",
     },
@@ -334,7 +322,7 @@ function Tutorial.init(sg: ScreenGui)
     xb.Position                  = UDim2.new(1, -28, 0, 6)
     xb.BackgroundColor3          = Color3.fromRGB(110, 22, 22)
     xb.BackgroundTransparency    = 0.15
-    xb.Text                      = "✕"
+    xb.Text                      = "X"
     xb.TextSize                  = 12
     xb.TextColor3                = Color3.fromRGB(220, 180, 180)
     xb.Font                      = Enum.Font.GothamBold

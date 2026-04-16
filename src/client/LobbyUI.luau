@@ -23,6 +23,10 @@ local localPlayer = Players.LocalPlayer
 local WORLD_HALF   = 432    -- must match FogManager / MiniMap
 local PREVIEW_PX   = 370    -- pixel side-length of the map preview square
 
+-- Minimap constants — must match MiniMap.luau exactly
+local MINIMAP_SIZE = 180    -- MAP_SIZE in MiniMap.luau
+local MINIMAP_PAD  = 10     -- PADDING in MiniMap.luau
+
 -- ── Palette ───────────────────────────────────────────────────────────────────
 local C_BG          = Color3.fromRGB(  8,  12,  26)
 local C_PANEL       = Color3.fromRGB( 14,  20,  40)
@@ -31,6 +35,7 @@ local C_GRID        = Color3.fromRGB( 20,  30,  55)
 local C_TITLE       = Color3.fromRGB(180, 210, 255)
 local C_TEXT        = Color3.fromRGB(200, 220, 255)
 local C_SUBTEXT     = Color3.fromRGB(100, 130, 180)
+local C_ACCENT      = Color3.fromRGB(  0, 190, 255)
 local C_DEPOSIT     = Color3.fromRGB(255, 248, 160)
 local C_READY_ON    = Color3.fromRGB( 45, 190,  75)
 local C_READY_OFF   = Color3.fromRGB( 30,  60, 120)
@@ -41,16 +46,22 @@ local C_COOLDOWN    = Color3.fromRGB( 40,  40,  70)
 
 -- ── Module state ──────────────────────────────────────────────────────────────
 local sg:          ScreenGui
-local mapCanvas:   Frame
+local bg:          Frame       -- full-screen backdrop
+local mapBorder:   Frame       -- coloured border around the map canvas
+local mapCanvas:   Frame       -- the actual drawable map area
+local panel:       Frame       -- right-side player/button panel
 local playerList:  Frame
 local readyBtn:    TextButton
 local rerollBtn:   TextButton
 local rerollHint:  TextLabel
 local statusLbl:   TextLabel
+local titleLbl:    TextLabel
+local mapLabelRef: TextLabel   -- "MAP PREVIEW" text above the map
 
-local depositDots: { Frame } = {}
+local depositDots:    { Frame } = {}
 local isReady          = false
 local rerollOnCooldown = false
+local pendingRerollAnim = false  -- true after client fires reroll, cleared on next sync
 
 -- ── World → preview pixel ─────────────────────────────────────────────────────
 local function w2p(wx: number, wz: number): (number, number)
@@ -95,24 +106,60 @@ local function label(
 end
 
 -- ── Deposit dots ──────────────────────────────────────────────────────────────
-local function syncDeposits(positions: { Vector3 })
-	while #depositDots > #positions do
-		depositDots[#depositDots]:Destroy()
-		table.remove(depositDots)
-	end
-	while #depositDots < #positions do
-		local f = Instance.new("Frame")
-		f.Size             = UDim2.fromOffset(6, 6)
-		f.AnchorPoint      = Vector2.new(0.5, 0.5)
-		f.BackgroundColor3 = C_DEPOSIT
-		f.BorderSizePixel  = 0
-		f.ZIndex           = 5
-		f.Parent           = mapCanvas
-		table.insert(depositDots, f)
-	end
-	for i, pos in positions do
-		local u, v = w2p(pos.X, pos.Z)
-		depositDots[i].Position = UDim2.fromOffset(u, v)
+local function syncDeposits(positions: { Vector3 }, animate: boolean?)
+	if animate then
+		-- Fade out existing dots
+		for _, dot in depositDots do
+			TweenService:Create(dot, TweenInfo.new(0.14), { BackgroundTransparency = 1 }):Play()
+		end
+
+		task.delay(0.17, function()
+			-- Resize pool
+			while #depositDots > #positions do
+				depositDots[#depositDots]:Destroy()
+				table.remove(depositDots)
+			end
+			for _ = #depositDots + 1, #positions do
+				local f = Instance.new("Frame")
+				f.Size                    = UDim2.fromOffset(2, 2)
+				f.AnchorPoint             = Vector2.new(0.5, 0.5)
+				f.BackgroundColor3        = C_DEPOSIT
+				f.BorderSizePixel         = 0
+				f.ZIndex                  = 5
+				f.BackgroundTransparency  = 1
+				f.Parent                  = mapCanvas
+				table.insert(depositDots, f)
+			end
+
+			-- Pop new dots in with a Back-ease scale
+			for i, pos in positions do
+				local u, v = w2p(pos.X, pos.Z)
+				depositDots[i].Position = UDim2.fromOffset(u, v)
+				TweenService:Create(depositDots[i],
+					TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+					{ BackgroundTransparency = 0, Size = UDim2.fromOffset(6, 6) }
+				):Play()
+			end
+		end)
+	else
+		while #depositDots > #positions do
+			depositDots[#depositDots]:Destroy()
+			table.remove(depositDots)
+		end
+		while #depositDots < #positions do
+			local f = Instance.new("Frame")
+			f.Size             = UDim2.fromOffset(6, 6)
+			f.AnchorPoint      = Vector2.new(0.5, 0.5)
+			f.BackgroundColor3 = C_DEPOSIT
+			f.BorderSizePixel  = 0
+			f.ZIndex           = 5
+			f.Parent           = mapCanvas
+			table.insert(depositDots, f)
+		end
+		for i, pos in positions do
+			local u, v = w2p(pos.X, pos.Z)
+			depositDots[i].Position = UDim2.fromOffset(u, v)
+		end
 	end
 end
 
@@ -165,6 +212,199 @@ local function syncPlayers(list: { { name: string, ready: boolean } })
 	end
 end
 
+-- ── Map-roll scan animation ────────────────────────────────────────────────────
+local function playMapScan(onDone: () -> ())
+	-- Glowing sweep line from top → bottom of the map canvas
+	local scan                      = Instance.new("Frame")
+	scan.Name                       = "ScanLine"
+	scan.Size                       = UDim2.new(1, 0, 0, 90)
+	scan.Position                   = UDim2.new(0, 0, 0, -90)
+	scan.BackgroundColor3           = C_ACCENT
+	scan.BackgroundTransparency     = 0.25
+	scan.BorderSizePixel            = 0
+	scan.ZIndex                     = 20
+	scan.Parent                     = mapCanvas
+
+	local grad                      = Instance.new("UIGradient")
+	grad.Transparency               = NumberSequence.new({
+		NumberSequenceKeypoint.new(0,    1),
+		NumberSequenceKeypoint.new(0.18, 0.3),
+		NumberSequenceKeypoint.new(0.82, 0.3),
+		NumberSequenceKeypoint.new(1,    1),
+	})
+	grad.Rotation                   = 90
+	grad.Parent                     = scan
+
+	-- Border colour flash
+	TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = C_ACCENT }):Play()
+	task.delay(0.2, function()
+		TweenService:Create(mapBorder, TweenInfo.new(0.3), { BackgroundColor3 = C_BORDER }):Play()
+	end)
+
+	local sweep = TweenService:Create(scan,
+		TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
+		{ Position = UDim2.new(0, 0, 1, 0) }
+	)
+	sweep:Play()
+	sweep.Completed:Connect(function()
+		scan:Destroy()
+		onDone()
+	end)
+end
+
+-- ── Game-start transition sequence ────────────────────────────────────────────
+--[[
+  Timing:
+    t = 0.00  countdown "3"
+    t = 0.65  "2"
+    t = 1.30  "1"
+    t = 1.80  "GO!" + text/panel fade begins (0.38s)
+              bg stays OPAQUE — hides the 3D world so no camera snap is visible
+    t = 2.00  mapBorder re-parented to sg root; slide+shrink starts (0.70s)
+    t = 2.70  slide complete; arrival flash
+    t = 3.10  map card fades out (0.28s)
+    t = 3.38  onComplete() fired — Camera.init() runs and positions the RTS camera
+              bg is still opaque here, so the camera snap is invisible
+    t = 3.38  bg fades out (0.25s), cleanly revealing the already-positioned game view
+    t = 3.63  sg:Destroy()
+]]
+local function playGameStartTransition(onComplete: () -> ())
+	readyBtn.Active  = false
+	rerollBtn.Active = false
+
+	-- ── Phase 1: countdown (0 → 1.8 s) ──────────────────────────────────────
+	task.spawn(function()
+		local steps   = { "3", "2", "1" }
+		local stepGap = 0.65
+		for _, txt in steps do
+			statusLbl.Text       = "Game starting in  " .. txt
+			statusLbl.TextColor3 = C_TEXT
+			statusLbl.TextSize   = 16
+			TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 21 }):Play()
+			task.delay(0.12, function()
+				TweenService:Create(statusLbl, TweenInfo.new(0.22), { TextSize = 15 }):Play()
+			end)
+			task.wait(stepGap)
+		end
+		statusLbl.Text       = "GO!"
+		statusLbl.TextColor3 = C_READY_DOT
+		statusLbl.TextSize   = 16
+		TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 26 }):Play()
+		task.delay(0.14, function()
+			TweenService:Create(statusLbl, TweenInfo.new(0.30), { TextSize = 16 }):Play()
+		end)
+	end)
+
+	-- ── Phase 2: fade out text + panel; bg stays opaque (t = 1.80 s) ────────
+	-- Keeping bg opaque prevents the 3D world from ever being visible while the
+	-- lobby camera is still at the aerial Y=700 position.
+	task.delay(1.80, function()
+		local fade = TweenInfo.new(0.38, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+		-- Text labels only
+		TweenService:Create(titleLbl,    fade, { TextTransparency = 1 }):Play()
+		TweenService:Create(statusLbl,   fade, { TextTransparency = 1 }):Play()
+		TweenService:Create(mapLabelRef, fade, { TextTransparency = 1 }):Play()
+
+		-- Player panel background + all its child frames / labels / buttons
+		TweenService:Create(panel, fade, { BackgroundTransparency = 1 }):Play()
+		for _, d in panel:GetDescendants() do
+			if d:IsA("GuiObject") then
+				pcall(function() TweenService:Create(d, fade, { BackgroundTransparency = 1 }):Play() end)
+			end
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				pcall(function() TweenService:Create(d, fade, { TextTransparency = 1 }):Play() end)
+			end
+		end
+
+		-- Once the fade is done, hide the panel completely so it cannot
+		-- intercept mouse events during the rest of the transition
+		task.delay(0.42, function()
+			panel.Visible = false
+		end)
+	end)
+
+	-- ── Phase 3: map slides to minimap corner (t = 2.00 s) ──────────────────
+	task.delay(2.00, function()
+		mapBorder.ClipsDescendants = true
+
+		-- Screen-relative top-left of mapBorder:
+		--   content starts at (0.5, -totalW/2, 0.5, -totalH/2 + 18)
+		--   mapBorder is at fromOffset(0, 22) inside content
+		local totalW = PREVIEW_PX + 16 + 300   -- 686
+		local totalH = PREVIEW_PX + 26          -- 396
+		local bxOff  = -math.floor(totalW / 2)            -- -343
+		local byOff  = -math.floor(totalH / 2) + 18 + 22  -- -158
+
+		mapBorder.ZIndex   = 12
+		mapBorder.Position = UDim2.new(0.5, bxOff, 0.5, byOff)
+		mapBorder.Parent   = sg   -- re-parent so it can travel anywhere on screen
+
+		-- Departure flash
+		TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = C_ACCENT }):Play()
+		task.delay(0.12, function()
+			TweenService:Create(mapBorder, TweenInfo.new(0.22), { BackgroundColor3 = C_BORDER }):Play()
+		end)
+
+		-- Slide + shrink to minimap position.
+		-- mapCanvas position is also tweened to keep the map centre locked.
+		local mmBorder    = MINIMAP_SIZE + 4                        -- 184
+		local canvasFinal = math.floor((mmBorder - PREVIEW_PX) / 2) -- ≈ -93
+		local slideInfo   = TweenInfo.new(0.70, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
+
+		TweenService:Create(mapBorder, slideInfo, {
+			Position = UDim2.new(1, -(mmBorder + MINIMAP_PAD), 1, -(mmBorder + MINIMAP_PAD)),
+			Size     = UDim2.fromOffset(mmBorder, mmBorder),
+		}):Play()
+		TweenService:Create(mapCanvas, slideInfo, {
+			Position = UDim2.fromOffset(canvasFinal, canvasFinal),
+		}):Play()
+
+		-- ── Phase 4: arrival pulse (t = 2.72 s) ──────────────────────────────
+		task.delay(0.72, function()
+			TweenService:Create(mapBorder, TweenInfo.new(0.08), {
+				BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+			}):Play()
+			task.delay(0.10, function()
+				TweenService:Create(mapBorder, TweenInfo.new(0.30), {
+					BackgroundColor3 = C_BORDER
+				}):Play()
+			end)
+
+			-- ── Phase 5: fade map card out (t = 3.12 s) ──────────────────────
+			task.delay(0.40, function()
+				local finalFade = TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+				TweenService:Create(mapBorder, finalFade, { BackgroundTransparency = 1 }):Play()
+				TweenService:Create(mapCanvas, finalFade, { BackgroundTransparency = 1 }):Play()
+				for _, child in mapCanvas:GetDescendants() do
+					if child:IsA("GuiObject") then
+						pcall(function()
+							TweenService:Create(child, finalFade, { BackgroundTransparency = 1 }):Play()
+						end)
+					end
+				end
+
+				-- ── Phase 6: start game + fade backdrop (t = 3.38 s) ─────────
+				-- Camera.init() runs inside onComplete() and sets the RTS CFrame.
+				-- bg is still fully opaque at this point, so the camera snap from
+				-- the aerial lobby position to the RTS position is completely hidden.
+				-- We then fade bg out, cleanly revealing the already-positioned view.
+				task.delay(0.28, function()
+					onComplete()   -- Camera.init() + HUD.create() happen here
+
+					local bgFade = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+					TweenService:Create(bg, bgFade, { BackgroundTransparency = 1 }):Play()
+
+					task.delay(0.27, function()
+						sg:Destroy()
+					end)
+				end)
+			end)
+		end)
+	end)
+end
+
 -- ── Build UI ──────────────────────────────────────────────────────────────────
 local function buildUI()
 	sg               = Instance.new("ScreenGui")
@@ -172,17 +412,18 @@ local function buildUI()
 	sg.ResetOnSpawn  = false
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.IgnoreGuiInset = true
+	sg.DisplayOrder  = 100   -- always above RTSHUD (DisplayOrder 0) during transition
 	sg.Parent        = localPlayer.PlayerGui
 
 	-- Full backdrop
-	local bg         = Instance.new("Frame")
+	bg               = Instance.new("Frame")
 	bg.Size          = UDim2.new(1, 0, 1, 0)
 	bg.BackgroundColor3 = C_BG
 	bg.BorderSizePixel  = 0
 	bg.Parent        = sg
 
 	-- Title
-	label(bg, "LUCENT", 40, C_TITLE, Enum.Font.GothamBold,
+	titleLbl = label(bg, "LUCENT", 40, C_TITLE, Enum.Font.GothamBold,
 		UDim2.new(1, 0, 0, 56), UDim2.new(0, 0, 0, 16))
 
 	statusLbl = label(bg, "Waiting for players to ready up...", 14, C_SUBTEXT, Enum.Font.Gotham,
@@ -198,10 +439,10 @@ local function buildUI()
 	content.Parent           = bg
 
 	-- ── Map preview ───────────────────────────────────────────────────────────
-	local mapLabel = label(content, "MAP PREVIEW", 11, C_BORDER, Enum.Font.GothamBold,
+	mapLabelRef = label(content, "MAP PREVIEW", 11, C_BORDER, Enum.Font.GothamBold,
 		UDim2.fromOffset(PREVIEW_PX + 4, 22), UDim2.fromOffset(0, 0))
 
-	local mapBorder = Instance.new("Frame")
+	mapBorder = Instance.new("Frame")
 	mapBorder.Size             = UDim2.fromOffset(PREVIEW_PX + 4, PREVIEW_PX + 4)
 	mapBorder.Position         = UDim2.fromOffset(0, 22)
 	mapBorder.BackgroundColor3 = C_BORDER
@@ -233,7 +474,7 @@ local function buildUI()
 	vc.BackgroundColor3 = Color3.fromRGB(30,46,90); vc.BorderSizePixel=0; vc.ZIndex=2; vc.Parent=mapCanvas
 
 	-- ── Right panel ───────────────────────────────────────────────────────────
-	local panel = Instance.new("Frame")
+	panel = Instance.new("Frame")
 	panel.Size             = UDim2.fromOffset(300, totalH)
 	panel.Position         = UDim2.fromOffset(PREVIEW_PX + 16, 0)
 	panel.BackgroundColor3 = C_PANEL
@@ -308,7 +549,14 @@ function LobbyUI.init(onGameStart: () -> ())
 	RemoteHandler.get(Config.REMOTES.LobbySync).OnClientEvent:Connect(
 		function(readyList: {{ name: string, ready: boolean }}, positions: { Vector3 })
 			syncPlayers(readyList)
-			syncDeposits(positions)
+			if pendingRerollAnim then
+				pendingRerollAnim = false
+				playMapScan(function()
+					syncDeposits(positions, true)
+				end)
+			else
+				syncDeposits(positions, false)
+			end
 		end
 	)
 
@@ -320,7 +568,8 @@ function LobbyUI.init(onGameStart: () -> ())
 	-- ── Re-roll button (3-second client-side cooldown) ────────────────────────
 	rerollBtn.MouseButton1Click:Connect(function()
 		if rerollOnCooldown then return end
-		rerollOnCooldown = true
+		rerollOnCooldown    = true
+		pendingRerollAnim   = true
 		RemoteHandler.get(Config.REMOTES.LobbyReroll):FireServer()
 
 		rerollBtn.BackgroundColor3 = C_COOLDOWN
@@ -339,27 +588,8 @@ function LobbyUI.init(onGameStart: () -> ())
 
 	-- ── LobbyStart ────────────────────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.LobbyStart).OnClientEvent:Connect(function()
-		statusLbl.Text      = "All players ready!  Starting..."
-		statusLbl.TextColor3 = C_READY_DOT
-		readyBtn.Active     = false
-		rerollBtn.Active    = false
-
-		-- Animate overlay fade-out then hand off to game
-		task.delay(2.8, function()
-			-- Restore camera control to the game
-			local cam = workspace.CurrentCamera
-			cam.CameraType = Enum.CameraType.Custom
-
-			-- Fade out and destroy
-			local info = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-			local over = sg:FindFirstChildWhichIsA("Frame")
-			if over then
-				TweenService:Create(over, info, { BackgroundTransparency = 1 }):Play()
-			end
-			task.delay(0.45, function()
-				sg:Destroy()
-				onGameStart()
-			end)
+		playGameStartTransition(function()
+			onGameStart()
 		end)
 	end)
 end

@@ -104,6 +104,8 @@ local rootStroke:   UIStroke?
 local buildOverlay:  Frame?
 local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
+local ccGlowRef:     UIStroke?
+local ccScaleRef:    UIScale?
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
 local function isUnlocked(btype: string): boolean
@@ -179,7 +181,7 @@ local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirect
 
 local function expandMenu()
 	buildMenuOpen = true
-	if rootBtn    then rootBtn.Text = "✕" end
+	if rootBtn    then rootBtn.Text = "X" end
 	if rootStroke then TweenService:Create(rootStroke, TweenInfo.new(0.12), { Thickness = 4 }):Play() end
 
 	for _, n in childNodes do
@@ -276,17 +278,41 @@ function HUD.create(): (Frame, TextButton)
 	-- ── CC placement button (shown in CC mode only) ───────────────────────────
 	local ccBtn                         = UILib.btn(sg,
 		"⌂  PLACE COMMAND CENTER",
-		UDim2.fromOffset(280, 50),
-		UDim2.new(0.5, -140, 1, -60),
+		UDim2.fromOffset(320, 58),
+		UDim2.new(0.5, -160, 1, -68),
 		C.TEAL, 4)
 	ccBtn.Name                          = "CCButton"
-	ccBtn.TextSize                      = 15
+	ccBtn.TextSize                      = 17
 	ccBtn.Visible                       = false
 	ccBtnInternal                       = ccBtn
 
+	-- Gradient fill: bright teal top fades to deeper teal at bottom
+	local ccGrad                        = Instance.new("UIGradient")
+	ccGrad.Color                        = ColorSequence.new({
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB( 30, 220, 210)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(  0, 180, 200)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB(  0, 130, 160)),
+	})
+	ccGrad.Rotation                     = 90
+	ccGrad.Parent                       = ccBtn
+
+	-- Glowing outer stroke (stored in module-level ref for pulse animation)
+	local ccGlowStroke                  = Instance.new("UIStroke")
+	ccGlowStroke.Color                  = Color3.fromRGB(0, 220, 255)
+	ccGlowStroke.Thickness              = 2.5
+	ccGlowStroke.Transparency           = 0
+	ccGlowStroke.Parent                 = ccBtn
+	ccGlowRef                           = ccGlowStroke
+
+	-- Scale spring for pop-in animation
+	local ccScaleInst                   = Instance.new("UIScale")
+	ccScaleInst.Scale                   = 1
+	ccScaleInst.Parent                  = ccBtn
+	ccScaleRef                          = ccScaleInst
+
 	-- ── Cancel button (shown during placement, bottom-right) ──────────────────
 	local cancelBtn                     = UILib.btn(sg,
-		"✕  CANCEL",
+		"X  CANCEL",
 		UDim2.fromOffset(145, 50),
 		UDim2.new(1, -160, 1, -60),
 		C.RED, 6)
@@ -438,6 +464,30 @@ function HUD.setCommandCenterMode(isCC: boolean)
 	if buildOverlay  then buildOverlay.Visible  = not isCC end
 	if ccBtnInternal then ccBtnInternal.Visible = isCC     end
 	if isCC and buildMenuOpen then collapseMenu() end
+
+	-- Pop-in + glow pulse when the button is revealed
+	if isCC then
+		if ccScaleRef then
+			ccScaleRef.Scale = 0.82
+			TweenService:Create(ccScaleRef,
+				TweenInfo.new(0.30, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+				{ Scale = 1 }
+			):Play()
+		end
+		if ccGlowRef then
+			local pulseOut = TweenService:Create(ccGlowRef,
+				TweenInfo.new(0.50, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+				{ Thickness = 6, Transparency = 0.3 }
+			)
+			pulseOut:Play()
+			pulseOut.Completed:Once(function()
+				TweenService:Create(ccGlowRef,
+					TweenInfo.new(0.50, Enum.EasingStyle.Sine, Enum.EasingDirection.In),
+					{ Thickness = 2.5, Transparency = 0 }
+				):Play()
+			end)
+		end
+	end
 end
 
 function HUD.refreshTrayState(counts: { [string]: number })

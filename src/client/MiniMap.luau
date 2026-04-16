@@ -40,7 +40,7 @@ local canvas:      Frame
 local cameraRef:   any
 local localUserId: number
 
-local unitDots:    { [string]: Frame } = {}
+local unitMarkers: { [string]: TextLabel } = {}
 local buildingDots:{ [string]: Frame } = {}
 local minerDots:   { [string]: Frame } = {}
 local depositDots: { [string]: Frame } = {}
@@ -81,6 +81,62 @@ end
 local function placeDot(dot: Frame, wx: number, wz: number)
 	local u, v    = w2m(wx, wz)
 	dot.Position  = UDim2.fromOffset(u, v)
+end
+
+-- ── Triangle unit marker ───────────────────────────────────────────────────────
+
+local function makeTriangleMarker(color: Color3): TextLabel
+	local lbl                   = Instance.new("TextLabel")
+	lbl.Size                    = UDim2.fromOffset(11, 11)
+	lbl.AnchorPoint             = Vector2.new(0.5, 0.5)
+	lbl.BackgroundTransparency  = 1
+	lbl.Text                    = "▲"
+	lbl.TextSize                = 9
+	lbl.TextColor3              = color
+	lbl.Font                    = Enum.Font.GothamBold
+	lbl.TextXAlignment          = Enum.TextXAlignment.Center
+	lbl.TextYAlignment          = Enum.TextYAlignment.Center
+	lbl.BorderSizePixel         = 0
+	lbl.ZIndex                  = 4
+	lbl.Parent                  = canvas
+	return lbl
+end
+
+local function syncUnitTriangles(folder: Instance?, myStr: string)
+	local seen: { [string]: true } = {}
+
+	if folder then
+		for _, child in folder:GetChildren() do
+			if not child:IsA("BasePart") then continue end
+			local ov = child:FindFirstChild("OwnerId") :: StringValue?
+			if not ov then continue end
+			local bp    = child :: BasePart
+			local isOwn = ov.Value == myStr
+
+			if not isOwn and bp.LocalTransparencyModifier >= 1 then continue end
+
+			local id     = child.Name
+			seen[id]     = true
+
+			local marker = unitMarkers[id]
+			if not marker then
+				marker          = makeTriangleMarker(isOwn and C_OWN_UNIT or C_ENEMY_UNIT)
+				unitMarkers[id] = marker
+			end
+
+			-- Position (centre of marker = unit world position)
+			local u, v      = w2m(bp.Position.X, bp.Position.Z)
+			marker.Position = UDim2.fromOffset(u, v)
+
+			-- Rotation: 0° = up (north/-Z world), 90° = right (+X world)
+			local lv        = bp.CFrame.LookVector
+			marker.Rotation = math.deg(math.atan2(lv.X, -lv.Z))
+		end
+	end
+
+	for id, marker in unitMarkers do
+		if not seen[id] then marker:Destroy(); unitMarkers[id] = nil end
+	end
 end
 
 -- ── Line helpers (viewport rectangle) ────────────────────────────────────────
@@ -313,6 +369,7 @@ local function buildUI()
 	sg.Name               = "MiniMapGui"
 	sg.ResetOnSpawn       = false
 	sg.ZIndexBehavior     = Enum.ZIndexBehavior.Sibling
+	sg.IgnoreGuiInset     = true   -- AbsolutePosition matches GetMouseLocation() coords
 	sg.Parent             = localPlayer.PlayerGui
 
 	-- Border frame
@@ -396,7 +453,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 		local minersF    = workspace:FindFirstChild("Miners")
 
 		syncDepositDots()
-		syncPartDots(unitsF,    unitDots,    myStr, DOT_UNIT,  C_OWN_UNIT, C_ENEMY_UNIT)
+		syncUnitTriangles(unitsF, myStr)
 		syncBuildingDots(buildingsF, buildingDots, myStr)
 		syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
 

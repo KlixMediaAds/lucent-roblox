@@ -329,7 +329,7 @@ function UILib.radialNode(
 
 	local wrapper                    = Instance.new("Frame")
 	wrapper.Name                     = "RadialNode"
-	wrapper.Size                     = UDim2.fromOffset(d, d + 40)
+	wrapper.Size                     = UDim2.fromOffset(d, d + 48)
 	wrapper.Position                 = position
 	wrapper.AnchorPoint              = Vector2.new(0.5, 0.5)
 	wrapper.BackgroundTransparency   = 1
@@ -357,12 +357,12 @@ function UILib.radialNode(
 
 	local lbl                        = Instance.new("TextLabel")
 	lbl.Name                         = "NodeLabel"
-	lbl.Size                         = UDim2.fromOffset(d + 44, 44)
+	lbl.Size                         = UDim2.fromOffset(d + 44, 52)
 	lbl.Position                     = UDim2.fromOffset(-22, d + 2)
 	lbl.BackgroundTransparency       = 1
 	lbl.Text                         = label
 	lbl.Font                         = Enum.Font.GothamBold
-	lbl.TextSize                     = 16
+	lbl.TextSize                     = 18
 	lbl.TextColor3                   = UILib.C.TEXT
 	lbl.TextStrokeTransparency       = 0.6
 	lbl.TextStrokeColor3             = Color3.new(0, 0, 0)

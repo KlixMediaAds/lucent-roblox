@@ -47,24 +47,22 @@ local COL1_X = -260   -- tier-1 tech column
 local COL2_X =    0   -- tier-2 tech column
 
 -- Root node Y offsets from screen centre
-local UNITS_ROOT_Y   = -120
-local STRUCTS_ROOT_Y =  240
-local MONUMENT_Y     =  415
+local UNITS_ROOT_Y   = -155
+local STRUCTS_ROOT_Y =  165
+local MONUMENT_Y     =  305
 
 -- Tier-1 Y positions (Units branch)
-local Y_COMBAT  = -310   -- CombatStims
-local Y_CONC    = -140   -- ConcussionShells
-local Y_MEDIC   =   70   -- MedicUnit
+local Y_COMBAT  = -290   -- CombatStims
+local Y_CONC    = -155   -- ConcussionShells
+local Y_MEDIC   =  -20   -- MedicUnit
 
 -- Tier-2 Y positions for the ConcussionShells split (RocketBarrage vs Trapper)
--- ±60 gives a 120 px gap between them while keeping each ≥110 px clear of its
--- COL2 neighbours (HardenedArmor above, EliteUnits below).
-local Y_BARRAGE = Y_CONC - 60   -- = -200, RocketBarrage sits above ConcussionShells
-local Y_TRAPPER = Y_CONC + 60   -- =  -80, Trapper sits below ConcussionShells
+local Y_BARRAGE = Y_CONC - 70   -- = -225, RocketBarrage sits above ConcussionShells
+local Y_TRAPPER = Y_CONC + 70   -- =  -85, Trapper sits below ConcussionShells
 
 -- Tier-1 Y positions (Structures branch)
-local Y_MINES   =  185   -- BetterMines
-local Y_TURRET  =  300   -- TurretUpgrades
+local Y_MINES   =  110   -- BetterMines
+local Y_TURRET  =  225   -- TurretUpgrades
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeCCId        : string?
@@ -83,39 +81,39 @@ local workshopBlur      : BlurEffect?
 local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: string } } = {
 	CombatStims = {
 		name = "Combat Stims", icon = "⚡", time = 12,
-		tip  = "Soldiers gain +50% speed and faster attacks for 8 s after engaging an enemy.",
+		tip  = "Speed + attacks boost on engage",
 	},
 	HardenedArmor = {
 		name = "Hardened Armor", icon = "🛡", time = 10,
-		tip  = "Soldiers absorb a flat 6 damage per incoming hit.",
+		tip  = "Absorb 6 flat damage/hit",
 	},
 	ConcussionShells = {
 		name = "Concussion Shells", icon = "◈", time = 10,
-		tip  = "Tank shells slow all hit enemies to 40% speed for 1.5 s.",
+		tip  = "Tank shells slow enemies 40%",
 	},
 	RocketBarrage = {
 		name = "Rocket Barrage", icon = "🚀", time = 18,
-		tip  = "Replaces tank attacks with 3 spiraling AoE rockets, each dealing 65% base damage.",
+		tip  = "3 AoE spiraling rockets/attack",
 	},
 	Trapper = {
 		name = "Trapper", icon = "⚓", time = 20,
-		tip  = "Replaces tank attacks with harpoons that slow enemies by 90% for 7 s. Carries 5 harpoons, restocking one every 10 s.",
+		tip  = "Harpoons slow enemies 90%",
 	},
 	MedicUnit = {
 		name = "Medic Unit", icon = "✚", time = 15,
-		tip  = "Unlocks Medic units that automatically heal the most-injured nearby ally (60 res each).",
+		tip  = "Heals nearest injured ally",
 	},
 	EliteUnits = {
 		name = "Elite Units", icon = "⚔", time = 15,
-		tip  = "Unlocks Elite units with long range and high damage (100 res each).",
+		tip  = "Long range, high damage",
 	},
 	BetterMines = {
 		name = "Better Mines", icon = "⛏", time = 5,
-		tip  = "Unlocks Efficiency (×2 income) and Capacity (+4 slots) upgrade paths on your mines.",
+		tip  = "Efficiency + capacity upgrades",
 	},
 	TurretUpgrades = {
 		name = "Turret Upgrades", icon = "⚙", time = 20,
-		tip  = "Unlocks Flamethrower and Rocket Launcher upgrade paths for each turret.",
+		tip  = "Flamethrower + rocket paths",
 	},
 }
 
@@ -210,33 +208,34 @@ local ttBody : TextLabel?
 local function buildTooltip(sg: ScreenGui)
 	local f                      = Instance.new("Frame")
 	f.Name                       = "WorkshopTooltip"
-	f.Size                       = UDim2.fromOffset(272, 200)
+	f.Size                       = UDim2.fromOffset(310, 112)
 	f.Position                   = UDim2.fromOffset(0, 0)
-	f.BackgroundColor3           = Color3.fromRGB(8, 11, 22)
-	f.BackgroundTransparency     = 0.06
+	f.BackgroundColor3           = Color3.fromRGB(10, 15, 30)
+	f.BackgroundTransparency     = 0.04
 	f.BorderSizePixel            = 0
 	f.ZIndex                     = 30
 	f.Visible                    = false
 	f.Parent                     = sg
-	UILib.corner(f, 10)
-	UILib.stroke(f, C.BORDER, 1.5)
+	UILib.corner(f, 8)
+	UILib.stroke(f, C.ACCENT, 1.5)
 
-	local accent                 = Instance.new("Frame")
-	accent.Size                  = UDim2.new(1, -2, 0, 3)
-	accent.Position              = UDim2.fromOffset(1, 1)
-	accent.BackgroundColor3      = C.ACCENT
-	accent.BorderSizePixel       = 0
-	accent.ZIndex                = 31
-	accent.Parent                = f
-	UILib.corner(accent, 8)
+	-- Left accent stripe
+	local stripe                 = Instance.new("Frame")
+	stripe.Size                  = UDim2.new(0, 4, 1, -20)
+	stripe.Position              = UDim2.fromOffset(9, 10)
+	stripe.BackgroundColor3      = C.ACCENT
+	stripe.BorderSizePixel       = 0
+	stripe.ZIndex                = 31
+	stripe.Parent                = f
+	UILib.corner(stripe, 3)
 
 	local title                  = Instance.new("TextLabel")
 	title.Name                   = "TipTitle"
-	title.Size                   = UDim2.new(1, -16, 0, 22)
-	title.Position               = UDim2.fromOffset(10, 10)
+	title.Size                   = UDim2.new(1, -30, 0, 26)
+	title.Position               = UDim2.fromOffset(22, 10)
 	title.BackgroundTransparency = 1
 	title.Font                   = Enum.Font.GothamBold
-	title.TextSize               = 14
+	title.TextSize               = 17
 	title.TextColor3             = C.TEXT
 	title.TextXAlignment         = Enum.TextXAlignment.Left
 	title.Text                   = ""
@@ -245,11 +244,11 @@ local function buildTooltip(sg: ScreenGui)
 
 	local cost                   = Instance.new("TextLabel")
 	cost.Name                    = "TipCost"
-	cost.Size                    = UDim2.new(1, -16, 0, 18)
-	cost.Position                = UDim2.fromOffset(10, 33)
+	cost.Size                    = UDim2.new(1, -30, 0, 20)
+	cost.Position                = UDim2.fromOffset(22, 37)
 	cost.BackgroundTransparency  = 1
 	cost.Font                    = Enum.Font.GothamBold
-	cost.TextSize                = 12
+	cost.TextSize                = 14
 	cost.TextColor3              = C.GOLD
 	cost.TextXAlignment          = Enum.TextXAlignment.Left
 	cost.Text                    = ""
@@ -257,8 +256,8 @@ local function buildTooltip(sg: ScreenGui)
 	cost.Parent                  = f
 
 	local sep                    = Instance.new("Frame")
-	sep.Size                     = UDim2.new(1, -20, 0, 1)
-	sep.Position                 = UDim2.fromOffset(10, 55)
+	sep.Size                     = UDim2.new(1, -30, 0, 1)
+	sep.Position                 = UDim2.fromOffset(22, 61)
 	sep.BackgroundColor3         = C.SEP
 	sep.BorderSizePixel          = 0
 	sep.ZIndex                   = 31
@@ -266,11 +265,11 @@ local function buildTooltip(sg: ScreenGui)
 
 	local body                   = Instance.new("TextLabel")
 	body.Name                    = "TipBody"
-	body.Size                    = UDim2.new(1, -20, 1, -68)
-	body.Position                = UDim2.fromOffset(10, 62)
+	body.Size                    = UDim2.new(1, -30, 0, 40)
+	body.Position                = UDim2.fromOffset(22, 67)
 	body.BackgroundTransparency  = 1
 	body.Font                    = Enum.Font.Gotham
-	body.TextSize                = 12
+	body.TextSize                = 14
 	body.TextColor3              = C.SUBTEXT
 	body.TextXAlignment          = Enum.TextXAlignment.Left
 	body.TextYAlignment          = Enum.TextYAlignment.Top
@@ -282,8 +281,8 @@ local function buildTooltip(sg: ScreenGui)
 	ttFrame = f ; ttTitle = title ; ttCost = cost ; ttBody = body
 end
 
-local TT_W = 272   -- matches buildTooltip UDim2.fromOffset(272, 200)
-local TT_H = 200
+local TT_W = 310   -- matches buildTooltip width
+local TT_H = 112
 
 local function positionTooltipAtMouse()
 	local f = ttFrame ; local sg = screenGui
@@ -585,7 +584,8 @@ local function buildTechNode(
 	wrapper.Visible = false
 
 	local label = wrapper:FindFirstChild("NodeLabel") :: TextLabel
-	label.Size  = UDim2.fromOffset(NODE_D + 52, 52)
+	label.Size     = UDim2.fromOffset(NODE_D + 52, 60)
+	label.TextSize = 18
 
 	local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	stroke.Color = STATE_STROKE["AVAILABLE"]
@@ -669,11 +669,16 @@ function WorkshopPanel.init(
 	local _sw, structBtn = UILib.radialNode(ov, "Structures", "⚒", C.ACCENT, structsPos, nil, 12)
 	local _mw, monBtn    = UILib.radialNode(ov, "Monument",   "★", C.GOLD,   monPos,     nil, 12)
 
+	-- Ensure root node labels use the larger font size
+	;(_uw:FindFirstChild("NodeLabel") :: TextLabel).TextSize = 18
+	;(_sw:FindFirstChild("NodeLabel") :: TextLabel).TextSize = 18
+
 	local unitsStroke  = unitsBtn:FindFirstChildWhichIsA("UIStroke")  :: UIStroke
 	local structStroke = structBtn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	local monStroke    = monBtn:FindFirstChildWhichIsA("UIStroke")    :: UIStroke
 	local monLabel     = _mw:FindFirstChild("NodeLabel")              :: TextLabel
-	monLabel.Size      = UDim2.fromOffset(NODE_D + 52, 52)
+	monLabel.Size      = UDim2.fromOffset(NODE_D + 52, 60)
+	monLabel.TextSize  = 18
 
 	-- Monument progress bar
 	local monBarTrack, monBarFill = makeProgressBar(monBtn, 14)
@@ -690,7 +695,7 @@ function WorkshopPanel.init(
 
 	monBtn.MouseEnter:Connect(function()
 		showTooltip("Monument", "💰 1 500 resources",
-			"Rises from your Command Center.\nDefend it for 5 minutes to win.\n\nVisible to all players — 3 000 HP.")
+			"Defend 5 min to win")
 	end)
 	monBtn.MouseMoved:Connect(positionTooltipAtMouse)
 	monBtn.MouseLeave:Connect(hideTooltip)

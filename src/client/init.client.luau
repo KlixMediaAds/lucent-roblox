@@ -1,5 +1,6 @@
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -29,11 +30,24 @@ end)
 
 local localUserId = Players.LocalPlayer.UserId
 
--- Resources per minute each miner generates
-local INCOME_PER_MINER = Config.MINI_MINER_INCOME * (60 / Config.MINI_MINER_INCOME_INTERVAL)
+-- mineId → income earned last extraction tick (used for HUD income-rate display)
+local mineLastIncome: { [string]: number } = {}
 
--- mineId → current miner count (only this player's mines)
-local mineMiners: { [string]: number } = {}
+-- mineId → active mechanical-arm data
+type ArmEntry = {
+	beam: Part, tip: Part, crystal: Part,
+	dist: number, dir: Vector3,
+	phaseOff: number, cycle: number, lastPct: number,
+}
+type MineBeamData = { arms: { ArmEntry }, conn: RBXScriptConnection? }
+local mineBeams: { [string]: MineBeamData } = {}
+-- Stable per-mine phase offsets so arms on different mines never sync up
+local minePhaseOffsets: { [string]: number } = {}
+-- Client-side deposit resource tracking for hover health bars (posKey → remaining)
+local depositClientRes: { [string]: number } = {}
+local function posKeyC(v: Vector3): string
+	return math.round(v.X) .. "," .. math.round(v.Z)
+end
 
 -- Current resource amount (tracked for MinePanel affordability checks)
 local currentResources = 0
@@ -54,12 +68,24 @@ local ownedBuildingCounts: { [string]: number } = {}
 
 local function totalIncome(): number
 	local total = 0
-	for _, count in mineMiners do total += count end
-	return total * INCOME_PER_MINER
+	for _, inc in mineLastIncome do total += inc end
+	-- Convert per-tick income to per-minute rate
+	return total * (60 / Config.MINE_EXTRACT_INTERVAL)
 end
 
-local function clearMinerData()
-	mineMiners = {}
+local function clearMineData()
+	mineLastIncome = {}
+	for _, bd in mineBeams do
+		if bd.conn then bd.conn:Disconnect() end
+		for _, arm in bd.arms do
+			if arm.beam.Parent    then arm.beam:Destroy()    end
+			if arm.tip.Parent     then arm.tip:Destroy()     end
+			if arm.crystal.Parent then arm.crystal:Destroy() end
+		end
+	end
+	mineBeams         = {}
+	minePhaseOffsets  = {}
+	depositClientRes  = {}
 	HUD.setIncome(0)
 end
 
@@ -86,7 +112,6 @@ BarracksPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 MinePanel.init(Network,
 	function() return currentResources end,
-	function(mineId) return mineMiners[mineId] or 0 end,
 	function(techName) return researchedTechs[techName] == true end)
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
@@ -98,6 +123,83 @@ TurretPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
+
+-- ── Deposit hover health bar ──────────────────────────────────────────────────
+-- A single screen-space bar that follows the cursor when hovering near a crystal.
+do
+	local sg                       = Instance.new("ScreenGui")
+	sg.Name                        = "DepositHoverUI"
+	sg.IgnoreGuiInset              = true
+	sg.ResetOnSpawn                = false
+	sg.ZIndexBehavior              = Enum.ZIndexBehavior.Sibling
+	sg.Parent                      = Players.LocalPlayer.PlayerGui
+
+	local bar                      = Instance.new("Frame")
+	bar.Name                       = "DepositHealthBar"
+	bar.Size                       = UDim2.fromOffset(80, 10)
+	bar.AnchorPoint                = Vector2.new(0.5, 1)
+	bar.BackgroundColor3           = Color3.fromRGB(15, 15, 18)
+	bar.BackgroundTransparency     = 0.22
+	bar.BorderSizePixel            = 0
+	bar.Visible                    = false
+	bar.ZIndex                     = 25
+	bar.Parent                     = sg
+	local _bc                      = Instance.new("UICorner")
+	_bc.CornerRadius               = UDim.new(0, 3)
+	_bc.Parent                     = bar
+
+	local fill                     = Instance.new("Frame")
+	fill.Name                      = "Fill"
+	fill.Size                      = UDim2.new(1, 0, 1, 0)
+	fill.BackgroundColor3          = Color3.fromRGB(255, 215, 0)
+	fill.BackgroundTransparency    = 0
+	fill.BorderSizePixel           = 0
+	fill.Parent                    = bar
+	local _fc                      = Instance.new("UICorner")
+	_fc.CornerRadius               = UDim.new(0, 3)
+	_fc.Parent                     = fill
+
+	RunService.RenderStepped:Connect(function()
+		local mousePos  = UserInputService:GetMouseLocation()
+		local cam       = workspace.CurrentCamera
+		local depositsF = workspace:FindFirstChild("Deposits") :: Folder?
+
+		local bestKey:  string?  = nil
+		local bestDist           = 52      -- pixel proximity threshold
+		local bestSV:   Vector3? = nil
+
+		if depositsF then
+			for k, res in depositClientRes do
+				if res <= 0 then continue end
+				local model = depositsF:FindFirstChild(k) :: Model?
+				if not model then continue end
+				local primary = model.PrimaryPart
+				if not primary then continue end
+				local sv, _on = cam:WorldToViewportPoint(primary.Position + Vector3.new(0, 6, 0))
+				if sv.Z <= 0 then continue end
+				local dx = sv.X - mousePos.X
+				local dy = sv.Y - mousePos.Y
+				local d  = math.sqrt(dx * dx + dy * dy)
+				if d < bestDist then
+					bestDist = d
+					bestKey  = k
+					bestSV   = sv
+				end
+			end
+		end
+
+		if bestKey and bestSV then
+			local res  = depositClientRes[bestKey] or 0
+			local frac = math.clamp(res / Config.DEPOSIT_TOTAL_RESOURCES, 0, 1)
+			bar.Position              = UDim2.fromOffset((bestSV :: Vector3).X, (bestSV :: Vector3).Y - 14)
+			fill.Size                 = UDim2.new(frac, 0, 1, 0)
+			fill.BackgroundColor3     = Color3.fromRGB(255, math.floor(frac * 180), 0)
+			bar.Visible               = true
+		else
+			bar.Visible = false
+		end
+	end)
+end
 
 -- ── Hide building panels when entering placement mode ─────────────────────────
 -- Called by HUD when a build node is clicked, and also wired to the CC button.
@@ -117,7 +219,7 @@ ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
 local function enterCCMode()
 	BuildingPlacer.exitPlacementMode()
-	clearMinerData()
+	clearMineData()
 	ownedBuildingCounts = {}
 	researchedTechs    = {}
 	researchProgress   = {}
@@ -158,7 +260,7 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, bu
 		if buildingType == "Mine"     then Tutorial.notify("mine_placed")     end
 		if buildingType == "Barracks" then Tutorial.notify("barracks_placed") end
 
-		-- Decrement when the building is destroyed
+		-- Decrement when the building is destroyed; also clean up mine beams
 		task.spawn(function()
 			local buildingsFolder = workspace:FindFirstChild("Buildings")
 				or workspace:WaitForChild("Buildings", 10) :: Folder?
@@ -173,6 +275,22 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, bu
 				ownedBuildingCounts[buildingType] =
 					math.max(0, (ownedBuildingCounts[buildingType] or 1) - 1)
 				refreshRequirements()
+				-- Clean up extraction arms when a mine is destroyed
+				if buildingType == "Mine" then
+					local bd = mineBeams[id]
+					if bd then
+						if bd.conn then bd.conn:Disconnect() end
+						for _, arm in bd.arms do
+							if arm.beam.Parent    then arm.beam:Destroy()    end
+							if arm.tip.Parent     then arm.tip:Destroy()     end
+							if arm.crystal.Parent then arm.crystal:Destroy() end
+						end
+						mineBeams[id] = nil
+					end
+					minePhaseOffsets[id] = nil
+					mineLastIncome[id]   = nil
+					HUD.setIncome(totalIncome())
+				end
 			end)
 		end)
 	end
@@ -234,10 +352,20 @@ Network.onUnitsOrderedMove(function(_ids: {string}, _targetPos: Vector3) end)
 
 Network.onSyncDeposits(function(positions: {Vector3})
 	BuildingPlacer.setDepositPositions(positions)
-end)
-
-Network.onDepositClaimed(function(pos: Vector3)
-	BuildingPlacer.removeDeposit(pos)
+	-- Sync client-side deposit resource tracking for health bars
+	local newKeys: { [string]: boolean } = {}
+	for _, pos in positions do
+		local k = posKeyC(pos)
+		newKeys[k] = true
+		if not depositClientRes[k] then
+			depositClientRes[k] = Config.DEPOSIT_TOTAL_RESOURCES
+		end
+	end
+	local toRemove: { string } = {}
+	for k, _ in depositClientRes do
+		if not newKeys[k] then table.insert(toRemove, k) end
+	end
+	for _, k in toRemove do depositClientRes[k] = nil end
 end)
 
 -- ── Tank Concussion Shells visual upgrade ────────────────────────────────────
@@ -516,78 +644,283 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 	end)
 end)
 
-Network.onMinerSpawned(function(mineId: string, ownerUserId: number, minerCount: number)
-	if ownerUserId ~= localUserId then return end
-	mineMiners[mineId] = minerCount
-	HUD.setIncome(totalIncome())
-	MinePanel.refreshIfVisible()
+-- ── Mine extraction arm VFX ──────────────────────────────────────────────────
+-- Arms run on wall-clock time (os.clock) so they never reset between server ticks
+-- and each mine has its own randomized phase base — no two mines stay in sync.
+-- Cycle duration scales with reach distance: close deposits harvest faster.
+local function setupMineArms(mineId: string, emitterPos: Vector3, depositPositions: { Vector3 })
+	-- Stop previous animation but do NOT clear the phase offset — that stays per mine
+	local existing = mineBeams[mineId]
+	if existing then
+		if existing.conn then existing.conn:Disconnect() end
+		for _, arm in existing.arms do
+			if arm.beam.Parent    then arm.beam:Destroy()    end
+			if arm.tip.Parent     then arm.tip:Destroy()     end
+			if arm.crystal.Parent then arm.crystal:Destroy() end
+		end
+	end
+
+	-- Assign a stable random phase base once per mine lifetime
+	if not minePhaseOffsets[mineId] then
+		minePhaseOffsets[mineId] = math.random() * 97
+	end
+	local minePhase = minePhaseOffsets[mineId]
+
+	-- Resolve the Emitter Part (used for 3D sound playback)
+	local emitterPart: BasePart? = nil
+	do
+		local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
+		if buildingsF then
+			local model = buildingsF:FindFirstChild(mineId) :: Instance?
+			if model then emitterPart = model:FindFirstChild("Emitter") :: BasePart? end
+		end
+	end
+
+	-- Create 3D positional sounds on the Emitter Part (once per mine lifetime)
+	if emitterPart then
+		if not emitterPart:FindFirstChild("_HarvestSnd") then
+			local hs              = Instance.new("Sound")
+			hs.Name               = "_HarvestSnd"
+			hs.SoundId            = "rbxassetid://9119596406"
+			hs.Volume             = 0.65
+			hs.RollOffMaxDistance = 80
+			hs.RollOffMinDistance = 8
+			hs.RollOffMode        = Enum.RollOffMode.Linear
+			hs.Parent             = emitterPart
+		end
+		if not emitterPart:FindFirstChild("_CollectSnd") then
+			local cs              = Instance.new("Sound")
+			cs.Name               = "_CollectSnd"
+			cs.SoundId            = "rbxassetid://136124980150792"
+			cs.Volume             = 0.7
+			cs.RollOffMaxDistance = 80
+			cs.RollOffMinDistance = 8
+			cs.RollOffMode        = Enum.RollOffMode.Linear
+			cs.Parent             = emitterPart
+		end
+	end
+
+	local armData: MineBeamData = { arms = {}, conn = nil }
+	mineBeams[mineId] = armData
+
+	local count = math.min(#depositPositions, 3)
+
+	for i = 1, count do
+		local depositPos = depositPositions[i]
+		local targetPos  = depositPos + Vector3.new(0, 5, 0)
+		local diff       = targetPos - emitterPos
+		local dist       = diff.Magnitude
+		if dist < 1 then continue end
+		local dirUnit = diff / dist
+
+		-- Cycle scales with reach: close = fast, far = slow (rewards closer placement)
+		local cycle   = 1.8 + dist / 18
+
+		-- Stagger arms evenly within one cycle so they never all move together
+		local phaseOff = minePhase + (i - 1) * (cycle / count)
+
+		-- Arm beam
+		local beam           = Instance.new("Part")
+		beam.Name            = "_MineArm"
+		beam.Size            = Vector3.new(0.28, 0.28, 0.1)
+		beam.Color           = Color3.fromRGB(80, 230, 255)
+		beam.Material        = Enum.Material.Neon
+		beam.Transparency    = 1
+		beam.Anchored        = true
+		beam.CanCollide      = false
+		beam.CanQuery        = false
+		beam.CastShadow      = false
+		beam.CFrame          = CFrame.lookAt(emitterPos, emitterPos + dirUnit)
+		beam.Parent          = workspace
+
+		-- Tip: gold neon orb
+		local tip            = Instance.new("Part")
+		tip.Name             = "_MineArmTip"
+		tip.Shape            = Enum.PartType.Ball
+		tip.Size             = Vector3.new(0.55, 0.55, 0.55)
+		tip.Color            = Color3.fromRGB(255, 200, 40)
+		tip.Material         = Enum.Material.Neon
+		tip.Transparency     = 1
+		tip.Anchored         = true
+		tip.CanCollide       = false
+		tip.CanQuery         = false
+		tip.CastShadow       = false
+		tip.Position         = emitterPos
+		tip.Parent           = workspace
+
+		-- Crystal shard: small yellow block carried back with the arm on retraction
+		local crystal            = Instance.new("Part")
+		crystal.Name             = "_MineArmCrystal"
+		crystal.Size             = Vector3.new(0.38, 0.85, 0.38)
+		crystal.Color            = Color3.fromRGB(255, 228, 55)
+		crystal.Material         = Enum.Material.Neon
+		crystal.Transparency     = 1
+		crystal.Anchored         = true
+		crystal.CanCollide       = false
+		crystal.CanQuery         = false
+		crystal.CastShadow       = false
+		crystal.CFrame           = CFrame.new(emitterPos)
+			* CFrame.Angles(0.4, phaseOff * 0.7, 0.55)  -- static tilt per arm
+		crystal.Parent           = workspace
+
+		local entry: ArmEntry = {
+			beam     = beam,
+			tip      = tip,
+			crystal  = crystal,
+			dist     = dist,
+			dir      = dirUnit,
+			phaseOff = phaseOff,
+			cycle    = cycle,
+			lastPct  = -1,
+		}
+		table.insert(armData.arms, entry)
+	end
+
+	if #armData.arms == 0 then return end
+
+	-- Fraction thresholds (shared across all arms)
+	local EXTEND_END  = 0.38
+	local HOLD_END    = 0.52
+	local RETRACT_END = 0.82
+
+	-- Fires when arm returns to base: show per-arm "+N res" popup
+	local function spawnDeliveryPopup()
+		local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
+		if not buildingsF then return end
+		local model = buildingsF:FindFirstChild(mineId) :: Instance?
+		if not model then return end
+		local emitter = model:FindFirstChild("Emitter") :: BasePart?
+		if not emitter then return end
+
+		local xOff             = (math.random() - 0.5) * 3.5
+		local bb               = Instance.new("BillboardGui")
+		bb.Name                = "_MineArmDelivery"
+		bb.Size                = UDim2.fromOffset(58, 18)
+		bb.StudsOffset         = Vector3.new(xOff, 2, 0)
+		bb.AlwaysOnTop         = false
+		bb.MaxDistance         = 120
+		bb.Parent              = emitter
+
+		local lbl                  = Instance.new("TextLabel")
+		lbl.Size                   = UDim2.new(1, 0, 1, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Font                   = Enum.Font.GothamBold
+		lbl.TextSize               = 13
+		lbl.TextColor3             = Color3.fromRGB(255, 215, 0)
+		lbl.TextStrokeTransparency = 0.4
+		lbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+		lbl.Text                   = "+" .. Config.MINE_INCOME_PER_DEPOSIT .. " res"
+		lbl.Parent                 = bb
+
+		local e = 0
+		local lc: RBXScriptConnection
+		lc = RunService.RenderStepped:Connect(function(idt)
+			e += idt
+			if bb.Parent then
+				local t = math.min(e / 1.0, 1)
+				bb.StudsOffset       = Vector3.new(xOff, 2 + t * 5, 0)
+				lbl.TextTransparency = math.clamp((t - 0.35) / 0.65, 0, 1)
+			end
+			if e >= 1.0 then lc:Disconnect(); if bb.Parent then bb:Destroy() end end
+		end)
+	end
+
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(_dt)
+		local now = os.clock()
+		for _, arm in armData.arms do
+			-- Wall-clock phase: survives MineBeams re-calls and is unique per mine
+			local pct     = ((now + arm.phaseOff) / arm.cycle) % 1
+			local prevPct = arm.lastPct
+
+			-- Arm tip arrives at deposit → harvest sound
+			if prevPct >= 0 and prevPct < EXTEND_END and pct >= EXTEND_END then
+				if emitterPart and emitterPart.Parent then
+					local snd = emitterPart:FindFirstChild("_HarvestSnd") :: Sound?
+					if snd then snd:Play() end
+				end
+			end
+
+			-- Arm returns to base → collect sound + delivery popup
+			if prevPct >= 0 and prevPct < RETRACT_END and pct >= RETRACT_END then
+				spawnDeliveryPopup()
+				if emitterPart and emitterPart.Parent then
+					local snd = emitterPart:FindFirstChild("_CollectSnd") :: Sound?
+					if snd then snd:Play() end
+				end
+			end
+			arm.lastPct = pct
+
+			-- Smoothstep extension (0 = retracted, 1 = fully extended)
+			local ext: number
+			if pct < EXTEND_END then
+				local t = pct / EXTEND_END
+				ext = t * t * (3 - 2 * t)
+			elseif pct < HOLD_END then
+				ext = 1
+			elseif pct < RETRACT_END then
+				local t = (pct - HOLD_END) / (RETRACT_END - HOLD_END)
+				ext = 1 - t * t * (3 - 2 * t)
+			else
+				ext = 0
+			end
+
+			if ext < 0.02 then
+				if arm.beam.Parent    then arm.beam.Transparency    = 1 end
+				if arm.tip.Parent     then arm.tip.Transparency     = 1 end
+				if arm.crystal.Parent then arm.crystal.Transparency = 1 end
+			else
+				local len    = arm.dist * ext
+				local tipPos = emitterPos + arm.dir * len
+
+				-- Beam
+				arm.beam.Transparency = 0.08
+				arm.beam.Size         = Vector3.new(0.28, 0.28, len)
+				arm.beam.CFrame       = CFrame.lookAt(emitterPos, emitterPos + arm.dir)
+					* CFrame.new(0, 0, -len / 2)
+
+				-- Tip orb
+				arm.tip.Position     = tipPos
+				arm.tip.Transparency = 0.08
+				if pct >= EXTEND_END and pct < HOLD_END then
+					-- Pulse at deposit during hold
+					local pulse = math.sin(now * 14) * 0.18
+					arm.tip.Transparency = math.clamp(0.05 + pulse, 0, 0.85)
+					local s = 0.55 + math.abs(pulse) * 1.2
+					arm.tip.Size = Vector3.new(s, s, s)
+				else
+					arm.tip.Size = Vector3.new(0.55, 0.55, 0.55)
+				end
+
+				-- Crystal shard: visible only during retraction (arm bringing it home)
+				if pct >= HOLD_END and pct < RETRACT_END then
+					arm.crystal.Transparency = 0.05
+					arm.crystal.CFrame       = CFrame.new(tipPos + Vector3.new(0, 0.3, 0))
+						* CFrame.Angles(0.4, now * 0.8, 0.55)
+				else
+					if arm.crystal.Parent then arm.crystal.Transparency = 1 end
+				end
+			end
+		end
+	end)
+	armData.conn = conn
+end
+
+Network.onMineBeams(function(mineId: string, emitterPos: Vector3, depositPositions: { Vector3 })
+	setupMineArms(mineId, emitterPos, depositPositions)
+	-- Decrement client-side deposit resources so health bars stay accurate
+	for _, pos in depositPositions do
+		local k = posKeyC(pos)
+		if depositClientRes[k] then
+			depositClientRes[k] = math.max(0, depositClientRes[k] - Config.MINE_INCOME_PER_DEPOSIT)
+		end
+	end
 end)
 
 Network.onMineIncome(function(mineId: string, income: number)
-	local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
-	if not buildingsF then return end
-	local model = buildingsF:FindFirstChild(mineId)
-	if not model then return end
-	local crystal = model:FindFirstChild("Crystal") :: BasePart?
-	if not crystal then return end
-
-	-- Floating "+X res" label
-	local bb           = Instance.new("BillboardGui")
-	bb.Name            = "_MineIncomeBB"
-	bb.Size            = UDim2.fromOffset(80, 22)
-	bb.StudsOffset     = Vector3.new(0, 4, 0)
-	bb.AlwaysOnTop     = false
-	bb.MaxDistance     = 120
-	bb.Parent          = crystal
-
-	local lbl                    = Instance.new("TextLabel")
-	lbl.Size                     = UDim2.new(1, 0, 1, 0)
-	lbl.BackgroundTransparency   = 1
-	lbl.Font                     = Enum.Font.GothamBold
-	lbl.TextSize                 = 15
-	lbl.TextColor3               = Color3.fromRGB(255, 215, 0)
-	lbl.TextStrokeTransparency   = 0.35
-	lbl.Text                     = "+" .. income .. " res"
-	lbl.Parent                   = bb
-
-	-- Crystal pulse: briefly enlarge then restore
-	local originalSize = crystal.Size
-	local PULSE_IN     = 0.12   -- seconds to grow
-	local PULSE_OUT    = 0.32   -- seconds to shrink back
-	local RISE_DUR     = 1.4    -- total float duration
-	local PULSE_ADD    = Vector3.new(0.8, 1.6, 0.8)
-
-	local elapsed = 0
-	local conn: RBXScriptConnection
-	conn = RunService.RenderStepped:Connect(function(dt)
-		elapsed += dt
-
-		-- Float label upward and fade
-		if bb.Parent then
-			local t        = math.min(elapsed / RISE_DUR, 1)
-			bb.StudsOffset = Vector3.new(0, 4 + t * 3.5, 0)
-			lbl.TextTransparency = math.clamp((t - 0.4) / 0.6, 0, 1)
-		end
-
-		-- Crystal size pulse
-		if crystal.Parent then
-			if elapsed < PULSE_IN then
-				local t      = elapsed / PULSE_IN
-				crystal.Size = originalSize + PULSE_ADD * t
-			elseif elapsed < PULSE_IN + PULSE_OUT then
-				local t      = (elapsed - PULSE_IN) / PULSE_OUT
-				crystal.Size = (originalSize + PULSE_ADD) - PULSE_ADD * t
-			else
-				crystal.Size = originalSize
-			end
-		end
-
-		if elapsed >= RISE_DUR then
-			conn:Disconnect()
-			if bb.Parent then bb:Destroy() end
-			if crystal.Parent then crystal.Size = originalSize end
-		end
-	end)
+	mineLastIncome[mineId] = income
+	HUD.setIncome(totalIncome())
+	-- Per-arm "+N res" popups are fired by setupMineArms when each arm delivers
 end)
 
 Network.onResourceSync(function(amount: number)
