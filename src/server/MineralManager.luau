@@ -16,6 +16,7 @@ type MineData = {
 local depositResources: { [string]: number } = {}  -- posKey → resources remaining
 local depositList:      { Vector3 }           = {}
 local mines:            { [string]: MineData } = {}
+local mineActive:       { [string]: boolean } = {}  -- tracks which mines currently have deposits in range
 local waveScheduled     = false
 local extractAccum      = 0
 
@@ -258,7 +259,25 @@ local function extractionTick()
 			end
 		end
 
-		if #found == 0 then continue end
+		-- Resolve emitter world position from the mine model
+		local emitterPos = data.pos + Vector3.new(0, 12.2, 0)
+		local bf = workspace:FindFirstChild("Buildings")
+		if bf then
+			local model = bf:FindFirstChild(mineId)
+			if model then
+				local em = model:FindFirstChild("Emitter") :: BasePart?
+				if em then emitterPos = em.Position end
+			end
+		end
+
+		if #found == 0 then
+			-- Send a stop signal once when the mine transitions from active to idle
+			if mineActive[mineId] then
+				mineActive[mineId] = nil
+				RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(mineId, emitterPos, {})
+			end
+			continue
+		end
 
 		-- Limit to the nearest 3 deposits (one arm per deposit)
 		if #found > 3 then
@@ -289,17 +308,7 @@ local function extractionTick()
 			RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(data.owner, mineId, totalIncome)
 		end
 
-		-- Resolve emitter world position from the mine model
-		local emitterPos = data.pos + Vector3.new(0, 12.2, 0)
-		local bf = workspace:FindFirstChild("Buildings")
-		if bf then
-			local model = bf:FindFirstChild(mineId)
-			if model then
-				local em = model:FindFirstChild("Emitter") :: BasePart?
-				if em then emitterPos = em.Position end
-			end
-		end
-
+		mineActive[mineId] = true
 		RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(mineId, emitterPos, found)
 	end
 
@@ -381,7 +390,8 @@ function MineralManager.getMineCount(player: any): number
 end
 
 function MineralManager.removeMine(mineId: string)
-	mines[mineId] = nil
+	mines[mineId]      = nil
+	mineActive[mineId] = nil
 end
 
 function MineralManager.removeAllMinesFor(player: any)
@@ -389,11 +399,15 @@ function MineralManager.removeAllMinesFor(player: any)
 	for id, data in mines do
 		if data.owner == player then table.insert(toRemove, id) end
 	end
-	for _, id in toRemove do mines[id] = nil end
+	for _, id in toRemove do
+		mines[id]      = nil
+		mineActive[id] = nil
+	end
 end
 
 function MineralManager.resetAll()
 	mines            = {}
+	mineActive       = {}
 	depositList      = {}
 	depositResources = {}
 	waveScheduled    = false

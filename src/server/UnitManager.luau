@@ -32,6 +32,11 @@ type UnitData = {
 	harpoonCount       : number?,  -- nil for non-trappers; current available harpoons (0–5)
 	harpoonRestockAt   : number?,  -- tick() timestamp when next harpoon restocks
 	trapperHarpooned   : {[string]: number}?,  -- unitId → expiry tick() for active harpoons this trapper fired
+	rollerAngle        : number?,   -- accumulated Z-roll radians
+	rollerCharging     : boolean?,  -- dashing toward charge target
+	rollerChargingOut  : boolean?,  -- bouncing back from charge
+	rollerChargeTarget : Vector3?,  -- charge destination
+	rollerChargeHome   : Vector3?,  -- position to return to after charge
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -505,6 +510,9 @@ function UnitManager.init(resourceManager)
 		local doAggro  = aggroScanFrame == 0
 
 		for id, data in units do
+			local isRoller = data.unitType == "Soldier" and researchManagerRef ~= nil
+				and researchManagerRef.hasResearch(data.owner, "Rollers")
+			if isRoller then data.attackRange = Config.ROLLER_ATTACK_RANGE end
 
 			-- ── 1. Aggro: update chase target or resolve ───────────────────────
 			if data.aggroId then
@@ -563,51 +571,81 @@ function UnitManager.init(resourceManager)
 			-- ── 2. Velocity-based movement ────────────────────────────────────
 			local pos = data.part.Position
 
-			-- Compute desired velocity toward target (zero when no target or arrived)
-			local desired = Vector3.zero
-			if data.target then
-				local flat  = Vector3.new(data.target.X, pos.Y, data.target.Z)
-				local delta = flat - pos
-				if delta.Magnitude < 1.5 then
-					-- Arrived
-					data.target = nil
-					if not data.aggroId then
-						data.home = pos
-						if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
-							data.atkMoveDest = nil
-						end
+			-- Roller charge: fast dash to target and bounce back, bypasses normal movement
+			if isRoller and (data.rollerCharging or data.rollerChargingOut) then
+				local chargeTarget = if data.rollerCharging
+					then (data.rollerChargeTarget :: Vector3)
+					else (data.rollerChargeHome  :: Vector3)
+				local cDelta = Vector3.new(chargeTarget.X - pos.X, 0, chargeTarget.Z - pos.Z)
+				local cDist  = cDelta.Magnitude
+				if cDist < 1.5 then
+					if data.rollerCharging then
+						data.rollerCharging    = false
+						data.rollerChargingOut = true
+					else
+						data.rollerChargingOut  = false
+						data.rollerChargeHome   = nil
+						data.rollerChargeTarget = nil
 					end
 				else
-					local effSpeed = data.moveSpeed
-					local t = tick()
-					if data.slowUntil and t < (data.slowUntil :: number) then
-						effSpeed = effSpeed * Config.TANK_SLOW_MULT
-					end
-					if data.incomingHarpoons and (data.incomingHarpoons :: number) > 0 then
-						effSpeed = effSpeed * (Config.TRAPPER_SLOW_MULT ^ (data.incomingHarpoons :: number))
-					end
-					if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
-						effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
-					end
-					desired = delta.Unit * effSpeed
+					local step   = math.min(Config.ROLLER_CHARGE_SPEED * dt, cDist)
+					local newPos = pos + cDelta.Unit * step
+					data.rollerAngle = ((data.rollerAngle or 0) + step * Config.ROLLER_ROLL_PER_STUD) % (2 * math.pi)
+					data.part.CFrame = CFrame.lookAt(newPos, newPos + cDelta.Unit) * CFrame.Angles(-data.rollerAngle, 0, 0)
 				end
-			end
+			else
+				-- Normal velocity-based movement
+				local desired = Vector3.zero
+				if data.target then
+					local flat  = Vector3.new(data.target.X, pos.Y, data.target.Z)
+					local delta = flat - pos
+					if delta.Magnitude < 1.5 then
+						-- Arrived
+						data.target = nil
+						if not data.aggroId then
+							data.home = pos
+							if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
+								data.atkMoveDest = nil
+							end
+						end
+					else
+						local effSpeed = data.moveSpeed
+						local t = tick()
+						if data.slowUntil and t < (data.slowUntil :: number) then
+							effSpeed = effSpeed * Config.TANK_SLOW_MULT
+						end
+						if data.incomingHarpoons and (data.incomingHarpoons :: number) > 0 then
+							effSpeed = effSpeed * (Config.TRAPPER_SLOW_MULT ^ (data.incomingHarpoons :: number))
+						end
+						if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
+							effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
+						end
+						if isRoller then effSpeed = effSpeed * Config.ROLLER_SPEED_MULT end
+						desired = delta.Unit * effSpeed
+					end
+				end
 
-			-- Lerp velocity: decelerate faster than accelerate for snappier stops
-			local lerpFactor = if desired.Magnitude < 0.1
-				then math.min(data.accel * 2.5 * dt, 1)
-				else math.min(data.accel * dt, 1)
-			data.velocity = data.velocity:Lerp(desired, lerpFactor)
+				-- Lerp velocity: decelerate faster than accelerate for snappier stops
+				local lerpFactor = if desired.Magnitude < 0.1
+					then math.min(data.accel * 2.5 * dt, 1)
+					else math.min(data.accel * dt, 1)
+				data.velocity = data.velocity:Lerp(desired, lerpFactor)
 
-			-- Apply velocity and face the direction of travel
-			local vel = data.velocity
-			if vel.Magnitude > 0.15 then
-				local newPos = Vector3.new(pos.X + vel.X * dt, pos.Y, pos.Z + vel.Z * dt)
-				local flatVel = Vector3.new(vel.X, 0, vel.Z)
-				if flatVel.Magnitude > 0.5 then
-					data.part.CFrame = CFrame.lookAt(newPos, newPos + flatVel)
-				else
-					data.part.Position = newPos
+				-- Apply velocity and face the direction of travel
+				local vel = data.velocity
+				if vel.Magnitude > 0.15 then
+					local newPos = Vector3.new(pos.X + vel.X * dt, pos.Y, pos.Z + vel.Z * dt)
+					local flatVel = Vector3.new(vel.X, 0, vel.Z)
+					if flatVel.Magnitude > 0.5 then
+						if isRoller then
+							data.rollerAngle = ((data.rollerAngle or 0) + vel.Magnitude * dt * Config.ROLLER_ROLL_PER_STUD) % (2 * math.pi)
+							data.part.CFrame = CFrame.lookAt(newPos, newPos + flatVel) * CFrame.Angles(-data.rollerAngle, 0, 0)
+						else
+							data.part.CFrame = CFrame.lookAt(newPos, newPos + flatVel)
+						end
+					else
+						data.part.Position = newPos
+					end
 				end
 			end
 
@@ -859,43 +897,97 @@ function UnitManager.init(resourceManager)
 					if hasBarrage and hitPos then vfxType = "TankBarrage" end
 				end
 			else
-				-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
-				local bestId2, bestDist2 = nil :: string?, math.huge
-				for otherId, other in units do
-					if other.hp <= 0 then continue end
-					if tostring(other.owner.UserId) == myOwnerStr then continue end
-					local d = (other.part.Position - myPos).Magnitude
-					if d <= atkRange and d < bestDist2 then
-						bestDist2 = d; bestId2 = otherId
-					end
-				end
-				if bestId2 then
-					local other = units[bestId2]
-					hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
-					other.hp -= calcDamage(other, data.attackDmg)
-					applyHP(other)
-					if other.hp <= 0 then table.insert(toRemove, bestId2) end
-				elseif buildingManagerRef then
-					local bId: string?, bPos: Vector3?
-					if data.focusBldId then
-						local bf    = workspace:FindFirstChild("Buildings")
-						local model = bf and bf:FindFirstChild(data.focusBldId)
-						local base  = model and model:FindFirstChild("Base")
-						if base and (base :: BasePart).Parent then
-							local bp = base :: BasePart
-							if (bp.Position - myPos).Magnitude <= atkRange then
-								bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
-							end
-						else
-							data.focusBldId = nil
+				if isRoller then
+					-- Roller: melee charge attack — find target, deal damage, start dash
+					local bestId2, bestDist2 = nil :: string?, math.huge
+					for otherId, other in units do
+						if other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == myOwnerStr then continue end
+						local d = (other.part.Position - myPos).Magnitude
+						if d <= atkRange and d < bestDist2 then
+							bestDist2 = d; bestId2 = otherId
 						end
 					end
-					if not bId then
-						bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+					if bestId2 then
+						local other = units[bestId2]
+						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+						other.hp -= calcDamage(other, data.attackDmg)
+						applyHP(other)
+						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+						if not data.rollerCharging and not data.rollerChargingOut then
+							data.rollerCharging     = true
+							local chargeDir = (other.part.Position - myPos)
+							data.rollerChargeTarget = myPos + chargeDir.Unit * Config.ROLLER_CHARGE_DIST
+							data.rollerChargeHome   = myPos
+						end
+					elseif buildingManagerRef then
+						local bId: string?, bPos: Vector3?
+						if data.focusBldId then
+							local bf    = workspace:FindFirstChild("Buildings")
+							local model = bf and bf:FindFirstChild(data.focusBldId)
+							local base  = model and model:FindFirstChild("Base")
+							if base and (base :: BasePart).Parent then
+								local bp = base :: BasePart
+								if (bp.Position - myPos).Magnitude <= atkRange then
+									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
+								end
+							else
+								data.focusBldId = nil
+							end
+						end
+						if not bId then
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+						end
+						if bId and bPos then
+							buildingManagerRef.damage(bId, data.attackDmg)
+							hitPos = bPos
+							if not data.rollerCharging and not data.rollerChargingOut then
+								data.rollerCharging     = true
+								local chargeDir = (bPos - myPos)
+								data.rollerChargeTarget = myPos + chargeDir.Unit * Config.ROLLER_CHARGE_DIST
+								data.rollerChargeHome   = myPos
+							end
+						end
 					end
-					if bId and bPos then
-						buildingManagerRef.damage(bId, data.attackDmg)
-						hitPos = bPos
+				else
+					-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
+					local bestId2, bestDist2 = nil :: string?, math.huge
+					for otherId, other in units do
+						if other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == myOwnerStr then continue end
+						local d = (other.part.Position - myPos).Magnitude
+						if d <= atkRange and d < bestDist2 then
+							bestDist2 = d; bestId2 = otherId
+						end
+					end
+					if bestId2 then
+						local other = units[bestId2]
+						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+						other.hp -= calcDamage(other, data.attackDmg)
+						applyHP(other)
+						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+					elseif buildingManagerRef then
+						local bId: string?, bPos: Vector3?
+						if data.focusBldId then
+							local bf    = workspace:FindFirstChild("Buildings")
+							local model = bf and bf:FindFirstChild(data.focusBldId)
+							local base  = model and model:FindFirstChild("Base")
+							if base and (base :: BasePart).Parent then
+								local bp = base :: BasePart
+								if (bp.Position - myPos).Magnitude <= atkRange then
+									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
+								end
+							else
+								data.focusBldId = nil
+							end
+						end
+						if not bId then
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+						end
+						if bId and bPos then
+							buildingManagerRef.damage(bId, data.attackDmg)
+							hitPos = bPos
+						end
 					end
 				end
 			end
@@ -909,11 +1001,13 @@ function UnitManager.init(resourceManager)
 
 			-- Face attack target, then fire VFX
 			if hitPos then
-				local flatDir = Vector3.new(hitPos.X - myPos.X, 0, hitPos.Z - myPos.Z)
-				if flatDir.Magnitude > 0.1 then
-					data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
+				if not isRoller then
+					local flatDir = Vector3.new(hitPos.X - myPos.X, 0, hitPos.Z - myPos.Z)
+					if flatDir.Magnitude > 0.1 then
+						data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
+					end
 				end
-			unitHitRemote:FireAllClients(myPos, hitPos, vfxType)
+				unitHitRemote:FireAllClients(myPos, hitPos, vfxType)
 			end
 		end
 

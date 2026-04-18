@@ -33,6 +33,9 @@ local localUserId = Players.LocalPlayer.UserId
 -- mineId → income earned last extraction tick (used for HUD income-rate display)
 local mineLastIncome: { [string]: number } = {}
 
+-- mineId → ownerId (used to skip enemy mine arm VFX so they don't pierce fog)
+local mineOwners: { [string]: number } = {}
+
 -- mineId → active mechanical-arm data
 type ArmEntry = {
 	beam: Part, tip: Part, crystal: Part,
@@ -51,6 +54,9 @@ end
 
 -- Current resource amount (tracked for MinePanel affordability checks)
 local currentResources = 0
+
+-- The local player's own CC building id (needed to open WorkshopPanel via the HUD button)
+local ownCCId: string? = nil
 
 -- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
 local winOverlay: Frame?
@@ -85,6 +91,7 @@ local function clearMineData()
 	end
 	mineBeams         = {}
 	minePhaseOffsets  = {}
+	mineOwners        = {}
 	depositClientRes  = {}
 	HUD.setIncome(0)
 end
@@ -205,14 +212,30 @@ end
 -- Called by HUD when a build node is clicked, and also wired to the CC button.
 -- Prevents open panels from intercepting placement clicks (they consume the click
 -- through GPE = true, leaving isPlacing stuck until Escape / right-click).
+local workshopBtnOpen = false  -- tracks whether the HUD upgrades button opened the workshop
+
 local function hideBuildingPanels()
+	workshopBtnOpen = false
 	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 end
 
-HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels)
+HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
+	if not ownCCId then return end
+	if workshopBtnOpen then
+		-- Second press: close it
+		workshopBtnOpen = false
+		WorkshopPanel.hide()
+	else
+		workshopBtnOpen = true
+		BarracksPanel.hide()
+		MinePanel.hide()
+		TurretPanel.hide()
+		WorkshopPanel.show(ownCCId)
+	end
+end)
 HUD.setHasResearch(function(techName: string) return researchedTechs[techName] == true end)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
@@ -222,6 +245,8 @@ local function enterCCMode()
 	BuildingPlacer.exitPlacementMode()
 	BuildingPlacer.clearRelayPositions()
 	clearMineData()
+	ownCCId             = nil
+	workshopBtnOpen     = false
 	ownedBuildingCounts = {}
 	researchedTechs    = {}
 	researchProgress   = {}
@@ -247,12 +272,18 @@ end)
 
 Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
+		ownCCId = id
 		HUD.setCommandCenterMode(false)
 		Tutorial.notify("cc_placed")
 	end
 
 	if buildingType == "Monument" then
 		monumentBuildingId[ownerId] = id
+	end
+
+	-- Track mine ownership so we can skip enemy mine arm VFX (fog of war)
+	if buildingType == "Mine" then
+		mineOwners[id] = ownerId
 	end
 
 	-- Track this player's non-CC buildings for the requirement system
@@ -291,6 +322,7 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, bu
 					end
 					minePhaseOffsets[id] = nil
 					mineLastIncome[id]   = nil
+					mineOwners[id]       = nil
 					HUD.setIncome(totalIncome())
 				end
 			end)
@@ -323,6 +355,7 @@ end)
 -- ── Command Center research panel ─────────────────────────────────────────────
 UnitController.onCCSelected(function(ccId: string?)
 	if ccId then
+		workshopBtnOpen = false  -- opened via click, not the HUD button
 		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
@@ -909,7 +942,19 @@ local function setupMineArms(mineId: string, emitterPos: Vector3, depositPositio
 end
 
 Network.onMineBeams(function(mineId: string, emitterPos: Vector3, depositPositions: { Vector3 })
+	-- Only render arms for our own mines; enemy mines are hidden by fog of war
+	if mineOwners[mineId] ~= localUserId then return end
 	setupMineArms(mineId, emitterPos, depositPositions)
+
+	if #depositPositions == 0 then
+		-- Mine has gone idle (no deposits in range) — clear its stale income contribution
+		if mineLastIncome[mineId] then
+			mineLastIncome[mineId] = nil
+			HUD.setIncome(totalIncome())
+		end
+		return
+	end
+
 	-- Decrement client-side deposit resources so health bars stay accurate
 	for _, pos in depositPositions do
 		local k = posKeyC(pos)

@@ -57,8 +57,11 @@ local Y_CONC    = -155   -- ConcussionShells
 local Y_MEDIC   =  -20   -- MedicUnit
 
 -- Tier-2 Y positions for the ConcussionShells split (RocketBarrage vs Trapper)
-local Y_BARRAGE = Y_CONC - 70   -- = -225, RocketBarrage sits above ConcussionShells
-local Y_TRAPPER = Y_CONC + 70   -- =  -85, Trapper sits below ConcussionShells
+local Y_BARRAGE  = Y_CONC - 70   -- = -225, RocketBarrage sits above ConcussionShells
+local Y_TRAPPER  = Y_CONC + 70   -- =  -85, Trapper sits below ConcussionShells
+
+-- Tier-2 Y positions for CombatStims branch
+local Y_ROLLERS  = Y_COMBAT - 70  -- = -360, Rollers sits above HardenedArmor
 
 -- Tier-1 Y positions (Structures branch)
 local Y_MINES   =  110   -- BetterMines
@@ -120,11 +123,16 @@ local TECH_DATA: { [string]: { name: string, icon: string, time: number, tip: st
 		name = "Relay", icon = "📡", time = 20,
 		tip  = "Extends build zone by 65 studs",
 	},
+	Rollers = {
+		name = "Rollers", icon = "⚙", time = 20,
+		tip  = "Melee charge attack, 20% faster",
+	},
 }
 
 -- Tier-2 key → its tier-1 parent key (drip-feed gating)
 local TIER2_PARENT: { [string]: string } = {
 	HardenedArmor = "CombatStims",
+	Rollers       = "CombatStims",
 	RocketBarrage  = "ConcussionShells",
 	Trapper        = "ConcussionShells",
 	EliteUnits     = "MedicUnit",
@@ -720,6 +728,7 @@ function WorkshopPanel.init(
 	-- Hidden until their tier-1 parent is DONE; slide out from tier-1 position.
 	-- ConcussionShells splits into RocketBarrage (above) and Trapper (below).
 	buildTechNode(ov, "HardenedArmor", cp(COL2_X, Y_COMBAT),  cp(COL1_X, Y_COMBAT), 14)
+	buildTechNode(ov, "Rollers",       cp(COL2_X, Y_ROLLERS), cp(COL1_X, Y_COMBAT), 14)
 	buildTechNode(ov, "RocketBarrage", cp(COL2_X, Y_BARRAGE),  cp(COL1_X, Y_CONC),   14)
 	buildTechNode(ov, "Trapper",       cp(COL2_X, Y_TRAPPER),  cp(COL1_X, Y_CONC),   14)
 	buildTechNode(ov, "EliteUnits",    cp(COL2_X, Y_MEDIC),   cp(COL1_X, Y_MEDIC),  14)

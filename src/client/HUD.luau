@@ -84,11 +84,11 @@ local BUILDING_INFO: { [string]: BuildingInfo } = {
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
-local CHILD_DEFS: { { btype: string, icon: string, color: Color3 } } = {
-	{ btype = "Mine",     icon = "⛏", color = C.MINE     },
-	{ btype = "Barracks", icon = "⚔", color = C.BARRACKS },
-	{ btype = "Turret",   icon = "⚙", color = C.TURRET   },
-	{ btype = "Relay",    icon = "📡", color = C.ACCENT   },
+local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
+	{ btype = "Mine",     icon = "⛏", color = C.MINE,     desc = "Harvests nearby mineral deposits" },
+	{ btype = "Barracks", icon = "⚔", color = C.BARRACKS, desc = "Trains and deploys combat units"  },
+	{ btype = "Turret",   icon = "⚙", color = C.TURRET,   desc = "Auto-attacks nearby enemies"      },
+	{ btype = "Relay",    icon = "📡", color = C.ACCENT,   desc = "Extends your build zone"          },
 }
 local CHILD_SPACING = 95   -- px between child centres
 
@@ -99,17 +99,57 @@ type ChildNode = {
 	stroke:   UIStroke,
 	label:    TextLabel,
 	btype:    string,
+	color:    Color3,
+	desc:     string,
 	finalPos: UDim2,
 	startPos: UDim2,
 }
-local childNodes:   { ChildNode } = {}
-local rootBtn:      TextButton?
-local rootStroke:   UIStroke?
+local childNodes:    { ChildNode } = {}
+local rootBtn:       TextButton?
+local rootStroke:    UIStroke?
 local buildOverlay:  Frame?
 local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
 local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
+local upgradesBtnRef: TextButton?
+
+-- ── Build-menu hover tooltip ──────────────────────────────────────────────────
+local tooltipFrame: Frame?
+local tooltipTitle: TextLabel?
+local tooltipDesc:  TextLabel?
+local typewriterToken = 0  -- incremented to cancel an in-flight typewriter
+
+local function startTypewriter(nameStr: string, descStr: string, color: Color3)
+	typewriterToken += 1
+	local myToken = typewriterToken
+	if not (tooltipFrame and tooltipTitle and tooltipDesc) then return end
+
+	tooltipTitle.TextColor3 = color
+	tooltipTitle.Text       = ""
+	tooltipDesc.Text        = ""
+	tooltipFrame.Visible    = true
+
+	task.spawn(function()
+		for i = 1, #nameStr do
+			if typewriterToken ~= myToken then return end
+			tooltipTitle.Text = string.sub(nameStr, 1, i)
+			task.wait(0.04)
+		end
+		if typewriterToken ~= myToken then return end
+		task.wait(0.07)
+		for i = 1, #descStr do
+			if typewriterToken ~= myToken then return end
+			tooltipDesc.Text = string.sub(descStr, 1, i)
+			task.wait(0.024)
+		end
+	end)
+end
+
+local function hideTooltip()
+	typewriterToken += 1
+	if tooltipFrame then tooltipFrame.Visible = false end
+end
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
 
@@ -221,6 +261,7 @@ end
 
 local function collapseMenu()
 	buildMenuOpen = false
+	hideTooltip()
 	if rootBtn    then rootBtn.Text = "⚒" end
 	if rootStroke then TweenService:Create(rootStroke, TweenInfo.new(0.12), { Thickness = 2 }):Play() end
 
@@ -365,6 +406,92 @@ function HUD.create(): (Frame, TextButton)
 	rootStroke                          = rBtn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	local _rw = rootWrapper  -- suppress unused
 
+	-- "UPGRADES" button — sits above the BUILD toggle, visually separate from structures
+	do
+		local upgradesColor = Color3.fromRGB(190, 140, 255)  -- soft purple = research/tech
+		local upgradesPos   = UDim2.new(0, 80, 1, -207)      -- centred above the root node
+
+		-- Pill-shaped button (rectangular, not circular) so it reads differently to build nodes
+		local upgBtn                        = Instance.new("TextButton")
+		upgBtn.Name                         = "UpgradesBtn"
+		upgBtn.Size                         = UDim2.fromOffset(110, 38)
+		upgBtn.AnchorPoint                  = Vector2.new(0.5, 0.5)
+		upgBtn.Position                     = upgradesPos
+		upgBtn.BackgroundColor3             = Color3.fromRGB(30, 20, 50)
+		upgBtn.BackgroundTransparency       = 0.18
+		upgBtn.BorderSizePixel              = 0
+		upgBtn.Text                         = "⚗  UPGRADES"
+		upgBtn.TextColor3                   = upgradesColor
+		upgBtn.Font                         = Enum.Font.GothamBold
+		upgBtn.TextSize                     = 13
+		upgBtn.ZIndex                       = 4
+		upgBtn.Parent                       = ov
+		UILib.corner(upgBtn, 19)  -- fully rounded pill
+
+		local upgStroke                     = Instance.new("UIStroke")
+		upgStroke.Color                     = upgradesColor
+		upgStroke.Thickness                 = 1.5
+		upgStroke.Transparency              = 0.25
+		upgStroke.Parent                    = upgBtn
+
+		-- Subtle glow on hover
+		upgBtn.MouseEnter:Connect(function()
+			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 2.5, Transparency = 0 }):Play()
+			TweenService:Create(upgBtn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.05 }):Play()
+		end)
+		upgBtn.MouseLeave:Connect(function()
+			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 1.5, Transparency = 0.25 }):Play()
+			TweenService:Create(upgBtn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.18 }):Play()
+		end)
+
+		upgradesBtnRef = upgBtn
+	end
+
+	-- Hover tooltip — fixed position above the build menu, always in the same spot
+	do
+		local tip                        = Instance.new("Frame")
+		tip.Name                         = "BuildTooltip"
+		tip.Size                         = UDim2.fromOffset(420, 92)
+		-- Anchored bottom-left, sitting well above the UPGRADES button
+		tip.Position                     = UDim2.new(0, 22, 1, -340)
+		tip.BackgroundTransparency       = 1
+		tip.BorderSizePixel              = 0
+		tip.Visible                      = false
+		tip.ZIndex                       = 5
+		tip.Parent                       = ov
+		tooltipFrame = tip
+
+		local tipTitle                   = Instance.new("TextLabel")
+		tipTitle.Size                    = UDim2.new(1, 0, 0, 54)
+		tipTitle.Position                = UDim2.new(0, 0, 0, 0)
+		tipTitle.BackgroundTransparency  = 1
+		tipTitle.Text                    = ""
+		tipTitle.Font                    = Enum.Font.GothamBold
+		tipTitle.TextSize                = 44
+		tipTitle.TextColor3              = C.ACCENT
+		tipTitle.TextXAlignment          = Enum.TextXAlignment.Left
+		tipTitle.TextStrokeTransparency  = 0.25
+		tipTitle.TextStrokeColor3        = Color3.new(0, 0, 0)
+		tipTitle.ZIndex                  = 6
+		tipTitle.Parent                  = tip
+		tooltipTitle = tipTitle
+
+		local tipDesc                    = Instance.new("TextLabel")
+		tipDesc.Size                     = UDim2.new(1, 0, 0, 30)
+		tipDesc.Position                 = UDim2.new(0, 2, 0, 58)
+		tipDesc.BackgroundTransparency   = 1
+		tipDesc.Text                     = ""
+		tipDesc.Font                     = Enum.Font.GothamBold
+		tipDesc.TextSize                 = 19
+		tipDesc.TextColor3               = C.TEXT
+		tipDesc.TextXAlignment           = Enum.TextXAlignment.Left
+		tipDesc.TextStrokeTransparency   = 0.35
+		tipDesc.TextStrokeColor3         = Color3.new(0, 0, 0)
+		tipDesc.ZIndex                   = 6
+		tipDesc.Parent                   = tip
+		tooltipDesc = tipDesc
+	end
+
 	-- Child nodes spread right along the bottom from the root position
 	for i, def in CHILD_DEFS do
 		local finalPos = UDim2.new(
@@ -386,9 +513,21 @@ function HUD.create(): (Frame, TextButton)
 			stroke   = stroke,
 			label    = label,
 			btype    = def.btype,
+			color    = def.color,
+			desc     = def.desc,
 			finalPos = finalPos,
 			startPos = rootPos,
 		})
+
+		-- Hover: start typewriter (tooltip position is fixed, set once at create time)
+		local bname  = def.btype:upper()
+		local bcolor = def.color
+		local bdesc  = def.desc
+		btn.MouseEnter:Connect(function()
+			if not buildMenuOpen then return end
+			startTypewriter(bname, bdesc, bcolor)
+		end)
+		btn.MouseLeave:Connect(hideTooltip)
 	end
 
 	updateAllNodes()
@@ -531,7 +670,8 @@ function HUD.wire(
 	network,
 	unitController,
 	buildingPlacer,
-	hidePanelsFn: () -> ()
+	hidePanelsFn: () -> (),
+	upgradesFn:  (() -> ())?
 )
 	-- Resource sync
 	network.onResourceSync(function(n: number)
@@ -579,6 +719,12 @@ function HUD.wire(
 		cancelBtnRef.MouseButton1Click:Connect(function()
 			buildingPlacer.exitPlacementMode()
 		end)
+	end
+
+	-- Upgrades button — upgradesFn owns its own show/hide logic; don't call
+	-- hidePanelsFn first or it resets the toggle flag before upgradesFn checks it.
+	if upgradesBtnRef and upgradesFn then
+		upgradesBtnRef.MouseButton1Click:Connect(upgradesFn)
 	end
 
 	-- Placement mode changes
