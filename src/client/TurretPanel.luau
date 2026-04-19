@@ -23,10 +23,12 @@ local C            = UILib.C
 
 local FLAME_COLOR   = Color3.fromRGB(230, 90,  15)
 local ROCKET_COLOR  = Color3.fromRGB(55,  115, 225)
-local EVOLVED_COLOR = Color3.fromRGB(80,  210, 60)
+local CREEPY_COLOR  = Color3.fromRGB(80,  200, 100)
+local MUTANT_COLOR  = Color3.fromRGB(140, 30,  210)
 local FLAME_COST    = (Config.TURRET_UPGRADE_COST :: any)["Flamethrower"]   or 200
 local ROCKET_COST   = (Config.TURRET_UPGRADE_COST :: any)["RocketLauncher"] or 225
-local EVOLVED_COST  = (Config.TURRET_UPGRADE_COST :: any)["Evolved"]        or 275
+local CREEPY_COST   = (Config.TURRET_UPGRADE_COST :: any)["Creepy"]         or 275
+local MUTANT_COST   = (Config.TURRET_UPGRADE_COST :: any)["Mutant"]         or 350
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeTurretId: string?
@@ -60,12 +62,31 @@ type ChildNode = {
 }
 local childNodes: { ChildNode } = {}
 
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function getUpgradeState(turretId: string): string?
+	local bf = workspace:FindFirstChild("Buildings")
+	if not bf then return nil end
+	local model = bf:FindFirstChild(turretId)
+	if not model then return nil end
+	local uv = model:FindFirstChild("Upgrade") :: StringValue?
+	return uv and uv.Value or nil
+end
+
 -- ── Expand / collapse ─────────────────────────────────────────────────────────
 local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 local function expandNodes()
+	local upgrade = activeTurretId and getUpgradeState(activeTurretId) or nil
 	for _, c in childNodes do
+		-- Mutant is tier-2: only show when Creepy is active or Mutant already applied
+		if c.key == "Mutant" then
+			if upgrade ~= "Creepy" and upgrade ~= "Mutant" then
+				c.wrapper.Visible = false
+				continue
+			end
+			c.line.Visible = true
+		end
 		c.wrapper.Visible             = true
 		c.wrapper.Position            = c.startPos
 		c.btn.BackgroundTransparency  = 1
@@ -78,24 +99,18 @@ end
 
 local function collapseNodes(then_: (() -> ())?)
 	for _, c in childNodes do
+		if not c.wrapper.Visible then continue end
 		TweenService:Create(c.wrapper, COLLAPSE_TI, { Position = c.startPos }):Play()
 		TweenService:Create(c.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
 		TweenService:Create(c.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
 	end
 	task.delay(COLLAPSE_TI.Time, function()
-		for _, c in childNodes do c.wrapper.Visible = false end
+		for _, c in childNodes do
+			c.wrapper.Visible = false
+			c.line.Visible    = false
+		end
 		if then_ then then_() end
 	end)
-end
-
--- ── Helpers ───────────────────────────────────────────────────────────────────
-local function getUpgradeState(turretId: string): string?
-	local bf = workspace:FindFirstChild("Buildings")
-	if not bf then return nil end
-	local model = bf:FindFirstChild(turretId)
-	if not model then return nil end
-	local uv = model:FindFirstChild("Upgrade") :: StringValue?
-	return uv and uv.Value or nil
 end
 
 -- ── Refresh ───────────────────────────────────────────────────────────────────
@@ -116,6 +131,35 @@ local function refresh()
 	end
 
 	for _, c in childNodes do
+		-- ── Mutant: tier-2 node, only visible after Creepy is chosen ──────────
+		if c.key == "Mutant" then
+			local showMutant = upgrade == "Creepy" or upgrade == "Mutant"
+			if not showMutant then
+				c.wrapper.Visible = false
+				continue
+			end
+			if upgrade == "Mutant" then
+				c.btn.BackgroundColor3       = C.GREEN
+				c.btn.BackgroundTransparency = 0.15
+				c.stroke.Color               = C.GREEN
+				c.stroke.Thickness           = 2.5
+				c.label.Text                 = "MUTANT\n✓ ACTIVE"
+				c.label.TextColor3           = C.GREEN
+				c.btn.Active                 = false
+			else
+				local ok = res >= c.cost
+				c.btn.BackgroundColor3       = ok and c.color or C.BG_LOCKED
+				c.btn.BackgroundTransparency = ok and 0.35 or 0.45
+				c.stroke.Color               = ok and c.color or C.BORDER_LO
+				c.stroke.Thickness           = 2
+				c.label.Text                 = "MUTANT\n◆ " .. c.cost
+				c.label.TextColor3           = ok and C.TEXT or C.DIM
+				c.btn.Active                 = ok
+			end
+			continue
+		end
+
+		-- ── Normal tier-1 nodes ───────────────────────────────────────────────
 		local nodeResearch = (not c.needsRes)
 			or (hasResearchFn ~= nil and hasResearchFn("TurretUpgrades"))
 
@@ -184,22 +228,39 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
 		TurretPanel.hide()
 	end)
 
-	-- Child nodes
+	-- Creepy node final position (Mutant chained above it at same angle, larger radius)
+	local RADIUS2      = 260
+	local CREEPY_RAD   = math.rad(-90)
+	local CREEPY_FINAL = UDim2.new(
+		ROOT_POS.X.Scale, ROOT_POS.X.Offset + math.cos(CREEPY_RAD) * RADIUS,
+		ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + math.sin(CREEPY_RAD) * RADIUS
+	)
+
+	-- Child nodes  (Mutant is tier-2: chains from Creepy's position)
 	local UPGRADES = {
-		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,   cost = FLAME_COST,   angle = -135, needsRes = true  },
-		{ key = "Evolved",        icon = "⊛", color = EVOLVED_COLOR, cost = EVOLVED_COST, angle = -90,  needsRes = false },
-		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR,  cost = ROCKET_COST,  angle = -45,  needsRes = true  },
+		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,  cost = FLAME_COST,  angle = -135, needsRes = true,  tier2 = false },
+		{ key = "Creepy",         icon = "⊛", color = CREEPY_COLOR, cost = CREEPY_COST, angle = -90,  needsRes = false, tier2 = false },
+		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR, cost = ROCKET_COST, angle = -45,  needsRes = true,  tier2 = false },
+		{ key = "Mutant",         icon = "◉", color = MUTANT_COLOR, cost = MUTANT_COST, angle = -90,  needsRes = false, tier2 = true  },
 	}
 
 	for _, def in UPGRADES do
-		local rad = math.rad(def.angle)
-		local dx  = math.cos(rad) * RADIUS
-		local dy  = math.sin(rad) * RADIUS
+		local rad      = math.rad(def.angle)
+		local radius   = if def.tier2 then RADIUS2 else RADIUS
+		local origin   = if def.tier2 then CREEPY_FINAL else ROOT_POS
+		local lineLen  = if def.tier2 then RADIUS2 - RADIUS else RADIUS
+		local startPos = if def.tier2 then CREEPY_FINAL else ROOT_POS
+
+		local dx = math.cos(rad) * radius
+		local dy = math.sin(rad) * radius
 		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
 
-		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
-		local wrapper, btn = UILib.radialNode(ov, def.key, def.icon, def.color, ROOT_POS, 70, 11)
+		local line         = UILib.connectorLine(ov, origin, def.angle, lineLen, 10)
+		local wrapper, btn = UILib.radialNode(ov, def.key, def.icon, def.color, startPos, 70, 11)
 		wrapper.Visible    = false
+		if def.tier2 then
+			line.Visible = false  -- hidden until Creepy is chosen
+		end
 
 		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
@@ -223,7 +284,7 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
 			color    = def.color,
 			needsRes = def.needsRes,
 			finalPos = finalPos,
-			startPos = ROOT_POS,
+			startPos = startPos,
 		})
 	end
 

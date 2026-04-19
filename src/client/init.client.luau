@@ -15,6 +15,7 @@ local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
+local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
@@ -119,6 +120,7 @@ local function startGame()
 
 CameraModule.init()
 SpiderLegs.init(workspace.CurrentCamera)
+CreepyLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 
 local dragFrame, ccBtn = HUD.create()
@@ -673,6 +675,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 		local tv = part:FindFirstChild("UnitType") :: StringValue?
 		if tv and tv.Value == "Elite" then
 			SpiderLegs.attach(unitId, part)
+		elseif tv and tv.Value == "CreepySoldier" then
+			CreepyLegs.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then

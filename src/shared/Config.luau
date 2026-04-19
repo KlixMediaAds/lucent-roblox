@@ -7,15 +7,16 @@ Config.MINE_COST             = 75   -- Mine building cost
 
 -- Unit types (trained from Barracks)
 Config.UNIT_TYPES = {
-	Soldier = { cost = 25, size = Vector3.new(4, 4, 4) },
-	Tank    = { cost = 60, size = Vector3.new(7, 5, 9)  },
-	Elite   = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
-	Medic   = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
+	Soldier       = { cost = 25,  size = Vector3.new(4, 4, 4) },
+	Tank          = { cost = 60,  size = Vector3.new(7, 5, 9)  },
+	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
+	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
+	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20, Medic = 22 }  -- per-type max speed
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8,  Medic = 10 }  -- velocity lerp factor
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20, Medic = 22, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8,  Medic = 10, CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -140,10 +141,14 @@ Config.ROLLER_SPEED_MULT    = 1.2  -- 20% faster than base soldier
 Config.ROLLER_ROLL_PER_STUD = 0.25 -- radians of X-roll (tire pitch) per stud traveled
 
 -- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
-Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225, Evolved = 275 }
-Config.TURRET_EVOLVED      = { range = 45, damage = 12, rate = 0.5 }
-Config.TURRET_FLAME  = { range = 28, damage = 35, rate = 0.6  }   -- short range, rapid fire
-Config.TURRET_ROCKET = { range = 70, damage = 80, rate = 3.5  }   -- long range, high damage
+Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225, Creepy = 275, Mutant = 350 }
+Config.TURRET_CREEPY = { range = 45, damage = 12, rate = 0.5 }  -- was Evolved
+Config.TURRET_FLAME  = { range = 28, damage = 35, rate = 0.6  }
+Config.TURRET_ROCKET = { range = 70, damage = 80, rate = 3.5  }
+
+-- Mutant turret → creepy soldier spawning
+Config.CREEPY_SOLDIER_MAX            = 3
+Config.CREEPY_SOLDIER_SPAWN_INTERVAL = 20  -- seconds between spawn checks
 
 -- Turret
 Config.TURRET_COST        = 100
@@ -153,14 +158,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70   }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
 Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22   }  -- Medic value = heal per tick
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15, Tank = 45, Elite = 30, Medic = 22 }  -- studs per type
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2  }  -- seconds between attacks
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
 
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon

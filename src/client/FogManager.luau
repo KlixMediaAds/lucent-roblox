@@ -450,18 +450,28 @@ local function updateFog()
 		end
 	end
 
-	-- ── 5. Elite unit legs — mirror owning unit's visibility ──────────────
-	local legsF = workspace:FindFirstChild("_EliteLegs")
-	if legsF then
-		for _, legPart in legsF:GetChildren() do
+	-- ── 5 & 6. Procedural leg folders — Elite (_EliteLegs) & Creepy (_CreepyLegs) ──
+	-- Own units: always visible. Enemy units: follow fog tween state.
+	local function syncLegFolder(folderName: string)
+		local lf = workspace:FindFirstChild(folderName)
+		if not lf then return end
+		for _, legPart in lf:GetChildren() do
 			if not legPart:IsA("BasePart") then continue end
 			local uid = legPart:GetAttribute("UnitId") :: string?
 			if not uid then continue end
-			local vis = unitLastVis[uid]  -- nil = not yet seen → stay hidden
-			local lp = legPart :: BasePart
-			lp.LocalTransparencyModifier = if vis then 0 else 1
+			local isOwn = false
+			if unitsF then
+				local unitPart = unitsF:FindFirstChild(uid)
+				local ov = unitPart and unitPart:FindFirstChild("OwnerId") :: StringValue?
+				isOwn = ov ~= nil and ov.Value == myStr
+			end
+			local vis: boolean = isOwn or (unitLastVis[uid] == true)
+			;(legPart :: BasePart).LocalTransparencyModifier = if vis then 0 else 1
 		end
 	end
+
+	syncLegFolder("_EliteLegs")
+	syncLegFolder("_CreepyLegs")
 
 end
 

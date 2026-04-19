@@ -434,30 +434,101 @@ local function applyTurretUpgradeVisuals(id: string, upgradeType: string)
 			ring.Material   = Enum.Material.Neon
 		end
 
-	elseif upgradeType == "Evolved" then
+	elseif upgradeType == "Creepy" then
 		if head then
 			head.BrickColor = BrickColor.new("Black")
 			head.Material   = Enum.Material.SmoothPlastic
 			head.Size       = Vector3.new(6, 4, 6)
 		end
-		if barrel then
-			barrel.Transparency = 1
-		end
+		if barrel then barrel.Transparency = 1 end
 		if ring then
 			ring.BrickColor = BrickColor.new("Black")
 			ring.Material   = Enum.Material.SmoothPlastic
 			ring.Size       = ring.Size + Vector3.new(3, 0, 3)
 		end
+
+	elseif upgradeType == "Mutant" then
+		-- Larger, more horrifying mass — pulsing black growth with bone-white teeth ring
+		if head then
+			head.BrickColor = BrickColor.new("Black")
+			head.Material   = Enum.Material.SmoothPlastic
+			head.Size       = Vector3.new(9, 6, 9)
+		end
+		if barrel then barrel.Transparency = 1 end
+		if ring then
+			ring.BrickColor = BrickColor.new("Black")
+			ring.Material   = Enum.Material.SmoothPlastic
+			ring.Size       = ring.Size + Vector3.new(7, 0, 7)
+		end
+		-- Bone-white tooth spines around the enlarged head
+		if model and head then
+			local toothCount = 8
+			for i = 1, toothCount do
+				local angle    = (i / toothCount) * math.pi * 2
+				local r        = 5.0
+				local toothPos = head.Position + Vector3.new(math.cos(angle) * r, -0.5, math.sin(angle) * r)
+				local tooth         = Instance.new("Part")
+				tooth.Name          = "MutantTooth_" .. i
+				tooth.Size          = Vector3.new(0.9, 2.8, 0.9)
+				tooth.BrickColor    = BrickColor.new("Institutional white")
+				tooth.Material      = Enum.Material.SmoothPlastic
+				tooth.Anchored      = true
+				tooth.CanCollide    = false
+				tooth.CastShadow    = false
+				tooth.CFrame        = CFrame.new(toothPos)
+					* CFrame.Angles(0, angle, math.pi * 0.12)
+				tooth.Parent        = model
+			end
+		end
 	end
 
-	-- Tag the model so clients can read upgrade state
-	local existing = model:FindFirstChild("Upgrade")
-	if not existing then
+	-- Tag the model so clients can read upgrade state (overwrite for tier-2 Mutant)
+	local existing = model:FindFirstChild("Upgrade") :: StringValue?
+	if existing then
+		existing.Value = upgradeType
+	else
 		local uv  = Instance.new("StringValue")
 		uv.Name   = "Upgrade"
 		uv.Value  = upgradeType
 		uv.Parent = model
 	end
+end
+
+-- ── Mutant turret: creepy soldier spawning ────────────────────────────────────
+
+local mutantSoldierParts: { [string]: { BasePart } } = {}
+
+local function startMutantSoldierLoop(turretId: string, data: any, owner: Player)
+	mutantSoldierParts[turretId] = {}
+	task.spawn(function()
+		-- Immediate first spawn attempt
+		task.wait(2)
+		while buildingData[turretId] and data.turretUpgrade == "Mutant" do
+			local soldiers = mutantSoldierParts[turretId]
+			if soldiers then
+				-- Prune dead soldiers
+				for i = #soldiers, 1, -1 do
+					if not soldiers[i].Parent then table.remove(soldiers, i) end
+				end
+				-- Spawn a new one if below cap
+				if #soldiers < Config.CREEPY_SOLDIER_MAX and unitManagerRef then
+					local angle    = math.random() * math.pi * 2
+					local offset   = Vector3.new(math.cos(angle) * 5, 0, math.sin(angle) * 5)
+					local spawnPos = data.base.Position + offset
+					local uid = unitManagerRef.spawnUnitNow(owner, spawnPos, "CreepySoldier")
+					if uid then
+						local unitsF = workspace:FindFirstChild("Units")
+						local part   = unitsF and unitsF:FindFirstChild(uid)
+						if part and part:IsA("BasePart") then
+							table.insert(soldiers, part :: BasePart)
+						end
+					end
+				end
+			end
+			task.wait(Config.CREEPY_SOLDIER_SPAWN_INTERVAL)
+		end
+		mutantSoldierParts[turretId] = nil
+	end)
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -654,18 +725,19 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if data.isConstructing then continue end   -- still under construction
 
 			-- Per-turret stats (may be upgraded)
-			local upg     = data.turretUpgrade
-			local tRate   = upg == "Flamethrower"   and Config.TURRET_FLAME.rate
-			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.rate
-			             or upg == "Evolved"         and Config.TURRET_EVOLVED.rate
+			local upg      = data.turretUpgrade
+			local isCreepy = upg == "Creepy" or upg == "Mutant"
+			local tRate   = upg == "Flamethrower"  and Config.TURRET_FLAME.rate
+			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.rate
+			             or isCreepy                and Config.TURRET_CREEPY.rate
 			             or Config.TURRET_ATTACK_RATE
-			local tRange  = upg == "Flamethrower"   and Config.TURRET_FLAME.range
-			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.range
-			             or upg == "Evolved"         and Config.TURRET_EVOLVED.range
+			local tRange  = upg == "Flamethrower"  and Config.TURRET_FLAME.range
+			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.range
+			             or isCreepy                and Config.TURRET_CREEPY.range
 			             or Config.TURRET_RANGE
-			local tDamage = upg == "Flamethrower"   and Config.TURRET_FLAME.damage
-			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.damage
-			             or upg == "Evolved"         and Config.TURRET_EVOLVED.damage
+			local tDamage = upg == "Flamethrower"  and Config.TURRET_FLAME.damage
+			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.damage
+			             or isCreepy                and Config.TURRET_CREEPY.damage
 			             or Config.TURRET_DAMAGE
 
 			turretTimers[id] = (turretTimers[id] or 0) + dt
@@ -675,8 +747,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local myPos      = data.base.Position
 			local myOwnerStr = tostring(data.owner.UserId)
 
-			-- Evolved: 3 independent tentacle strikes, no projectile
-			if upg == "Evolved" then
+			-- Creepy / Mutant: 3 independent tentacle strikes, no projectile
+			if isCreepy then
 				local headPos = myPos + Vector3.new(0, Config.BUILDING_SIZE.Y + 1.5, 0)
 				local t1: Vector3? = nil
 				local t2: Vector3? = nil
@@ -855,15 +927,26 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.UpgradeTurret).OnServerEvent:Connect(
 		function(player, turretId, upgradeType)
 			if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return end
-			if upgradeType ~= "Flamethrower" and upgradeType ~= "RocketLauncher" and upgradeType ~= "Evolved" then return end
+
+			local TIER1 = { Flamethrower = true, RocketLauncher = true, Creepy = true }
+			local TIER2 = { Mutant = true }
+			if not TIER1[upgradeType] and not TIER2[upgradeType] then return end
+
 			local data = buildingData[turretId]
 			if not data or data.buildingType ~= "Turret" then return end
 			if data.owner ~= player then return end
-			if data.turretUpgrade then return end  -- already upgraded
 			if data.isConstructing then return end
 
-			if upgradeType ~= "Evolved" then
-				if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
+			if TIER2[upgradeType] then
+				-- Mutant requires Creepy already applied, not yet mutated
+				if data.turretUpgrade ~= "Creepy" then return end
+			else
+				-- Tier-1: no existing upgrade yet
+				if data.turretUpgrade then return end
+				-- Flamethrower and Rocket require TurretUpgrades research; Creepy does not
+				if upgradeType ~= "Creepy" then
+					if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
+				end
 			end
 
 			local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
@@ -871,6 +954,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 			data.turretUpgrade = upgradeType
 			applyTurretUpgradeVisuals(turretId, upgradeType)
+
+			if upgradeType == "Mutant" then
+				startMutantSoldierLoop(turretId, data, player)
+			end
 		end
 	)
 end

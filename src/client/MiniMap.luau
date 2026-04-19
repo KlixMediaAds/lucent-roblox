@@ -46,6 +46,12 @@ local minerDots:   { [string]: Frame } = {}
 local depositDots: { [string]: Frame } = {}
 local vpLines:     { Frame }           = {}  -- 4 viewport rectangle edges
 
+-- CC avatar icons (one per Command Center building)
+local ccIcons:      { [string]: Frame }  = {}
+local ccIconOwners: { [string]: number } = {}  -- building id → userId
+local thumbCache:   { [number]: string } = {}  -- userId → thumbnail URL
+local thumbLoading: { [number]: boolean } = {}
+
 -- ── World ↔ minimap conversion ────────────────────────────────────────────────
 
 local function w2m(wx: number, wz: number): (number, number)
@@ -81,6 +87,60 @@ end
 local function placeDot(dot: Frame, wx: number, wz: number)
 	local u, v    = w2m(wx, wz)
 	dot.Position  = UDim2.fromOffset(u, v)
+end
+
+-- ── CC avatar icon ────────────────────────────────────────────────────────────
+
+local function makeCCIcon(buildingId: string, userId: number, isOwn: boolean): Frame
+	local borderColor = isOwn and C_CC_OWN or C_CC_ENEMY
+
+	local ring               = Instance.new("Frame")
+	ring.Name                = "CCIcon"
+	ring.Size                = UDim2.fromOffset(20, 20)
+	ring.AnchorPoint         = Vector2.new(0.5, 0.5)
+	ring.BackgroundColor3    = borderColor
+	ring.BorderSizePixel     = 0
+	ring.ZIndex              = 4
+	Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+
+	local img                = Instance.new("ImageLabel")
+	img.Name                 = "PfpImage"
+	img.Size                 = UDim2.new(1, -4, 1, -4)
+	img.Position             = UDim2.fromOffset(2, 2)
+	img.BackgroundColor3     = Color3.fromRGB(15, 20, 35)
+	img.BorderSizePixel      = 0
+	img.ZIndex               = 5
+	img.ScaleType            = Enum.ScaleType.Crop
+	Instance.new("UICorner", img).CornerRadius = UDim.new(1, 0)
+	img.Parent               = ring
+
+	if thumbCache[userId] then
+		img.Image = thumbCache[userId]
+	elseif not thumbLoading[userId] then
+		thumbLoading[userId] = true
+		task.spawn(function()
+			local ok, url = pcall(function()
+				return Players:GetUserThumbnailAsync(
+					userId,
+					Enum.ThumbnailType.HeadShot,
+					Enum.ThumbnailSize.Size48x48
+				)
+			end)
+			if ok and url then
+				thumbCache[userId] = url
+				for bid, owner in ccIconOwners do
+					if owner == userId then
+						local ic   = ccIcons[bid]
+						local imgL = ic and ic:FindFirstChild("PfpImage") :: ImageLabel?
+						if imgL then imgL.Image = url end
+					end
+				end
+			end
+		end)
+	end
+
+	ring.Parent = canvas
+	return ring
 end
 
 -- ── Triangle unit marker ───────────────────────────────────────────────────────
@@ -218,6 +278,9 @@ local function syncBuildingDots(folder: Instance?, pool: { [string]: Frame }, my
 			local btv   = model:FindFirstChild("BuildingType") :: StringValue?
 			local btype = btv and btv.Value or ""
 
+			-- CCs use avatar icons (handled by syncCCIcons)
+			if btype == "CommandCenter" then continue end
+
 			-- Hide fully-fogged enemy buildings (Monuments are always shown)
 			if not isOwn and bp.LocalTransparencyModifier >= 1 and btype ~= "Monument" then continue end
 
@@ -248,6 +311,48 @@ local function syncBuildingDots(folder: Instance?, pool: { [string]: Frame }, my
 
 	for id, dot in pool do
 		if not seen[id] then dot:Destroy(); pool[id] = nil end
+	end
+end
+
+-- ── CC avatar icon sync ───────────────────────────────────────────────────────
+
+local function syncCCIcons(folder: Instance?, myStr: string)
+	local seen: { [string]: true } = {}
+
+	if folder then
+		for _, model in folder:GetChildren() do
+			local ov  = model:FindFirstChild("OwnerId")      :: StringValue?
+			local btv = model:FindFirstChild("BuildingType") :: StringValue?
+			if not ov or not btv or btv.Value ~= "CommandCenter" then continue end
+
+			local base = model:FindFirstChild("Base")
+			if not base or not base:IsA("BasePart") then continue end
+			local bp    = base :: BasePart
+			local isOwn = ov.Value == myStr
+
+			-- Only reveal enemy CC once it has been spotted (not fully fogged)
+			if not isOwn and bp.LocalTransparencyModifier >= 1 then continue end
+
+			local id     = model.Name
+			seen[id]     = true
+			local userId = tonumber(ov.Value) or 0
+
+			if not ccIcons[id] then
+				ccIcons[id]      = makeCCIcon(id, userId, isOwn)
+				ccIconOwners[id] = userId
+			end
+
+			local u, v          = w2m(bp.Position.X, bp.Position.Z)
+			ccIcons[id].Position = UDim2.fromOffset(u, v)
+		end
+	end
+
+	for id, icon in ccIcons do
+		if not seen[id] then
+			icon:Destroy()
+			ccIcons[id]      = nil
+			ccIconOwners[id] = nil
+		end
 	end
 end
 
@@ -455,6 +560,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 		syncDepositDots()
 		syncUnitTriangles(unitsF, myStr)
 		syncBuildingDots(buildingsF, buildingDots, myStr)
+		syncCCIcons(buildingsF, myStr)
 		syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
 
 		updateViewport()

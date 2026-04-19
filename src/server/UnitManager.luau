@@ -243,9 +243,9 @@ end
 
 -- ── Spawn ─────────────────────────────────────────────────────────────────────
 
-local function spawnUnit(player: Player, position: Vector3, unitType: string)
+local function spawnUnit(player: Player, position: Vector3, unitType: string): string?
 	local typeDef = Config.UNIT_TYPES[unitType]
-	if not typeDef then return end
+	if not typeDef then return nil end
 
 	counter += 1
 	local id = "u" .. counter
@@ -258,6 +258,11 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	part.Material       = Enum.Material.SmoothPlastic
 	part.Anchored       = true
 	part.CastShadow     = false
+
+	-- CreepySoldier: always black regardless of team color
+	if unitType == "CreepySoldier" then
+		part.BrickColor = BrickColor.new("Black")
+	end
 
 	local ov        = Instance.new("StringValue")
 	ov.Name         = "OwnerId"
@@ -310,6 +315,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 	}
 
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
+	return id
 end
 
 -- ── Move helpers ──────────────────────────────────────────────────────────────
@@ -473,6 +479,11 @@ function UnitManager.spawnUnitAt(player: Player, position: Vector3, unitType: st
 	else
 		spawnUnit(player, position, unitType)
 	end
+end
+
+-- Spawns immediately and returns the unit ID (for turret-spawned units that need tracking).
+function UnitManager.spawnUnitNow(player: Player, position: Vector3, unitType: string): string?
+	return spawnUnit(player, position, unitType)
 end
 
 function UnitManager.getUnitCount(player: Player): number
