@@ -45,11 +45,22 @@ function Camera.init()
 
 	UserInputService.InputChanged:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseWheel then
-			zoom = math.clamp(
-				zoom - input.Position.Z * Config.CAMERA_ZOOM_STEP,
-				Config.CAMERA_ZOOM_MIN,
-				Config.CAMERA_ZOOM_MAX
-			)
+			-- Don't zoom when any modal panel is intercepting scroll
+			local guiObjects = Players.LocalPlayer.PlayerGui
+				:GetGuiObjectsAtPosition(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+			local overPanel = false
+			for _, obj in guiObjects do
+				if obj:IsA("ScrollingFrame") or obj.Name == "TechGallery" or obj.Name == "Panel" then
+					overPanel = true; break
+				end
+			end
+			if not overPanel then
+				zoom = math.clamp(
+					zoom - input.Position.Z * Config.CAMERA_ZOOM_STEP,
+					Config.CAMERA_ZOOM_MIN,
+					Config.CAMERA_ZOOM_MAX
+				)
+			end
 		end
 		if midDrag and input.UserInputType == Enum.UserInputType.MouseMovement then
 			local cur = UserInputService:GetMouseLocation()

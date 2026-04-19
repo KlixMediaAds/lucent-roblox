@@ -93,21 +93,38 @@ Config.MINE_EXTRACT_RANGE       = 60    -- studs; mine scans for deposits within
 Config.MINE_EXTRACT_INTERVAL    = 5     -- seconds between extraction ticks
 Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources per deposit per extraction tick
 
--- Research techs (time in seconds; no resource cost)
--- `requires`: if set, that tech must be done before this one can start.
-Config.RESEARCH = {
-	BetterMines       = { time = 5,  desc = "Unlocks the ability to upgrade mine buildings." },
-	EliteUnits        = { time = 15, desc = "Unlocks the Elite unit at Barracks." },
-	MedicUnit         = { time = 15, desc = "Unlocks the Medic unit at Barracks. Medics automatically heal damaged friendly units nearby." },
-	TurretUpgrades    = { time = 20, desc = "Unlocks Flamethrower and Rocket Launcher upgrades for turrets." },
-	ConcussionShells  = { time = 10, desc = "Tank shells slow enemy units on impact." },
-	RocketBarrage     = { time = 18, requires = "ConcussionShells", desc = "Replaces the tank's attack with 3 spiraling rockets, each dealing AoE splash damage." },
-	Trapper           = { time = 20, requires = "ConcussionShells", desc = "Replaces the tank's weapon with a harpoon launcher. Each harpoon slows an enemy by 90% for 7 s. Carries 5 harpoons, restocking one every 10 s." },
-	CombatStims       = { time = 12, desc = "Soldiers automatically boost speed and attack rate when engaging enemies." },
-	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
-	Relay             = { time = 20, desc = "Unlocks the Relay building. Place it to extend your build zone by 65 studs in any direction." },
-	Rollers           = { time = 20, requires = "CombatStims", desc = "Soldiers become Rollers: rolling melee charge attack, 20% faster movement." },
-	EyeUpgrade        = { time = 25, desc = "All units gain enhanced vision, increasing fog-of-war sight radius by 20%." },
+-- Condition-based unlocks.
+-- cond.type: "building" (cumulative placed), "kill" (enemies killed), "train" (units trained)
+-- requires: tech name that must be done first
+-- group: mutually-exclusive choice group — player picks one when any member's cond is met
+Config.UNLOCKS = {
+	BetterMines      = { icon = "⛏", desc = "Mines gain upgrade options.",
+		condText = "Build 3 Mines",    cond = { type = "building", name = "Mine",     count = 3 } },
+	EliteUnits       = { icon = "⭐", desc = "Unlocks the Elite unit at Barracks.",
+		condText = "Train 5 Soldiers", cond = { type = "train",    name = "Soldier",  count = 5 } },
+	MedicUnit        = { icon = "➕", desc = "Unlocks the Medic unit. Medics automatically heal nearby friendly units.",
+		condText = "Build 3 Barracks", cond = { type = "building", name = "Barracks", count = 3 } },
+	TurretUpgrades   = { icon = "⚙", desc = "Unlocks upgrade options for all Turrets.",
+		condText = "Build 3 Turrets",  cond = { type = "building", name = "Turret",   count = 3 } },
+	Relay            = { icon = "📡", desc = "Unlocks the Relay building. Extends your build zone by 65 studs.",
+		condText = "Build 2 Barracks", cond = { type = "building", name = "Barracks", count = 2 } },
+	EyeUpgrade       = { icon = "👁", desc = "All units gain enhanced vision, increasing fog-of-war sight radius by 20%.",
+		condText = "Build 8 structures", cond = { type = "building", name = "any",    count = 8 } },
+	ConcussionShells = { icon = "💥", desc = "Tank shells slow enemy units on impact.",
+		condText = "Kill 5 enemies",   cond = { type = "kill", count = 5 } },
+	HardenedArmor    = { icon = "🛡", desc = "Soldiers absorb a flat amount of damage per hit.",
+		condText = "Kill 8 enemies",   cond = { type = "kill", count = 8 } },
+	CombatStims      = { icon = "⚡", desc = "Soldiers automatically boost speed and attack rate when engaging enemies.",
+		condText = "Kill 10 enemies",  cond = { type = "kill", count = 10 } },
+	RocketBarrage    = { icon = "🚀", desc = "Replaces the tank's attack with 3 spiraling rockets, each dealing AoE splash damage.",
+		condText = "Kill 15 enemies",  cond = { type = "kill", count = 15 },
+		requires = "ConcussionShells", group = "TankSpec" },
+	Trapper          = { icon = "🪝", desc = "Replaces the tank's weapon with a harpoon launcher. Slows enemies by 90% for 7 s.",
+		condText = "Build 5 Turrets",  cond = { type = "building", name = "Turret", count = 5 },
+		requires = "ConcussionShells", group = "TankSpec" },
+	Rollers          = { icon = "🔄", desc = "Soldiers become Rollers: rolling melee charge attack, 20% faster movement.",
+		condText = "Kill 20 enemies",  cond = { type = "kill", count = 20 },
+		requires = "CombatStims" },
 }
 
 -- Tank: Rocket Barrage (requires ConcussionShells)
@@ -197,9 +214,9 @@ Config.REMOTES = {
 	UnitHit           = "UnitHit",
 	UpgradeMine       = "UpgradeMine",
 	UpgradeTurret     = "UpgradeTurret",
-	StartResearch     = "StartResearch",
-	ResearchUpdate    = "ResearchUpdate",
-	ResearchCompleted = "ResearchCompleted",
+	UnlockGranted     = "UnlockGranted",
+	UnlockChoice      = "UnlockChoice",
+	UnlockChoose      = "UnlockChoose",
 	BuildMonument    = "BuildMonument",
 	MonumentProgress = "MonumentProgress",
 	PlayerWon        = "PlayerWon",

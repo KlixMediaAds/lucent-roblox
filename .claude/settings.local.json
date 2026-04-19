@@ -7,7 +7,8 @@
       "Read(//c/Users/ohkod/.cargo/bin/**)",
       "Bash(powershell:*)",
       "Bash(wc:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(git revert *)"
     ]
   }
 }

@@ -99,18 +99,19 @@ function Network.upgradeTurret(turretId: string, upgradeType: string)
 	RemoteHandler.get(Config.REMOTES.UpgradeTurret):FireServer(turretId, upgradeType)
 end
 
-function Network.startResearch(workshopId: string, techName: string)
-	RemoteHandler.get(Config.REMOTES.StartResearch):FireServer(workshopId, techName)
-end
-
--- techName, progress (0–1)
-function Network.onResearchUpdate(fn: (string, number) -> ())
-	RemoteHandler.get(Config.REMOTES.ResearchUpdate).OnClientEvent:Connect(fn)
-end
-
 -- techName
-function Network.onResearchCompleted(fn: (string) -> ())
-	RemoteHandler.get(Config.REMOTES.ResearchCompleted).OnClientEvent:Connect(fn)
+function Network.onUnlockGranted(fn: (string) -> ())
+	RemoteHandler.get(Config.REMOTES.UnlockGranted).OnClientEvent:Connect(fn)
+end
+
+-- group name, options array
+function Network.onUnlockChoice(fn: (string, {string}) -> ())
+	RemoteHandler.get(Config.REMOTES.UnlockChoice).OnClientEvent:Connect(fn)
+end
+
+-- player chooses a grouped tech
+function Network.sendUnlockChoose(techName: string)
+	RemoteHandler.get(Config.REMOTES.UnlockChoose):FireServer(techName)
 end
 
 function Network.buildMonument()

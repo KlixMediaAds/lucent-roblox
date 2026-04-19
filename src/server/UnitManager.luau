@@ -423,6 +423,9 @@ local function startNextInQueue(barrackId: string)
 		local bf = workspace:FindFirstChild("Buildings")
 		if bf and bf:FindFirstChild(barrackId) then
 			spawnUnit(player, item.spawnPos, item.unitType)
+			if researchManagerRef and player.UserId > 0 then
+				researchManagerRef.recordUnitTrained(player, item.unitType)
+			end
 		end
 		fireTrainingUpdate(barrackId, player)
 		startNextInQueue(barrackId)
@@ -593,6 +596,10 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 		if (data.unitType == "Tank" or data.unitType == "Soldier")
 			and data.owner.UserId > 0 and data.owner.Parent then
 			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
+		end
+		-- Record kill for attacker (excludes AI-vs-AI and self-damage)
+		if researchManagerRef and data.owner.UserId ~= tonumber(attackerOwnerIdStr) then
+			researchManagerRef.recordEnemyKilled(attackerOwnerIdStr)
 		end
 		data.part:Destroy()
 		units[bestId] = nil

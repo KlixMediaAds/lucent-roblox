@@ -706,6 +706,9 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	if buildingType == "Mine" then
 		mineralManager.registerMine(id, snapped, player)
 	end
+	if researchManagerRef and buildingType ~= "CommandCenter" then
+		researchManagerRef.recordBuildingPlaced(player, buildingType)
+	end
 	return true, id
 end
 
@@ -915,6 +918,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		if buildingType == "Mine" then
 			mineralManager.registerMine(id, snapped, player)
+		end
+		if researchManagerRef and buildingType ~= "CommandCenter" then
+			researchManagerRef.recordBuildingPlaced(player, buildingType)
 		end
 	end)
 

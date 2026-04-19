@@ -11,7 +11,8 @@ local BuildingPlacer = require(script:WaitForChild("BuildingPlacer"))
 local UnitController = require(script:WaitForChild("UnitController"))
 local BarracksPanel  = require(script:WaitForChild("BarracksPanel"))
 local MinePanel      = require(script:WaitForChild("MinePanel"))
-local WorkshopPanel  = require(script:WaitForChild("WorkshopPanel"))
+local WorkshopPanel          = require(script:WaitForChild("WorkshopPanel"))
+local UnlockNotification     = require(script:WaitForChild("UnlockNotification"))
 local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
@@ -67,8 +68,7 @@ local monumentBuildingId: { [number]: string }       = {}  -- ownerUserId → bu
 local monumentBillboards: { [number]: BillboardGui } = {}  -- ownerUserId → floating timer
 
 -- Research state (replicated from server)
-local researchedTechs:   { [string]: boolean } = {}
-local researchProgress:  { [string]: number?  } = {}
+local researchedTechs: { [string]: boolean } = {}
 
 -- Evolved turret client state
 type TentacleParts = { joints: {Part}, connectors: {Part}, teeth: {Part} }
@@ -135,9 +135,7 @@ MinePanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
-	function(techName) return researchProgress[techName] end,
-	function() return currentResources end,
-	HUD.showNotification)
+	function() return currentResources end)
 TurretPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
@@ -262,8 +260,6 @@ local function enterCCMode()
 	workshopBtnOpen     = false
 	ownedBuildingCounts = {}
 	researchedTechs    = {}
-	researchProgress   = {}
-	HUD.setResearchProgress(nil)
 	refreshRequirements()
 	HUD.setCommandCenterMode(true)
 	BarracksPanel.hide()
@@ -991,26 +987,11 @@ Network.onResourceSync(function(amount: number)
 	MinePanel.refreshIfVisible()
 end)
 
--- ── Research events ───────────────────────────────────────────────────────────
+-- ── Unlock events ─────────────────────────────────────────────────────────────
 
-Network.onResearchUpdate(function(techName: string, progress: number)
-	researchProgress[techName] = progress
-	HUD.setResearchProgress(progress)
-	WorkshopPanel.refreshIfVisible()
-end)
-
-Network.onResearchCompleted(function(techName: string)
-	researchedTechs[techName]  = true
-	researchProgress[techName] = nil
-	HUD.flashResearchComplete()
-	WorkshopPanel.refreshIfVisible()
-	MinePanel.refreshIfVisible()
-	BarracksPanel.refreshIfVisible()
-	TurretPanel.refreshIfVisible()
-	HUD.refreshTrayState(ownedBuildingCounts)  -- re-evaluate research-gated nodes (e.g. Relay)
-
-	-- Apply visuals to all existing own units when relevant research completes
-	if techName == "ConcussionShells" or techName == "CombatStims" or techName == "HardenedArmor" or techName == "Trapper" then
+local function applyUnlockVisuals(techName: string)
+	if techName == "ConcussionShells" or techName == "CombatStims"
+		or techName == "HardenedArmor" or techName == "Trapper" then
 		local unitsFolder = workspace:FindFirstChild("Units") :: Folder?
 		if unitsFolder then
 			for _, child in unitsFolder:GetChildren() do
@@ -1030,6 +1011,25 @@ Network.onResearchCompleted(function(techName: string)
 			end
 		end
 	end
+end
+
+Network.onUnlockGranted(function(techName: string)
+	researchedTechs[techName] = true
+	WorkshopPanel.refreshIfVisible()
+	MinePanel.refreshIfVisible()
+	BarracksPanel.refreshIfVisible()
+	TurretPanel.refreshIfVisible()
+	HUD.refreshTrayState(ownedBuildingCounts)
+	applyUnlockVisuals(techName)
+	UnlockNotification.showUnlock(techName)
+end)
+
+Network.onUnlockChoice(function(group: string, options: {string})
+	UnlockNotification.showChoice(group, options, function(chosen: string)
+		Network.sendUnlockChoose(chosen)
+		-- Optimistically mark it; server will also send UnlockGranted
+		researchedTechs[chosen] = true
+	end)
 end)
 
 -- ── Monument & win condition ──────────────────────────────────────────────────
