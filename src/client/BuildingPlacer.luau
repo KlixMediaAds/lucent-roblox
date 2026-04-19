@@ -14,12 +14,10 @@ local currentType         = "Barracks"
 local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping to
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
 local outOfBuildZone      = false          -- non-CC mode: ghost is outside build zone
-local blobTooFarFromDeposit = false        -- Blob mode: first blob too far from deposit
 local depositPositions: {Vector3} = {}
 local ccPositions: {Vector3}      = {}     -- all known CC positions
 local ownCcPosition: Vector3?     = nil    -- local player's own CC position
 local ownRelayPositions: {Vector3} = {}    -- local player's own Relay positions
-local ownedMineCount: number      = 0      -- updated by init.client for first-blob constraint
 local ghost:          Part?
 local rangeRing:      Model?               -- mine extract-range ring (follows ghost)
 local buildZoneRing:  Model?               -- union build-zone ring (shown during placement)
@@ -221,7 +219,6 @@ end
 local function ghostSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
-	if buildingType == "Blob"          then return Config.BLOB_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -254,9 +251,6 @@ local function makeGhost()
 	ghost.Transparency = 0.5
 	ghost.BrickColor   = localPlayer.TeamColor
 	ghost.Material     = Enum.Material.SmoothPlastic
-	if currentType == "Blob" then
-		ghost.Shape = Enum.PartType.Ball
-	end
 	ghost.Parent       = workspace
 end
 
@@ -282,15 +276,7 @@ function BuildingPlacer.init(network, cameraModule)
 		if not isPlacing then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
-			if currentType == "Blob" then
-				if outOfBuildZone or blobTooFarFromDeposit then return end
-				local pos = cameraModule.getPositionAtHeight(Config.BLOB_SIZE.Y / 2)
-				if pos then
-					network.placeBuilding(snap(pos), "Blob")
-					task.defer(BuildingPlacer.exitPlacementMode)
-				end
-
-			elseif currentType == "Mine" then
+			if currentType == "Mine" then
 				if outOfBuildZone then return end  -- blocked by build zone
 				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 				if pos then
@@ -367,42 +353,10 @@ function BuildingPlacer.init(network, cameraModule)
 			local pos   = cameraModule.getPositionAtHeight(halfH)
 			if pos then
 				local snapped = snap(pos)
-				-- Block if too close to another CC OR too far from all deposits
-				local farFromDeposit = true
-				for _, dep in depositPositions do
-					if (Vector3.new(snapped.X, 0, snapped.Z) - dep).Magnitude <= Config.CC_MAX_DIST_FROM_DEPOSIT then
-						farFromDeposit = false; break
-					end
-				end
-				ccTooClose    = isCCTooClose(snapped) or (farFromDeposit and #depositPositions > 0)
+				ccTooClose    = isCCTooClose(snapped)
 				ghost.Position  = snapped
 				ghost.BrickColor = ccTooClose and BrickColor.new("Bright red") or localPlayer.TeamColor
 				ghost.Transparency = ccTooClose and 0.65 or 0.5
-			end
-
-		elseif currentType == "Blob" then
-			local pos = cameraModule.getPositionAtHeight(Config.BLOB_SIZE.Y / 2)
-			if pos then
-				local snapped = snap(pos)
-				outOfBuildZone = not isInBuildZone(snapped)
-
-				-- First blob (no mines owned) must be near a deposit
-				blobTooFarFromDeposit = false
-				if ownedMineCount == 0 then
-					local nearDeposit = false
-					for _, dep in depositPositions do
-						if (Vector3.new(snapped.X, 0, snapped.Z) - dep).Magnitude
-							<= Config.FIRST_BLOB_MAX_DIST_FROM_DEPOSIT then
-							nearDeposit = true; break
-						end
-					end
-					blobTooFarFromDeposit = not nearDeposit
-				end
-
-				local blocked = outOfBuildZone or blobTooFarFromDeposit
-				ghost.Position     = snapped
-				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
-				ghost.Transparency = blocked and 0.65 or 0.5
 			end
 
 		else
@@ -451,11 +405,10 @@ end
 
 function BuildingPlacer.exitPlacementMode()
 	if not isPlacing then return end
-	isPlacing              = false
-	currentSnapTarget      = nil
-	ccTooClose             = false
-	outOfBuildZone         = false
-	blobTooFarFromDeposit  = false
+	isPlacing         = false
+	currentSnapTarget = nil
+	ccTooClose        = false
+	outOfBuildZone    = false
 	if ghost        then ghost:Destroy();              ghost        = nil end
 	if rangeRing    then RangeRing.destroy(rangeRing); rangeRing    = nil end
 	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
@@ -477,10 +430,6 @@ end
 
 function BuildingPlacer.clearRelayPositions()
 	ownRelayPositions = {}
-end
-
-function BuildingPlacer.setOwnedMineCount(count: number)
-	ownedMineCount = count
 end
 
 function BuildingPlacer.removeDeposit(pos: Vector3)

@@ -19,7 +19,6 @@ local onBarracksSelectedCb:  ((string?) -> ())?
 local onMineSelectedCb:      ((string?) -> ())?
 local onCCSelectedCb:        ((string?) -> ())?
 local onTurretSelectedCb:    ((string?) -> ())?
-local onBlobSelectedCb:      ((string?) -> ())?
 local onMoveIssuedCb:        (() -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
@@ -495,7 +494,6 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if onMineSelectedCb     then onMineSelectedCb(nil)     end
 			if onCCSelectedCb       then onCCSelectedCb(nil)       end
 			if onTurretSelectedCb   then onTurretSelectedCb(nil)   end
-			if onBlobSelectedCb     then onBlobSelectedCb(nil)     end
 			return
 		end
 
@@ -618,7 +616,6 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if onMineSelectedCb      then onMineSelectedCb(nil)      end
 			if onCCSelectedCb        then onCCSelectedCb(nil)        end
 			if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-			if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 		else
 			-- Single / double click — check unit first, then buildings
 			local now = os.clock()
@@ -638,7 +635,6 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				if onMineSelectedCb      then onMineSelectedCb(nil)      end
 				if onCCSelectedCb        then onCCSelectedCb(nil)        end
 				if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-				if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 			else
 				local bid = hitBuilding()
 				if bid then
@@ -656,37 +652,26 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
 						if onCCSelectedCb        then onCCSelectedCb(nil)        end
 						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 					elseif info and info.buildingType == "Mine" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(bid)      end
 						if onCCSelectedCb        then onCCSelectedCb(nil)        end
 						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 					elseif info and info.buildingType == "CommandCenter" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
 						if onCCSelectedCb        then onCCSelectedCb(bid)        end
 						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 					elseif info and info.buildingType == "Turret" and info.ownerId == localPlayer.UserId then
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
 						if onCCSelectedCb        then onCCSelectedCb(nil)        end
 						if onTurretSelectedCb    then onTurretSelectedCb(bid)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-					elseif info and info.buildingType == "Blob" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(bid)      end
 					else
 						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
 						if onMineSelectedCb      then onMineSelectedCb(nil)      end
 						if onCCSelectedCb        then onCCSelectedCb(nil)        end
 						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 					end
 				else
 					lastClickTime   = 0
@@ -697,7 +682,6 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					if onMineSelectedCb      then onMineSelectedCb(nil)      end
 					if onCCSelectedCb        then onCCSelectedCb(nil)        end
 					if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-					if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
 				end
 			end
 		end
@@ -726,10 +710,6 @@ end
 
 function UnitController.onTurretSelected(fn: (string?) -> ())
 	onTurretSelectedCb = fn
-end
-
-function UnitController.onBlobSelected(fn: (string?) -> ())
-	onBlobSelectedCb = fn
 end
 
 function UnitController.onMoveIssued(fn: () -> ())
