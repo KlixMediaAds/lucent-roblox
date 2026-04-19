@@ -69,6 +69,17 @@ local monumentBillboards: { [number]: BillboardGui } = {}  -- ownerUserId → fl
 local researchedTechs:   { [string]: boolean } = {}
 local researchProgress:  { [string]: number?  } = {}
 
+-- Evolved turret client state
+type TentacleParts = { joints: {Part}, connectors: {Part}, teeth: {Part} }
+type EvolvedData = {
+	targets:    { Vector3? },
+	lastTarget: number,
+	tentacles:  { TentacleParts },
+	tipPos:     { Vector3 },   -- smoothed tip position per tentacle (avoids snapping)
+	sound:      Sound?,
+}
+local evolvedTurrets: { [string]: EvolvedData } = {}
+
 -- buildingType → count of owned (non-CC) buildings for requirement system
 local ownedBuildingCounts: { [string]: number } = {}
 
@@ -250,6 +261,7 @@ local function enterCCMode()
 	ownedBuildingCounts = {}
 	researchedTechs    = {}
 	researchProgress   = {}
+	HUD.setResearchProgress(nil)
 	refreshRequirements()
 	HUD.setCommandCenterMode(true)
 	BarracksPanel.hide()
@@ -979,12 +991,14 @@ end)
 
 Network.onResearchUpdate(function(techName: string, progress: number)
 	researchProgress[techName] = progress
+	HUD.setResearchProgress(progress)
 	WorkshopPanel.refreshIfVisible()
 end)
 
 Network.onResearchCompleted(function(techName: string)
 	researchedTechs[techName]  = true
 	researchProgress[techName] = nil
+	HUD.flashResearchComplete()
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
@@ -2294,6 +2308,201 @@ Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: str
 		spawnRocketShot(fromPos, toPos)
 	else
 		spawnBaseTurretShot(fromPos, toPos)
+	end
+end)
+
+-- ── Evolved turret tentacle animation ────────────────────────────────────────
+
+local TENT_PHASES = { 0, math.pi * 2 / 3, math.pi * 4 / 3 }
+local JOINT_SIZES = { 2.0, 1.4, 0.9 }
+
+local function bez3(u_: number, p0: Vector3, ctrl_: Vector3, p2: Vector3): Vector3
+	local v = 1 - u_
+	return v*v * p0 + 2*v*u_ * ctrl_ + u_*u_ * p2
+end
+
+local function createEvolvedTentacles(turretId: string): EvolvedData?
+	local tentacles: { TentacleParts } = {}
+	for t = 1, 3 do
+		local joints:     { Part } = {}
+		local connectors: { Part } = {}
+		local teeth:      { Part } = {}
+
+		for j = 1, 3 do
+			local p = Instance.new("Part")
+			p.Shape    = Enum.PartType.Ball
+			p.Size     = Vector3.new(JOINT_SIZES[j], JOINT_SIZES[j], JOINT_SIZES[j])
+			p.Color    = Color3.new(0.05, 0.05, 0.05)
+			p.Material = Enum.Material.SmoothPlastic
+			p.Anchored = true; p.CanCollide = false; p.CastShadow = false; p.CanQuery = false
+			p.Parent   = workspace
+			joints[j]  = p
+		end
+
+		for c = 1, 3 do
+			local p = Instance.new("Part")
+			p.Shape       = Enum.PartType.Cylinder
+			p.Size        = Vector3.new(1, 0.75, 0.75)
+			p.Color       = Color3.new(0.05, 0.05, 0.05)
+			p.Material    = Enum.Material.SmoothPlastic
+			p.Anchored    = true; p.CanCollide = false; p.CastShadow = false; p.CanQuery = false
+			p.Parent      = workspace
+			connectors[c] = p
+		end
+
+		-- 2 teeth per connector segment = 6 total (staggered alternating sides)
+		for k = 1, 6 do
+			local p = Instance.new("Part")
+			p.Size     = Vector3.new(0.35, 1.3, 0.35)
+			p.Color    = Color3.fromRGB(235, 235, 225)
+			p.Material = Enum.Material.SmoothPlastic
+			p.Anchored = true; p.CanCollide = false; p.CastShadow = false; p.CanQuery = false
+			p.Parent   = workspace
+			teeth[k]   = p
+		end
+
+		tentacles[t] = { joints = joints, connectors = connectors, teeth = teeth }
+	end
+
+	local data: EvolvedData = { targets = { nil, nil, nil }, lastTarget = 0, tentacles = tentacles, tipPos = {}, sound = nil }
+	evolvedTurrets[turretId] = data
+	return data
+end
+
+local function destroyEvolvedTentacles(turretId: string)
+	local data = evolvedTurrets[turretId]
+	if not data then return end
+	for _, tp in data.tentacles do
+		for _, p in tp.joints     do if p.Parent then p:Destroy() end end
+		for _, p in tp.connectors do if p.Parent then p:Destroy() end end
+		for _, p in tp.teeth      do if p.Parent then p:Destroy() end end
+	end
+	evolvedTurrets[turretId] = nil
+end
+
+RunService.RenderStepped:Connect(function(dt: number)
+	local now = os.clock()
+	local bf  = workspace:FindFirstChild("Buildings") :: Folder?
+	for turretId, data in evolvedTurrets do
+		if not bf then continue end
+		local model = bf:FindFirstChild(turretId)
+		if not model then destroyEvolvedTentacles(turretId); continue end
+		local head = model:FindFirstChild("Head") :: BasePart?
+		if not head then continue end
+		local headPos = head.Position
+
+		local TENTACLE_LEN = 14
+		local isAttacking  = (now - data.lastTarget) < 0.75
+
+		for t = 1, 3 do
+			local phase = TENT_PHASES[t]
+			local wT    = now * math.pi * 2 * 0.75 + phase
+
+			-- Idle tip: slow organic wave
+			local idleAngle = phase + math.sin(wT) * 0.32
+			local idleTip   = headPos
+				+ Vector3.new(math.cos(idleAngle), 0, math.sin(idleAngle)) * TENTACLE_LEN
+				+ Vector3.new(0, math.sin(wT * 0.85) * 4 + 4, 0)
+
+			-- Goal position: each tentacle spreads to its own approach angle
+			-- so three tentacles targeting the same enemy never fully merge
+			local goalTip: Vector3
+			if isAttacking and data.targets[t] then
+				local target    = data.targets[t] :: Vector3
+				local spreadDir = Vector3.new(math.cos(phase), 0.12, math.sin(phase))
+				goalTip = target + spreadDir * 3.0
+			else
+				goalTip = idleTip
+			end
+
+			-- Continuous per-frame lerp toward goal — no snapping when target refreshes
+			local current = data.tipPos[t]
+			local alpha   = math.min(dt * 6, 1)
+			local tipPos: Vector3
+			if current then
+				tipPos = current:Lerp(goalTip, alpha)
+			else
+				tipPos = goalTip
+			end
+			data.tipPos[t] = tipPos
+
+			local ctrl = (headPos + tipPos) * 0.5 + Vector3.new(0, 7, 0)
+			local p1   = bez3(0.33, headPos, ctrl, tipPos)
+			local p2   = bez3(0.67, headPos, ctrl, tipPos)
+			local pts  = { headPos, p1, p2, tipPos }
+
+			local tp = data.tentacles[t]
+			tp.joints[1].Position = p1
+			tp.joints[2].Position = p2
+			tp.joints[3].Position = tipPos
+
+			local TOOTH_LEN   = 1.3
+			local CONN_RADIUS = 0.375
+			local toothOffset = CONN_RADIUS + TOOTH_LEN * 0.5
+
+			for c = 1, 3 do
+				local A   = pts[c]
+				local B   = pts[c + 1]
+				local seg = B - A
+				local len = seg.Magnitude
+				if len < 0.01 then continue end
+				local fwd = seg.Unit
+				local mid = (A + B) * 0.5
+
+				-- Connector cylinder: length along X axis
+				tp.connectors[c].Size   = Vector3.new(len, 0.75, 0.75)
+				tp.connectors[c].CFrame = CFrame.new(mid, B) * CFrame.Angles(0, math.pi / 2, 0)
+
+				-- Perpendicular axis for tooth placement
+				local upRef = Vector3.new(0, 1, 0)
+				if math.abs(fwd:Dot(upRef)) > 0.9 then upRef = Vector3.new(1, 0, 0) end
+				local perp  = fwd:Cross(upRef).Unit
+				-- Alternate which side each connector's tooth pair emerges from
+				local side1 = (c % 2 == 1) and perp or -perp
+				local side2 = -side1
+
+				-- Tooth at 1/3 of segment (side1) — Y axis points outward so spike faces away
+				local tPos1 = A:Lerp(B, 0.33) + side1 * toothOffset
+				local zV1   = fwd:Cross(side1); if zV1.Magnitude > 0.01 then zV1 = zV1.Unit end
+				tp.teeth[(c - 1) * 2 + 1].CFrame = CFrame.fromMatrix(tPos1, fwd, side1, zV1)
+
+				-- Tooth at 2/3 of segment (side2)
+				local tPos2 = A:Lerp(B, 0.67) + side2 * toothOffset
+				local zV2   = fwd:Cross(side2); if zV2.Magnitude > 0.01 then zV2 = zV2.Unit end
+				tp.teeth[(c - 1) * 2 + 2].CFrame = CFrame.fromMatrix(tPos2, fwd, side2, zV2)
+			end
+		end
+	end
+end)
+
+Network.onTentacleTargets(function(turretId: string, _headPos: Vector3, t1: Vector3?, t2: Vector3?, t3: Vector3?)
+	local data = evolvedTurrets[turretId]
+	if not data then
+		data = createEvolvedTentacles(turretId) :: EvolvedData
+		if not data then return end
+	end
+	data.targets    = { t1, t2, t3 }
+	local hasTarget = t1 ~= nil or t2 ~= nil or t3 ~= nil
+	data.lastTarget = if hasTarget then os.clock() else data.lastTarget
+
+	if hasTarget then
+		-- Lazy-create 3D positional attack sound on the turret head
+		if not data.sound then
+			local bf = workspace:FindFirstChild("Buildings") :: Folder?
+			local model = bf and bf:FindFirstChild(turretId)
+			local head  = model and model:FindFirstChild("Head") :: BasePart?
+			if head then
+				local snd            = Instance.new("Sound")
+				snd.SoundId          = "rbxassetid://126493346091885"
+				snd.Volume           = 0.9
+				snd.RollOffMaxDistance = 80
+				snd.Parent           = head
+				data.sound           = snd
+			end
+		end
+		if data.sound and not (data.sound :: Sound).IsPlaying then
+			(data.sound :: Sound):Play()
+		end
 	end
 end)
 

@@ -106,6 +106,7 @@ Config.RESEARCH = {
 	HardenedArmor     = { time = 10, desc = "Soldiers absorb a flat amount of damage per hit." },
 	Relay             = { time = 20, desc = "Unlocks the Relay building. Place it to extend your build zone by 65 studs in any direction." },
 	Rollers           = { time = 20, requires = "CombatStims", desc = "Soldiers become Rollers: rolling melee charge attack, 20% faster movement." },
+	EyeUpgrade        = { time = 25, desc = "All units gain enhanced vision, increasing fog-of-war sight radius by 20%." },
 }
 
 -- Tank: Rocket Barrage (requires ConcussionShells)
@@ -128,6 +129,9 @@ Config.SOLDIER_STIM_RATE      = 0.55 -- attack-rate period multiplier while stim
 -- Soldier: Hardened Armor
 Config.SOLDIER_ARMOR          = 6    -- flat damage absorbed per incoming hit
 
+-- Eye Upgrade
+Config.EYE_VISION_MULT = 1.2   -- 20% broader unit vision radius in fog of war
+
 -- Soldier: Rollers upgrade
 Config.ROLLER_ATTACK_RANGE  = 14   -- studs; approach/engage range (wider for tracking)
 Config.ROLLER_CHARGE_DIST   = 22   -- studs; fixed dash distance per attack (zips past target)
@@ -136,7 +140,8 @@ Config.ROLLER_SPEED_MULT    = 1.2  -- 20% faster than base soldier
 Config.ROLLER_ROLL_PER_STUD = 0.25 -- radians of X-roll (tire pitch) per stud traveled
 
 -- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
-Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225 }
+Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225, Evolved = 275 }
+Config.TURRET_EVOLVED      = { range = 45, damage = 12, rate = 0.5 }
 Config.TURRET_FLAME  = { range = 28, damage = 35, rate = 0.6  }   -- short range, rapid fire
 Config.TURRET_ROCKET = { range = 70, damage = 80, rate = 3.5  }   -- long range, high damage
 
@@ -199,6 +204,7 @@ Config.REMOTES = {
 	MineDepletionWarning    = "MineDepletionWarning",
 	HealBeam                = "HealBeam",
 	CometWave               = "CometWave",
+	TentacleTargets         = "TentacleTargets",
 	LobbySync               = "LobbySync",
 	LobbyReady              = "LobbyReady",
 	LobbyReroll             = "LobbyReroll",

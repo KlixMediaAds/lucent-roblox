@@ -142,4 +142,9 @@ function Network.onHealBeam(fn: (Vector3, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.HealBeam).OnClientEvent:Connect(fn)
 end
 
+-- turretId, headPos, target1?, target2?, target3?: evolved turret tentacle animation tick
+function Network.onTentacleTargets(fn: (string, Vector3, Vector3?, Vector3?, Vector3?) -> ())
+	RemoteHandler.get(Config.REMOTES.TentacleTargets).OnClientEvent:Connect(fn)
+end
+
 return Network

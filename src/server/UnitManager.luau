@@ -89,6 +89,87 @@ local function addTankTreads(body: BasePart)
 	end
 end
 
+-- Track which players have the Eye Upgrade so newly spawned units get eyes too
+local eyeUpgradePlayers: { [number]: boolean } = {}
+
+local function addCreepyEyes(body: BasePart, unitType: string)
+	if body:FindFirstChild("_EyeL") then return end
+
+	local function makeEye(cf: CFrame, name: string, eyeSize: number)
+		-- Jaundiced, sickly sclera
+		local sclera        = Instance.new("Part")
+		sclera.Name         = name
+		sclera.Shape        = Enum.PartType.Ball
+		sclera.Size         = Vector3.new(eyeSize, eyeSize, eyeSize)
+		sclera.Color        = Color3.fromRGB(255, 255, 255)
+		sclera.Material     = Enum.Material.SmoothPlastic
+		sclera.Anchored     = false
+		sclera.CanCollide   = false
+		sclera.CastShadow   = false
+		sclera.CanQuery     = false
+		sclera.CFrame       = cf
+		sclera.Parent       = body
+		local w1 = Instance.new("WeldConstraint")
+		w1.Part0 = body; w1.Part1 = sclera; w1.Parent = body
+
+		-- Blood-red neon iris
+		local iris          = Instance.new("Part")
+		iris.Name           = "_Iris"
+		iris.Shape          = Enum.PartType.Ball
+		iris.Size           = Vector3.new(eyeSize * 0.42, eyeSize * 0.42, eyeSize * 0.42)
+		iris.Color          = Color3.fromRGB(255, 30, 0)
+		iris.Material       = Enum.Material.Neon
+		iris.Anchored       = false
+		iris.CanCollide     = false
+		iris.CastShadow     = false
+		iris.CanQuery       = false
+		iris.CFrame         = cf * CFrame.new(0, 0, -eyeSize * 0.3)  -- flush with sclera front surface
+		iris.Parent         = body
+		local w2 = Instance.new("WeldConstraint")
+		w2.Part0 = body; w2.Part1 = iris; w2.Parent = body
+
+		-- Void-black pupil (protrudes just past sclera surface so it's clearly visible)
+		local pupil         = Instance.new("Part")
+		pupil.Name          = "_Pupil"
+		pupil.Shape         = Enum.PartType.Ball
+		pupil.Size          = Vector3.new(eyeSize * 0.2, eyeSize * 0.2, eyeSize * 0.2)
+		pupil.Color         = Color3.fromRGB(0, 0, 0)
+		pupil.Material      = Enum.Material.SmoothPlastic
+		pupil.Anchored      = false
+		pupil.CanCollide    = false
+		pupil.CastShadow    = false
+		pupil.CanQuery      = false
+		pupil.CFrame        = cf * CFrame.new(0, 0, -eyeSize * 0.44)  -- sits on iris surface
+		pupil.Parent        = body
+		local w3 = Instance.new("WeldConstraint")
+		w3.Part0 = body; w3.Part1 = pupil; w3.Parent = body
+	end
+
+	if unitType == "Soldier" then
+		-- Large eyes bulging out from each side of the soldier (mutant insect look)
+		local halfX   = body.Size.X / 2
+		local eyeSize = 2.4
+		-- Left eye: mounted on left face, pupil faces outward (-X)
+		makeEye(
+			body.CFrame * CFrame.new(-halfX + eyeSize * 0.1, 0, 0) * CFrame.Angles(0, math.pi / 2, 0),
+			"_EyeL", eyeSize
+		)
+		-- Right eye: mounted on right face, pupil faces outward (+X)
+		makeEye(
+			body.CFrame * CFrame.new(halfX - eyeSize * 0.1, 0, 0) * CFrame.Angles(0, -math.pi / 2, 0),
+			"_EyeR", eyeSize
+		)
+	else
+		-- Front-facing eyes for all other unit types
+		local topY    = body.Size.Y / 2
+		local halfX   = body.Size.X * 0.22
+		local fwdZ    = -(body.Size.Z / 2) + 0.15
+		local eyeSize = 1.5
+		makeEye(body.CFrame * CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
+		makeEye(body.CFrame * CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
+	end
+end
+
 local function addMedicCross(body: BasePart)
 	-- Two white bars forming a "+" on top of the medic body so it's visually distinct.
 	local topY = body.Size.Y / 2 + 0.18
@@ -205,6 +286,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string)
 		hv.Parent  = part
 	end
 	if unitType == "Medic" then addMedicCross(part)  end
+	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(part, unitType) end
 
 	units[id] = {
 		part        = part,
@@ -442,6 +524,7 @@ function UnitManager.resetAll()
 		if data.part and data.part.Parent then data.part:Destroy() end
 	end
 	units = {}
+	eyeUpgradePlayers = {}
 end
 
 function UnitManager.setBuildingManager(bm: any)
@@ -450,6 +533,22 @@ end
 
 function UnitManager.setResearchManager(rm: any)
 	researchManagerRef = rm
+	rm.addCompletionHook(function(player: any, techName: string)
+		if techName == "EyeUpgrade" then
+			UnitManager.applyEyeUpgrade(player)
+		end
+	end)
+end
+
+-- Called when a player completes EyeUpgrade: adds eyes to all their existing units
+-- and marks them so future spawns also get eyes.
+function UnitManager.applyEyeUpgrade(player: any)
+	eyeUpgradePlayers[player.UserId] = true
+	for _, data in units do
+		if data.owner == player then
+			addCreepyEyes(data.part, data.unitType)
+		end
+	end
 end
 
 function UnitManager.setMineralManager(mm: any)

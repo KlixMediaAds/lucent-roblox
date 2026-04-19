@@ -21,10 +21,12 @@ local TurretPanel  = {}
 local localPlayer  = Players.LocalPlayer
 local C            = UILib.C
 
-local FLAME_COLOR  = Color3.fromRGB(230, 90,  15)
-local ROCKET_COLOR = Color3.fromRGB(55,  115, 225)
-local FLAME_COST   = (Config.TURRET_UPGRADE_COST :: any)["Flamethrower"]   or 200
-local ROCKET_COST  = (Config.TURRET_UPGRADE_COST :: any)["RocketLauncher"] or 225
+local FLAME_COLOR   = Color3.fromRGB(230, 90,  15)
+local ROCKET_COLOR  = Color3.fromRGB(55,  115, 225)
+local EVOLVED_COLOR = Color3.fromRGB(80,  210, 60)
+local FLAME_COST    = (Config.TURRET_UPGRADE_COST :: any)["Flamethrower"]   or 200
+local ROCKET_COST   = (Config.TURRET_UPGRADE_COST :: any)["RocketLauncher"] or 225
+local EVOLVED_COST  = (Config.TURRET_UPGRADE_COST :: any)["Evolved"]        or 275
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeTurretId: string?
@@ -52,6 +54,7 @@ type ChildNode = {
 	key:      string,
 	cost:     number,
 	color:    Color3,
+	needsRes: boolean,  -- true = requires TurretUpgrades research
 	finalPos: UDim2,
 	startPos: UDim2,
 }
@@ -100,19 +103,22 @@ local function refresh()
 	if not activeTurretId then return end
 	local upgrade    = getUpgradeState(activeTurretId)
 	local res        = getResources and getResources() or 0
-	local hasResearch = hasResearchFn and hasResearchFn("TurretUpgrades") or false
+	local hasBase    = hasResearchFn and hasResearchFn("TurretUpgrades") or false
 
 	if statusLbl then
-		if not hasResearch then
+		if not hasBase then
 			statusLbl.Text = "Research 'Turret Upgrades' at your Command Center to unlock."
 		elseif upgrade then
-			statusLbl.Text = upgrade .. " upgrade active.  The other path is permanently locked."
+			statusLbl.Text = upgrade .. " upgrade active.  Other paths are permanently locked."
 		else
-			statusLbl.Text = "Choose one upgrade — your choice is permanent."
+			statusLbl.Text = "Choose one upgrade path — your choice is permanent."
 		end
 	end
 
 	for _, c in childNodes do
+		local nodeResearch = (not c.needsRes)
+			or (hasResearchFn ~= nil and hasResearchFn("TurretUpgrades"))
+
 		if upgrade == c.key then
 			c.btn.BackgroundColor3       = C.GREEN
 			c.btn.BackgroundTransparency = 0.15
@@ -131,7 +137,7 @@ local function refresh()
 			c.label.TextColor3           = C.DIM
 			c.btn.Active                 = false
 
-		elseif not hasResearch then
+		elseif not nodeResearch then
 			c.btn.BackgroundColor3       = C.BG_LOCKED
 			c.btn.BackgroundTransparency = 0.35
 			c.stroke.Color               = C.BORDER_LO
@@ -180,8 +186,9 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
 
 	-- Child nodes
 	local UPGRADES = {
-		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,  cost = FLAME_COST,  angle = -135 },
-		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR, cost = ROCKET_COST, angle = -45  },
+		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,   cost = FLAME_COST,   angle = -135, needsRes = true  },
+		{ key = "Evolved",        icon = "⊛", color = EVOLVED_COLOR, cost = EVOLVED_COST, angle = -90,  needsRes = false },
+		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR,  cost = ROCKET_COST,  angle = -45,  needsRes = true  },
 	}
 
 	for _, def in UPGRADES do
@@ -214,6 +221,7 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
 			key      = key,
 			cost     = cost,
 			color    = def.color,
+			needsRes = def.needsRes,
 			finalPos = finalPos,
 			startPos = ROOT_POS,
 		})

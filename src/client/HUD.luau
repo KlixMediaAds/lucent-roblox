@@ -112,7 +112,12 @@ local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
 local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
-local upgradesBtnRef: TextButton?
+local upgradesBtnRef:  TextButton?
+local upgradesWrapper:  Frame?
+local upgradesStroke:   UIStroke?
+local upgradesScaleRef: UIScale?
+local UPGRADES_COLOR = Color3.fromRGB(190, 140, 255)
+local UPGRADES_SEGS  = 24
 
 -- ── Build-menu hover tooltip ──────────────────────────────────────────────────
 local tooltipFrame: Frame?
@@ -406,45 +411,55 @@ function HUD.create(): (Frame, TextButton)
 	rootStroke                          = rBtn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	local _rw = rootWrapper  -- suppress unused
 
-	-- "UPGRADES" button — sits above the BUILD toggle, visually separate from structures
+	-- "UPGRADES" node — circular, matching BUILD style, with perimeter research ring
 	do
-		local upgradesColor = Color3.fromRGB(190, 140, 255)  -- soft purple = research/tech
-		local upgradesPos   = UDim2.new(0, 80, 1, -207)      -- centred above the root node
+		local upgPos = UDim2.new(0, 80, 1, -212)
+		local w, btn = UILib.radialNode(ov, "UPGRADES", "⚗", UPGRADES_COLOR, upgPos, 80, 4)
+		;(w:FindFirstChild("NodeLabel") :: TextLabel).TextSize = 15
 
-		-- Pill-shaped button (rectangular, not circular) so it reads differently to build nodes
-		local upgBtn                        = Instance.new("TextButton")
-		upgBtn.Name                         = "UpgradesBtn"
-		upgBtn.Size                         = UDim2.fromOffset(110, 38)
-		upgBtn.AnchorPoint                  = Vector2.new(0.5, 0.5)
-		upgBtn.Position                     = upgradesPos
-		upgBtn.BackgroundColor3             = Color3.fromRGB(30, 20, 50)
-		upgBtn.BackgroundTransparency       = 0.18
-		upgBtn.BorderSizePixel              = 0
-		upgBtn.Text                         = "⚗  UPGRADES"
-		upgBtn.TextColor3                   = upgradesColor
-		upgBtn.Font                         = Enum.Font.GothamBold
-		upgBtn.TextSize                     = 13
-		upgBtn.ZIndex                       = 4
-		upgBtn.Parent                       = ov
-		UILib.corner(upgBtn, 19)  -- fully rounded pill
+		local stroke     = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+		stroke.Color     = UPGRADES_COLOR
+		stroke.Thickness = 1.5
 
-		local upgStroke                     = Instance.new("UIStroke")
-		upgStroke.Color                     = upgradesColor
-		upgStroke.Thickness                 = 1.5
-		upgStroke.Transparency              = 0.25
-		upgStroke.Parent                    = upgBtn
+		-- UIScale for the completion pulse
+		local scl  = Instance.new("UIScale")
+		scl.Scale  = 1
+		scl.Parent = btn
 
-		-- Subtle glow on hover
-		upgBtn.MouseEnter:Connect(function()
-			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 2.5, Transparency = 0 }):Play()
-			TweenService:Create(upgBtn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.05 }):Play()
+		-- Segmented perimeter ring (24 dots just outside the circle)
+		local SEG_R = 47  -- px from button centre; button radius = 40
+		for i = 0, UPGRADES_SEGS - 1 do
+			local rad               = math.rad((i / UPGRADES_SEGS) * 360 - 90)
+			local seg               = Instance.new("Frame")
+			seg.Name                = "ProgSeg" .. i
+			seg.Size                = UDim2.fromOffset(6, 6)
+			seg.AnchorPoint         = Vector2.new(0.5, 0.5)
+			seg.Position            = UDim2.fromOffset(
+				40 + math.cos(rad) * SEG_R,
+				40 + math.sin(rad) * SEG_R
+			)
+			seg.BackgroundColor3       = UPGRADES_COLOR
+			seg.BackgroundTransparency = 0.82
+			seg.BorderSizePixel        = 0
+			seg.ZIndex                 = 6
+			seg.Parent                 = w
+			UILib.corner(seg, 3)
+		end
+
+		-- Hover: subtly brighten
+		btn.MouseEnter:Connect(function()
+			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.15 }):Play()
+			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 2.5 }):Play()
 		end)
-		upgBtn.MouseLeave:Connect(function()
-			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 1.5, Transparency = 0.25 }):Play()
-			TweenService:Create(upgBtn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.18 }):Play()
+		btn.MouseLeave:Connect(function()
+			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.35 }):Play()
+			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 1.5 }):Play()
 		end)
 
-		upgradesBtnRef = upgBtn
+		upgradesBtnRef   = btn
+		upgradesWrapper  = w
+		upgradesStroke   = stroke
+		upgradesScaleRef = scl
 	end
 
 	-- Hover tooltip — fixed position above the build menu, always in the same spot
@@ -733,6 +748,62 @@ function HUD.wire(
 		updateAllNodes()
 		if cancelBtnRef then
 			cancelBtnRef.Visible = active and buildingType ~= "CommandCenter"
+		end
+	end)
+end
+
+-- Updates the perimeter ring to reflect in-progress research (progress 0→1, nil = none).
+function HUD.setResearchProgress(progress: number?)
+	local w = upgradesWrapper
+	if not w then return end
+	local active = if progress then math.floor(progress * UPGRADES_SEGS) else 0
+	for i = 0, UPGRADES_SEGS - 1 do
+		local seg = w:FindFirstChild("ProgSeg" .. i) :: Frame?
+		if seg then
+			seg.BackgroundTransparency = if i < active then 0 else 0.82
+		end
+	end
+	if upgradesStroke then
+		upgradesStroke.Thickness = if progress then 2.5 else 1.5
+	end
+end
+
+-- Flashes the perimeter ring gold and pulses the button when a research completes.
+function HUD.flashResearchComplete()
+	local w = upgradesWrapper
+	if not w then return end
+	for i = 0, UPGRADES_SEGS - 1 do
+		local seg = w:FindFirstChild("ProgSeg" .. i) :: Frame?
+		if seg then
+			TweenService:Create(seg, TweenInfo.new(0.1), {
+				BackgroundColor3 = C.GOLD, BackgroundTransparency = 0,
+			}):Play()
+		end
+	end
+	if upgradesStroke then
+		TweenService:Create(upgradesStroke,
+			TweenInfo.new(0.12), { Color = C.GOLD, Thickness = 4 }):Play()
+	end
+	if upgradesScaleRef then
+		upgradesScaleRef.Scale = 1.22
+		TweenService:Create(upgradesScaleRef,
+			TweenInfo.new(0.5, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out),
+			{ Scale = 1 }):Play()
+	end
+	task.delay(0.9, function()
+		local w2 = upgradesWrapper
+		if not w2 then return end
+		for i = 0, UPGRADES_SEGS - 1 do
+			local seg = w2:FindFirstChild("ProgSeg" .. i) :: Frame?
+			if seg then
+				TweenService:Create(seg, TweenInfo.new(0.5), {
+					BackgroundColor3 = UPGRADES_COLOR, BackgroundTransparency = 0.82,
+				}):Play()
+			end
+		end
+		if upgradesStroke then
+			TweenService:Create(upgradesStroke,
+				TweenInfo.new(0.5), { Color = UPGRADES_COLOR, Thickness = 1.5 }):Play()
 		end
 	end)
 end

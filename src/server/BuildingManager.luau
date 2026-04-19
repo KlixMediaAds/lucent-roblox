@@ -433,6 +433,21 @@ local function applyTurretUpgradeVisuals(id: string, upgradeType: string)
 			ring.BrickColor = BrickColor.new("Medium blue")
 			ring.Material   = Enum.Material.Neon
 		end
+
+	elseif upgradeType == "Evolved" then
+		if head then
+			head.BrickColor = BrickColor.new("Black")
+			head.Material   = Enum.Material.SmoothPlastic
+			head.Size       = Vector3.new(6, 4, 6)
+		end
+		if barrel then
+			barrel.Transparency = 1
+		end
+		if ring then
+			ring.BrickColor = BrickColor.new("Black")
+			ring.Material   = Enum.Material.SmoothPlastic
+			ring.Size       = ring.Size + Vector3.new(3, 0, 3)
+		end
 	end
 
 	-- Tag the model so clients can read upgrade state
@@ -642,12 +657,15 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local upg     = data.turretUpgrade
 			local tRate   = upg == "Flamethrower"   and Config.TURRET_FLAME.rate
 			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.rate
+			             or upg == "Evolved"         and Config.TURRET_EVOLVED.rate
 			             or Config.TURRET_ATTACK_RATE
 			local tRange  = upg == "Flamethrower"   and Config.TURRET_FLAME.range
 			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.range
+			             or upg == "Evolved"         and Config.TURRET_EVOLVED.range
 			             or Config.TURRET_RANGE
 			local tDamage = upg == "Flamethrower"   and Config.TURRET_FLAME.damage
 			             or upg == "RocketLauncher"  and Config.TURRET_ROCKET.damage
+			             or upg == "Evolved"         and Config.TURRET_EVOLVED.damage
 			             or Config.TURRET_DAMAGE
 
 			turretTimers[id] = (turretTimers[id] or 0) + dt
@@ -656,6 +674,25 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 			local myPos      = data.base.Position
 			local myOwnerStr = tostring(data.owner.UserId)
+
+			-- Evolved: 3 independent tentacle strikes, no projectile
+			if upg == "Evolved" then
+				local headPos = myPos + Vector3.new(0, Config.BUILDING_SIZE.Y + 1.5, 0)
+				local t1: Vector3? = nil
+				local t2: Vector3? = nil
+				local t3: Vector3? = nil
+				if unitManagerRef then
+					local _, p1 = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
+					t1 = p1
+					local _, p2 = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
+					t2 = p2
+					local _, p3 = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
+					t3 = p3
+				end
+				RemoteHandler.get(Config.REMOTES.TentacleTargets):FireAllClients(id, headPos, t1, t2, t3)
+				continue
+			end
+
 			local targetPos: Vector3? = nil
 
 			-- Prefer hitting units → buildings → miners
@@ -818,14 +855,16 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.UpgradeTurret).OnServerEvent:Connect(
 		function(player, turretId, upgradeType)
 			if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return end
-			if upgradeType ~= "Flamethrower" and upgradeType ~= "RocketLauncher" then return end
+			if upgradeType ~= "Flamethrower" and upgradeType ~= "RocketLauncher" and upgradeType ~= "Evolved" then return end
 			local data = buildingData[turretId]
 			if not data or data.buildingType ~= "Turret" then return end
 			if data.owner ~= player then return end
 			if data.turretUpgrade then return end  -- already upgraded
 			if data.isConstructing then return end
 
-			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
+			if upgradeType ~= "Evolved" then
+				if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
+			end
 
 			local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
 			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end

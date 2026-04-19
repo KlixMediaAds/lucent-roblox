@@ -74,6 +74,14 @@ end
 
 local ResearchManager = {}
 
+-- Server-side hooks called whenever any player finishes a research tech.
+-- fn(player, techName)
+local completionHooks: { (any, string) -> () } = {}
+
+function ResearchManager.addCompletionHook(fn: (any, string) -> ())
+	table.insert(completionHooks, fn)
+end
+
 type ResearchState = {
 	done:       { [string]: boolean },
 	inProgress: { [string]: boolean },
@@ -121,6 +129,7 @@ function ResearchManager.startForPlayer(player: any, _workshopId: string, techNa
 		end
 		state.inProgress[techName] = nil
 		state.done[techName]       = true
+		for _, hook in completionHooks do hook(player, techName) end
 	end)
 end
 
@@ -164,6 +173,7 @@ function ResearchManager.init()
 				state.inProgress[techName] = nil
 				state.done[techName]       = true
 				RemoteHandler.get(Config.REMOTES.ResearchCompleted):FireClient(player, techName)
+				for _, hook in completionHooks do hook(player, techName) end
 			end)
 		end
 	)

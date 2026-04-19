@@ -52,7 +52,10 @@ local STATE_VISIBLE    = 2
 
 local FADE_INFO = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
 
--- Precomputed squared radii + cell-radii for unit / miner (constant across all sources)
+-- Effective unit vision (may be boosted by EyeUpgrade)
+local effVIS_UNIT = VIS_UNIT
+
+-- Precomputed squared radii + cell-radii for unit / miner (recalculated when eye upgrade activates)
 local UNIT_R2  = VIS_UNIT  * VIS_UNIT
 local UNIT_RC  = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
 local MINER_R2 = VIS_MINER * VIS_MINER
@@ -463,6 +466,16 @@ local function updateFog()
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
+
+-- Called client-side when EyeUpgrade research completes.
+-- Recomputes UNIT_R2/UNIT_RC so the next fog tick uses the wider vision radius.
+function FogManager.setEyeUpgrade(active: boolean)
+	local Config = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Config"))
+	local mult   = if active then Config.EYE_VISION_MULT else 1.0
+	effVIS_UNIT  = VIS_UNIT * mult
+	UNIT_R2      = effVIS_UNIT * effVIS_UNIT
+	UNIT_RC      = math.ceil(effVIS_UNIT / CELL_SIZE) + 1
+end
 
 -- Call when the local player is eliminated (CC destroyed). Wipes exploration
 -- memory so the map returns to black — the player must re-scout after rebuilding.
