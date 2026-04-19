@@ -27,6 +27,7 @@ Config.TANK_SLOW_MULT         = 0.4  -- speed multiplier while slowed (requires 
 
 -- Buildings
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
+Config.BLOB_SIZE             = Vector3.new(8, 8, 8)     -- blob footprint + sphere diameter
 Config.BUILDING_GRID         = 5     -- snap grid in studs
 
 -- Mineral Deposits — cluster spawning
@@ -71,8 +72,10 @@ Config.MINER_OFFSETS = {
 
 -- Command Center
 Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
-Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command centers
-Config.BUILD_RADIUS            = 85    -- studs; non-CC buildings must be within this distance of the player's CC
+Config.COMMAND_CENTER_MIN_DIST       = 100   -- minimum studs between any two command centers
+Config.BUILD_RADIUS                  = 85    -- studs; non-CC buildings must be within this distance of the player's CC
+Config.CC_MAX_DIST_FROM_DEPOSIT      = 145   -- CC must be within this range of at least one mineral deposit
+Config.FIRST_BLOB_MAX_DIST_FROM_DEPOSIT = 60 -- first blob (no mines yet) must be this close to a deposit
 
 -- Relay (build-zone extender, unlocked via Relay research)
 Config.RELAY_COST       = 175
@@ -157,12 +160,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, Blob = 8 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10, CreepySoldier = 0 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, Blob = 100 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
@@ -210,6 +213,7 @@ Config.REMOTES = {
 	HealBeam                = "HealBeam",
 	CometWave               = "CometWave",
 	TentacleTargets         = "TentacleTargets",
+	EvolveBlob              = "EvolveBlob",
 	LobbySync               = "LobbySync",
 	LobbyReady              = "LobbyReady",
 	LobbyReroll             = "LobbyReroll",

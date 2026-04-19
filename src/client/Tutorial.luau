@@ -1,19 +1,20 @@
 --!strict
 --[[
-    Tutorial — drip-feed onboarding state machine.
+    Tutorial — minimal bottom-right pill toast.
 
-    One card is visible at a time.  Each step waits for the player to
-    demonstrate the current mechanic before revealing the next hint.
+    One step at a time, action-gated. No walls of text.
+    Auto-hides after 8 s, re-pulses after 20 s if the step is still pending.
+    Returning players will barely notice it; new players get enough to act on.
 
-    Steps unlock in order:
-      1. camera        — pan the camera (WASD)
-      2. place_cc      — place Command Center
-      3. build_mine    — build a Mine
-      4. build_barracks— build a Barracks
-      5. train_unit    — train first unit
-      6. move_units    — right-click move
-      7. research      — click CC to open Workshop
-      8. objective     — win condition  (persistent, manually dismissed)
+    Steps:
+      1. camera_moved    — pan the camera
+      2. cc_placed       — place Command Center
+      3. mine_placed     — build a Mine
+      4. barracks_placed — build a Barracks
+      5. unit_trained    — train first unit
+      6. move_issued     — right-click move
+      7. cc_selected     — open Workshop
+      8. (objective)     — auto-dismissed after 10 s, never repeats
 
     Wire Tutorial.notify(action) from init.client.luau at relevant events.
     The camera step is detected internally.
@@ -29,173 +30,144 @@ local C        = UILib.C
 
 type Step = {
     icon:    string,
-    title:   string,
-    body:    string,
+    label:   string,   -- ≤ 4 words
     color:   Color3,
-    trigger: string,   -- action id that completes this step ("" = manual dismiss)
+    trigger: string,   -- "" = auto-dismissed (last step only)
 }
 
 local STEPS: { Step } = {
-    -- 1 -----------------------------------------------------------------------
-    {
-        icon    = "✦",
-        title   = "Pan the Camera",
-        body    = "WASD · scroll · Q/E rotate",
-        color   = C.ACCENT,
-        trigger = "camera_moved",
-    },
-    -- 2 -----------------------------------------------------------------------
-    {
-        icon    = "⌂",
-        title   = "Place Your Command Center",
-        body    = "Press button · click map",
-        color   = C.TEAL,
-        trigger = "cc_placed",
-    },
-    -- 3 -----------------------------------------------------------------------
-    {
-        icon    = "⛏",
-        title   = "Build a Mine  —  ◆ 75",
-        body    = "Build on yellow deposit",
-        color   = C.MINE,
-        trigger = "mine_placed",
-    },
-    -- 4 -----------------------------------------------------------------------
-    {
-        icon    = "⚔",
-        title   = "Build a Barracks  —  ◆ 50",
-        body    = "Trains soldiers, needs Mine",
-        color   = C.BARRACKS,
-        trigger = "barracks_placed",
-    },
-    -- 5 -----------------------------------------------------------------------
-    {
-        icon    = "★",
-        title   = "Train Your First Unit",
-        body    = "Click Barracks · train Soldier",
-        color   = C.GREEN,
-        trigger = "unit_trained",
-    },
-    -- 6 -----------------------------------------------------------------------
-    {
-        icon    = "➤",
-        title   = "Command Your Units",
-        body    = "Drag select · right-click move",
-        color   = C.TURRET,
-        trigger = "move_issued",
-    },
-    -- 7 -----------------------------------------------------------------------
-    {
-        icon    = "⚙",
-        title   = "Research Upgrades",
-        body    = "Click CC · open Workshop",
-        color   = C.WORKSHOP,
-        trigger = "cc_selected",
-    },
-    -- 8 (objective — manual dismiss) -----------------------------------------
-    {
-        icon    = "◆",
-        title   = "How to Win",
-        body    = "Build Monument · defend 5 min",
-        color   = C.GOLD,
-        trigger = "",
-    },
+    { icon = "✦", label = "Pan the camera",      color = C.ACCENT,   trigger = "camera_moved"    },
+    { icon = "⌂", label = "Place Command Ctr",   color = C.TEAL,     trigger = "cc_placed"       },
+    { icon = "⬡", label = "Place a Blob",        color = C.TEAL,     trigger = "blob_placed"     },
+    { icon = "⛏", label = "Evolve to Mine",      color = C.MINE,     trigger = "mine_placed"     },
+    { icon = "⚔", label = "Build Barracks",      color = C.BARRACKS, trigger = "barracks_placed" },
+    { icon = "★", label = "Train a Soldier",     color = C.GREEN,    trigger = "unit_trained"    },
+    { icon = "➤", label = "Right-click to move", color = C.TURRET,   trigger = "move_issued"     },
+    { icon = "⚙", label = "Open Workshop",       color = C.WORKSHOP, trigger = "cc_selected"     },
+    { icon = "◆", label = "Defend 5 minutes",    color = C.GOLD,     trigger = ""                },
 }
 
-local TOTAL_STEPS = #STEPS - 1  -- last step is the objective, not counted
-
 -- ── State ─────────────────────────────────────────────────────────────────────
-local currentStep  = 1
-local completing   = false
-local dismissed    = false
-local cardFrame:   Frame?
-local accentBar:   Frame?
-local iconLabel:   TextLabel?
-local titleLabel:  TextLabel?
-local bodyLabel:   TextLabel?
-local stepLabel:   TextLabel?
-local dismissBtn:  TextButton?
-local skipBtn:     TextButton?
-local camConn:     RBXScriptConnection?
 
--- ── Animation helpers ─────────────────────────────────────────────────────────
-local CARD_SHOWN  = UDim2.new(0.5, 0, 1, -130)
-local CARD_HIDDEN = UDim2.new(0.5, 0, 1,   70)
-local EASE_IN     = TweenInfo.new(0.30, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-local EASE_OUT    = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+local currentStep: number              = 1
+local completing:  boolean             = false
+local dismissed:   boolean             = false
+local pill:        Frame?              = nil
+local iconLbl:     TextLabel?          = nil
+local hintLbl:     TextLabel?          = nil
+local camConn:     RBXScriptConnection? = nil
+local hideTimer:   thread?             = nil
+
+-- ── Positions ────────────────────────────────────────────────────────────────
+
+-- AnchorPoint (1,1): bottom-right corner of the pill is the pivot.
+local PILL_SHOWN  = UDim2.new(1, -14, 1, -68)
+local PILL_HIDDEN = UDim2.new(1, -14, 1,  18)   -- just below screen edge
+local EASE_IN     = TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local EASE_OUT    = TweenInfo.new(0.20, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 
 local function slideIn()
-    if not cardFrame then return end
-    cardFrame.Position = CARD_HIDDEN
-    cardFrame.Visible  = true
-    TweenService:Create(cardFrame, EASE_IN, { Position = CARD_SHOWN }):Play()
+    if not pill then return end
+    pill.Position = PILL_HIDDEN
+    pill.Visible  = true
+    TweenService:Create(pill, EASE_IN, { Position = PILL_SHOWN }):Play()
 end
 
 local function slideOut(then_: (() -> ())?)
-    if not cardFrame then return end
-    local t = TweenService:Create(cardFrame, EASE_OUT, { Position = CARD_HIDDEN })
+    if not pill then return end
+    local t = TweenService:Create(pill, EASE_OUT, { Position = PILL_HIDDEN })
     t.Completed:Once(function()
-        if cardFrame then cardFrame.Visible = false end
+        if pill then pill.Visible = false end
         if then_ then then_() end
     end)
     t:Play()
 end
 
--- ── Apply a step's content to the card ───────────────────────────────────────
+-- Brief brightness flash to re-draw attention without being annoying
+local function pulse()
+    if not pill or not pill.Visible then return end
+    local t1 = TweenService:Create(pill, TweenInfo.new(0.12), { BackgroundTransparency = 0.0  })
+    local t2 = TweenService:Create(pill, TweenInfo.new(0.30), { BackgroundTransparency = 0.14 })
+    t1.Completed:Once(function() t2:Play() end)
+    t1:Play()
+end
+
+-- Hide after 8 s; re-show with a pulse 20 s later if the step is still pending.
+local function scheduleAutoHide()
+    if hideTimer and coroutine.status(hideTimer) == "suspended" then task.cancel(hideTimer) end
+    hideTimer = task.delay(8, function()
+        if dismissed or completing then return end
+        slideOut(function()
+            hideTimer = task.delay(20, function()
+                if dismissed or completing then return end
+                if not pill then return end
+                slideIn()
+                pulse()
+                scheduleAutoHide()
+            end)
+        end)
+    end)
+end
+
+-- ── Apply step content ────────────────────────────────────────────────────────
+
 local function applyStep(n: number)
     local step = STEPS[n]
     if not step then return end
-    if accentBar  then accentBar.BackgroundColor3 = step.color end
-    if iconLabel  then
-        iconLabel.Text       = step.icon
-        iconLabel.TextColor3 = step.color
+    if iconLbl then
+        iconLbl.Text       = step.icon
+        iconLbl.TextColor3 = step.color
     end
-    if titleLabel then
-        titleLabel.Text       = step.title
-        titleLabel.TextColor3 = C.TEXT
-    end
-    if bodyLabel  then bodyLabel.Text  = step.body  end
-
-    -- Step counter: "1 / 7".  Hidden on the final objective card.
-    if stepLabel then
-        stepLabel.Text = (n <= TOTAL_STEPS) and (n .. " / " .. TOTAL_STEPS) or ""
-    end
-
-    -- Dismiss button only on the last step
-    if dismissBtn then
-        dismissBtn.Visible = (step.trigger == "")
+    if hintLbl then
+        hintLbl.Text       = step.label
+        hintLbl.TextColor3 = C.TEXT
     end
 end
 
 -- ── Complete current step and slide to next ───────────────────────────────────
+
 local function completeAndAdvance()
     if completing then return end
     completing = true
+    if hideTimer then task.cancel(hideTimer); hideTimer = nil end
 
-    -- Flash title green with tick
-    if titleLabel then
-        titleLabel.TextColor3 = C.GREEN
-        titleLabel.Text = "✓  " .. STEPS[currentStep].title
+    if iconLbl then iconLbl.TextColor3 = C.GREEN end
+    if hintLbl then
+        hintLbl.Text       = "✓"
+        hintLbl.TextColor3 = C.GREEN
     end
 
-    task.delay(0.8, function()
+    task.delay(0.55, function()
         slideOut(function()
-            completing   = false
-            currentStep += 1
-            if currentStep <= #STEPS then
-                applyStep(currentStep)
-                slideIn()
+            completing    = false
+            currentStep  += 1
+            if currentStep > #STEPS then return end
+
+            applyStep(currentStep)
+            slideIn()
+
+            local step = STEPS[currentStep]
+            if step.trigger == "" then
+                -- Objective card: show for 10 s then vanish forever
+                task.delay(10, function()
+                    if dismissed then return end
+                    dismissed = true
+                    slideOut(function()
+                        if pill then pill:Destroy(); pill = nil end
+                    end)
+                end)
+            else
+                scheduleAutoHide()
             end
         end)
     end)
 end
 
 -- ── Camera pan detection ──────────────────────────────────────────────────────
+
 local function startCameraWatch()
     local cam = workspace.CurrentCamera
     if not cam then return end
-
-    -- Sample origin after a brief delay so loading drift doesn't count
     task.delay(1.5, function()
         local origin = cam.CFrame.Position
         camConn = cam:GetPropertyChangedSignal("CFrame"):Connect(function()
@@ -203,8 +175,7 @@ local function startCameraWatch()
                 if camConn then camConn:Disconnect(); camConn = nil end
                 return
             end
-            local delta = cam.CFrame.Position - origin
-            -- Only count horizontal movement, ignore zoom
+            local delta    = cam.CFrame.Position - origin
             local flatDist = Vector2.new(delta.X, delta.Z).Magnitude
             if flatDist > 14 then
                 if camConn then camConn:Disconnect(); camConn = nil end
@@ -214,166 +185,90 @@ local function startCameraWatch()
     end)
 end
 
--- ── Build the card UI ─────────────────────────────────────────────────────────
+-- ── Build the pill UI ─────────────────────────────────────────────────────────
+
 function Tutorial.init(sg: ScreenGui)
-    local f                      = Instance.new("Frame")
-    f.Name                       = "TutorialCard"
-    f.Size                       = UDim2.fromOffset(368, 118)
-    f.Position                   = CARD_HIDDEN
-    f.AnchorPoint                = Vector2.new(0.5, 1)
-    f.BackgroundColor3           = Color3.fromRGB(7, 10, 20)
-    f.BackgroundTransparency     = 0.04
-    f.BorderSizePixel            = 0
-    f.ZIndex                     = 50
-    f.Visible                    = false
-    f.Parent                     = sg
-    UILib.corner(f, 10)
-    UILib.stroke(f, C.BORDER, 1.5)
-    cardFrame = f
+    local f                   = Instance.new("Frame")
+    f.Name                    = "TutorialPill"
+    f.Size                    = UDim2.fromOffset(188, 40)
+    f.Position                = PILL_HIDDEN
+    f.AnchorPoint             = Vector2.new(1, 1)
+    f.BackgroundColor3        = Color3.fromRGB(7, 10, 20)
+    f.BackgroundTransparency  = 0.14
+    f.BorderSizePixel         = 0
+    f.ZIndex                  = 50
+    f.Visible                 = false
+    f.Parent                  = sg
+    UILib.corner(f, 8)
+    UILib.stroke(f, C.BORDER, 1)
+    pill = f
 
-    -- Left colour accent strip
-    local ab                     = Instance.new("Frame")
-    ab.Name                      = "AccentBar"
-    ab.Size                      = UDim2.new(0, 4, 1, -20)
-    ab.Position                  = UDim2.fromOffset(10, 10)
-    ab.BackgroundColor3          = C.ACCENT
-    ab.BorderSizePixel           = 0
-    ab.ZIndex                    = 51
-    ab.Parent                    = f
-    UILib.corner(ab, 2)
-    accentBar = ab
+    -- Colored icon
+    local ic                  = Instance.new("TextLabel")
+    ic.Name                   = "Icon"
+    ic.Size                   = UDim2.fromOffset(28, 28)
+    ic.Position               = UDim2.fromOffset(8, 6)
+    ic.BackgroundTransparency = 1
+    ic.Text                   = "✦"
+    ic.TextSize               = 20
+    ic.TextColor3             = C.ACCENT
+    ic.Font                   = Enum.Font.GothamBold
+    ic.TextXAlignment         = Enum.TextXAlignment.Center
+    ic.TextYAlignment         = Enum.TextYAlignment.Center
+    ic.ZIndex                 = 51
+    ic.Parent                 = f
+    iconLbl = ic
 
-    -- Icon
-    local ic                     = Instance.new("TextLabel")
-    ic.Name                      = "Icon"
-    ic.Size                      = UDim2.fromOffset(38, 38)
-    ic.Position                  = UDim2.fromOffset(22, 18)
-    ic.BackgroundTransparency    = 1
-    ic.Text                      = "✦"
-    ic.TextSize                  = 26
-    ic.TextColor3                = C.ACCENT
-    ic.Font                      = Enum.Font.GothamBold
-    ic.TextXAlignment            = Enum.TextXAlignment.Center
-    ic.TextYAlignment            = Enum.TextYAlignment.Center
-    ic.ZIndex                    = 51
-    ic.Parent                    = f
-    iconLabel = ic
+    -- Short hint (≤ 4 words, no body text)
+    local ht                  = Instance.new("TextLabel")
+    ht.Name                   = "Hint"
+    ht.Size                   = UDim2.new(1, -56, 1, 0)
+    ht.Position               = UDim2.fromOffset(40, 0)
+    ht.BackgroundTransparency = 1
+    ht.Text                   = ""
+    ht.TextSize               = 13
+    ht.TextColor3             = C.TEXT
+    ht.Font                   = Enum.Font.GothamMedium
+    ht.TextXAlignment         = Enum.TextXAlignment.Left
+    ht.TextYAlignment         = Enum.TextYAlignment.Center
+    ht.ZIndex                 = 51
+    ht.Parent                 = f
+    hintLbl = ht
 
-    -- Title
-    local ti                     = Instance.new("TextLabel")
-    ti.Name                      = "Title"
-    ti.Size                      = UDim2.new(1, -104, 0, 24)
-    ti.Position                  = UDim2.fromOffset(66, 10)
-    ti.BackgroundTransparency    = 1
-    ti.Text                      = ""
-    ti.TextSize                  = 15
-    ti.TextColor3                = C.TEXT
-    ti.Font                      = Enum.Font.GothamBold
-    ti.TextXAlignment            = Enum.TextXAlignment.Left
-    ti.ZIndex                    = 51
-    ti.Parent                    = f
-    titleLabel = ti
-
-    -- Divider
-    local sep                    = Instance.new("Frame")
-    sep.Size                     = UDim2.new(1, -76, 0, 1)
-    sep.Position                 = UDim2.fromOffset(66, 36)
-    sep.BackgroundColor3         = C.SEP
-    sep.BorderSizePixel          = 0
-    sep.ZIndex                   = 51
-    sep.Parent                   = f
-
-    -- Body text
-    local bo                     = Instance.new("TextLabel")
-    bo.Name                      = "Body"
-    bo.Size                      = UDim2.new(1, -78, 1, -48)
-    bo.Position                  = UDim2.fromOffset(66, 44)
-    bo.BackgroundTransparency    = 1
-    bo.Text                      = ""
-    bo.TextSize                  = 13
-    bo.TextColor3                = C.SUBTEXT
-    bo.Font                      = Enum.Font.Gotham
-    bo.TextXAlignment            = Enum.TextXAlignment.Left
-    bo.TextYAlignment            = Enum.TextYAlignment.Top
-    bo.TextWrapped               = true
-    bo.ZIndex                    = 51
-    bo.Parent                    = f
-    bodyLabel = bo
-
-    -- Step counter  "1 / 7"  (shifted left to make room for X button)
-    local sc                     = Instance.new("TextLabel")
-    sc.Name                      = "StepCount"
-    sc.Size                      = UDim2.fromOffset(54, 20)
-    sc.Position                  = UDim2.new(1, -90, 0, 8)
-    sc.BackgroundTransparency    = 1
-    sc.Text                      = ""
-    sc.TextSize                  = 11
-    sc.TextColor3                = C.DIM
-    sc.Font                      = Enum.Font.Gotham
-    sc.TextXAlignment            = Enum.TextXAlignment.Right
-    sc.ZIndex                    = 51
-    sc.Parent                    = f
-    stepLabel = sc
-
-    -- ✕ skip button — always visible, lets experienced players dismiss all tips
-    local xb                     = Instance.new("TextButton")
-    xb.Name                      = "SkipBtn"
-    xb.Size                      = UDim2.fromOffset(22, 22)
-    xb.Position                  = UDim2.new(1, -28, 0, 6)
-    xb.BackgroundColor3          = Color3.fromRGB(110, 22, 22)
-    xb.BackgroundTransparency    = 0.15
-    xb.Text                      = "X"
-    xb.TextSize                  = 12
-    xb.TextColor3                = Color3.fromRGB(220, 180, 180)
-    xb.Font                      = Enum.Font.GothamBold
-    xb.AutoButtonColor           = true
-    xb.BorderSizePixel           = 0
-    xb.ZIndex                    = 52
-    xb.Parent                    = f
-    UILib.corner(xb, 5)
-    skipBtn = xb
+    -- ✕ skip — lets returning players dismiss permanently
+    local xb                  = Instance.new("TextButton")
+    xb.Name                   = "SkipBtn"
+    xb.Size                   = UDim2.fromOffset(18, 18)
+    xb.Position               = UDim2.new(1, -22, 0.5, -9)
+    xb.BackgroundColor3       = Color3.fromRGB(80, 18, 18)
+    xb.BackgroundTransparency = 0.25
+    xb.Text                   = "✕"
+    xb.TextSize               = 9
+    xb.TextColor3             = Color3.fromRGB(190, 140, 140)
+    xb.Font                   = Enum.Font.GothamBold
+    xb.AutoButtonColor        = true
+    xb.BorderSizePixel        = 0
+    xb.ZIndex                 = 52
+    xb.Parent                 = f
+    UILib.corner(xb, 4)
 
     xb.MouseButton1Click:Connect(function()
         dismissed = true
-        if camConn then camConn:Disconnect(); camConn = nil end
+        if camConn   then camConn:Disconnect();  camConn   = nil end
+        if hideTimer then task.cancel(hideTimer); hideTimer = nil end
         slideOut(function()
-            if cardFrame then cardFrame:Destroy(); cardFrame = nil end
+            if pill then pill:Destroy(); pill = nil end
         end)
     end)
 
-    -- "Got it" dismiss button (only on last step)
-    local db                     = Instance.new("TextButton")
-    db.Name                      = "DismissBtn"
-    db.Size                      = UDim2.fromOffset(90, 24)
-    db.Position                  = UDim2.new(1, -100, 1, -30)
-    db.BackgroundColor3          = C.GOLD
-    db.BackgroundTransparency    = 0.2
-    db.Text                      = "Got it  ✓"
-    db.TextSize                  = 12
-    db.TextColor3                = Color3.fromRGB(10, 8, 0)
-    db.Font                      = Enum.Font.GothamBold
-    db.AutoButtonColor           = true
-    db.BorderSizePixel           = 0
-    db.Visible                   = false
-    db.ZIndex                    = 52
-    db.Parent                    = f
-    UILib.corner(db, 6)
-    dismissBtn = db
-
-    db.MouseButton1Click:Connect(function()
-        dismissed = true
-        slideOut(function()
-            if cardFrame then cardFrame:Destroy(); cardFrame = nil end
-        end)
-    end)
-
-    -- Show step 1 and begin watching the camera
     applyStep(1)
     slideIn()
+    scheduleAutoHide()
     startCameraWatch()
 end
 
--- ── Public: fire from init.client.luau at key game events ────────────────────
+-- ── Public notify ─────────────────────────────────────────────────────────────
+
 function Tutorial.notify(action: string)
     if dismissed or completing then return end
     local step = STEPS[currentStep]

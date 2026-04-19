@@ -32,6 +32,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Monument"      then return Config.MONUMENT_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
+	if buildingType == "Blob"          then return Config.BLOB_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -285,6 +286,50 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		ring.CanCollide   = false
 		ring.Parent       = model
 
+	elseif buildingType == "Blob" then
+		-- Organic sphere body
+		base.Shape    = Enum.PartType.Ball
+		base.Material = Enum.Material.SmoothPlastic
+
+		-- Small nubs for an organic look
+		local blobCenter = position + Vector3.new(0, Config.BLOB_SIZE.Y / 2, 0)
+		for _, nubOff in ipairs({
+			Vector3.new(3.2,  0.3,  0),
+			Vector3.new(-2.2, 0.3,  2.8),
+			Vector3.new( 0.6, 0.3, -3.2),
+		}) do
+			local nub         = Instance.new("Part")
+			nub.Shape         = Enum.PartType.Ball
+			nub.Size          = Vector3.new(2.5, 2.5, 2.5)
+			nub.Position      = blobCenter + nubOff
+			nub.BrickColor    = player.TeamColor
+			nub.Material      = Enum.Material.SmoothPlastic
+			nub.Anchored      = true
+			nub.CanCollide    = false
+			nub.CastShadow    = false
+			nub.Parent        = model
+		end
+
+		-- Neon ground ring
+		local ring        = Instance.new("Part")
+		ring.Name         = "BlobRing"
+		ring.Shape        = Enum.PartType.Cylinder
+		ring.Size         = Vector3.new(0.3, 9, 9)
+		ring.CFrame       = CFrame.new(position + Vector3.new(0, 0.15, 0))
+		                  * CFrame.Angles(0, 0, math.pi / 2)
+		ring.BrickColor   = player.TeamColor
+		ring.Material     = Enum.Material.Neon
+		ring.Anchored     = true
+		ring.CastShadow   = false
+		ring.CanCollide   = false
+		ring.Parent       = model
+
+		-- Ready flag (becomes true when construction finishes)
+		local rv       = Instance.new("BoolValue")
+		rv.Name        = "IsReady"
+		rv.Value       = false
+		rv.Parent      = model
+
 	else
 		-- Barracks flag
 		local flag      = Instance.new("Part")
@@ -377,6 +422,12 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 				if buildingType == "Mine" and mineralManager then
 					mineralManager.setMineReady(id)
+				end
+
+				if buildingType == "Blob" then
+					local mdl = buildingsFolder:FindFirstChild(id)
+					local rv  = mdl and mdl:FindFirstChild("IsReady") :: BoolValue?
+					if rv then rv.Value = true end
 				end
 
 				if buildingType == "Monument" then
@@ -864,6 +915,20 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 				if d.Magnitude < Config.COMMAND_CENTER_MIN_DIST then return end
 			end
+			-- CC must be near at least one mineral deposit
+			if mineralManager then
+				local depPositions = mineralManager.getUnclaimedPositions()
+				if #depPositions > 0 then
+					local nearDep = false
+					for _, dp in depPositions do
+						if (Vector3.new(snapped.X, 0, snapped.Z) - dp).Magnitude
+							<= Config.CC_MAX_DIST_FROM_DEPOSIT then
+							nearDep = true; break
+						end
+					end
+					if not nearDep then return end
+				end
+			end
 			createBuilding(player, snapped, "CommandCenter")
 			return
 		end
@@ -886,6 +951,23 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				end
 			end
 			if not inZone then return end
+		end
+
+		-- Blob: free to place; first blob (no mines) must be near a deposit
+		if buildingType == "Blob" then
+			if getPlayerBuildingCount(player, "Mine") == 0 and mineralManager then
+				local depPositions = mineralManager.getUnclaimedPositions()
+				local nearDep = false
+				for _, dp in depPositions do
+					if (Vector3.new(snapped.X, 0, snapped.Z) - dp).Magnitude
+						<= Config.FIRST_BLOB_MAX_DIST_FROM_DEPOSIT then
+						nearDep = true; break
+					end
+				end
+				if not nearDep then return end
+			end
+			createBuilding(player, snapped, "Blob")
+			return
 		end
 
 		-- Mine cap
@@ -917,6 +999,47 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			mineralManager.registerMine(id, snapped, player)
 		end
 	end)
+
+	-- ── EvolveBlob remote ────────────────────────────────────────────────
+	local EVOLVE_VALID = { Mine = true, Barracks = true, Turret = true }
+	RemoteHandler.get(Config.REMOTES.EvolveBlob).OnServerEvent:Connect(
+		function(player, blobId, targetType)
+			if type(blobId) ~= "string" or type(targetType) ~= "string" then return end
+			if not EVOLVE_VALID[targetType] then return end
+
+			local data = buildingData[blobId]
+			if not data or data.buildingType ~= "Blob" then return end
+			if data.owner ~= player then return end
+			if data.isConstructing then return end
+
+			local blobPos = snapGrid(data.base.Position)
+
+			-- Cost for the target building
+			local cost = targetType == "Mine"   and Config.MINE_COST
+				or       targetType == "Turret" and Config.TURRET_COST
+				or       Config.BUILDING_COST
+			if not resourceManagerRef or resourceManagerRef.get(player) < cost then return end
+
+			-- For Mine: claim deposit before spending (fail fast, blob stays if no deposit)
+			if targetType == "Mine" then
+				if not mineralManager or not mineralManager.tryClaimDeposit(blobPos) then return end
+			end
+
+			resourceManagerRef.spend(player, cost)
+
+			-- Destroy blob
+			buildingData[blobId] = nil
+			turretTimers[blobId] = nil
+			local blobModel = buildingsFolder:FindFirstChild(blobId)
+			if blobModel then blobModel:Destroy() end
+
+			-- Create the evolved building
+			local newId = createBuilding(player, blobPos, targetType)
+			if targetType == "Mine" then
+				mineralManager.registerMine(newId, blobPos, player)
+			end
+		end
+	)
 
 	-- ── BuildMonument remote ──────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.BuildMonument).OnServerEvent:Connect(function(player)

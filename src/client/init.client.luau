@@ -17,6 +17,7 @@ local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
+local BlobPanel      = require(script:WaitForChild("BlobPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager   = require(script:WaitForChild("CometManager"))
@@ -110,6 +111,7 @@ end
 
 local function refreshRequirements()
 	HUD.refreshTrayState(ownedBuildingCounts)
+	BuildingPlacer.setOwnedMineCount(ownedBuildingCounts["Mine"] or 0)
 end
 
 local function isBlocked(): boolean
@@ -141,6 +143,7 @@ WorkshopPanel.init(Network,
 TurretPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
+BlobPanel.init()
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
@@ -233,6 +236,7 @@ local function hideBuildingPanels()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
+	BlobPanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
@@ -304,6 +308,7 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, bu
 	if ownerId == localUserId and buildingType ~= "CommandCenter" then
 		ownedBuildingCounts[buildingType] = (ownedBuildingCounts[buildingType] or 0) + 1
 		refreshRequirements()
+		if buildingType == "Blob"     then Tutorial.notify("blob_placed")     end
 		if buildingType == "Mine"     then Tutorial.notify("mine_placed")     end
 		if buildingType == "Barracks" then Tutorial.notify("barracks_placed") end
 
@@ -389,6 +394,18 @@ UnitController.onTurretSelected(function(turretId: string?)
 		TurretPanel.show(turretId)
 	else
 		TurretPanel.hide()
+	end
+end)
+
+UnitController.onBlobSelected(function(blobId: string?)
+	if blobId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.show(blobId)
+	else
+		BlobPanel.hide()
 	end
 end)
 

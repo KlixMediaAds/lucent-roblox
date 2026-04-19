@@ -91,6 +91,10 @@ function Network.onUnitHit(fn: (Vector3, Vector3, string) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitHit).OnClientEvent:Connect(fn)
 end
 
+function Network.evolveBlob(blobId: string, targetType: string)
+	RemoteHandler.get(Config.REMOTES.EvolveBlob):FireServer(blobId, targetType)
+end
+
 function Network.upgradeMine(mineId: string, upgradeType: string)
 	RemoteHandler.get(Config.REMOTES.UpgradeMine):FireServer(mineId, upgradeType)
 end
