@@ -1,8 +1,11 @@
 local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris            = game:GetService("Debris")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+
+local rng = Random.new()
 
 local BuildingManager    = {}
 local buildingsFolder: Folder
@@ -563,6 +566,112 @@ function BuildingManager.setResearchManager(rm: any)
 	researchManagerRef = rm
 end
 
+-- ── Destruction VFX (server-side) ────────────────────────────────────────────
+
+local function spawnDestructionVFX(pos: Vector3)
+	-- 3D destruction sound
+	local soundPart            = Instance.new("Part")
+	soundPart.Anchored         = true
+	soundPart.CanCollide       = false
+	soundPart.CanTouch         = false
+	soundPart.Transparency     = 1
+	soundPart.Size             = Vector3.new(1, 1, 1)
+	soundPart.CastShadow       = false
+	soundPart.Position         = pos
+	soundPart.Parent           = workspace
+	local snd                  = Instance.new("Sound")
+	snd.SoundId                = "rbxassetid://117211977307268"
+	snd.Volume                 = 1.1
+	snd.RollOffMaxDistance     = 200
+	snd.RollOffMinDistance     = 12
+	snd.Parent                 = soundPart
+	snd:Play()
+	Debris:AddItem(soundPart, 6)
+
+	-- Primary explosion
+	local exp              = Instance.new("Explosion")
+	exp.BlastRadius        = 0
+	exp.BlastPressure      = 0
+	exp.Position           = pos
+	exp.ExplosionType      = Enum.ExplosionType.NoCraters
+	exp.Parent             = workspace
+
+	-- Secondary offset explosion
+	task.delay(0.08, function()
+		local exp2          = Instance.new("Explosion")
+		exp2.BlastRadius    = 0
+		exp2.BlastPressure  = 0
+		exp2.Position       = pos + Vector3.new(rng:NextNumber(-2.5, 2.5), 1.5, rng:NextNumber(-2.5, 2.5))
+		exp2.ExplosionType  = Enum.ExplosionType.NoCraters
+		exp2.Parent         = workspace
+	end)
+
+	-- Tertiary small explosion
+	task.delay(0.18, function()
+		local exp3          = Instance.new("Explosion")
+		exp3.BlastRadius    = 0
+		exp3.BlastPressure  = 0
+		exp3.Position       = pos + Vector3.new(rng:NextNumber(-3, 3), rng:NextNumber(0, 2), rng:NextNumber(-3, 3))
+		exp3.ExplosionType  = Enum.ExplosionType.NoCraters
+		exp3.Parent         = workspace
+	end)
+
+	-- Flash light burst
+	local flashPart            = Instance.new("Part")
+	flashPart.Anchored         = true
+	flashPart.CanCollide       = false
+	flashPart.CanTouch         = false
+	flashPart.CastShadow       = false
+	flashPart.Transparency     = 1
+	flashPart.Size             = Vector3.new(1, 1, 1)
+	flashPart.Position         = pos + Vector3.new(0, 3, 0)
+	flashPart.Parent           = workspace
+	local light                = Instance.new("PointLight")
+	light.Brightness           = 10
+	light.Range                = 50
+	light.Color                = Color3.fromRGB(255, 150, 50)
+	light.Parent               = flashPart
+	Debris:AddItem(flashPart, 0.45)
+
+	-- Debris chunks
+	local debrisColors = {
+		Color3.fromRGB(120, 110, 100),
+		Color3.fromRGB(80,  75,  70),
+		Color3.fromRGB(60,  55,  50),
+	}
+	for _ = 1, 10 do
+		local d            = Instance.new("Part")
+		d.Anchored         = false
+		d.CanCollide       = false
+		d.CanTouch         = false
+		d.CastShadow       = false
+		d.Size             = Vector3.new(
+			rng:NextNumber(0.25, 0.9),
+			rng:NextNumber(0.25, 0.9),
+			rng:NextNumber(0.25, 0.9)
+		)
+		d.Color            = debrisColors[rng:NextInteger(1, #debrisColors)]
+		d.Material         = Enum.Material.SmoothPlastic
+		d.Position         = pos + Vector3.new(
+			rng:NextNumber(-2, 2),
+			rng:NextNumber(0.5, 2.5),
+			rng:NextNumber(-2, 2)
+		)
+		d.Parent           = workspace
+		d.AssemblyLinearVelocity = Vector3.new(
+			rng:NextNumber(-14, 14),
+			rng:NextNumber(9, 22),
+			rng:NextNumber(-14, 14)
+		)
+		d.AssemblyAngularVelocity = Vector3.new(
+			rng:NextNumber(-6, 6),
+			rng:NextNumber(-6, 6),
+			rng:NextNumber(-6, 6)
+		)
+		Debris:AddItem(d, rng:NextNumber(1.5, 3.0))
+	end
+end
+
 function BuildingManager.damage(id: string, amount: number)
 	local data = buildingData[id]
 	if not data then return end
@@ -591,8 +700,11 @@ function BuildingManager.damage(id: string, amount: number)
 		mineralManager.removeMine(id)
 	end
 
-	local model = buildingsFolder:FindFirstChild(id)
+	local model      = buildingsFolder:FindFirstChild(id)
+	local destroyPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
 	if model then model:Destroy() end
+
+	task.spawn(spawnDestructionVFX, destroyPos)
 
 	if wasCC then
 		playerHasCC[owner.UserId] = nil
