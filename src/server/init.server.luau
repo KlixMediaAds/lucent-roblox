@@ -47,64 +47,31 @@ MineralManager.setBuildingManager(BuildingManager)
 AIManager.init(UnitManager, BuildingManager, ResourceManager)
 AIManager.setResearchManager(ResearchManager)
 
--- ── Elimination callback ──────────────────────────────────────────────────────
-BuildingManager.setOnCCDestroyed(function(player)
-	UnitManager.removeAllUnitsFor(player)
-	BuildingManager.removeAllBuildingsFor(player)   -- also cleans up mines
-	ResourceManager.reset(player)
-	ResearchManager.resetPlayer(player)
-
-	if player.UserId > 0 then
-		-- Real player: tell their client to enter CC placement mode again
-		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-	else
-		-- AI bot: reset its state so it rebuilds
-		AIManager.resetBot(player.UserId)
-	end
-end)
-
--- ── Chat commands (always active, not gated by lobby) ────────────────────────
-Players.PlayerAdded:Connect(function(player)
-	player.Chatted:Connect(function(msg)
-		local lower = msg:lower():match("^%s*(.-)%s*$")
-		if lower == "/money" then
-			ResourceManager.add(player, 10000)
-		end
-		local difficulty = lower:match("^/ai%s+(%a+)$")
-		if difficulty then
-			AIManager.spawnAI(difficulty)
-		end
-	end)
-end)
-
--- ── Lobby → game handoff ──────────────────────────────────────────────────────
-LobbyManager.init(MineralManager, function()
-	-- Tell every connected player to place their Command Center
-	for _, player in Players:GetPlayers() do
-		task.delay(1, function()
-			if player.Parent then
-				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-			end
-		end)
-	end
-	-- Wire up late-joiners (shouldn't happen after lobby ends, but just in case)
-	Players.PlayerAdded:Connect(function(player)
-		task.delay(2, function()
-			if player.Parent then
-				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-			end
-		end)
-	end)
-end)
-
--- ── Game reset after a player wins ───────────────────────────────────────────
+-- ── Game end / reset ──────────────────────────────────────────────────────────
 local gameResetInProgress = false
+local gameStartTime       = os.clock()
 
-BuildingManager.setOnPlayerWon(function()
+local function triggerEndGame(winnerUserId: number, reason: string)
 	if gameResetInProgress then return end
 	gameResetInProgress = true
 
-	task.wait(8)   -- let players read the victory/defeat screen
+	local statsTable = {}
+	local duration   = math.max(0, math.floor(os.clock() - gameStartTime))
+	for _, player in Players:GetPlayers() do
+		if player.UserId > 0 then
+			local rs = ResearchManager.getStats(player)
+			statsTable[tostring(player.UserId)] = {
+				kills           = rs.kills,
+				unitsTrained    = rs.unitsTrained,
+				buildingsBuilt  = rs.buildingsBuilt,
+				resourcesEarned = ResourceManager.getTotalEarned(player),
+			}
+		end
+	end
+
+	RemoteHandler.get(Config.REMOTES.ShowEndScreen):FireAllClients(winnerUserId, reason, statsTable, duration)
+
+	task.wait(10)
 
 	UnitManager.resetAll()
 	BuildingManager.resetAll()
@@ -116,12 +83,90 @@ BuildingManager.setOnPlayerWon(function()
 
 	MineralManager.resetAll()
 	AIManager.resetAllBots()
+	gameStartTime = os.clock()
 
 	for _, player in Players:GetPlayers() do
 		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
 	end
 
 	gameResetInProgress = false
+end
+
+-- ── Elimination callback ──────────────────────────────────────────────────────
+BuildingManager.setOnCCDestroyed(function(player)
+	UnitManager.removeAllUnitsFor(player)
+	BuildingManager.removeAllBuildingsFor(player)
+
+	if player.UserId > 0 then
+		local totalReal = 0
+		local remainingWithCC = {}
+		for _, p in Players:GetPlayers() do
+			if p.UserId > 0 then
+				totalReal += 1
+				if BuildingManager.hasCommandCenter(p) then
+					table.insert(remainingWithCC, p)
+				end
+			end
+		end
+		if totalReal >= 2 and #remainingWithCC == 1 then
+			-- Don't reset stats yet — triggerEndGame collects them first
+			triggerEndGame(remainingWithCC[1].UserId, "elimination")
+		else
+			ResourceManager.reset(player)
+			ResearchManager.resetPlayer(player)
+			RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+		end
+	else
+		ResourceManager.reset(player)
+		ResearchManager.resetPlayer(player)
+		AIManager.resetBot(player.UserId)
+	end
+end)
+
+-- ── Monument win ──────────────────────────────────────────────────────────────
+BuildingManager.setOnPlayerWon(function(winnerUserId: number)
+	triggerEndGame(winnerUserId, "monument")
+end)
+
+-- ── Chat commands (always active, not gated by lobby) ────────────────────────
+local function connectChatForPlayer(player: Player)
+	player.Chatted:Connect(function(msg)
+		local lower = msg:lower():match("^%s*(.-)%s*$")
+		if lower == "/money" then
+			ResourceManager.add(player, 10000)
+		end
+		if lower == "/end" then
+			triggerEndGame(player.UserId, "debug")
+		end
+		local difficulty = lower:match("^/ai%s+(%a+)$")
+		if difficulty then
+			AIManager.spawnAI(difficulty)
+		end
+	end)
+end
+
+Players.PlayerAdded:Connect(connectChatForPlayer)
+for _, player in Players:GetPlayers() do
+	connectChatForPlayer(player)
+end
+
+-- ── Lobby → game handoff ──────────────────────────────────────────────────────
+LobbyManager.init(MineralManager, function()
+	gameStartTime = os.clock()
+	for _, player in Players:GetPlayers() do
+		task.delay(1, function()
+			if player.Parent then
+				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+			end
+		end)
+	end
+	Players.PlayerAdded:Connect(function(player)
+		task.delay(2, function()
+			if player.Parent then
+				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+			end
+		end)
+	end)
 end)
 
 print("[Server] RTS initialized")

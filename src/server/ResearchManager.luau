@@ -65,6 +65,7 @@ local function grantTech(player: any, techName: string)
 	state.done[techName] = true
 	RemoteHandler.get(Config.REMOTES.UnlockGranted):FireClient(player, techName)
 	for _, hook in completionHooks do hook(player, techName) end
+	checkConditions(player)  -- re-evaluate anything that was blocked by this prerequisite
 end
 
 local function checkConditions(player: any)
@@ -150,6 +151,15 @@ function ResearchManager.resetPlayer(player: any)
 		trained     = {},
 		groupsFired = {},
 	}
+end
+
+function ResearchManager.getStats(player: any): { kills: number, unitsTrained: number, buildingsBuilt: number }
+	local state = getState(player)
+	local totalTrained = 0
+	for _, v in state.trained do totalTrained += v end
+	local totalBuilds = 0
+	for _, v in state.builds do totalBuilds += v end
+	return { kills = state.kills, unitsTrained = totalTrained, buildingsBuilt = totalBuilds }
 end
 
 -- AI shortcut: grant a tech directly without conditions (bots don't do the gallery flow)

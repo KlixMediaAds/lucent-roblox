@@ -5,26 +5,33 @@ local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 
 local ResourceManager   = {}
-local store: {[number]: number} = {}
+local store:       {[number]: number} = {}
+local totalEarned: {[number]: number} = {}
 
 local function sync(player: Player)
-	if player.UserId < 0 then return end   -- AI bots (negative UserId) have no client to sync
+	if player.UserId < 0 then return end
 	RemoteHandler.get(Config.REMOTES.SyncResources):FireClient(player, store[player.UserId] or 0)
 end
 
 function ResourceManager.init()
 	Players.PlayerAdded:Connect(function(player)
-		store[player.UserId] = Config.STARTING_RESOURCES
+		store[player.UserId]       = Config.STARTING_RESOURCES
+		totalEarned[player.UserId] = 0
 		task.defer(sync, player)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		store[player.UserId] = nil
+		store[player.UserId]       = nil
+		totalEarned[player.UserId] = nil
 	end)
 end
 
 function ResourceManager.get(player: Player): number
 	return store[player.UserId] or 0
+end
+
+function ResourceManager.getTotalEarned(player: Player): number
+	return totalEarned[player.UserId] or 0
 end
 
 function ResourceManager.spend(player: Player, amount: number): boolean
@@ -36,12 +43,14 @@ function ResourceManager.spend(player: Player, amount: number): boolean
 end
 
 function ResourceManager.reset(player: Player)
-	store[player.UserId] = Config.STARTING_RESOURCES
+	store[player.UserId]       = Config.STARTING_RESOURCES
+	totalEarned[player.UserId] = 0
 	sync(player)
 end
 
 function ResourceManager.add(player: Player, amount: number)
-	store[player.UserId] = (store[player.UserId] or 0) + amount
+	store[player.UserId]       = (store[player.UserId] or 0) + amount
+	totalEarned[player.UserId] = (totalEarned[player.UserId] or 0) + amount
 	sync(player)
 end
 

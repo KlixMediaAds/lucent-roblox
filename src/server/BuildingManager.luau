@@ -20,7 +20,7 @@ type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, bui
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
-local onPlayerWonCb: (() -> ())?
+local onPlayerWonCb: ((number) -> ())?
 
 local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
 local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
@@ -554,7 +554,7 @@ function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
 	onCCDestroyedCb = fn
 end
 
-function BuildingManager.setOnPlayerWon(fn: () -> ())
+function BuildingManager.setOnPlayerWon(fn: (number) -> ())
 	onPlayerWonCb = fn
 end
 
@@ -950,7 +950,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				RemoteHandler.get(Config.REMOTES.PlayerWon):FireAllClients(userId)
 				monumentByOwner[userId] = nil
 				monumentWinTimer[bid]   = nil
-				if onPlayerWonCb then task.spawn(onPlayerWonCb) end
+				if onPlayerWonCb then task.spawn(onPlayerWonCb, userId) end
 				break
 			end
 

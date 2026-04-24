@@ -1158,41 +1158,164 @@ Network.onMonumentProgress(function(ownerUserId: number, timeRemaining: number?)
 	end
 end)
 
--- Win / lose overlay
+-- End screen overlay
 do
-	local sg             = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
-	local overlay        = Instance.new("Frame")
-	overlay.Name         = "WinOverlay"
-	overlay.Size         = UDim2.new(1, 0, 1, 0)
-	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	local sg      = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+	local overlay = Instance.new("Frame")
+	overlay.Name                   = "EndScreen"
+	overlay.Size                   = UDim2.new(1, 0, 1, 0)
+	overlay.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
 	overlay.BackgroundTransparency = 0.45
-	overlay.ZIndex       = 100
-	overlay.Visible      = false
-	overlay.Parent       = sg
-	winOverlay           = overlay
+	overlay.ZIndex                 = 100
+	overlay.Visible                = false
+	overlay.Parent                 = sg
+	winOverlay = overlay
 
-	local heading        = Instance.new("TextLabel")
-	heading.Name         = "Heading"
-	heading.Size         = UDim2.new(1, 0, 0, 110)
-	heading.Position     = UDim2.new(0, 0, 0.5, -90)
+	local card = Instance.new("Frame")
+	card.Name                   = "Card"
+	card.Size                   = UDim2.new(0, 600, 0, 500)
+	card.Position               = UDim2.new(0.5, -300, 0.5, -250)
+	card.BackgroundColor3       = Color3.fromRGB(16, 18, 26)
+	card.BorderSizePixel        = 0
+	card.ZIndex                 = 101
+	card.Parent                 = overlay
+	local cardCorner            = Instance.new("UICorner")
+	cardCorner.CornerRadius     = UDim.new(0, 10)
+	cardCorner.Parent           = card
+
+	local topBar                = Instance.new("Frame")
+	topBar.Name                 = "TopBar"
+	topBar.Size                 = UDim2.new(1, 0, 0, 6)
+	topBar.BackgroundColor3     = Color3.fromRGB(255, 215, 0)
+	topBar.BorderSizePixel      = 0
+	topBar.ZIndex               = 102
+	topBar.Parent               = card
+	local topCorner             = Instance.new("UICorner")
+	topCorner.CornerRadius      = UDim.new(0, 10)
+	topCorner.Parent            = topBar
+
+	local heading               = Instance.new("TextLabel")
+	heading.Name                = "Heading"
+	heading.Size                = UDim2.new(1, 0, 0, 76)
+	heading.Position            = UDim2.new(0, 0, 0, 12)
 	heading.BackgroundTransparency = 1
-	heading.Font         = Enum.Font.GothamBold
-	heading.TextSize     = 80
-	heading.Text         = "VICTORY!"
-	heading.ZIndex       = 101
-	heading.Parent       = overlay
+	heading.Font                = Enum.Font.GothamBold
+	heading.TextSize            = 64
+	heading.Text                = "VICTORY!"
+	heading.TextColor3          = Color3.fromRGB(255, 215, 0)
+	heading.ZIndex              = 102
+	heading.Parent              = card
 
-	local sub            = Instance.new("TextLabel")
-	sub.Name             = "Sub"
-	sub.Size             = UDim2.new(1, 0, 0, 36)
-	sub.Position         = UDim2.new(0, 0, 0.5, 32)
-	sub.BackgroundTransparency = 1
-	sub.Font             = Enum.Font.Gotham
-	sub.TextSize         = 22
-	sub.TextColor3       = Color3.fromRGB(200, 220, 255)
-	sub.Text             = ""
-	sub.ZIndex           = 101
-	sub.Parent           = overlay
+	local sub                   = Instance.new("TextLabel")
+	sub.Name                    = "Sub"
+	sub.Size                    = UDim2.new(1, -60, 0, 26)
+	sub.Position                = UDim2.new(0, 30, 0, 94)
+	sub.BackgroundTransparency  = 1
+	sub.Font                    = Enum.Font.Gotham
+	sub.TextSize                = 16
+	sub.Text                    = ""
+	sub.TextColor3              = Color3.fromRGB(165, 180, 210)
+	sub.ZIndex                  = 102
+	sub.Parent                  = card
+
+	-- Player avatar cards (populated dynamically in handler)
+	local playersSection        = Instance.new("Frame")
+	playersSection.Name         = "PlayersSection"
+	playersSection.Size         = UDim2.new(1, -60, 0, 120)
+	playersSection.Position     = UDim2.new(0, 30, 0, 130)
+	playersSection.BackgroundTransparency = 1
+	playersSection.ZIndex       = 102
+	playersSection.Parent       = card
+
+	local div1                  = Instance.new("Frame")
+	div1.Size                   = UDim2.new(1, -60, 0, 1)
+	div1.Position               = UDim2.new(0, 30, 0, 260)
+	div1.BackgroundColor3       = Color3.fromRGB(55, 62, 80)
+	div1.BorderSizePixel        = 0
+	div1.ZIndex                 = 102
+	div1.Parent                 = card
+
+	local statDefs = {
+		{ id = "Kills",     label = "Enemy Units Destroyed" },
+		{ id = "Trained",   label = "Units Trained"         },
+		{ id = "Builds",    label = "Buildings Constructed" },
+		{ id = "Resources", label = "Resources Gathered"    },
+	}
+	for i, def in statDefs do
+		local row               = Instance.new("Frame")
+		row.Name                = def.id .. "Row"
+		row.Size                = UDim2.new(1, -60, 0, 34)
+		row.Position            = UDim2.new(0, 30, 0, 270 + (i - 1) * 38)
+		row.BackgroundTransparency = 1
+		row.ZIndex              = 102
+		row.Parent              = card
+
+		local lbl               = Instance.new("TextLabel")
+		lbl.Size                = UDim2.new(0.72, 0, 1, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Font                = Enum.Font.Gotham
+		lbl.TextSize            = 16
+		lbl.Text                = def.label
+		lbl.TextColor3          = Color3.fromRGB(130, 145, 170)
+		lbl.TextXAlignment      = Enum.TextXAlignment.Left
+		lbl.ZIndex              = 103
+		lbl.Parent              = row
+
+		local val               = Instance.new("TextLabel")
+		val.Name                = def.id .. "Value"
+		val.Size                = UDim2.new(0.28, 0, 1, 0)
+		val.Position            = UDim2.new(0.72, 0, 0, 0)
+		val.BackgroundTransparency = 1
+		val.Font                = Enum.Font.GothamBold
+		val.TextSize            = 20
+		val.Text                = "0"
+		val.TextColor3          = Color3.fromRGB(235, 240, 255)
+		val.TextXAlignment      = Enum.TextXAlignment.Right
+		val.ZIndex              = 103
+		val.Parent              = row
+	end
+
+	local div2                  = Instance.new("Frame")
+	div2.Size                   = UDim2.new(1, -60, 0, 1)
+	div2.Position               = UDim2.new(0, 30, 0, 428)
+	div2.BackgroundColor3       = Color3.fromRGB(55, 62, 80)
+	div2.BorderSizePixel        = 0
+	div2.ZIndex                 = 102
+	div2.Parent                 = card
+
+	local durationLbl           = Instance.new("TextLabel")
+	durationLbl.Name            = "DurationLabel"
+	durationLbl.Size            = UDim2.new(1, -60, 0, 22)
+	durationLbl.Position        = UDim2.new(0, 30, 0, 438)
+	durationLbl.BackgroundTransparency = 1
+	durationLbl.Font            = Enum.Font.Gotham
+	durationLbl.TextSize        = 14
+	durationLbl.Text            = "Match duration: --"
+	durationLbl.TextColor3      = Color3.fromRGB(100, 115, 140)
+	durationLbl.TextXAlignment  = Enum.TextXAlignment.Left
+	durationLbl.ZIndex          = 102
+	durationLbl.Parent          = card
+
+	local returnLbl             = Instance.new("TextLabel")
+	returnLbl.Name              = "ReturnLabel"
+	returnLbl.Size              = UDim2.new(1, -60, 0, 26)
+	returnLbl.Position          = UDim2.new(0, 30, 0, 468)
+	returnLbl.BackgroundTransparency = 1
+	returnLbl.Font              = Enum.Font.Gotham
+	returnLbl.TextSize          = 15
+	returnLbl.Text              = "Returning to lobby..."
+	returnLbl.TextColor3        = Color3.fromRGB(90, 105, 130)
+	returnLbl.TextXAlignment    = Enum.TextXAlignment.Left
+	returnLbl.ZIndex            = 102
+	returnLbl.Parent            = card
+
+	-- Tick sound played during stat counter animations
+	local tickSnd               = Instance.new("Sound")
+	tickSnd.Name                = "TickSound"
+	tickSnd.SoundId             = "rbxassetid://9119739203"
+	tickSnd.Volume              = 0.25
+	tickSnd.RollOffMaxDistance  = 0
+	tickSnd.Parent              = card
 end
 
 Network.onCCAttacked(function()
@@ -1203,17 +1326,219 @@ Network.onMineDepletionWarning(function(_mineId: string)
 	HUD.showNotification("⛏ A Mine has been depleted.", Color3.fromRGB(220, 150, 30))
 end)
 
-Network.onPlayerWon(function(winnerUserId: number)
-	winOverlay.Visible = true
-	local heading = winOverlay:FindFirstChild("Heading") :: TextLabel?
-	local sub     = winOverlay:FindFirstChild("Sub")     :: TextLabel?
-	if winnerUserId == localUserId then
-		if heading then heading.Text = "VICTORY!";           heading.TextColor3 = Color3.fromRGB(255, 215, 0)  end
-		if sub     then sub.Text     = "Your monument stood for 5 minutes." end
-	else
-		if heading then heading.Text = "DEFEAT";             heading.TextColor3 = Color3.fromRGB(210, 50, 50)  end
-		if sub     then sub.Text     = "The enemy's monument has been completed." end
+Network.onShowEndScreen(function(winnerUserId: number, reason: string, statsTable: any, duration: number)
+	if not winOverlay then return end
+	local card = winOverlay:FindFirstChild("Card")
+	if not card then return end
+
+	local isWinner = winnerUserId == localUserId
+
+	-- Heading + colour strip
+	local heading = card:FindFirstChild("Heading") :: TextLabel?
+	local sub     = card:FindFirstChild("Sub")     :: TextLabel?
+	local topBar  = card:FindFirstChild("TopBar")  :: Frame?
+	local durLbl  = card:FindFirstChild("DurationLabel") :: TextLabel?
+	local retLbl  = card:FindFirstChild("ReturnLabel")   :: TextLabel?
+
+	if heading then
+		heading.Text       = isWinner and "VICTORY!" or "DEFEAT"
+		heading.TextColor3 = isWinner and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(220, 55, 55)
 	end
+	if topBar then
+		topBar.BackgroundColor3 = isWinner and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(200, 40, 40)
+	end
+	if sub then
+		if isWinner then
+			sub.Text = reason == "monument"   and "Your monument stood for 5 minutes."
+				or reason == "elimination" and "You are the last commander standing."
+				or "Victory declared."
+		else
+			local winnerName = "Enemy"
+			local wp = Players:GetPlayerByUserId(winnerUserId)
+			if wp then winnerName = wp.Name end
+			sub.Text = reason == "monument"   and (winnerName .. "'s monument completed its hold time.")
+				or reason == "elimination" and "Your Command Center was destroyed."
+				or "Defeat declared."
+		end
+	end
+
+	if durLbl and duration then
+		local m = math.floor(duration / 60)
+		local s = math.floor(duration % 60)
+		durLbl.Text = string.format("Match duration: %d:%02d", m, s)
+	end
+
+	-- ── Player avatar cards ───────────────────────────────────────────────────
+	local playersSection = card:FindFirstChild("PlayersSection") :: Frame?
+	if playersSection then
+		for _, ch in playersSection:GetChildren() do ch:Destroy() end
+
+		-- Collect real player IDs from stats table; always include local player
+		local playerIds: { number } = {}
+		local seen: { [number]: boolean } = {}
+		if statsTable then
+			for uidStr in statsTable do
+				local uid = tonumber(uidStr)
+				if uid and not seen[uid] then
+					seen[uid] = true
+					table.insert(playerIds, uid)
+				end
+			end
+		end
+		if not seen[localUserId] then
+			table.insert(playerIds, localUserId)
+		end
+		-- Winner first, then local, then rest
+		table.sort(playerIds, function(a, b)
+			if a == winnerUserId then return true end
+			if b == winnerUserId then return false end
+			if a == localUserId  then return true end
+			return a < b
+		end)
+
+		-- Horizontal layout with UIListLayout
+		local layout                 = Instance.new("UIListLayout")
+		layout.FillDirection         = Enum.FillDirection.Horizontal
+		layout.HorizontalAlignment   = Enum.HorizontalAlignment.Center
+		layout.VerticalAlignment     = Enum.VerticalAlignment.Center
+		layout.SortOrder             = Enum.SortOrder.LayoutOrder
+		layout.Padding               = UDim.new(0, 18)
+		layout.Parent                = playersSection
+
+		for idx, uid in playerIds do
+			-- VS separator between cards
+			if idx > 1 then
+				local vs             = Instance.new("TextLabel")
+				vs.Size              = UDim2.new(0, 28, 0, 120)
+				vs.LayoutOrder       = idx * 2 - 1
+				vs.BackgroundTransparency = 1
+				vs.Font              = Enum.Font.GothamBold
+				vs.TextSize          = 13
+				vs.Text              = "VS"
+				vs.TextColor3        = Color3.fromRGB(70, 80, 100)
+				vs.ZIndex            = 103
+				vs.Parent            = playersSection
+			end
+
+			local isThisWinner = uid == winnerUserId
+
+			local pCard              = Instance.new("Frame")
+			pCard.Name               = "PCard_" .. uid
+			pCard.Size               = UDim2.new(0, 88, 0, 120)
+			pCard.LayoutOrder        = idx * 2
+			pCard.BackgroundTransparency = 1
+			pCard.ZIndex             = 103
+			pCard.Parent             = playersSection
+
+			-- Avatar frame with winner/loser border tint
+			local avatarFrame        = Instance.new("Frame")
+			avatarFrame.Size         = UDim2.new(0, 72, 0, 72)
+			avatarFrame.Position     = UDim2.new(0.5, -36, 0, 0)
+			avatarFrame.BackgroundColor3 = isThisWinner
+				and Color3.fromRGB(160, 130, 0)
+				or  Color3.fromRGB(45, 50, 68)
+			avatarFrame.BorderSizePixel = 0
+			avatarFrame.ZIndex       = 103
+			avatarFrame.Parent       = pCard
+			local afCorner           = Instance.new("UICorner")
+			afCorner.CornerRadius    = UDim.new(0, 8)
+			afCorner.Parent          = avatarFrame
+
+			local avatarImg          = Instance.new("ImageLabel")
+			avatarImg.Name           = "AvatarImg"
+			avatarImg.Size           = UDim2.new(1, -4, 1, -4)
+			avatarImg.Position       = UDim2.new(0, 2, 0, 2)
+			avatarImg.BackgroundColor3 = Color3.fromRGB(28, 31, 42)
+			avatarImg.BorderSizePixel = 0
+			avatarImg.Image          = ""
+			avatarImg.ZIndex         = 104
+			avatarImg.Parent         = avatarFrame
+			local aiCorner           = Instance.new("UICorner")
+			aiCorner.CornerRadius    = UDim.new(0, 6)
+			aiCorner.Parent          = avatarImg
+
+			local nameLabel          = Instance.new("TextLabel")
+			nameLabel.Size           = UDim2.new(1, 0, 0, 18)
+			nameLabel.Position       = UDim2.new(0, 0, 0, 76)
+			nameLabel.BackgroundTransparency = 1
+			nameLabel.Font           = Enum.Font.GothamBold
+			nameLabel.TextSize       = 12
+			nameLabel.Text           = "..."
+			nameLabel.TextTruncate   = Enum.TextTruncate.AtEnd
+			nameLabel.TextColor3     = Color3.fromRGB(200, 215, 235)
+			nameLabel.ZIndex         = 104
+			nameLabel.Parent         = pCard
+
+			local badgeLabel         = Instance.new("TextLabel")
+			badgeLabel.Size          = UDim2.new(1, 0, 0, 16)
+			badgeLabel.Position      = UDim2.new(0, 0, 0, 98)
+			badgeLabel.BackgroundTransparency = 1
+			badgeLabel.Font          = Enum.Font.GothamBold
+			badgeLabel.TextSize      = 11
+			badgeLabel.Text          = isThisWinner and "WINNER" or "DEFEATED"
+			badgeLabel.TextColor3    = isThisWinner
+				and Color3.fromRGB(255, 215, 0)
+				or  Color3.fromRGB(180, 65, 65)
+			badgeLabel.ZIndex        = 104
+			badgeLabel.Parent        = pCard
+
+			-- Load name + headshot asynchronously
+			task.spawn(function()
+				local p = Players:GetPlayerByUserId(uid)
+				nameLabel.Text = p and p.Name or ("Player " .. uid)
+				local ok, url = pcall(Players.GetUserThumbnailAsync, Players,
+					uid, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+				if ok and url then avatarImg.Image = url end
+			end)
+		end
+	end
+
+	-- ── Animated stat counters ────────────────────────────────────────────────
+	local tickSnd = card:FindFirstChild("TickSound") :: Sound?
+	local myStats = statsTable and statsTable[tostring(localUserId)]
+
+	local function animateStat(statId: string, target: number, delaySeconds: number)
+		task.spawn(function()
+			task.wait(delaySeconds)
+			local row    = card:FindFirstChild(statId .. "Row")
+			local valLbl = row and row:FindFirstChild(statId .. "Value") :: TextLabel?
+			if not valLbl then return end
+			if target == 0 then valLbl.Text = "0" return end
+
+			local DURATION    = 1.3
+			local elapsed     = 0
+			local lastSndTime = -1
+			while elapsed < DURATION do
+				local dt  = task.wait()
+				elapsed   = math.min(elapsed + dt, DURATION)
+				local t   = elapsed / DURATION
+				local ease = 1 - (1 - t) ^ 3   -- ease-out cubic
+				valLbl.Text = tostring(math.floor(ease * target))
+				if tickSnd and (elapsed - lastSndTime) >= 0.055 then
+					tickSnd:Play()
+					lastSndTime = elapsed
+				end
+			end
+			valLbl.Text = tostring(target)
+		end)
+	end
+
+	animateStat("Kills",     myStats and myStats.kills           or 0, 0.3)
+	animateStat("Trained",   myStats and myStats.unitsTrained    or 0, 0.6)
+	animateStat("Builds",    myStats and myStats.buildingsBuilt  or 0, 0.9)
+	animateStat("Resources", myStats and myStats.resourcesEarned or 0, 1.2)
+
+	winOverlay.Visible = true
+
+	-- Countdown
+	task.spawn(function()
+		for i = 10, 1, -1 do
+			if not winOverlay or not winOverlay.Visible then return end
+			if retLbl then retLbl.Text = "Returning to lobby in " .. i .. "s..." end
+			task.wait(1)
+		end
+		if retLbl then retLbl.Text = "Returning to lobby..." end
+	end)
 end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────

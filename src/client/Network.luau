@@ -128,6 +128,11 @@ function Network.onPlayerWon(fn: (number) -> ())
 	RemoteHandler.get(Config.REMOTES.PlayerWon).OnClientEvent:Connect(fn)
 end
 
+-- winnerUserId, reason, statsTable, duration
+function Network.onShowEndScreen(fn: (number, string, any, number) -> ())
+	RemoteHandler.get(Config.REMOTES.ShowEndScreen).OnClientEvent:Connect(fn)
+end
+
 -- Fired by server when the local player's CC takes damage (throttled ~5 s)
 function Network.onCCAttacked(fn: () -> ())
 	RemoteHandler.get(Config.REMOTES.CCAttacked).OnClientEvent:Connect(fn)

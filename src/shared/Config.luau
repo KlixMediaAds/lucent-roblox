@@ -232,6 +232,7 @@ Config.REMOTES = {
 	LobbyReroll             = "LobbyReroll",
 	LobbyStart              = "LobbyStart",
 	LobbySetColor           = "LobbySetColor",
+	ShowEndScreen           = "ShowEndScreen",
 }
 
 return Config
