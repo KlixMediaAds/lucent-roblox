@@ -28,6 +28,7 @@ local monumentHeartbeatAccum = 0
 
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
+local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -35,8 +36,14 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Monument"      then return Config.MONUMENT_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
+	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
+	if buildingType == "CreepyBlob"   then return Vector3.new(9, 6, 9) end
 	return Config.BUILDING_SIZE
 end
+
+-- Forward-declared so createBuilding can reference it in a task.spawn closure;
+-- the actual body is assigned after spawnDestructionVFX below.
+local spawnWormBurstVFX: (Vector3) -> ()
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -288,6 +295,66 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		ring.CanCollide   = false
 		ring.Parent       = model
 
+	elseif buildingType == "CreepyBlob" then
+		base.BrickColor = BrickColor.new("Black")
+		base.Material   = Enum.Material.SmoothPlastic
+
+		-- Irregular nodule bumps around the top
+		for i = 1, 5 do
+			local angle   = (i / 5) * math.pi * 2
+			local r       = 2.8
+			local bump         = Instance.new("Part")
+			bump.Name          = "Bump_" .. i
+			bump.Shape         = Enum.PartType.Ball
+			bump.Size          = Vector3.new(
+				rng:NextNumber(2.2, 3.2),
+				rng:NextNumber(2.0, 3.0),
+				rng:NextNumber(2.2, 3.2)
+			)
+			bump.Position      = position + Vector3.new(math.cos(angle) * r, size.Y - 0.5, math.sin(angle) * r)
+			bump.BrickColor    = BrickColor.new("Black")
+			bump.Material      = Enum.Material.SmoothPlastic
+			bump.Anchored      = true
+			bump.CanCollide    = false
+			bump.CastShadow    = false
+			bump.Parent        = model
+		end
+
+		-- Small dark-indigo neon eye at the peak
+		local eye          = Instance.new("Part")
+		eye.Name           = "Eye"
+		eye.Shape          = Enum.PartType.Ball
+		eye.Size           = Vector3.new(1.8, 1.8, 1.8)
+		eye.Position       = position + Vector3.new(0, size.Y + 0.8, 0)
+		eye.BrickColor     = BrickColor.new("Dark indigo")
+		eye.Material       = Enum.Material.Neon
+		eye.Anchored       = true
+		eye.CanCollide     = false
+		eye.CastShadow     = false
+		eye.Parent         = model
+
+	elseif buildingType == "CreepyWorm" then
+		base.BrickColor = BrickColor.new("Black")
+		base.Material   = Enum.Material.SmoothPlastic
+
+		-- Six bone-black spine protrusions tilting outward from the mound
+		local spineCount = 6
+		for i = 1, spineCount do
+			local angle  = (i / spineCount) * math.pi * 2
+			local r      = 3.0
+			local spine         = Instance.new("Part")
+			spine.Name          = "Spine_" .. i
+			spine.Size          = Vector3.new(0.8, 3.5, 0.8)
+			spine.BrickColor    = BrickColor.new("Black")
+			spine.Material      = Enum.Material.SmoothPlastic
+			spine.Anchored      = true
+			spine.CanCollide    = false
+			spine.CastShadow    = false
+			spine.CFrame        = CFrame.new(position + Vector3.new(math.cos(angle) * r, size.Y + 0.75, math.sin(angle) * r))
+				* CFrame.Angles(math.sin(angle) * 0.28, 0, -math.cos(angle) * 0.28)
+			spine.Parent        = model
+		end
+
 	else
 		-- Barracks flag
 		local flag      = Instance.new("Part")
@@ -361,7 +428,20 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 				elapsed = math.min(elapsed + dt, buildTime)
 				local progress = elapsed / buildTime
 
-				model:PivotTo(CFrame.new(position.X, progress * finalY, position.Z))
+				if buildingType == "CreepyWorm" then
+					-- Smoothstep easing: slow start → fast finish (fighting to get free)
+					local ease  = progress * progress * (3 - 2 * progress)
+					-- Pure rotation wobble — stays on its X/Z footprint so it looks grounded
+					local tiltX = math.sin(elapsed * 4.1) * math.min(progress * 0.6, 0.14)
+					local tiltZ = math.cos(elapsed * 5.7) * math.min(progress * 0.6, 0.11)
+					local spin  = elapsed * 0.35  -- slow base rotation
+					model:PivotTo(
+						CFrame.new(position.X, ease * finalY, position.Z)
+						* CFrame.Angles(tiltX, spin, tiltZ)
+					)
+				else
+					model:PivotTo(CFrame.new(position.X, progress * finalY, position.Z))
+				end
 
 				local target = math.max(1, math.floor(progress * maxHp))
 				local data   = buildingData[id]
@@ -377,6 +457,40 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 				data.hp            = math.max(data.hp, maxHp)
 				data.isConstructing = false
 				applyHP(data)
+
+				if buildingType == "CreepyWorm" then
+					-- Lunge skyward: rapid spiral rise then freeze briefly before eruption
+					for i = 1, 12 do
+						task.wait(0.025)
+						if not buildingData[id] then return end
+						local t    = i / 12
+						local spin = t * math.pi * 2.2
+						local lungeY = finalY + math.sin(t * math.pi) * 7
+						model:PivotTo(
+							CFrame.new(position.X, lungeY, position.Z)
+							* CFrame.Angles(math.sin(spin * 0.5) * 0.3, spin, math.cos(spin * 0.7) * 0.3)
+						)
+					end
+					if not buildingData[id] then return end
+					-- Pause at peak height for a beat, then drop back to spawn height for explosion
+					task.wait(0.08)
+					if not buildingData[id] then return end
+					model:PivotTo(CFrame.new(position.X, finalY + 4, position.Z))
+
+					-- Erupt: VFX, spawn 10 soldiers, destroy the building
+					task.spawn(spawnWormBurstVFX, position + Vector3.new(0, 5, 0))
+					if unitManagerRef then
+						for i = 1, 10 do
+							local angle  = (i / 10) * math.pi * 2
+							local offset = Vector3.new(math.cos(angle) * 8, 0, math.sin(angle) * 8)
+							unitManagerRef.spawnUnitNow(player, position + offset, "CreepySoldier")
+						end
+					end
+					RemoteHandler.get(Config.REMOTES.WormBurst):FireAllClients(position)
+					buildingData[id] = nil
+					model:Destroy()
+					return
+				end
 
 				if buildingType == "Mine" and mineralManager then
 					mineralManager.setMineReady(id)
@@ -548,6 +662,7 @@ function BuildingManager.resetAll()
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
+	blobCooldowns            = {}
 end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
@@ -672,6 +787,68 @@ local function spawnDestructionVFX(pos: Vector3)
 	end
 end
 
+-- ── Worm burst VFX (server-side) ─────────────────────────────────────────────
+
+spawnWormBurstVFX = function(pos: Vector3)
+	-- Burst sound (reuses the building-destruction sound)
+	local soundPart            = Instance.new("Part")
+	soundPart.Anchored         = true
+	soundPart.CanCollide       = false
+	soundPart.CanTouch         = false
+	soundPart.Transparency     = 1
+	soundPart.Size             = Vector3.new(1, 1, 1)
+	soundPart.CastShadow       = false
+	soundPart.Position         = pos
+	soundPart.Parent           = workspace
+	local snd                  = Instance.new("Sound")
+	snd.SoundId                = "rbxassetid://117211977307268"
+	snd.Volume                 = 1.3
+	snd.RollOffMaxDistance     = 220
+	snd.RollOffMinDistance     = 14
+	snd.Parent                 = soundPart
+	snd:Play()
+	Debris:AddItem(soundPart, 6)
+
+	-- Earthen dirt chunks hurled outward
+	local dirtColors = {
+		Color3.fromRGB(90,  60, 30),
+		Color3.fromRGB(70,  45, 20),
+		Color3.fromRGB(110, 80, 40),
+		Color3.fromRGB(55,  85, 20),
+	}
+	for _ = 1, 18 do
+		local d            = Instance.new("Part")
+		d.Anchored         = false
+		d.CanCollide       = false
+		d.CanTouch         = false
+		d.CastShadow       = false
+		d.Size             = Vector3.new(
+			rng:NextNumber(0.3, 1.2),
+			rng:NextNumber(0.3, 1.2),
+			rng:NextNumber(0.3, 1.2)
+		)
+		d.Color            = dirtColors[rng:NextInteger(1, #dirtColors)]
+		d.Material         = Enum.Material.SmoothPlastic
+		d.Position         = pos + Vector3.new(
+			rng:NextNumber(-3, 3),
+			rng:NextNumber(0.5, 3.0),
+			rng:NextNumber(-3, 3)
+		)
+		d.Parent           = workspace
+		d.AssemblyLinearVelocity = Vector3.new(
+			rng:NextNumber(-20, 20),
+			rng:NextNumber(14, 30),
+			rng:NextNumber(-20, 20)
+		)
+		d.AssemblyAngularVelocity = Vector3.new(
+			rng:NextNumber(-9, 9),
+			rng:NextNumber(-9, 9),
+			rng:NextNumber(-9, 9)
+		)
+		Debris:AddItem(d, rng:NextNumber(1.5, 3.5))
+	end
+end
+
 function BuildingManager.damage(id: string, amount: number)
 	local data = buildingData[id]
 	if not data then return end
@@ -704,7 +881,10 @@ function BuildingManager.damage(id: string, amount: number)
 	local destroyPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
 	if model then model:Destroy() end
 
-	task.spawn(spawnDestructionVFX, destroyPos)
+	-- CreepyWorm vanishes silently (either burst already fired VFX, or destroyed mid-construction)
+	if data.buildingType ~= "CreepyWorm" then
+		task.spawn(spawnDestructionVFX, destroyPos)
+	end
 
 	if wasCC then
 		playerHasCC[owner.UserId] = nil
@@ -738,9 +918,10 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 	for _, id in toRemove do
 		local data = buildingData[id]
 		if not data then continue end
-		buildingData[id] = nil
-		turretTimers[id] = nil
+		buildingData[id]    = nil
+		turretTimers[id]    = nil
 		monumentWinTimer[id] = nil
+		blobCooldowns[id]   = nil
 		if data.buildingType == "Mine" and mineralManager then
 			mineralManager.removeMine(id)
 		end
@@ -801,10 +982,14 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
+	if buildingType == "CreepyBlob" then
+		if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return false end
+	end
 
-	local cost = buildingType == "Mine"   and Config.MINE_COST
-		or buildingType == "Turret" and Config.TURRET_COST
-		or buildingType == "Relay"  and Config.RELAY_COST
+	local cost = buildingType == "Mine"       and Config.MINE_COST
+		or buildingType == "Turret"     and Config.TURRET_COST
+		or buildingType == "Relay"      and Config.RELAY_COST
+		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
@@ -1008,16 +1193,24 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return end
 		end
 
-		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay needs research
+		-- Whitelist: only these types may be placed by clients directly
+		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Turret=true, Relay=true, CreepyBlob=true }
+		if not PLACEABLE[buildingType] then return end
+
+		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay/Blob need research
 		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
+		if buildingType == "CreepyBlob" then
+			if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return end
+		end
 
-		local cost = buildingType == "Mine"   and Config.MINE_COST
-			or buildingType == "Turret" and Config.TURRET_COST
-			or buildingType == "Relay"  and Config.RELAY_COST
+		local cost = buildingType == "Mine"      and Config.MINE_COST
+			or buildingType == "Turret"    and Config.TURRET_COST
+			or buildingType == "Relay"     and Config.RELAY_COST
+			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
 
@@ -1046,35 +1239,84 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		function(player, turretId, upgradeType)
 			if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return end
 
-			local TIER1 = { Flamethrower = true, RocketLauncher = true, Creepy = true }
-			local TIER2 = { Mutant = true }
-			if not TIER1[upgradeType] and not TIER2[upgradeType] then return end
+			local VALID = { Flamethrower = true, RocketLauncher = true }
+			if not VALID[upgradeType] then return end
 
 			local data = buildingData[turretId]
 			if not data or data.buildingType ~= "Turret" then return end
 			if data.owner ~= player then return end
 			if data.isConstructing then return end
+			if data.turretUpgrade then return end  -- already upgraded
 
-			if TIER2[upgradeType] then
-				-- Mutant requires Creepy already applied, not yet mutated
-				if data.turretUpgrade ~= "Creepy" then return end
-			else
-				-- Tier-1: no existing upgrade yet
-				if data.turretUpgrade then return end
-				-- Flamethrower and Rocket require TurretUpgrades research; Creepy does not
-				if upgradeType ~= "Creepy" then
-					if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
-				end
-			end
+			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
 
 			local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
 			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
 
 			data.turretUpgrade = upgradeType
 			applyTurretUpgradeVisuals(turretId, upgradeType)
+		end
+	)
 
-			if upgradeType == "Mutant" then
-				startMutantSoldierLoop(turretId, data, player)
+	-- ── BlobProduce remote ────────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.BlobProduce).OnServerEvent:Connect(
+		function(player: any, blobId: any, productType: any)
+			if type(blobId) ~= "string" or type(productType) ~= "string" then return end
+
+			local data = buildingData[blobId]
+			if not data or data.buildingType ~= "CreepyBlob" then return end
+			if data.owner ~= player then return end
+			if data.isConstructing then return end
+
+			local blobPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+
+			if productType == "CreepySoldier" then
+				local now = os.clock()
+				if (blobCooldowns[blobId] or 0) > now then return end
+				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_SOLDIER_COST then return end
+				resourceManagerRef.spend(player, Config.BLOB_SOLDIER_COST)
+
+				if unitManagerRef then
+					local angle  = math.random() * math.pi * 2
+					local offset = Vector3.new(math.cos(angle) * 6, 0, math.sin(angle) * 6)
+					unitManagerRef.spawnUnitNow(player, blobPos + offset, "CreepySoldier")
+				end
+
+				local expiry = now + Config.BLOB_SOLDIER_COOLDOWN
+				blobCooldowns[blobId] = expiry
+				RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, Config.BLOB_SOLDIER_COOLDOWN)
+				task.delay(Config.BLOB_SOLDIER_COOLDOWN, function()
+					if buildingData[blobId] then
+						RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, 0)
+					end
+				end)
+
+			elseif productType == "CreepyWorm" then
+				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_WORM_COST then return end
+				resourceManagerRef.spend(player, Config.BLOB_WORM_COST)
+
+				buildingData[blobId] = nil
+				blobCooldowns[blobId] = nil
+				local model = buildingsFolder:FindFirstChild(blobId)
+				if model then model:Destroy() end
+
+				createBuilding(player, blobPos, "CreepyWorm")
+
+			elseif productType == "CreepyTurret" then
+				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_TURRET_COST then return end
+				resourceManagerRef.spend(player, Config.BLOB_TURRET_COST)
+
+				buildingData[blobId] = nil
+				blobCooldowns[blobId] = nil
+				local model = buildingsFolder:FindFirstChild(blobId)
+				if model then model:Destroy() end
+
+				local tId  = createBuilding(player, blobPos, "Turret")
+				local tDat = buildingData[tId]
+				if tDat then
+					tDat.turretUpgrade = "Creepy"
+					applyTurretUpgradeVisuals(tId, "Creepy")
+				end
 			end
 		end
 	)

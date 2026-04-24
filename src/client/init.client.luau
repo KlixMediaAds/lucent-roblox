@@ -18,6 +18,7 @@ local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
+local BlobPanel      = require(script:WaitForChild("BlobPanel"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager   = require(script:WaitForChild("CometManager"))
@@ -164,6 +165,9 @@ WorkshopPanel.init(Network,
 TurretPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
+BlobPanel.init(Network,
+	function() return currentResources end,
+	function(techName) return researchedTechs[techName] == true end)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
@@ -256,6 +260,7 @@ local function hideBuildingPanels()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
+	BlobPanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
@@ -429,9 +434,23 @@ UnitController.onTurretSelected(function(turretId: string?)
 		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
+		BlobPanel.hide()
 		TurretPanel.show(turretId)
 	else
 		TurretPanel.hide()
+	end
+end)
+
+-- ── Blob evolution panel ──────────────────────────────────────────────────────
+UnitController.onBlobSelected(function(blobId: string?)
+	if blobId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.show(blobId)
+	else
+		BlobPanel.hide()
 	end
 end)
 
@@ -1032,6 +1051,7 @@ end)
 Network.onResourceSync(function(amount: number)
 	currentResources = amount
 	MinePanel.refreshIfVisible()
+	BlobPanel.refreshIfVisible()
 end)
 
 -- ── Unlock events ─────────────────────────────────────────────────────────────
@@ -1075,6 +1095,7 @@ Network.onUnlockGranted(function(techName: string)
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
+	BlobPanel.refreshIfVisible()
 	HUD.refreshTrayState(ownedBuildingCounts)
 	applyUnlockVisuals(techName)
 	UnlockNotification.showUnlock(techName)

@@ -88,6 +88,8 @@ type NodeRef = {
     icon:    TextLabel,
     nameLbl: TextLabel,
     condLbl: TextLabel,
+    barBg:   Frame,
+    barFill: Frame,
 }
 local nodeRefs: { [string]: NodeRef } = {}
 
@@ -303,6 +305,8 @@ local function applyTransparency(ref: NodeRef, trans: number)
     TweenService:Create(ref.icon,    t, { TextTransparency       = trans }):Play()
     TweenService:Create(ref.nameLbl, t, { TextTransparency       = trans }):Play()
     TweenService:Create(ref.condLbl, t, { TextTransparency       = trans }):Play()
+    TweenService:Create(ref.barBg,   t, { BackgroundTransparency = math.min(trans + 0.15, 1) }):Play()
+    TweenService:Create(ref.barFill, t, { BackgroundTransparency = trans }):Play()
 end
 
 -- ── Refresh ───────────────────────────────────────────────────────────────────
@@ -331,6 +335,7 @@ local function refreshAllNodes()
 
         if not isReal and not isGhost then
             ref.circle.Visible = false
+            ref.barBg.Visible  = false
             continue
         end
 
@@ -338,41 +343,72 @@ local function refreshAllNodes()
 
         local newPos = positions[techName]
         if newPos then
-            local nx = math.floor(newPos.x)
-            local ny = math.floor(newPos.y)
+            local nx    = math.floor(newPos.x)
+            local ny    = math.floor(newPos.y)
+            local barNy = ny + NODE_R + 1   -- 1 px below circle bottom edge
             if isGhost then
-                -- Ghosts snap instantly; don't dirty the position cache
                 ref.circle.Position = UDim2.new(0.5, nx, 0.5, ny)
+                ref.barBg.Position  = UDim2.new(0.5, nx, 0.5, barNy)
             else
                 local last = lastLayoutPositions[techName]
                 if not last then
                     ref.circle.Position = UDim2.new(0.5, nx, 0.5, ny)
+                    ref.barBg.Position  = UDim2.new(0.5, nx, 0.5, barNy)
                 elseif last.x ~= nx or last.y ~= ny then
                     TweenService:Create(ref.circle, TI_POS,
                         { Position = UDim2.new(0.5, nx, 0.5, ny) }):Play()
+                    TweenService:Create(ref.barBg, TI_POS,
+                        { Position = UDim2.new(0.5, nx, 0.5, barNy) }):Play()
                 end
                 lastLayoutPositions[techName] = { x = nx, y = ny }
             end
         end
 
         if isGhost then
-            ref.circle.BackgroundColor3      = COL_NODE_GHOST
+            ref.circle.BackgroundColor3       = COL_NODE_GHOST
             ref.circle.BackgroundTransparency = 0.55
-            ref.stroke.Color                 = COL_BDR_GHOST
-            ref.stroke.Transparency          = 0.55
-            ref.icon.TextColor3              = COL_BDR_GHOST
-            ref.icon.TextTransparency        = 0.6
-            ref.nameLbl.TextTransparency     = 0.6
-            ref.condLbl.TextTransparency     = 0.75
+            ref.stroke.Color                  = COL_BDR_GHOST
+            ref.stroke.Transparency           = 0.55
+            ref.icon.TextColor3               = COL_BDR_GHOST
+            ref.icon.TextTransparency         = 0.6
+            ref.nameLbl.TextTransparency      = 0.6
+            ref.condLbl.TextTransparency      = 0.75
+            ref.barBg.Visible                 = true
+            ref.barBg.BackgroundTransparency  = 0.6
+            ref.barFill.BackgroundColor3      = COL_BDR_GHOST
+            ref.barFill.BackgroundTransparency = 0.5
+            local fn = getCondProgressFn
+            ref.barFill.Size = UDim2.new(math.clamp(fn and fn(techName) or 0, 0, 1), 0, 1, 0)
         else
+            local st = computeNodeState(techName)
+
             local stateVal = techStateVals[techName]
             if stateVal then
-                local newState = computeNodeState(techName)
-                if Fusion.peek(stateVal) ~= newState then
-                    stateVal:set(newState)
+                if Fusion.peek(stateVal) ~= st then
+                    stateVal:set(st)
                 end
             end
             applyTransparency(ref, progressToTransparency(p))
+
+            -- Mini progress bar
+            if st == "excluded" then
+                ref.barBg.Visible = false
+            else
+                ref.barBg.Visible = true
+                local hr = hasResearchFn
+                local fraction: number
+                if hr and hr(techName) then
+                    fraction = 1.0
+                else
+                    local fn = getCondProgressFn
+                    fraction = fn and fn(techName) or 0
+                end
+                ref.barFill.Size = UDim2.new(math.clamp(fraction, 0, 1), 0, 1, 0)
+                ref.barFill.BackgroundColor3 =
+                    st == "unlocked"  and COL_BDR_UNLOCKED or
+                    st == "available" and COL_BDR_AVAIL     or
+                    COL_BDR_LOCKED
+            end
         end
     end
 
@@ -509,12 +545,40 @@ local function buildNode(canvas: Frame, techName: string)
     condLbl.ZIndex                   = 53
     condLbl.Parent                   = circle
 
+    -- Mini progress bar — sibling on canvas so it isn't affected by the circle's UICorner.
+    -- Sits in the 4 px gap between the circle bottom edge and the name label.
+    local barBg                      = Instance.new("Frame")
+    barBg.Name                       = "ProgBg_" .. techName
+    barBg.Size                       = UDim2.fromOffset(D - 16, 4)
+    barBg.AnchorPoint                = Vector2.new(0.5, 0)
+    barBg.Position                   = UDim2.new(0.5, 0, 0.5, NODE_R + 1)  -- updated in refresh
+    barBg.BackgroundColor3           = Color3.fromRGB(12, 12, 22)
+    barBg.BackgroundTransparency     = 1
+    barBg.BorderSizePixel            = 0
+    barBg.ZIndex                     = 53
+    barBg.ClipsDescendants           = true
+    barBg.Visible                    = false
+    barBg.Parent                     = canvas
+    UILib.corner(barBg, 2)
+
+    local barFill                    = Instance.new("Frame")
+    barFill.Name                     = "ProgFill"
+    barFill.Size                     = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3         = COL_BDR_LOCKED
+    barFill.BackgroundTransparency   = 0
+    barFill.BorderSizePixel          = 0
+    barFill.ZIndex                   = 54
+    barFill.Parent                   = barBg
+    UILib.corner(barFill, 2)
+
     nodeRefs[techName] = {
         circle  = circle,
         stroke  = stroke,
         icon    = iconLbl,
         nameLbl = nameLbl,
         condLbl = condLbl,
+        barBg   = barBg,
+        barFill = barFill,
     }
 
     local stateVal = scope:Value("locked" :: NodeState)

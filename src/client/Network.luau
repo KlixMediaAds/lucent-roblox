@@ -128,6 +128,21 @@ function Network.onMonumentProgress(fn: (number, number?) -> ())
 	RemoteHandler.get(Config.REMOTES.MonumentProgress).OnClientEvent:Connect(fn)
 end
 
+-- blobId, productType ("CreepySoldier" | "CreepyWorm" | "CreepyTurret")
+function Network.blobProduce(blobId: string, productType: string)
+	RemoteHandler.get(Config.REMOTES.BlobProduce):FireServer(blobId, productType)
+end
+
+-- blobId, cooldownRemaining (seconds; 0 = ready)
+function Network.onBlobUpdate(fn: (string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.BlobUpdate).OnClientEvent:Connect(fn)
+end
+
+-- position: where the worm erupted
+function Network.onWormBurst(fn: (Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.WormBurst).OnClientEvent:Connect(fn)
+end
+
 -- winnerUserId
 function Network.onPlayerWon(fn: (number) -> ())
 	RemoteHandler.get(Config.REMOTES.PlayerWon).OnClientEvent:Connect(fn)

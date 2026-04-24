@@ -76,19 +76,21 @@ local hasResearchFn: ((string) -> boolean)?
 -- ── Building metadata ─────────────────────────────────────────────────────────
 type BuildingInfo = { cost: number, requires: { [string]: number }, researchReq: string? }
 local BUILDING_INFO: { [string]: BuildingInfo } = {
-	Mine     = { cost = Config.MINE_COST,     requires = {},             researchReq = nil    },
-	Barracks = { cost = Config.BUILDING_COST, requires = { Mine = 1 },   researchReq = nil    },
-	Turret   = { cost = Config.TURRET_COST,   requires = { Barracks = 1 }, researchReq = nil  },
-	Relay    = { cost = Config.RELAY_COST,    requires = {},             researchReq = "Relay" },
+	Mine       = { cost = Config.MINE_COST,         requires = {},             researchReq = nil          },
+	Barracks   = { cost = Config.BUILDING_COST,     requires = { Mine = 1 },   researchReq = nil          },
+	Turret     = { cost = Config.TURRET_COST,       requires = { Barracks = 1 }, researchReq = nil        },
+	Relay      = { cost = Config.RELAY_COST,        requires = {},             researchReq = "Relay"      },
+	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
 }
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
-	{ btype = "Mine",     icon = "⛏", color = C.MINE,     desc = "Harvests nearby mineral deposits" },
-	{ btype = "Barracks", icon = "⚔", color = C.BARRACKS, desc = "Trains and deploys combat units"  },
-	{ btype = "Turret",   icon = "⚙", color = C.TURRET,   desc = "Auto-attacks nearby enemies"      },
-	{ btype = "Relay",    icon = "📡", color = C.ACCENT,   desc = "Extends your build zone"          },
+	{ btype = "Mine",       icon = "⛏", color = C.MINE,                        desc = "Harvests nearby mineral deposits"              },
+	{ btype = "Barracks",   icon = "⚔", color = C.BARRACKS,                    desc = "Trains and deploys combat units"               },
+	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
+	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
+	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 }
 local CHILD_SPACING = 95   -- px between child centres
 
@@ -228,9 +230,9 @@ local function applyNodeState(node: ChildNode)
 		node.label.Text               = node.btype:upper() .. "\n" .. lockReason
 		node.label.TextColor3         = C.DIM
 	else
-		node.btn.BackgroundColor3     = BUILDING_INFO[node.btype] and
+		node.btn.BackgroundColor3     =
 			({ Mine = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
-			or C.ACCENT
+			or node.color
 		node.btn.BackgroundTransparency = 0.35
 		node.stroke.Color             = node.btn.BackgroundColor3
 		node.stroke.Thickness         = 2

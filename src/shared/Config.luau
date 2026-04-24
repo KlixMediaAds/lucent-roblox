@@ -75,7 +75,12 @@ Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command 
 Config.BUILD_RADIUS            = 85    -- studs; non-CC buildings must be within this distance of the player's CC
 
 -- Relay (build-zone extender, unlocked via Relay research)
-Config.RELAY_COST       = 175
+Config.RELAY_COST            = 175
+Config.CREEPY_BLOB_COST      = 225   -- cost to place the blob building
+Config.BLOB_SOLDIER_COST     = 40    -- per CreepySoldier spawn
+Config.BLOB_SOLDIER_COOLDOWN = 6     -- seconds between soldier spawns
+Config.BLOB_WORM_COST        = 300   -- triggers worm burst, consumes blob
+Config.BLOB_TURRET_COST      = 275   -- transforms blob into a Creepy Turret
 Config.RELAY_HP         = 250
 Config.RELAY_BUILD_TIME = 12
 Config.RELAY_RADIUS     = 65    -- studs; extends the build zone around this structure
@@ -125,6 +130,8 @@ Config.UNLOCKS = {
 	Rollers          = { icon = "🔄", desc = "Soldiers become Rollers: rolling melee charge attack, 20% faster movement.",
 		condText = "Kill 20 enemies",  cond = { type = "kill", count = 20 },
 		requires = "CombatStims" },
+	CreepyBlob       = { icon = "🫧", desc = "Unlocks the Creepy Blob. Evolve it into CreepySoldiers, a Creepy Worm, or a Creepy Turret.",
+		condText = "Build 3 Relays",   cond = { type = "building", name = "Relay", count = 3 } },
 }
 
 -- Tank: Rocket Barrage (requires ConcussionShells)
@@ -174,12 +181,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12 }
+Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10, CreepySoldier = 0 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250 }
+Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
@@ -234,6 +241,9 @@ Config.REMOTES = {
 	LobbySetColor           = "LobbySetColor",
 	ShowEndScreen           = "ShowEndScreen",
 	CondProgressSync        = "CondProgressSync",
+	WormBurst               = "WormBurst",
+	BlobProduce             = "BlobProduce",
+	BlobUpdate              = "BlobUpdate",
 }
 
 return Config
