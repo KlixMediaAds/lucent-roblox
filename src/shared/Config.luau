@@ -233,6 +233,7 @@ Config.REMOTES = {
 	LobbyStart              = "LobbyStart",
 	LobbySetColor           = "LobbySetColor",
 	ShowEndScreen           = "ShowEndScreen",
+	CondProgressSync        = "CondProgressSync",
 }
 
 return Config

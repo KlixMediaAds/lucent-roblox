@@ -60,6 +60,9 @@ local function conditionMet(state: PlayerState, cond: any): boolean
 	return false
 end
 
+-- Forward-declared so grantTech and checkConditions can mutually call each other
+local checkConditions: (any) -> ()
+
 local function grantTech(player: any, techName: string)
 	local state = getState(player)
 	state.done[techName] = true
@@ -68,7 +71,7 @@ local function grantTech(player: any, techName: string)
 	checkConditions(player)  -- re-evaluate anything that was blocked by this prerequisite
 end
 
-local function checkConditions(player: any)
+checkConditions = function(player: any)
 	local state = getState(player)
 
 	-- Gather which groups have a member whose conditions are newly met
@@ -111,11 +114,21 @@ end
 
 -- ── Public recording API ──────────────────────────────────────────────────────
 
+local function fireProgressSync(player: any)
+	local state = getState(player)
+	RemoteHandler.get(Config.REMOTES.CondProgressSync):FireClient(player, {
+		kills   = state.kills,
+		builds  = state.builds,
+		trained = state.trained,
+	})
+end
+
 function ResearchManager.recordBuildingPlaced(player: any, buildingType: string)
 	if not player or player.UserId <= 0 then return end
 	local state = getState(player)
 	state.builds[buildingType] = (state.builds[buildingType] or 0) + 1
 	checkConditions(player)
+	fireProgressSync(player)
 end
 
 function ResearchManager.recordEnemyKilled(attackerUserIdStr: string)
@@ -126,6 +139,7 @@ function ResearchManager.recordEnemyKilled(attackerUserIdStr: string)
 	local state = getState(player)
 	state.kills += 1
 	checkConditions(player)
+	fireProgressSync(player)
 end
 
 function ResearchManager.recordUnitTrained(player: any, unitType: string)
@@ -133,6 +147,7 @@ function ResearchManager.recordUnitTrained(player: any, unitType: string)
 	local state = getState(player)
 	state.trained[unitType] = (state.trained[unitType] or 0) + 1
 	checkConditions(player)
+	fireProgressSync(player)
 end
 
 -- ── Compatibility API (used by UnitManager, BuildingManager, AIManager) ───────
@@ -151,6 +166,7 @@ function ResearchManager.resetPlayer(player: any)
 		trained     = {},
 		groupsFired = {},
 	}
+	fireProgressSync(player)
 end
 
 function ResearchManager.getStats(player: any): { kills: number, unitsTrained: number, buildingsBuilt: number }

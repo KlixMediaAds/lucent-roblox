@@ -68,7 +68,10 @@ local monumentBuildingId: { [number]: string }       = {}  -- ownerUserId → bu
 local monumentBillboards: { [number]: BillboardGui } = {}  -- ownerUserId → floating timer
 
 -- Research state (replicated from server)
-local researchedTechs: { [string]: boolean } = {}
+local researchedTechs:  { [string]: boolean } = {}
+local localKillCount:   number                = 0
+local localTrainCounts: { [string]: number }  = {}
+local localBuildCounts: { [string]: number }  = {}
 
 -- Evolved turret client state
 type TentacleParts = { joints: {Part}, connectors: {Part}, teeth: {Part} }
@@ -135,7 +138,29 @@ MinePanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
-	function() return currentResources end)
+	function() return currentResources end,
+	function(techName: string): number
+		local unlock = (Config.UNLOCKS :: any)[techName]
+		if not unlock then return 0 end
+		local cond  = (unlock.cond :: any)
+		local t     = cond.type :: string
+		if t == "building" then
+			local name  = cond.name  :: string
+			local count = cond.count :: number
+			if name == "any" then
+				local total = 0
+				for _, v in localBuildCounts do total += v end
+				return math.clamp(total / count, 0, 1)
+			else
+				return math.clamp((localBuildCounts[name] or 0) / count, 0, 1)
+			end
+		elseif t == "kill" then
+			return math.clamp(localKillCount / (cond.count :: number), 0, 1)
+		elseif t == "train" then
+			return math.clamp((localTrainCounts[cond.name :: string] or 0) / (cond.count :: number), 0, 1)
+		end
+		return 0
+	end)
 TurretPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
@@ -250,6 +275,23 @@ end)
 HUD.setHasResearch(function(techName: string) return researchedTechs[techName] == true end)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
 
+-- R shortcut: open/close workshop panel (mirrors the HUD upgrades button)
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.KeyCode ~= Enum.KeyCode.R then return end
+	if not ownCCId then return end
+	if workshopBtnOpen then
+		workshopBtnOpen = false
+		WorkshopPanel.hide()
+	else
+		workshopBtnOpen = true
+		BarracksPanel.hide()
+		MinePanel.hide()
+		TurretPanel.hide()
+		WorkshopPanel.show(ownCCId)
+	end
+end)
+
 -- ── Command Center mode ───────────────────────────────────────────────────────
 
 local function enterCCMode()
@@ -259,7 +301,10 @@ local function enterCCMode()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ownedBuildingCounts = {}
-	researchedTechs    = {}
+	researchedTechs     = {}
+	localKillCount      = 0
+	localTrainCounts    = {}
+	localBuildCounts    = {}
 	refreshRequirements()
 	HUD.setCommandCenterMode(true)
 	BarracksPanel.hide()
@@ -267,6 +312,8 @@ local function enterCCMode()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 	WorkshopPanel.resetMonument()
+	WorkshopPanel.resetPlayer()
+	HUD.setUpgradesVisible(false)
 	if winOverlay then winOverlay.Visible = false end
 	monumentBuildingId = {}
 	monumentBillboards = {}
@@ -1013,8 +1060,17 @@ local function applyUnlockVisuals(techName: string)
 	end
 end
 
+Network.onCondProgressSync(function(stats: any)
+	localKillCount   = stats.kills   or 0
+	localBuildCounts = stats.builds  or {}
+	localTrainCounts = stats.trained or {}
+	WorkshopPanel.refreshIfVisible()
+end)
+
 Network.onUnlockGranted(function(techName: string)
+	local isFirst = not next(researchedTechs)
 	researchedTechs[techName] = true
+	if isFirst then HUD.setUpgradesVisible(true) end
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
 	BarracksPanel.refreshIfVisible()

@@ -114,6 +114,11 @@ function Network.sendUnlockChoose(techName: string)
 	RemoteHandler.get(Config.REMOTES.UnlockChoose):FireServer(techName)
 end
 
+-- { kills, builds, trained } progress payload from server
+function Network.onCondProgressSync(fn: (any) -> ())
+	RemoteHandler.get(Config.REMOTES.CondProgressSync).OnClientEvent:Connect(fn)
+end
+
 function Network.buildMonument()
 	RemoteHandler.get(Config.REMOTES.BuildMonument):FireServer()
 end

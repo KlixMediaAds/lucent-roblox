@@ -112,8 +112,9 @@ local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
 local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
-local upgradesBtnRef:  TextButton?
-local upgradesStroke:   UIStroke?
+local upgradesBtnRef:     TextButton?
+local upgradesStroke:     UIStroke?
+local upgradesBtnWrapper: Frame?
 local UPGRADES_COLOR = Color3.fromRGB(190, 140, 255)
 
 -- ── Build-menu hover tooltip ──────────────────────────────────────────────────
@@ -500,8 +501,10 @@ function HUD.create(): (Frame, TextButton)
 			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 1.5 }):Play()
 		end)
 
-		upgradesBtnRef = btn
-		upgradesStroke = stroke
+		upgradesBtnRef     = btn
+		upgradesStroke     = stroke
+		upgradesBtnWrapper = _w :: Frame
+		_w.Visible         = false   -- hidden until the player earns their first upgrade
 	end
 
 	-- Hover tooltip — fixed position above the build menu, always in the same spot
@@ -736,6 +739,12 @@ end
 function HUD.setHasResearch(fn: (string) -> boolean)
 	hasResearchFn = fn
 	updateAllNodes()
+end
+
+function HUD.setUpgradesVisible(visible: boolean)
+	local w = upgradesBtnWrapper
+	if not w then return end
+	w.Visible = visible
 end
 
 -- ── HUD.wire ──────────────────────────────────────────────────────────────────
