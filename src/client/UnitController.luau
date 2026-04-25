@@ -729,6 +729,18 @@ function UnitController.onBlobSelected(fn: (string?) -> ())
 	onBlobSelectedCb = fn
 end
 
+-- Returns the primary selected building ID plus all secondary double-click selected IDs.
+function UnitController.getSelectedBuildingIds(): {string}
+	local result: {string} = {}
+	if selectedBuildingId then
+		table.insert(result, selectedBuildingId)
+	end
+	for bid in multiBldBoxes do
+		table.insert(result, bid)
+	end
+	return result
+end
+
 function UnitController.onMoveIssued(fn: () -> ())
 	onMoveIssuedCb = fn
 end

@@ -22,6 +22,7 @@ local C           = UILib.C
 local activeBlobId:  string? = nil
 local networkRef:    any
 local getResources:  (() -> number)?
+local getMultiIdsFn: (() -> {string})?
 
 local rootLbl:  TextLabel?
 local overlay:  Frame?
@@ -140,9 +141,10 @@ local function startRefreshLoop()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function BlobPanel.init(network: any, getResourcesFn: () -> number, _hasResearch: any)
-	networkRef   = network
-	getResources = getResourcesFn
+function BlobPanel.init(network: any, getResourcesFn: () -> number, _hasResearch: any, getMultiIds: (() -> {string})?)
+	networkRef    = network
+	getResources  = getResourcesFn
+	getMultiIdsFn = getMultiIds
 
 	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
@@ -179,7 +181,8 @@ function BlobPanel.init(network: any, getResourcesFn: () -> number, _hasResearch
 		local cost = def.cost
 		btn.MouseButton1Click:Connect(function()
 			if not activeBlobId or not btn.Active then return end
-			networkRef.blobProduce(activeBlobId, key)
+			local ids = getMultiIdsFn and getMultiIdsFn() or {activeBlobId}
+			networkRef.blobProduce(ids, key)
 			if key == "CreepySoldier" then
 				soldierCooldownExpiry = os.clock() + Config.BLOB_SOLDIER_COOLDOWN
 				refresh()

@@ -23,8 +23,25 @@ local C              = UILib.C
 local activeBarracksId: string? = nil
 local networkRef:       any
 local hasResearchFn:    ((string) -> boolean)?
+local getMultiIdsFn:    (() -> {string})?
 
 local lastTrainingState: { [string]: { queue: {string}, progress: number } } = {}
+local lastQueueKeys:     { [string]: string  } = {}   -- barrackId -> "Soldier,Tank,..." for diff-check
+
+local UNIT_ICON: { [string]: string } = {
+	Soldier       = "⚔",
+	Tank          = "⬡",
+	Elite         = "★",
+	Medic         = "✚",
+	CreepySoldier = "🪲",
+}
+local UNIT_COLOR: { [string]: Color3 } = {
+	Soldier       = C.GREEN,
+	Tank          = C.BARRACKS,
+	Elite         = Color3.fromRGB(160,  80, 230),
+	Medic         = Color3.fromRGB( 50, 200, 160),
+	CreepySoldier = Color3.fromRGB( 50, 170,  80),
+}
 
 -- Root node label ref (shows training state inline)
 local rootLbl: TextLabel?
@@ -147,8 +164,13 @@ local function updateRootLabel(queue: {string}, progress: number)
 	end
 end
 
--- ── World-space training bar (above barracks in 3D) ───────────────────────────
-local function updateWorldTrainBar(barrackId: string, queue: {string}, progress: number)
+-- ── World-space queue display (icons + progress bar above barracks) ──────────
+local ICON_W = 26
+local ICON_H = 26
+local ICON_P = 3   -- padding between icons
+local BAR_H  = 4
+
+local function updateWorldQueueDisplay(barrackId: string, queue: {string}, progress: number)
 	local bf = workspace:FindFirstChild("Buildings")
 	if not bf then return end
 	local model = bf:FindFirstChild(barrackId)
@@ -156,48 +178,115 @@ local function updateWorldTrainBar(barrackId: string, queue: {string}, progress:
 	local base = model:FindFirstChild("Base") :: BasePart?
 	if not base then return end
 
-	local bb = base:FindFirstChild("TrainBar") :: BillboardGui?
+	-- Remove legacy TrainBar if present
+	local old = base:FindFirstChild("TrainBar")
+	if old then old:Destroy() end
+
+	local bb = base:FindFirstChild("QueueDisplay") :: BillboardGui?
 
 	if #queue == 0 then
 		if bb then bb:Destroy() end
+		lastQueueKeys[barrackId] = nil
 		return
 	end
 
-	if not bb then
-		bb             = Instance.new("BillboardGui")
-		bb.Name        = "TrainBar"
-		bb.Size        = UDim2.fromOffset(70, 6)
-		bb.StudsOffset = Vector3.new(0, base.Size.Y / 2 + 4.5, 0)
-		bb.AlwaysOnTop = false
-		bb.Parent      = base
+	local newKey     = table.concat(queue, ",")
+	local needRebuild = (bb == nil) or (lastQueueKeys[barrackId] ~= newKey)
+	lastQueueKeys[barrackId] = newKey
 
-		local track                = Instance.new("Frame")
-		track.Size                 = UDim2.new(1, 0, 1, 0)
-		track.BackgroundColor3     = Color3.fromRGB(10, 12, 22)
-		track.BorderSizePixel      = 0
-		track.Parent               = bb
+	if needRebuild then
+		if bb then bb:Destroy() end
+
+		local n      = #queue
+		local rowW   = n * ICON_W + (n - 1) * ICON_P
+		local totalW = math.max(rowW, 70)
+		local totalH = ICON_H + 4 + BAR_H
+
+		bb                 = Instance.new("BillboardGui")
+		bb.Name            = "QueueDisplay"
+		bb.Size            = UDim2.fromOffset(totalW, totalH)
+		bb.StudsOffset     = Vector3.new(0, base.Size.Y / 2 + 6, 0)
+		bb.AlwaysOnTop     = false
+		bb.LightInfluence  = 0
+		bb.Parent          = base
+
+		-- Icon row (centered horizontally in the billboard)
+		local row                    = Instance.new("Frame")
+		row.Name                     = "IconRow"
+		row.Size                     = UDim2.fromOffset(rowW, ICON_H)
+		row.Position                 = UDim2.fromOffset((totalW - rowW) / 2, 0)
+		row.BackgroundTransparency   = 1
+		row.BorderSizePixel          = 0
+		row.Parent                   = bb
+
+		local layout             = Instance.new("UIListLayout")
+		layout.FillDirection     = Enum.FillDirection.Horizontal
+		layout.Padding           = UDim.new(0, ICON_P)
+		layout.SortOrder         = Enum.SortOrder.LayoutOrder
+		layout.Parent            = row
+
+		for i, unitType in queue do
+			local color    = UNIT_COLOR[unitType] or Color3.fromRGB(120, 120, 120)
+			local icon     = UNIT_ICON[unitType]  or "?"
+			local isActive = (i == 1)
+
+			local badge                    = Instance.new("Frame")
+			badge.Size                     = UDim2.fromOffset(ICON_W, ICON_H)
+			badge.BackgroundColor3         = color
+			badge.BackgroundTransparency   = isActive and 0.15 or 0.60
+			badge.BorderSizePixel          = 0
+			badge.LayoutOrder              = i
+			badge.Parent                   = row
+			UILib.corner(badge, 7)
+
+			if isActive then
+				UILib.stroke(badge, color, 1.5)
+			end
+
+			local lbl                  = Instance.new("TextLabel")
+			lbl.Size                   = UDim2.new(1, 0, 1, 0)
+			lbl.BackgroundTransparency = 1
+			lbl.Text                   = icon
+			lbl.TextScaled             = true
+			lbl.Font                   = Enum.Font.GothamBold
+			lbl.TextColor3             = Color3.new(1, 1, 1)
+			lbl.TextTransparency       = isActive and 0 or 0.35
+			lbl.Parent                 = badge
+		end
+
+		-- Progress bar
+		local track                    = Instance.new("Frame")
+		track.Name                     = "ProgTrack"
+		track.Size                     = UDim2.fromOffset(totalW, BAR_H)
+		track.Position                 = UDim2.fromOffset(0, ICON_H + 4)
+		track.BackgroundColor3         = Color3.fromRGB(10, 12, 22)
+		track.BackgroundTransparency   = 0.25
+		track.BorderSizePixel          = 0
+		track.Parent                   = bb
 		UILib.corner(track, 2)
 
 		local fill                 = Instance.new("Frame")
 		fill.Name                  = "Fill"
-		fill.Size                  = UDim2.new(0, 0, 1, 0)
-		fill.BackgroundColor3      = C.ACCENT
+		fill.Size                  = UDim2.new(math.clamp(progress, 0, 1), 0, 1, 0)
+		fill.BackgroundColor3      = UNIT_COLOR[queue[1]] or C.ACCENT
 		fill.BorderSizePixel       = 0
 		fill.Parent                = track
 		UILib.corner(fill, 2)
-	end
-
-	local track = bb:FindFirstChildWhichIsA("Frame") :: Frame?
-	if track then
-		local fill = track:FindFirstChild("Fill") :: Frame?
-		if fill then fill.Size = UDim2.new(math.clamp(progress, 0, 1), 0, 1, 0) end
+	else
+		-- Queue unchanged — only update progress fill
+		local track = bb:FindFirstChild("ProgTrack") :: Frame?
+		if track then
+			local fill = track:FindFirstChild("Fill") :: Frame?
+			if fill then fill.Size = UDim2.new(math.clamp(progress, 0, 1), 0, 1, 0) end
+		end
 	end
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function BarracksPanel.init(network, hasResearch)
+function BarracksPanel.init(network, hasResearch, getMultiIds)
 	networkRef    = network
 	hasResearchFn = hasResearch
+	getMultiIdsFn = getMultiIds
 
 	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
@@ -241,7 +330,8 @@ function BarracksPanel.init(network, hasResearch)
 			if not activeBarracksId then return end
 			if key == "Elite" and not (hasResearchFn and hasResearchFn("EliteUnits")) then return end
 			if key == "Medic" and not (hasResearchFn and hasResearchFn("MedicUnit"))  then return end
-			networkRef.trainUnit(activeBarracksId, key)
+			local ids = getMultiIdsFn and getMultiIdsFn() or {activeBarracksId}
+			networkRef.trainUnit(ids, key)
 		end)
 
 		table.insert(childNodes, {
@@ -259,7 +349,7 @@ function BarracksPanel.init(network, hasResearch)
 	-- ── Training update listener ───────────────────────────────────────────────
 	network.onTrainingUpdate(function(barrackId: string, queue: {string}, progress: number)
 		lastTrainingState[barrackId] = { queue = queue, progress = progress }
-		updateWorldTrainBar(barrackId, queue, progress)
+		updateWorldQueueDisplay(barrackId, queue, progress)
 		if barrackId == activeBarracksId then
 			updateRootLabel(queue, progress)
 		end

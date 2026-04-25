@@ -76,6 +76,8 @@ Config.BUILD_RADIUS            = 85    -- studs; non-CC buildings must be within
 
 -- Relay (build-zone extender, unlocked via Relay research)
 Config.RELAY_COST            = 175
+Config.MOBILE_CC_COST        = 200   -- one-time cost to enable CC mobility
+Config.MOBILE_CC_SPEED       = 14    -- studs per second when walking
 Config.CREEPY_BLOB_COST      = 225   -- cost to place the blob building
 Config.BLOB_SOLDIER_COST     = 40    -- per CreepySoldier spawn
 Config.BLOB_SOLDIER_COOLDOWN = 6     -- seconds between soldier spawns
@@ -132,6 +134,8 @@ Config.UNLOCKS = {
 		requires = "CombatStims" },
 	CreepyBlob       = { icon = "🫧", desc = "Unlocks the Creepy Blob. Evolve it into CreepySoldiers, a Creepy Worm, or a Creepy Turret.",
 		condText = "Build 3 Relays",   cond = { type = "building", name = "Relay", count = 3 } },
+	MobileCC         = { icon = "🦾", desc = "Unlocks mobility for your Command Center. Move it anywhere — but building is disabled while mobile.",
+		condText = "Build 2 Mines",    cond = { type = "building", name = "Mine",  count = 2 } },
 }
 
 -- Tank: Rocket Barrage (requires ConcussionShells)
@@ -244,6 +248,9 @@ Config.REMOTES = {
 	WormBurst               = "WormBurst",
 	BlobProduce             = "BlobProduce",
 	BlobUpdate              = "BlobUpdate",
+	MobilizeCC              = "MobilizeCC",
+	MoveMobileCC            = "MoveMobileCC",
+	CCMobileSync            = "CCMobileSync",
 }
 
 return Config

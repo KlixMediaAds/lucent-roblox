@@ -1187,8 +1187,8 @@ function UnitManager.init(resourceManager)
 	end)
 
 	-- Train remote
-	RemoteHandler.get(Config.REMOTES.TrainUnit).OnServerEvent:Connect(function(player, barrackId, unitType)
-		if type(barrackId) ~= "string" or type(unitType) ~= "string" then return end
+	RemoteHandler.get(Config.REMOTES.TrainUnit).OnServerEvent:Connect(function(player, barrackIds, unitType)
+		if type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
 
@@ -1199,37 +1199,44 @@ function UnitManager.init(resourceManager)
 			end
 		end
 
+		local ids = type(barrackIds) == "string" and {barrackIds} or barrackIds
+		if type(ids) ~= "table" then return end
+
 		local buildingsFolder = workspace:FindFirstChild("Buildings")
 		if not buildingsFolder then return end
-		local building = buildingsFolder:FindFirstChild(barrackId)
-		if not building then return end
 
-		local ownerVal = building:FindFirstChild("OwnerId")
-		if not ownerVal or ownerVal.Value ~= tostring(player.UserId) then return end
+		for _, barrackId in ids do
+			if type(barrackId) ~= "string" then continue end
+			local building = buildingsFolder:FindFirstChild(barrackId)
+			if not building then continue end
 
-		local base = building:FindFirstChild("Base") :: BasePart
-		if not base then return end
+			local ownerVal = building:FindFirstChild("OwnerId")
+			if not ownerVal or ownerVal.Value ~= tostring(player.UserId) then continue end
 
-		local q = barrackQueues[barrackId] or {}
-		if #q >= MAX_QUEUE then return end
+			local base = building:FindFirstChild("Base") :: BasePart
+			if not base then continue end
 
-		if not resourceManagerRef.spend(player, typeDef.cost) then return end
+			local q = barrackQueues[barrackId] or {}
+			if #q >= MAX_QUEUE then continue end
 
-		local spawnPos  = base.Position + Vector3.new(Config.BUILDING_SIZE.X + typeDef.size.X, 0, 0)
-		local trainTime = (Config.UNIT_TRAIN_TIME :: any)[unitType] or 0
+			if not resourceManagerRef.spend(player, typeDef.cost) then continue end
 
-		if trainTime <= 0 then
-			spawnUnit(player, spawnPos, unitType)
-			return
-		end
+			local spawnPos  = base.Position + Vector3.new(Config.BUILDING_SIZE.X + typeDef.size.X, 0, 0)
+			local trainTime = (Config.UNIT_TRAIN_TIME :: any)[unitType] or 0
 
-		barrackQueues[barrackId] = q
-		table.insert(q, { unitType = unitType, trainTime = trainTime, player = player, spawnPos = spawnPos })
+			if trainTime <= 0 then
+				spawnUnit(player, spawnPos, unitType)
+				continue
+			end
 
-		if not barrackIsTraining[barrackId] then
-			startNextInQueue(barrackId)
-		else
-			fireTrainingUpdate(barrackId, player)
+			barrackQueues[barrackId] = q
+			table.insert(q, { unitType = unitType, trainTime = trainTime, player = player, spawnPos = spawnPos })
+
+			if not barrackIsTraining[barrackId] then
+				startNextInQueue(barrackId)
+			else
+				fireTrainingUpdate(barrackId, player)
+			end
 		end
 	end)
 

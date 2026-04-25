@@ -5,8 +5,8 @@ local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 
 local Network = {}
 
-function Network.trainUnit(barrackId: string, unitType: string)
-	RemoteHandler.get(Config.REMOTES.TrainUnit):FireServer(barrackId, unitType)
+function Network.trainUnit(barrackIds: {string}, unitType: string)
+	RemoteHandler.get(Config.REMOTES.TrainUnit):FireServer(barrackIds, unitType)
 end
 
 function Network.moveUnits(ids: {string}, target: Vector3)
@@ -95,8 +95,8 @@ function Network.upgradeMine(mineId: string, upgradeType: string)
 	RemoteHandler.get(Config.REMOTES.UpgradeMine):FireServer(mineId, upgradeType)
 end
 
-function Network.upgradeTurret(turretId: string, upgradeType: string)
-	RemoteHandler.get(Config.REMOTES.UpgradeTurret):FireServer(turretId, upgradeType)
+function Network.upgradeTurret(turretIds: {string}, upgradeType: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeTurret):FireServer(turretIds, upgradeType)
 end
 
 -- techName
@@ -128,9 +128,9 @@ function Network.onMonumentProgress(fn: (number, number?) -> ())
 	RemoteHandler.get(Config.REMOTES.MonumentProgress).OnClientEvent:Connect(fn)
 end
 
--- blobId, productType ("CreepySoldier" | "CreepyWorm" | "CreepyTurret")
-function Network.blobProduce(blobId: string, productType: string)
-	RemoteHandler.get(Config.REMOTES.BlobProduce):FireServer(blobId, productType)
+-- blobIds array, productType ("CreepySoldier" | "CreepyWorm" | "CreepyTurret")
+function Network.blobProduce(blobIds: {string}, productType: string)
+	RemoteHandler.get(Config.REMOTES.BlobProduce):FireServer(blobIds, productType)
 end
 
 -- blobId, cooldownRemaining (seconds; 0 = ready)
@@ -161,6 +161,21 @@ end
 -- Fired by server when a mine owned by the local player is depleted
 function Network.onMineDepletionWarning(fn: (mineId: string) -> ())
 	RemoteHandler.get(Config.REMOTES.MineDepletionWarning).OnClientEvent:Connect(fn)
+end
+
+-- ccId: toggle mobility unlock/on/off
+function Network.mobilizeCC(ccId: string)
+	RemoteHandler.get(Config.REMOTES.MobilizeCC):FireServer(ccId)
+end
+
+-- ccId, target: right-click movement order when CC is mobile
+function Network.moveMobileCC(ccId: string, pos: Vector3)
+	RemoteHandler.get(Config.REMOTES.MoveMobileCC):FireServer(ccId, pos)
+end
+
+-- ccId, isUnlocked, isMobile
+function Network.onCCMobileSync(fn: (string, boolean, boolean) -> ())
+	RemoteHandler.get(Config.REMOTES.CCMobileSync).OnClientEvent:Connect(fn)
 end
 
 -- fromPos, toPos: medic heal beam VFX

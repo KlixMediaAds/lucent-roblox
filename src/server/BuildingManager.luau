@@ -30,6 +30,12 @@ local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire time
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
 
+-- ── Mobile CC state ───────────────────────────────────────────────────────────
+local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
+local ccMobile:         { [string]: boolean } = {}  -- ccId   → currently walking
+local ccMoveTargets:    { [string]: Vector3 } = {}  -- ccId   → current move target
+local playerCCId:       { [number]: string  } = {}  -- userId → their CC building id
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
@@ -138,6 +144,9 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	base.Parent     = model
 
 	if buildingType == "CommandCenter" then
+		model.PrimaryPart = base   -- needed for PivotTo during mobile movement
+		playerCCId[player.UserId] = id
+
 		local spire        = Instance.new("Part")
 		spire.Name         = "Spire"
 		spire.Size         = Vector3.new(3, 18, 3)
@@ -663,6 +672,10 @@ function BuildingManager.resetAll()
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
 	blobCooldowns            = {}
+	ccMobileUnlocked         = {}
+	ccMobile                 = {}
+	ccMoveTargets            = {}
+	playerCCId               = {}
 end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
@@ -1144,6 +1157,82 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(userId, remaining)
 			end
 		end
+
+		-- ── Mobile CC movement ────────────────────────────────────────────────
+		for ccId, target in ccMoveTargets do
+			local data = buildingData[ccId]
+			if not data then ccMoveTargets[ccId] = nil; continue end
+			if not data.base.Parent then ccMoveTargets[ccId] = nil; continue end
+
+			local cur  = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+			local flat = Vector3.new(target.X - cur.X, 0, target.Z - cur.Z)
+			if flat.Magnitude < 1 then
+				ccMoveTargets[ccId] = nil
+				continue
+			end
+
+			local step  = math.min(Config.MOBILE_CC_SPEED * dt, flat.Magnitude)
+			local move  = flat.Unit * step
+			local model = buildingsFolder:FindFirstChild(ccId) :: Model?
+			if model and model:IsA("Model") then
+				model:PivotTo(CFrame.new(
+					data.base.Position.X + move.X,
+					data.base.Position.Y,
+					data.base.Position.Z + move.Z
+				))
+			end
+		end
+	end)
+
+	-- ── MobilizeCC remote ────────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.MobilizeCC).OnServerEvent:Connect(function(player, ccId)
+		if type(ccId) ~= "string" then return end
+		local data = buildingData[ccId]
+		if not data or data.buildingType ~= "CommandCenter" then return end
+		if data.owner ~= player then return end
+		if not researchManagerRef or not researchManagerRef.hasResearch(player, "MobileCC") then return end
+
+		if not ccMobileUnlocked[player.UserId] then
+			-- First use: spend 200 resources to permanently unlock
+			if not resourceManagerRef or resourceManagerRef.get(player) < Config.MOBILE_CC_COST then return end
+			resourceManagerRef.spend(player, Config.MOBILE_CC_COST)
+			ccMobileUnlocked[player.UserId] = true
+			RemoteHandler.get(Config.REMOTES.CCMobileSync):FireClient(player, ccId, true, false)
+			return
+		end
+
+		-- Toggle mobile/deployed state
+		local nowMobile = not ccMobile[ccId]
+		ccMobile[ccId]  = nowMobile
+
+		if not nowMobile then
+			ccMoveTargets[ccId] = nil
+		end
+
+		-- Keep an IsMobile BoolValue on the model so any client can read it
+		local model = buildingsFolder:FindFirstChild(ccId)
+		if model then
+			local mv = model:FindFirstChild("IsMobile") :: BoolValue?
+			if not mv then
+				mv        = Instance.new("BoolValue")
+				mv.Name   = "IsMobile"
+				mv.Parent = model
+			end
+			(mv :: BoolValue).Value = nowMobile
+		end
+
+		RemoteHandler.get(Config.REMOTES.CCMobileSync):FireClient(player, ccId, true, nowMobile)
+	end)
+
+	-- ── MoveMobileCC remote ───────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.MoveMobileCC).OnServerEvent:Connect(function(player, ccId, pos)
+		if type(ccId) ~= "string" then return end
+		if typeof(pos) ~= "Vector3" then return end
+		local data = buildingData[ccId]
+		if not data or data.buildingType ~= "CommandCenter" then return end
+		if data.owner ~= player then return end
+		if not ccMobile[ccId] then return end
+		ccMoveTargets[ccId] = Vector3.new(pos.X, 0, pos.Z)
 	end)
 
 	-- ── PlaceBuilding remote ──────────────────────────────────────────────
@@ -1155,6 +1244,12 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		-- Reject if the footprint overlaps any existing building
 		if isOccupied(snapped, buildingType) then return end
+
+		-- Reject non-CC buildings while CC is mobile
+		if buildingType ~= "CommandCenter" then
+			local myCCId = playerCCId[player.UserId]
+			if myCCId and ccMobile[myCCId] then return end
+		end
 
 		if buildingType == "CommandCenter" then
 			if playerHasCC[player.UserId] then return end
@@ -1236,86 +1331,99 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 	-- ── UpgradeTurret remote ──────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.UpgradeTurret).OnServerEvent:Connect(
-		function(player, turretId, upgradeType)
-			if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return end
+		function(player, turretIds, upgradeType)
+			if type(upgradeType) ~= "string" then return end
 
 			local VALID = { Flamethrower = true, RocketLauncher = true }
 			if not VALID[upgradeType] then return end
 
-			local data = buildingData[turretId]
-			if not data or data.buildingType ~= "Turret" then return end
-			if data.owner ~= player then return end
-			if data.isConstructing then return end
-			if data.turretUpgrade then return end  -- already upgraded
-
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
 
-			local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
-			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
+			local ids = type(turretIds) == "string" and {turretIds} or turretIds
+			if type(ids) ~= "table" then return end
 
-			data.turretUpgrade = upgradeType
-			applyTurretUpgradeVisuals(turretId, upgradeType)
+			for _, turretId in ids do
+				if type(turretId) ~= "string" then continue end
+				local data = buildingData[turretId]
+				if not data or data.buildingType ~= "Turret" then continue end
+				if data.owner ~= player then continue end
+				if data.isConstructing then continue end
+				if data.turretUpgrade then continue end
+
+				local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
+				if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then continue end
+
+				data.turretUpgrade = upgradeType
+				applyTurretUpgradeVisuals(turretId, upgradeType)
+			end
 		end
 	)
 
 	-- ── BlobProduce remote ────────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.BlobProduce).OnServerEvent:Connect(
-		function(player: any, blobId: any, productType: any)
-			if type(blobId) ~= "string" or type(productType) ~= "string" then return end
+		function(player: any, blobIds: any, productType: any)
+			if type(productType) ~= "string" then return end
 
-			local data = buildingData[blobId]
-			if not data or data.buildingType ~= "CreepyBlob" then return end
-			if data.owner ~= player then return end
-			if data.isConstructing then return end
+			local ids = type(blobIds) == "string" and {blobIds} or blobIds
+			if type(ids) ~= "table" then return end
 
-			local blobPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+			for _, blobId in ids do
+				if type(blobId) ~= "string" then continue end
 
-			if productType == "CreepySoldier" then
-				local now = os.clock()
-				if (blobCooldowns[blobId] or 0) > now then return end
-				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_SOLDIER_COST then return end
-				resourceManagerRef.spend(player, Config.BLOB_SOLDIER_COST)
+				local data = buildingData[blobId]
+				if not data or data.buildingType ~= "CreepyBlob" then continue end
+				if data.owner ~= player then continue end
+				if data.isConstructing then continue end
 
-				if unitManagerRef then
-					local angle  = math.random() * math.pi * 2
-					local offset = Vector3.new(math.cos(angle) * 6, 0, math.sin(angle) * 6)
-					unitManagerRef.spawnUnitNow(player, blobPos + offset, "CreepySoldier")
-				end
+				local blobPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 
-				local expiry = now + Config.BLOB_SOLDIER_COOLDOWN
-				blobCooldowns[blobId] = expiry
-				RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, Config.BLOB_SOLDIER_COOLDOWN)
-				task.delay(Config.BLOB_SOLDIER_COOLDOWN, function()
-					if buildingData[blobId] then
-						RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, 0)
+				if productType == "CreepySoldier" then
+					local now = os.clock()
+					if (blobCooldowns[blobId] or 0) > now then continue end
+					if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_SOLDIER_COST then continue end
+					resourceManagerRef.spend(player, Config.BLOB_SOLDIER_COST)
+
+					if unitManagerRef then
+						local angle  = math.random() * math.pi * 2
+						local offset = Vector3.new(math.cos(angle) * 6, 0, math.sin(angle) * 6)
+						unitManagerRef.spawnUnitNow(player, blobPos + offset, "CreepySoldier")
 					end
-				end)
 
-			elseif productType == "CreepyWorm" then
-				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_WORM_COST then return end
-				resourceManagerRef.spend(player, Config.BLOB_WORM_COST)
+					local expiry = now + Config.BLOB_SOLDIER_COOLDOWN
+					blobCooldowns[blobId] = expiry
+					RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, Config.BLOB_SOLDIER_COOLDOWN)
+					task.delay(Config.BLOB_SOLDIER_COOLDOWN, function()
+						if buildingData[blobId] then
+							RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, 0)
+						end
+					end)
 
-				buildingData[blobId] = nil
-				blobCooldowns[blobId] = nil
-				local model = buildingsFolder:FindFirstChild(blobId)
-				if model then model:Destroy() end
+				elseif productType == "CreepyWorm" then
+					if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_WORM_COST then continue end
+					resourceManagerRef.spend(player, Config.BLOB_WORM_COST)
 
-				createBuilding(player, blobPos, "CreepyWorm")
+					buildingData[blobId] = nil
+					blobCooldowns[blobId] = nil
+					local model = buildingsFolder:FindFirstChild(blobId)
+					if model then model:Destroy() end
 
-			elseif productType == "CreepyTurret" then
-				if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_TURRET_COST then return end
-				resourceManagerRef.spend(player, Config.BLOB_TURRET_COST)
+					createBuilding(player, blobPos, "CreepyWorm")
 
-				buildingData[blobId] = nil
-				blobCooldowns[blobId] = nil
-				local model = buildingsFolder:FindFirstChild(blobId)
-				if model then model:Destroy() end
+				elseif productType == "CreepyTurret" then
+					if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_TURRET_COST then continue end
+					resourceManagerRef.spend(player, Config.BLOB_TURRET_COST)
 
-				local tId  = createBuilding(player, blobPos, "Turret")
-				local tDat = buildingData[tId]
-				if tDat then
-					tDat.turretUpgrade = "Creepy"
-					applyTurretUpgradeVisuals(tId, "Creepy")
+					buildingData[blobId] = nil
+					blobCooldowns[blobId] = nil
+					local model = buildingsFolder:FindFirstChild(blobId)
+					if model then model:Destroy() end
+
+					local tId  = createBuilding(player, blobPos, "Turret")
+					local tDat = buildingData[tId]
+					if tDat then
+						tDat.turretUpgrade = "Creepy"
+						applyTurretUpgradeVisuals(tId, "Creepy")
+					end
 				end
 			end
 		end

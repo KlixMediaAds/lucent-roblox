@@ -19,6 +19,8 @@ local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
+local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
+local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager   = require(script:WaitForChild("CometManager"))
@@ -116,6 +118,9 @@ local function refreshRequirements()
 	HUD.refreshTrayState(ownedBuildingCounts)
 end
 
+-- Whether the local player's CC is currently in mobile (walking) state
+local ccIsMobile = false
+
 local function isBlocked(): boolean
 	return BuildingPlacer.isActive()
 end
@@ -133,7 +138,8 @@ Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
 UnitController.onMoveIssued(function() Tutorial.notify("move_issued") end)
 BarracksPanel.init(Network,
-	function(techName) return researchedTechs[techName] == true end)
+	function(techName) return researchedTechs[techName] == true end,
+	function() return UnitController.getSelectedBuildingIds() end)
 MinePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
@@ -164,10 +170,16 @@ WorkshopPanel.init(Network,
 	end)
 TurretPanel.init(Network,
 	function() return currentResources end,
-	function(techName) return researchedTechs[techName] == true end)
+	function(techName) return researchedTechs[techName] == true end,
+	function() return UnitController.getSelectedBuildingIds() end)
 BlobPanel.init(Network,
 	function() return currentResources end,
+	function(techName) return researchedTechs[techName] == true end,
+	function() return UnitController.getSelectedBuildingIds() end)
+CCMobilePanel.init(Network,
+	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
+MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 
@@ -261,12 +273,12 @@ local function hideBuildingPanels()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 	BlobPanel.hide()
+	CCMobilePanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
 	if not ownCCId then return end
 	if workshopBtnOpen then
-		-- Second press: close it
 		workshopBtnOpen = false
 		WorkshopPanel.hide()
 	else
@@ -274,6 +286,8 @@ HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
 		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
+		BlobPanel.hide()
+		CCMobilePanel.hide()
 		WorkshopPanel.show(ownCCId)
 	end
 end)
@@ -293,6 +307,8 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
+		BlobPanel.hide()
+		CCMobilePanel.hide()
 		WorkshopPanel.show(ownCCId)
 	end
 end)
@@ -305,6 +321,7 @@ local function enterCCMode()
 	clearMineData()
 	ownCCId             = nil
 	workshopBtnOpen     = false
+	ccIsMobile          = false
 	ownedBuildingCounts = {}
 	researchedTechs     = {}
 	localKillCount      = 0
@@ -316,6 +333,8 @@ local function enterCCMode()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
+	BlobPanel.hide()
+	CCMobilePanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
@@ -414,17 +433,18 @@ UnitController.onMineSelected(function(mineId: string?)
 	end
 end)
 
--- ── Command Center research panel ─────────────────────────────────────────────
+-- ── Command Center mobility panel ─────────────────────────────────────────────
 UnitController.onCCSelected(function(ccId: string?)
 	if ccId then
-		workshopBtnOpen = false  -- opened via click, not the HUD button
 		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
-		WorkshopPanel.show(ccId)
+		BlobPanel.hide()
+		WorkshopPanel.hide()
+		CCMobilePanel.show(ccId)
 		Tutorial.notify("cc_selected")
 	else
-		WorkshopPanel.hide()
+		CCMobilePanel.hide()
 	end
 end)
 
@@ -451,6 +471,36 @@ UnitController.onBlobSelected(function(blobId: string?)
 		BlobPanel.show(blobId)
 	else
 		BlobPanel.hide()
+	end
+end)
+
+-- ── Mobile CC sync ────────────────────────────────────────────────────────────
+Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boolean)
+	if ccId ~= ownCCId then return end
+	ccIsMobile = isMobile
+	CCMobilePanel.setMobileState(isUnlocked, isMobile)
+	if isMobile then
+		task.spawn(function()
+			local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
+			if not bf then return end
+			local model = bf:WaitForChild(ccId, 10)
+			if not model then return end
+			local base = model:FindFirstChild("Base") :: BasePart?
+			if base then MechLegs.attach(ccId, base) end
+		end)
+	else
+		MechLegs.detach(ccId)
+	end
+end)
+
+-- Right-click while CC is mobile: issue a move-to command
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
+	if not ccIsMobile or not ownCCId then return end
+	local ground = CameraModule.getGroundPosition()
+	if ground then
+		Network.moveMobileCC(ownCCId, ground)
 	end
 end)
 
@@ -1052,6 +1102,7 @@ Network.onResourceSync(function(amount: number)
 	currentResources = amount
 	MinePanel.refreshIfVisible()
 	BlobPanel.refreshIfVisible()
+	CCMobilePanel.refreshIfVisible()
 end)
 
 -- ── Unlock events ─────────────────────────────────────────────────────────────
@@ -1096,6 +1147,7 @@ Network.onUnlockGranted(function(techName: string)
 	BarracksPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
 	BlobPanel.refreshIfVisible()
+	CCMobilePanel.refreshIfVisible()
 	HUD.refreshTrayState(ownedBuildingCounts)
 	applyUnlockVisuals(techName)
 	UnlockNotification.showUnlock(techName)

@@ -31,6 +31,7 @@ local activeTurretId: string?
 local networkRef:     any
 local getResources:   (() -> number)?
 local hasResearchFn:  ((string) -> boolean)?
+local getMultiIdsFn:  (() -> {string})?
 
 -- Info panel refs
 local statusLbl: TextLabel?
@@ -162,10 +163,11 @@ local function refresh()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
+function TurretPanel.init(network, getResourcesFn, hasResearchFn_, getMultiIds)
 	networkRef    = network
 	getResources  = getResourcesFn
 	hasResearchFn = hasResearchFn_
+	getMultiIdsFn = getMultiIds
 
 	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
@@ -209,7 +211,8 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_)
 		local cost = def.cost
 		btn.MouseButton1Click:Connect(function()
 			if not activeTurretId or not btn.Active then return end
-			networkRef.upgradeTurret(activeTurretId, key)
+			local ids = getMultiIdsFn and getMultiIdsFn() or {activeTurretId}
+			networkRef.upgradeTurret(ids, key)
 			task.delay(0.35, refresh)
 		end)
 
