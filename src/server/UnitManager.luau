@@ -58,8 +58,9 @@ local MAX_QUEUE = 5
 local aggroScanFrame = 0
 local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
 
-local SEP_DIST = 5.5   -- studs: same-team separation trigger radius
-local SEP_PUSH = 0.18  -- studs pushed per frame per overlapping neighbour
+local SEP_DIST   = 5.5   -- studs: same-team separation trigger radius
+local SEP_PUSH   = 0.18  -- studs pushed per frame per overlapping neighbour
+local MOVE_BOUND = 427   -- studs: clamp units inside the ±432 boundary walls
 
 -- ── Health bar ────────────────────────────────────────────────────────────────
 
@@ -739,6 +740,43 @@ function UnitManager.init(resourceManager)
 						end
 						if isRoller then effSpeed = effSpeed * Config.ROLLER_SPEED_MULT end
 						desired = delta.Unit * effSpeed
+
+						-- Terrain obstacle avoidance: repel from obstacle edges
+						local terrainF = workspace:FindFirstChild("TerrainObstacles")
+						if terrainF then
+							local repX, repZ = 0, 0
+							local AVOID_R = Config.TERRAIN_AVOIDANCE_RADIUS
+							for _, obs in terrainF:GetChildren() do
+								if not obs:IsA("BasePart") then continue end
+								local hw = obs.Size.X / 2
+								local hd = obs.Size.Z / 2
+								local ox = obs.Position.X
+								local oz = obs.Position.Z
+								local cx2 = math.clamp(pos.X, ox - hw, ox + hw)
+								local cz2 = math.clamp(pos.Z, oz - hd, oz + hd)
+								local sx  = pos.X - cx2
+								local sz  = pos.Z - cz2
+								local sd  = math.sqrt(sx * sx + sz * sz)
+								if sd < AVOID_R then
+									local nx, nz
+									if sd > 0.05 then
+										nx = sx / sd; nz = sz / sd
+									else
+										nx = 1; nz = 0  -- emergency escape
+									end
+									local strength = (1 - sd / AVOID_R) ^ 2
+									repX = repX + nx * strength
+									repZ = repZ + nz * strength
+								end
+							end
+							if repX ~= 0 or repZ ~= 0 then
+								desired = desired + Vector3.new(repX, 0, repZ) * effSpeed * 2
+								local dMag = desired.Magnitude
+								if dMag > effSpeed then
+									desired = desired * (effSpeed / dMag)
+								end
+							end
+						end
 					end
 				end
 
@@ -751,7 +789,9 @@ function UnitManager.init(resourceManager)
 				-- Apply velocity and face the direction of travel
 				local vel = data.velocity
 				if vel.Magnitude > 0.15 then
-					local newPos = Vector3.new(pos.X + vel.X * dt, pos.Y, pos.Z + vel.Z * dt)
+					local newX   = math.clamp(pos.X + vel.X * dt, -MOVE_BOUND, MOVE_BOUND)
+					local newZ   = math.clamp(pos.Z + vel.Z * dt, -MOVE_BOUND, MOVE_BOUND)
+					local newPos = Vector3.new(newX, pos.Y, newZ)
 					local flatVel = Vector3.new(vel.X, 0, vel.Z)
 					if flatVel.Magnitude > 0.5 then
 						if isRoller then

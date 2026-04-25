@@ -33,6 +33,7 @@ local C_CC_OWN      = Color3.fromRGB(255, 200,  40)
 local C_CC_ENEMY    = Color3.fromRGB(220, 100,  30)
 local C_MONUMENT    = Color3.fromRGB(255, 215,   0)  -- gold — always shown
 local C_DEPOSIT     = Color3.fromRGB(255, 248, 160)  -- light yellow — ore deposits
+local C_TERRAIN     = Color3.fromRGB(78,  66,  56)   -- grey-brown — terrain obstacles
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ local unitMarkers: { [string]: TextLabel } = {}
 local buildingDots:{ [string]: Frame } = {}
 local minerDots:   { [string]: Frame } = {}
 local depositDots: { [string]: Frame } = {}
+local terrainDots: { [string]: Frame } = {}  -- terrain obstacle rectangles
 local vpLines:     { Frame }           = {}  -- 4 viewport rectangle edges
 
 -- CC avatar icons (one per Command Center building)
@@ -356,6 +358,43 @@ local function syncCCIcons(folder: Instance?, myStr: string)
 	end
 end
 
+-- ── Terrain obstacle rectangles ──────────────────────────────────────────────
+
+local function syncTerrainDots()
+	local seen: { [string]: true } = {}
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+
+	if folder then
+		for i, part in ipairs(folder:GetChildren()) do
+			if not part:IsA("BasePart") then continue end
+			local id  = "t" .. i
+			seen[id]  = true
+
+			local dot = terrainDots[id]
+			if not dot then
+				local pw = math.max(3, part.Size.X / (WORLD_HALF * 2) * MAP_SIZE)
+				local ph = math.max(3, part.Size.Z / (WORLD_HALF * 2) * MAP_SIZE)
+				dot                    = Instance.new("Frame")
+				dot.Size               = UDim2.fromOffset(pw, ph)
+				dot.AnchorPoint        = Vector2.new(0.5, 0.5)
+				dot.BackgroundColor3   = C_TERRAIN
+				dot.BackgroundTransparency = 0.2
+				dot.BorderSizePixel    = 0
+				dot.ZIndex             = 1   -- drawn behind everything else
+				dot.Parent             = canvas
+				terrainDots[id]        = dot
+			end
+
+			local u, v     = w2m(part.Position.X, part.Position.Z)
+			dot.Position   = UDim2.fromOffset(u, v)
+		end
+	end
+
+	for id, dot in terrainDots do
+		if not seen[id] then dot:Destroy(); terrainDots[id] = nil end
+	end
+end
+
 -- ── Deposit dots (squares, always visible) ────────────────────────────────────
 
 -- Reads unclaimed deposits from the server-created workspace.Deposits folder.
@@ -557,6 +596,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 		local buildingsF = workspace:FindFirstChild("Buildings")
 		local minersF    = workspace:FindFirstChild("Miners")
 
+		syncTerrainDots()
 		syncDepositDots()
 		syncUnitTriangles(unitsF, myStr)
 		syncBuildingDots(buildingsF, buildingDots, myStr)

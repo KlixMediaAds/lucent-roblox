@@ -83,6 +83,28 @@ local function isOccupied(pos: Vector3, newType: string): boolean
 	return false
 end
 
+-- Returns true if the proposed footprint overlaps any terrain obstacle.
+local function isTerrainBlocked(pos: Vector3, buildType: string): boolean
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+	if not folder then return false end
+	local ns  = buildingSize(buildType)
+	local nhw = ns.X / 2
+	local nhd = ns.Z / 2
+	for _, part in folder:GetChildren() do
+		if not part:IsA("BasePart") then continue end
+		if math.abs(pos.X - part.Position.X) < nhw + part.Size.X / 2
+			and math.abs(pos.Z - part.Position.Z) < nhd + part.Size.Z / 2 then
+			return true
+		end
+	end
+	return false
+end
+
+local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
+	local ns = buildingSize(buildType)
+	return math.abs(pos.X) + ns.X / 2 > 432 or math.abs(pos.Z) + ns.Z / 2 > 432
+end
+
 -- ── Health bar ────────────────────────────────────────────────────────────────
 
 local function addHealthBar(part: BasePart)
@@ -948,8 +970,10 @@ end
 function BuildingManager.placeForPlayer(player: any, position: Vector3, buildingType: string): boolean
 	local snapped = snapGrid(position)
 
-	-- Reject if the footprint overlaps any existing building
+	-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 	if isOccupied(snapped, buildingType) then return false end
+	if isTerrainBlocked(snapped, buildingType) then return false end
+	if isOutOfMapBounds(snapped, buildingType) then return false end
 
 	if buildingType == "CommandCenter" then
 		if playerHasCC[player.UserId] then return false end
@@ -1242,8 +1266,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		local snapped = snapGrid(pos)
 
-		-- Reject if the footprint overlaps any existing building
+		-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 		if isOccupied(snapped, buildingType) then return end
+		if isTerrainBlocked(snapped, buildingType) then return end
+		if isOutOfMapBounds(snapped, buildingType) then return end
 
 		-- Reject non-CC buildings while CC is mobile
 		if buildingType ~= "CommandCenter" then

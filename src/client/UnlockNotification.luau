@@ -38,6 +38,7 @@ local C = UILib.C
 type CardEntry = { frame: Frame, cardH: number }
 local activeCards: { CardEntry } = {}
 local CARD_GAP = 10
+local MAX_CARDS = 3
 
 local function computeTargetY(idx: number): number
     local CARD_OFF_Y = 40
@@ -134,6 +135,8 @@ function UnlockNotification.showUnlock(techName: string)
     local condText = unlock.condText :: string
 
     task.spawn(function()
+        while #activeCards >= MAX_CARDS do task.wait(0.3) end
+
         local sg = getScreenGui()
         if not sg then return end
 
@@ -273,6 +276,8 @@ function UnlockNotification.showChoice(
     chooseFn: (string) -> ()
 )
     task.spawn(function()
+        while #activeCards >= MAX_CARDS do task.wait(0.3) end
+
         local sg = getScreenGui()
         if not sg then return end
 
@@ -318,6 +323,10 @@ function UnlockNotification.showChoice(
         local BTN_W   = math.floor((CARD_W - 72) / #options)
         local chosenName: string? = nil
         local btns: { TextButton } = {}
+
+        -- Register before building buttons so click handlers close over the real value
+        local unregister = registerCard(card, CARD_H_CHO)
+        local targetY    = computeTargetY(#activeCards)
 
         for i, techName in options do
             local ul = (Config.UNLOCKS :: any)[techName]
@@ -400,10 +409,7 @@ function UnlockNotification.showChoice(
             end)
         end
 
-        -- Register in stack and slide in
-        local unregister = registerCard(card, CARD_H_CHO)
-        local targetY    = computeTargetY(#activeCards)
-
+        -- Slide in
         TweenService:Create(card,
             TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
             { Position = UDim2.new(0.5, 0, 1, targetY) }

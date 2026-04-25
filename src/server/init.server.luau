@@ -19,6 +19,41 @@ do
 	)
 end
 
+-- ── Map boundary walls ────────────────────────────────────────────────────────
+-- Four permanent rock walls seal the ±432 play area.  Always present regardless
+-- of the terrain toggle; units and buildings are clamped/rejected in code too.
+do
+	local BOUND     = 432
+	local THICKNESS = 20
+	local HEIGHT    = 20
+	local OT        = THICKNESS / 2       -- 10: half-thickness
+	local OVER      = BOUND + THICKNESS   -- 452: overhang fills the corners
+
+	local folder        = Instance.new("Folder")
+	folder.Name         = "MapBoundary"
+	folder.Parent       = workspace
+
+	local walls = {
+		{ cx = 0,           cz =  BOUND + OT, hw = OVER, hd = OT   }, -- north
+		{ cx = 0,           cz = -(BOUND+OT), hw = OVER, hd = OT   }, -- south
+		{ cx =  BOUND + OT, cz = 0,           hw = OT,   hd = OVER }, -- east
+		{ cx = -(BOUND+OT), cz = 0,           hw = OT,   hd = OVER }, -- west
+	}
+	for _, w in walls do
+		local p         = Instance.new("Part")
+		p.Name          = "BoundaryWall"
+		p.Size          = Vector3.new(w.hw * 2, HEIGHT, w.hd * 2)
+		p.CFrame        = CFrame.new(w.cx, HEIGHT / 2, w.cz)
+		p.Material      = Enum.Material.Rock
+		p.BrickColor    = BrickColor.new("Dark stone grey")
+		p.Anchored      = true
+		p.CanCollide    = false
+		p.CanQuery      = false
+		p.CastShadow    = true
+		p.Parent        = folder
+	end
+end
+
 -- Create all RemoteEvents before other modules need them
 local RemoteHandler   = require(Shared:WaitForChild("RemoteHandler"))
 
@@ -30,6 +65,7 @@ local MineralManager   = require(script:WaitForChild("MineralManager"))
 local ResearchManager  = require(script:WaitForChild("ResearchManager"))
 local AIManager        = require(script:WaitForChild("AIManager"))
 local LobbyManager     = require(script:WaitForChild("LobbyManager"))
+local TerrainManager   = require(script:WaitForChild("TerrainManager"))
 
 TeamManager.init()
 ResourceManager.init()
@@ -151,7 +187,7 @@ for _, player in Players:GetPlayers() do
 end
 
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
-LobbyManager.init(MineralManager, function()
+LobbyManager.init(MineralManager, TerrainManager, function()
 	gameStartTime = os.clock()
 	for _, player in Players:GetPlayers() do
 		task.delay(1, function()

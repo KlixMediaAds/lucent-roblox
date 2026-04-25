@@ -14,6 +14,7 @@ local currentType         = "Barracks"
 local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping to
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
 local outOfBuildZone      = false          -- non-CC mode: ghost is outside build zone
+local onTerrain           = false          -- ghost is overlapping a terrain obstacle
 local depositPositions: {Vector3} = {}
 local ccPositions: {Vector3}      = {}     -- all known CC positions
 local ownCcPosition: Vector3?     = nil    -- local player's own CC position
@@ -240,6 +241,27 @@ local function isCCTooClose(pos: Vector3): boolean
 	return false
 end
 
+local function checkTerrainOverlap(pos: Vector3, buildType: string): boolean
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+	if not folder then return false end
+	local size = ghostSize(buildType)
+	local nhw  = size.X / 2
+	local nhd  = size.Z / 2
+	for _, part in folder:GetChildren() do
+		if not part:IsA("BasePart") then continue end
+		if math.abs(pos.X - part.Position.X) < nhw + part.Size.X / 2
+			and math.abs(pos.Z - part.Position.Z) < nhd + part.Size.Z / 2 then
+			return true
+		end
+	end
+	return false
+end
+
+local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
+	local size = ghostSize(buildType)
+	return math.abs(pos.X) + size.X / 2 > 432 or math.abs(pos.Z) + size.Z / 2 > 432
+end
+
 local function makeGhost()
 	if ghost then ghost:Destroy() end
 	ghost              = Instance.new("Part")
@@ -277,7 +299,7 @@ function BuildingPlacer.init(network, cameraModule)
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
 			if currentType == "Mine" then
-				if outOfBuildZone then return end  -- blocked by build zone
+				if outOfBuildZone or onTerrain then return end
 				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 				if pos then
 					network.placeBuilding(snap(pos), "Mine")
@@ -285,7 +307,7 @@ function BuildingPlacer.init(network, cameraModule)
 				end
 
 			elseif currentType == "CommandCenter" then
-				if not ccTooClose then
+				if not ccTooClose and not onTerrain then
 					local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 					local pos   = cameraModule.getPositionAtHeight(halfH)
 					if pos then
@@ -293,10 +315,10 @@ function BuildingPlacer.init(network, cameraModule)
 						task.defer(BuildingPlacer.exitPlacementMode)
 					end
 				end
-				-- Red = too close → do nothing (keeps mode open)
+				-- Red = blocked → do nothing (keeps mode open)
 
 			else
-				if outOfBuildZone then return end  -- blocked by build zone
+				if outOfBuildZone or onTerrain then return end
 				local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
 				if pos then
 					network.placeBuilding(snap(pos), currentType)
@@ -319,10 +341,11 @@ function BuildingPlacer.init(network, cameraModule)
 				local snapped = snap(cursor)
 				ghost.Position = snapped
 
-				-- Build zone check takes priority over extract-range colouring
-				outOfBuildZone = not isInBuildZone(snapped)
+				-- Terrain/bounds check overrides all other colouring
+				onTerrain      = checkTerrainOverlap(snapped, "Mine") or isOutOfMapBounds(snapped, "Mine")
+				outOfBuildZone = not onTerrain and not isInBuildZone(snapped)
 
-				if outOfBuildZone then
+				if onTerrain or outOfBuildZone then
 					ghost.BrickColor   = BrickColor.new("Bright red")
 					ghost.Transparency = 0.65
 				else
@@ -352,11 +375,13 @@ function BuildingPlacer.init(network, cameraModule)
 			local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 			local pos   = cameraModule.getPositionAtHeight(halfH)
 			if pos then
-				local snapped = snap(pos)
-				ccTooClose    = isCCTooClose(snapped)
-				ghost.Position  = snapped
-				ghost.BrickColor = ccTooClose and BrickColor.new("Bright red") or localPlayer.TeamColor
-				ghost.Transparency = ccTooClose and 0.65 or 0.5
+				local snapped  = snap(pos)
+				ccTooClose     = isCCTooClose(snapped)
+				onTerrain      = checkTerrainOverlap(snapped, "CommandCenter") or isOutOfMapBounds(snapped, "CommandCenter")
+				ghost.Position = snapped
+				local blocked  = ccTooClose or onTerrain
+				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
+				ghost.Transparency = blocked and 0.65 or 0.5
 			end
 
 		else
@@ -365,10 +390,12 @@ function BuildingPlacer.init(network, cameraModule)
 				local snapped = snap(pos)
 				ghost.Position = snapped
 
-				outOfBuildZone = not isInBuildZone(snapped)
+				onTerrain      = checkTerrainOverlap(snapped, currentType) or isOutOfMapBounds(snapped, currentType)
+				outOfBuildZone = not onTerrain and not isInBuildZone(snapped)
 
-				ghost.BrickColor   = outOfBuildZone and BrickColor.new("Bright red") or localPlayer.TeamColor
-				ghost.Transparency = outOfBuildZone and 0.65 or 0.5
+				local blocked  = onTerrain or outOfBuildZone
+				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
+				ghost.Transparency = blocked and 0.65 or 0.5
 
 				-- Keep attack-range ring (e.g. turret) centred under ghost
 				if rangeRing then
@@ -409,6 +436,7 @@ function BuildingPlacer.exitPlacementMode()
 	currentSnapTarget = nil
 	ccTooClose        = false
 	outOfBuildZone    = false
+	onTerrain         = false
 	if ghost        then ghost:Destroy();              ghost        = nil end
 	if rangeRing    then RangeRing.destroy(rangeRing); rangeRing    = nil end
 	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end

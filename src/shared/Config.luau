@@ -195,6 +195,9 @@ Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic =
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
 
+-- Terrain obstacles (generated in lobby when terrain is toggled on)
+Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
+
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
 Config.CAMERA_MOVE_SPEED     = 60
@@ -243,6 +246,7 @@ Config.REMOTES = {
 	LobbyReroll             = "LobbyReroll",
 	LobbyStart              = "LobbyStart",
 	LobbySetColor           = "LobbySetColor",
+	LobbyTerrainToggle      = "LobbyTerrainToggle",
 	ShowEndScreen           = "ShowEndScreen",
 	CondProgressSync        = "CondProgressSync",
 	WormBurst               = "WormBurst",

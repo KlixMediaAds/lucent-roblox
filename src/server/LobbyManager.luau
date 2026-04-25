@@ -23,6 +23,8 @@ local LobbyManager = {}
 local readyMap:        { [number]: boolean } = {}  -- userId → ready
 local rerollCooldown   = false
 local active           = true   -- false once lobby has ended
+local terrainEnabled   = false
+local terrainManagerRef: any = nil
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +42,8 @@ end
 local function syncAll(mineralManager)
 	RemoteHandler.get(Config.REMOTES.LobbySync):FireAllClients(
 		buildReadyList(),
-		mineralManager.getUnclaimedPositions()
+		mineralManager.getUnclaimedPositions(),
+		terrainEnabled
 	)
 end
 
@@ -67,7 +70,9 @@ end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
 
-function LobbyManager.init(mineralManager, onLobbyEnd: () -> ())
+function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
+
+	terrainManagerRef = terrainManager
 
 	-- Players who join while the lobby is live
 	Players.PlayerAdded:Connect(function(player)
@@ -79,7 +84,8 @@ function LobbyManager.init(mineralManager, onLobbyEnd: () -> ())
 			RemoteHandler.get(Config.REMOTES.LobbySync):FireClient(
 				player,
 				buildReadyList(),
-				mineralManager.getUnclaimedPositions()
+				mineralManager.getUnclaimedPositions(),
+				terrainEnabled
 			)
 		end)
 		syncAll(mineralManager)
@@ -101,15 +107,31 @@ function LobbyManager.init(mineralManager, onLobbyEnd: () -> ())
 		checkAllReady(mineralManager, onLobbyEnd)
 	end)
 
-	-- Re-roll (3-second server cooldown; resets all ready states)
+	-- Re-roll (3-second server cooldown; resets all ready states + regenerates terrain if enabled)
 	RemoteHandler.get(Config.REMOTES.LobbyReroll).OnServerEvent:Connect(function(_player)
 		if not active then return end
 		if rerollCooldown then return end
 		rerollCooldown = true
 		for userId in readyMap do readyMap[userId] = false end
 		mineralManager.rerollDeposits()
+		if terrainEnabled and terrainManagerRef then
+			terrainManagerRef.generate()
+		end
 		syncAll(mineralManager)
 		task.delay(3, function() rerollCooldown = false end)
+	end)
+
+	-- Terrain toggle (any player can toggle; resets all ready states)
+	RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle).OnServerEvent:Connect(function(_player)
+		if not active then return end
+		terrainEnabled = not terrainEnabled
+		for userId in readyMap do readyMap[userId] = false end
+		if terrainEnabled and terrainManagerRef then
+			terrainManagerRef.generate()
+		elseif not terrainEnabled and terrainManagerRef then
+			terrainManagerRef.clear()
+		end
+		syncAll(mineralManager)
 	end)
 
 	-- Color picker

@@ -41,8 +41,10 @@ local C_READY_ON    = Color3.fromRGB( 45, 190,  75)
 local C_READY_OFF   = Color3.fromRGB( 30,  60, 120)
 local C_READY_DOT   = Color3.fromRGB( 45, 190,  75)
 local C_WAITING_DOT = Color3.fromRGB(180,  60,  60)
-local C_REROLL      = Color3.fromRGB( 18,  34,  72)
-local C_COOLDOWN    = Color3.fromRGB( 40,  40,  70)
+local C_REROLL        = Color3.fromRGB( 18,  34,  72)
+local C_COOLDOWN      = Color3.fromRGB( 40,  40,  70)
+local C_TERRAIN_OFF   = Color3.fromRGB( 18,  34,  72)
+local C_TERRAIN_ON    = Color3.fromRGB( 55,  38,  18)
 
 -- ── Module state ──────────────────────────────────────────────────────────────
 local sg:          ScreenGui
@@ -59,9 +61,12 @@ local titleLbl:    TextLabel
 local mapLabelRef: TextLabel   -- "MAP PREVIEW" text above the map
 
 local depositDots:    { Frame } = {}
+local terrainDots:    { Frame } = {}   -- grey obstacle rectangles on map preview
 local isReady          = false
 local rerollOnCooldown = false
 local pendingRerollAnim = false  -- true after client fires reroll, cleared on next sync
+local terrainToggleBtn: TextButton
+local lobbyTerrainEnabled = false
 
 -- ── World → preview pixel ─────────────────────────────────────────────────────
 local function w2p(wx: number, wz: number): (number, number)
@@ -160,6 +165,50 @@ local function syncDeposits(positions: { Vector3 }, animate: boolean?)
 			local u, v = w2p(pos.X, pos.Z)
 			depositDots[i].Position = UDim2.fromOffset(u, v)
 		end
+	end
+end
+
+-- ── Terrain preview dots ─────────────────────────────────────────────────────
+local C_TERRAIN_DOT = Color3.fromRGB(80, 68, 58)
+
+local function syncTerrain(enabled: boolean)
+	lobbyTerrainEnabled = enabled
+
+	-- Update button label if it's built yet
+	if terrainToggleBtn then
+		terrainToggleBtn.Text             = enabled and "TERRAIN: ON" or "TERRAIN: OFF"
+		terrainToggleBtn.BackgroundColor3 = enabled and C_TERRAIN_ON or C_TERRAIN_OFF
+	end
+
+	-- Clear existing dots
+	for _, dot in terrainDots do dot:Destroy() end
+	terrainDots = {}
+
+	if not enabled then return end
+	if not mapCanvas then return end
+
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+	if not folder then return end
+
+	for _, part in folder:GetChildren() do
+		if not part:IsA("BasePart") then continue end
+		local cx, cz = part.Position.X, part.Position.Z
+		local hw, hd = part.Size.X / 2, part.Size.Z / 2
+		local pu, pv = w2p(cx, cz)
+		local pw     = hw * 2 / (WORLD_HALF * 2) * PREVIEW_PX
+		local ph     = hd * 2 / (WORLD_HALF * 2) * PREVIEW_PX
+
+		local dot               = Instance.new("Frame")
+		dot.Size                = UDim2.fromOffset(math.max(4, pw), math.max(4, ph))
+		dot.AnchorPoint         = Vector2.new(0.5, 0.5)
+		dot.Position            = UDim2.fromOffset(pu, pv)
+		dot.BackgroundColor3    = C_TERRAIN_DOT
+		dot.BackgroundTransparency = 0.25
+		dot.BorderSizePixel     = 0
+		dot.ZIndex              = 3
+		dot.Parent              = mapCanvas
+		local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 2); c.Parent = dot
+		table.insert(terrainDots, dot)
 	end
 end
 
@@ -431,7 +480,7 @@ local function buildUI()
 
 	-- ── Content row ──────────────────────────────────────────────────────────
 	local totalW = PREVIEW_PX + 16 + 300   -- map + gap + panel
-	local totalH = PREVIEW_PX + 26
+	local totalH = PREVIEW_PX + 74         -- extra 48px for terrain toggle button
 	local content = Instance.new("Frame")
 	content.Size             = UDim2.fromOffset(totalW, totalH)
 	content.Position         = UDim2.new(0.5, -totalW / 2, 0.5, -totalH / 2 + 18)
@@ -530,6 +579,20 @@ local function buildUI()
 	rerollHint = label(panel, "Re-rolling resets all ready states", 11, C_SUBTEXT, Enum.Font.Gotham,
 		UDim2.new(1, -20, 0, 18), UDim2.fromOffset(10, 364),
 		Enum.TextXAlignment.Center)
+
+	-- Terrain toggle button
+	terrainToggleBtn = Instance.new("TextButton")
+	terrainToggleBtn.Size             = UDim2.new(1, -20, 0, 38)
+	terrainToggleBtn.Position         = UDim2.fromOffset(10, 388)
+	terrainToggleBtn.BackgroundColor3 = C_TERRAIN_OFF
+	terrainToggleBtn.BorderSizePixel  = 0
+	terrainToggleBtn.Font             = Enum.Font.GothamBold
+	terrainToggleBtn.TextSize         = 13
+	terrainToggleBtn.TextColor3       = Color3.fromRGB(185, 155, 110)
+	terrainToggleBtn.Text             = "TERRAIN: OFF"
+	terrainToggleBtn.Parent           = panel
+	corner(terrainToggleBtn, 6)
+	stroke(terrainToggleBtn, C_BORDER, 1)
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
@@ -547,15 +610,18 @@ function LobbyUI.init(onGameStart: () -> ())
 
 	-- ── LobbySync ─────────────────────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.LobbySync).OnClientEvent:Connect(
-		function(readyList: {{ name: string, ready: boolean }}, positions: { Vector3 })
+		function(readyList: {{ name: string, ready: boolean }}, positions: { Vector3 }, terrainOn: boolean)
 			syncPlayers(readyList)
 			if pendingRerollAnim then
 				pendingRerollAnim = false
 				playMapScan(function()
 					syncDeposits(positions, true)
+					task.wait(0.05)  -- let workspace replicate terrain changes
+					syncTerrain(terrainOn)
 				end)
 			else
 				syncDeposits(positions, false)
+				syncTerrain(terrainOn)
 			end
 		end
 	)
@@ -584,6 +650,11 @@ function LobbyUI.init(onGameStart: () -> ())
 		rerollBtn.BackgroundColor3 = C_REROLL
 		rerollBtn.Text             = "RE-ROLL MAP"
 		rerollHint.Text            = "Re-rolling resets all ready states"
+	end)
+
+	-- ── Terrain toggle ────────────────────────────────────────────────────────
+	terrainToggleBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle):FireServer()
 	end)
 
 	-- ── LobbyStart ────────────────────────────────────────────────────────────
