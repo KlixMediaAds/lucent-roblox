@@ -1014,7 +1014,8 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	end
 
 	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay needs research
-	if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return false end
+	-- AI bots (UserId < 0) bypass the mine prerequisite — deposits may be outside their build zone.
+	if buildingType == "Barracks" and player.UserId > 0 and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end

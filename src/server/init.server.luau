@@ -174,9 +174,9 @@ local function connectChatForPlayer(player: Player)
 		if lower == "/end" then
 			triggerEndGame(player.UserId, "debug")
 		end
-		local difficulty = lower:match("^/ai%s+(%a+)$")
-		if difficulty then
-			AIManager.spawnAI(difficulty)
+		local personality, lvStr = lower:match("^/ai%s+(%a+)%s*(%d*)$")
+		if personality then
+			AIManager.spawnAI(personality, tonumber(lvStr) or 3)
 		end
 	end)
 end
@@ -187,15 +187,19 @@ for _, player in Players:GetPlayers() do
 end
 
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
-LobbyManager.init(MineralManager, TerrainManager, function()
+LobbyManager.init(MineralManager, TerrainManager, function(aiQueue)
 	gameStartTime = os.clock()
-	for _, player in Players:GetPlayers() do
+
+	-- Send all human players to CC placement mode
+	local humanPlayers = Players:GetPlayers()
+	for _, player in humanPlayers do
 		task.delay(1, function()
 			if player.Parent then
 				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
 			end
 		end)
 	end
+
 	Players.PlayerAdded:Connect(function(player)
 		task.delay(2, function()
 			if player.Parent then
@@ -203,6 +207,38 @@ LobbyManager.init(MineralManager, TerrainManager, function()
 			end
 		end)
 	end)
+
+	-- Spawn AI bots AFTER all human players have placed their Command Centers.
+	-- This prevents AI CCs from blocking player spawn locations.
+	if #aiQueue > 0 then
+		task.spawn(function()
+			local CC_WAIT_TIMEOUT = 300  -- 5 minutes max
+			local elapsed = 0
+
+			while elapsed < CC_WAIT_TIMEOUT do
+				task.wait(1)
+				elapsed += 1
+
+				local allPlaced = true
+				local humanCount = 0
+				for _, player in Players:GetPlayers() do
+					humanCount += 1
+					if not BuildingManager.hasCommandCenter(player) then
+						allPlaced = false
+					end
+				end
+
+				-- Proceed once all connected humans have placed, or if nobody remains
+				if humanCount == 0 or allPlaced then break end
+			end
+
+			-- Spawn each queued AI with a small stagger so base-selection is accurate
+			for _, entry in aiQueue do
+				AIManager.spawnAI(entry.personality, entry.level)
+				task.wait(0.8)
+			end
+		end)
+	end
 end)
 
 print("[Server] RTS initialized")

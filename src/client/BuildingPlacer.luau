@@ -26,6 +26,12 @@ local modeCb: ((boolean, string?) -> ())?
 local networkRef: any
 local cameraRef:  any
 
+local lineShiftHeld  = false
+local isLineDragging = false
+local lineDragStart:  Vector3?  = nil
+local lineGhosts:     { Part }  = {}
+local getResources:   (() -> number)? = nil
+
 local GRID = Config.BUILDING_GRID
 
 -- Returns true if pos is within any owned build zone (CC or Relay).
@@ -262,6 +268,74 @@ local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
 	return math.abs(pos.X) + size.X / 2 > 432 or math.abs(pos.Z) + size.Z / 2 > 432
 end
 
+local function buildingCost(btype: string): number
+	if btype == "Mine"       then return Config.MINE_COST end
+	if btype == "Turret"     then return Config.TURRET_COST end
+	if btype == "Relay"      then return Config.RELAY_COST end
+	if btype == "CreepyBlob" then return Config.CREEPY_BLOB_COST end
+	return Config.BUILDING_COST
+end
+
+local function lineSpacing(btype: string): number
+	local sz = ghostSize(btype)
+	return math.max(sz.X, sz.Z) + 5
+end
+
+local function getLinePositions(startPos: Vector3, endPos: Vector3, spacing: number): { Vector3 }
+	local dx  = endPos.X - startPos.X
+	local dz  = endPos.Z - startPos.Z
+	local len = math.sqrt(dx * dx + dz * dz)
+	if len < 0.1 then return { snap(startPos) } end
+	local ndx = dx / len
+	local ndz = dz / len
+	local count = math.max(1, math.floor(len / spacing) + 1)
+	local result: { Vector3 } = {}
+	for i = 0, count - 1 do
+		table.insert(result, snap(Vector3.new(
+			startPos.X + ndx * i * spacing,
+			startPos.Y,
+			startPos.Z + ndz * i * spacing
+		)))
+	end
+	return result
+end
+
+local function clearLineGhosts()
+	for _, g in lineGhosts do
+		if g.Parent then g:Destroy() end
+	end
+	lineGhosts = {}
+end
+
+local function confirmLineDrag()
+	if not lineDragStart or not cameraRef then
+		clearLineGhosts(); isLineDragging = false; lineDragStart = nil; return
+	end
+	local curPos = cameraRef.getPositionAtHeight(ghostSize(currentType).Y / 2)
+	local endPos = curPos and snap(curPos) or lineDragStart
+	local positions = getLinePositions(lineDragStart, endPos, lineSpacing(currentType))
+	local resources = getResources and getResources() or 0
+	local cost      = buildingCost(currentType)
+	local placed    = 0
+	for _, lpos in positions do
+		if resources < cost then break end
+		local valid = isInBuildZone(lpos)
+			and not checkTerrainOverlap(lpos, currentType)
+			and not isOutOfMapBounds(lpos, currentType)
+		if valid then
+			networkRef.placeBuilding(lpos, currentType)
+			resources -= cost
+			placed    += 1
+		end
+	end
+	clearLineGhosts()
+	isLineDragging = false
+	lineDragStart  = nil
+	if placed > 0 then
+		task.defer(BuildingPlacer.exitPlacementMode)
+	end
+end
+
 local function makeGhost()
 	if ghost then ghost:Destroy() end
 	ghost              = Instance.new("Part")
@@ -295,6 +369,9 @@ function BuildingPlacer.init(network, cameraModule)
 	end)
 
 	UserInputService.InputBegan:Connect(function(input, gpe)
+		if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+			lineShiftHeld = true
+		end
 		if not isPlacing then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
@@ -320,9 +397,13 @@ function BuildingPlacer.init(network, cameraModule)
 			else
 				if outOfBuildZone or onTerrain then return end
 				local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
-				if pos then
-					network.placeBuilding(snap(pos), currentType)
+				if not pos then return end
+				if lineShiftHeld then
+					isLineDragging = true
+					lineDragStart  = snap(pos)
+					return
 				end
+				network.placeBuilding(snap(pos), currentType)
 				task.defer(BuildingPlacer.exitPlacementMode)
 			end
 
@@ -332,8 +413,66 @@ function BuildingPlacer.init(network, cameraModule)
 		end
 	end)
 
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+			lineShiftHeld = false
+			if isLineDragging then confirmLineDrag() end
+		end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			if isLineDragging then confirmLineDrag() end
+		end
+	end)
+
 	RunService.RenderStepped:Connect(function()
-		if not isPlacing or not ghost then return end
+		if not isPlacing then return end
+
+		-- Line drag mode: pool of ghosts along the drag line
+		if isLineDragging and lineDragStart then
+			if ghost then ghost.Transparency = 1 end
+			local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
+			if pos then
+				local endPos    = snap(pos)
+				local spacing   = lineSpacing(currentType)
+				local positions = getLinePositions(lineDragStart, endPos, spacing)
+				local resources = getResources and getResources() or math.huge
+				local cost      = buildingCost(currentType)
+				local canAffordN = math.max(0, math.floor(resources / cost))
+
+				-- Resize ghost pool
+				while #lineGhosts > #positions do
+					lineGhosts[#lineGhosts]:Destroy()
+					table.remove(lineGhosts)
+				end
+				while #lineGhosts < #positions do
+					local g          = Instance.new("Part")
+					g.Name           = "__LineGhost"
+					g.Size           = ghostSize(currentType)
+					g.Anchored       = true
+					g.CanCollide     = false
+					g.CanQuery       = false
+					g.Material       = Enum.Material.SmoothPlastic
+					g.Parent         = workspace
+					table.insert(lineGhosts, g)
+				end
+
+				-- Update each ghost
+				for i, lpos in positions do
+					local g     = lineGhosts[i]
+					local valid = isInBuildZone(lpos)
+						and not checkTerrainOverlap(lpos, currentType)
+						and not isOutOfMapBounds(lpos, currentType)
+					local affordable = i <= canAffordN
+					g.BrickColor   = not valid       and BrickColor.new("Bright red")
+						or not affordable and BrickColor.new("Bright orange")
+						or localPlayer.TeamColor
+					g.Transparency = (not valid or not affordable) and 0.65 or 0.5
+					g.Position     = lpos
+				end
+			end
+			return  -- skip normal ghost update
+		end
+
+		if not ghost then return end
 
 		if currentType == "Mine" then
 			local cursor = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
@@ -432,6 +571,9 @@ end
 
 function BuildingPlacer.exitPlacementMode()
 	if not isPlacing then return end
+	isLineDragging = false
+	lineDragStart  = nil
+	clearLineGhosts()
 	isPlacing         = false
 	currentSnapTarget = nil
 	ccTooClose        = false
@@ -476,6 +618,10 @@ function BuildingPlacer.removeDeposit(pos: Vector3)
 			return
 		end
 	end
+end
+
+function BuildingPlacer.setResourceGetter(fn: () -> number)
+	getResources = fn
 end
 
 return BuildingPlacer

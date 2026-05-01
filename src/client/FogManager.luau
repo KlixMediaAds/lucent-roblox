@@ -64,6 +64,7 @@ local MINER_RC = math.ceil(VIS_MINER / CELL_SIZE) + 1
 -- ── Module state ──────────────────────────────────────────────────────────────
 local localUserId: number
 local fogFolder:   Folder
+local xrayEnabled  = false
 
 -- Fog tile layers
 local blackLayer:  { { Part } } = {}
@@ -288,9 +289,64 @@ local function posIsExplored(pos: Vector3): boolean
 	return exploredMap[row] ~= nil and exploredMap[row][col] == true
 end
 
+-- ── Xray fast-path (reveal entire map for local player) ──────────────────────
+
+local function applyXray()
+	local myStr = tostring(localUserId)
+
+	for row = 1, GRID_CELLS do
+		for col = 1, GRID_CELLS do
+			if tileState[row][col] ~= STATE_VISIBLE then
+				tileState[row][col] = STATE_VISIBLE
+				applyTileState(row, col, STATE_VISIBLE)
+			end
+		end
+	end
+
+	local function showAll(folder: Folder?)
+		if not folder then return end
+		for _, child in folder:GetChildren() do
+			local ov = child:FindFirstChild("OwnerId")
+			if not ov or ov.Value == myStr then continue end
+			if child:IsA("BasePart") then
+				(child :: BasePart).LocalTransparencyModifier = 0
+				for _, desc in child:GetDescendants() do
+					if desc:IsA("BasePart") then (desc :: BasePart).LocalTransparencyModifier = 0 end
+					if desc:IsA("BillboardGui") then (desc :: BillboardGui).Enabled = true end
+				end
+				for _, gc in child:GetChildren() do
+					if gc:IsA("BillboardGui") then (gc :: BillboardGui).Enabled = true end
+				end
+			elseif child:IsA("Model") then
+				for _, desc in child:GetDescendants() do
+					if desc:IsA("BasePart") then (desc :: BasePart).LocalTransparencyModifier = 0 end
+					if desc:IsA("BillboardGui") then (desc :: BillboardGui).Enabled = true end
+				end
+			end
+		end
+	end
+
+	showAll(workspace:FindFirstChild("Units") :: Folder?)
+	showAll(workspace:FindFirstChild("Buildings") :: Folder?)
+	showAll(workspace:FindFirstChild("Miners") :: Folder?)
+
+	for _, folderName in { "_EliteLegs", "_CreepyLegs" } do
+		local lf = workspace:FindFirstChild(folderName)
+		if lf then
+			for _, legPart in lf:GetChildren() do
+				if legPart:IsA("BasePart") then
+					(legPart :: BasePart).LocalTransparencyModifier = 0
+				end
+			end
+		end
+	end
+end
+
 -- ── Main update ───────────────────────────────────────────────────────────────
 
 local function updateFog()
+	if xrayEnabled then applyXray() return end
+
 	local sources = collectSources()
 	local visGrid = computeVisibleGrid(sources)
 
@@ -476,6 +532,15 @@ local function updateFog()
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
+
+-- Toggle full-map reveal for the local player (debug/cheat command).
+function FogManager.setXray(enabled: boolean)
+	xrayEnabled = enabled
+	if not enabled then
+		-- Force a fresh fog update on the next tick so tiles/units snap back correctly
+		sourcesDirty = true
+	end
+end
 
 -- Called client-side when EyeUpgrade research completes.
 -- Recomputes UNIT_R2/UNIT_RC so the next fog tick uses the wider vision radius.

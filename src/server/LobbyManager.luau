@@ -6,8 +6,10 @@
 	  2. Any client can fire LobbyReady to toggle their own ready state.
 	  3. Any client can fire LobbyReroll to regenerate mineral deposits
 	     (3-second server-enforced cooldown; resets all ready states).
-	  4. When every connected player is ready, LobbyStart fires to all clients,
-	     then onLobbyEnd() is called ~3 s later to kick off the actual game.
+	  4. Any client can fire LobbyAddAI / LobbyRemoveAI to manage the AI queue.
+	  5. When every connected player is ready, LobbyStart fires to all clients,
+	     then onLobbyEnd(aiQueue) is called ~3.5 s later to kick off the game.
+	     AI bots are spawned AFTER human players place their CCs.
 ]]
 
 local Players       = game:GetService("Players")
@@ -20,11 +22,23 @@ local LobbyManager = {}
 
 -- ── State ──────────────────────────────────────────────────────────────────────
 
-local readyMap:        { [number]: boolean } = {}  -- userId → ready
+local readyMap:        { [number]: boolean } = {}
 local rerollCooldown   = false
-local active           = true   -- false once lobby has ended
+local active           = true
 local terrainEnabled   = false
 local terrainManagerRef: any = nil
+
+type AIEntry = { personality: string, level: number }
+local aiQueue: { AIEntry } = {}
+
+local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true }
+
+local function findAIEntry(personality: string): (number?, AIEntry?)
+	for i, entry in aiQueue do
+		if entry.personality == personality then return i, entry end
+	end
+	return nil, nil
+end
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,8 +57,13 @@ local function syncAll(mineralManager)
 	RemoteHandler.get(Config.REMOTES.LobbySync):FireAllClients(
 		buildReadyList(),
 		mineralManager.getUnclaimedPositions(),
-		terrainEnabled
+		terrainEnabled,
+		aiQueue
 	)
+end
+
+local function resetAllReady()
+	for userId in readyMap do readyMap[userId] = false end
 end
 
 local function checkAllReady(mineralManager, onLobbyEnd)
@@ -54,44 +73,44 @@ local function checkAllReady(mineralManager, onLobbyEnd)
 		if not readyMap[player.UserId] then return end
 	end
 
-	-- Everyone is ready — start the game
 	active = false
 	RemoteHandler.get(Config.REMOTES.LobbyStart):FireAllClients()
 
-	-- Give clients time to animate the transition, then start server game logic.
-	-- Also re-fire SyncDeposits so BuildingPlacer is populated after startGame().
 	task.delay(3.5, function()
 		RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
 			mineralManager.getUnclaimedPositions()
 		)
-		onLobbyEnd()
+		-- Pass a copy of the AI queue to the game
+		local snapshot: { AIEntry } = {}
+		for _, entry in aiQueue do
+			table.insert(snapshot, { personality = entry.personality, level = entry.level })
+		end
+		onLobbyEnd(snapshot)
 	end)
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
 
-function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
+function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntry }) -> ())
 
 	terrainManagerRef = terrainManager
 
-	-- Players who join while the lobby is live
 	Players.PlayerAdded:Connect(function(player)
 		if not active then return end
 		readyMap[player.UserId] = false
-		-- Small delay so the client ScreenGui has loaded
 		task.delay(1.5, function()
 			if not active or not player.Parent then return end
 			RemoteHandler.get(Config.REMOTES.LobbySync):FireClient(
 				player,
 				buildReadyList(),
 				mineralManager.getUnclaimedPositions(),
-				terrainEnabled
+				terrainEnabled,
+				aiQueue
 			)
 		end)
 		syncAll(mineralManager)
 	end)
 
-	-- Players who disconnect during lobby
 	Players.PlayerRemoving:Connect(function(player)
 		if not active then return end
 		readyMap[player.UserId] = nil
@@ -99,7 +118,6 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
 		checkAllReady(mineralManager, onLobbyEnd)
 	end)
 
-	-- Ready toggle
 	RemoteHandler.get(Config.REMOTES.LobbyReady).OnServerEvent:Connect(function(player)
 		if not active then return end
 		readyMap[player.UserId] = not (readyMap[player.UserId] == true)
@@ -107,12 +125,11 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
 		checkAllReady(mineralManager, onLobbyEnd)
 	end)
 
-	-- Re-roll (3-second server cooldown; resets all ready states + regenerates terrain if enabled)
 	RemoteHandler.get(Config.REMOTES.LobbyReroll).OnServerEvent:Connect(function(_player)
 		if not active then return end
 		if rerollCooldown then return end
 		rerollCooldown = true
-		for userId in readyMap do readyMap[userId] = false end
+		resetAllReady()
 		mineralManager.rerollDeposits()
 		if terrainEnabled and terrainManagerRef then
 			terrainManagerRef.generate()
@@ -121,11 +138,10 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
 		task.delay(3, function() rerollCooldown = false end)
 	end)
 
-	-- Terrain toggle (any player can toggle; resets all ready states)
 	RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle).OnServerEvent:Connect(function(_player)
 		if not active then return end
 		terrainEnabled = not terrainEnabled
-		for userId in readyMap do readyMap[userId] = false end
+		resetAllReady()
 		if terrainEnabled and terrainManagerRef then
 			terrainManagerRef.generate()
 		elseif not terrainEnabled and terrainManagerRef then
@@ -134,13 +150,52 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: () -> ())
 		syncAll(mineralManager)
 	end)
 
-	-- Color picker
+	-- Left-click a personality button: increment level (1→5) or add at level 1
+	RemoteHandler.get(Config.REMOTES.LobbyAddAI).OnServerEvent:Connect(function(_player, personality: any)
+		if not active then return end
+		if type(personality) ~= "string" then return end
+		if not VALID_PERSONALITIES[personality] then return end
+
+		local idx, entry = findAIEntry(personality)
+		if entry then
+			if entry.level < 5 then entry.level += 1 end
+		else
+			if #aiQueue >= 3 then return end  -- max one of each personality (3 total)
+			table.insert(aiQueue, { personality = personality, level = 1 })
+		end
+		resetAllReady()
+		syncAll(mineralManager)
+	end)
+
+	-- Right-click a personality button: decrement level, remove at 0
+	RemoteHandler.get(Config.REMOTES.LobbyRemoveAI).OnServerEvent:Connect(function(_player, personality: any)
+		if not active then return end
+		if type(personality) ~= "string" then return end
+		local idx, entry = findAIEntry(personality)
+		if not entry then return end
+		entry.level -= 1
+		if entry.level <= 0 then table.remove(aiQueue, idx) end
+		resetAllReady()
+		syncAll(mineralManager)
+	end)
+
+	-- × button on queue entry: fully remove the personality
+	RemoteHandler.get(Config.REMOTES.LobbyRemoveAIFull).OnServerEvent:Connect(function(_player, personality: any)
+		if not active then return end
+		if type(personality) ~= "string" then return end
+		local idx = findAIEntry(personality)
+		if idx then
+			table.remove(aiQueue, idx)
+			resetAllReady()
+			syncAll(mineralManager)
+		end
+	end)
+
 	RemoteHandler.get(Config.REMOTES.LobbySetColor).OnServerEvent:Connect(function(player, colorName: string)
 		if not active then return end
 		player.TeamColor = BrickColor.new(colorName)
 	end)
 
-	-- Seed the ready map for players already in-server (e.g. solo testing)
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false
 	end

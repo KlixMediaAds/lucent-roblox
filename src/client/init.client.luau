@@ -131,6 +131,7 @@ CameraModule.init()
 SpiderLegs.init(workspace.CurrentCamera)
 CreepyLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
+BuildingPlacer.setResourceGetter(function() return currentResources end)
 
 local dragFrame, ccBtn = HUD.create()
 Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
@@ -182,6 +183,17 @@ CCMobilePanel.init(Network,
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
+
+-- ── /xray chat command ────────────────────────────────────────────────────────
+do
+	local xrayOn = false
+	Players.LocalPlayer.Chatted:Connect(function(msg)
+		if msg:lower():match("^%s*/xray%s*$") then
+			xrayOn = not xrayOn
+			FogManager.setXray(xrayOn)
+		end
+	end)
+end
 
 -- ── Deposit hover health bar ──────────────────────────────────────────────────
 -- A single screen-space bar that follows the cursor when hovering near a crystal.

@@ -10,8 +10,9 @@
     HUD.wire() now takes a hidePanelsFn callback instead of individual button refs.
 ]]
 
-local Players       = game:GetService("Players")
-local TweenService  = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
@@ -817,6 +818,34 @@ function HUD.wire(
 		updateAllNodes()
 		if cancelBtnRef then
 			cancelBtnRef.Visible = active and buildingType ~= "CommandCenter"
+		end
+	end)
+
+	-- Number keybinds 1–5: enter placement mode for the corresponding building
+	local KEY_CODES = {
+		Enum.KeyCode.One,
+		Enum.KeyCode.Two,
+		Enum.KeyCode.Three,
+		Enum.KeyCode.Four,
+		Enum.KeyCode.Five,
+	}
+	UserInputService.InputBegan:Connect(function(input, gpe)
+		if gpe then return end
+		for i, kc in KEY_CODES do
+			if input.KeyCode == kc then
+				local node = childNodes[i]
+				if not node then return end
+				if not isResearchVisible(node.btype) then return end
+				if not isUnlocked(node.btype) then return end
+				local info = BUILDING_INFO[node.btype]
+				if info and currentResources < info.cost then
+					HUD.showNotification("⚠ Not enough resources  (need ◆ " .. info.cost .. ")", C.GOLD)
+					return
+				end
+				hidePanelsFn()
+				buildingPlacer.enterPlacementMode(node.btype)
+				return
+			end
 		end
 	end)
 end

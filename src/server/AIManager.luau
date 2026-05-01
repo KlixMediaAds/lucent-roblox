@@ -1,26 +1,40 @@
 --[[
-	AIManager v3 — Behavior-tree AI for server bots.
+	AIManager v4 — Overhauled behavior-tree AI for server bots.
 
 	Architecture:
-	  • Strategy tick (5–10 s):  build order, squad rebuild, composition update,
-	                              research queuing.
-	  • Reaction tick (1–2 s):   vision scan, unit training, army command.
-	  • BT primitives:  seq / sel / cond / act  → SUCCESS / FAILURE / RUNNING.
+	  • Strategy tick (5–10 s):  build order, research grants, squad rebuild,
+	                              adaptive composition.
+	  • Reaction tick (1–2 s):   vision scan, unit training, army commands.
+	  • BT primitives: seq / act → SUCCESS / FAILURE / RUNNING.
 
-	Squad roles (rebuilt each strategy tick):
-	  main force  ≈ 70 %  — attacks priority target or explores.
-	  garrison    ≈ 20 %  — holds near base.
-	  scouts      1–2 u   — patrol a different waypoint for vision.
+	Build order per difficulty:
+	  CC → Mine → Barracks → (more Mines → more Barracks → Turrets → Relays)
+	  Hard AI also builds a Monument when flush with resources.
+
+	Research grants:
+	  AI bots can't trigger condition-based auto-unlocks (ResearchManager skips
+	  negative UserIds). Instead, AIManager calls startForPlayer directly when
+	  it meets internal thresholds.
+	  - 2 Barracks built   → Relay research (lets AI expand build zone)
+	  - 3 Barracks built   → MedicUnit
+	  - 3 Turrets built    → TurretUpgrades + BetterMines
+	  - 5 Soldiers trained → EliteUnits
+	  - 8 structures built → EyeUpgrade
+	  - Hard AI only: ConcussionShells (early grant), RocketBarrage (after 3 tanks trained)
+
+	Building lookup:
+	  All building IDs are read live from workspace each tick (no stale-ID bugs).
 
 	Threat scoring (reaction tick):
-	  Each visible enemy target is scored; highest score drives priorityTarget.
-	  CC(100) > Mine(60) > Barracks(50) > Workshop(40) > Turret(30) > unit(20).
-	  Score is boosted for closer targets.
+	  Monument(200) > CC(100) > Mine(60) > Barracks(50) > Turret(30)
+	  Elite(35) > Tank(30) > Soldier(20) > CreepySoldier(15) > Medic(10)
+	  Closer targets score higher. Garrison responds when base is under attack.
 
 	Adaptive composition (strategy tick):
-	  ≥2 enemy turrets → add Elite weight (long range).
-	  ≥4 enemy units   → add Tank weight (splash + HP).
-	  Elite weight is zeroed if EliteUnits research is not done.
+	  ≥ 2 enemy turrets  → lean Elite (outranges turrets at 30 studs)
+	  ≥ 4 enemy units    → lean Tank  (splash + HP pool)
+	  Medic added once MedicUnit research unlocked.
+	  Elite zeroed until EliteUnits research unlocked.
 
 	Chat command: /ai easy | /ai medium | /ai hard
 --]]
@@ -40,7 +54,6 @@ local RUNNING = 3
 
 -- ── BT combinators ────────────────────────────────────────────────────────────
 
--- seq: run children left-to-right; stop and return on first non-SUCCESS.
 local function seq(...)
 	local children = { ... }
 	return function(ai)
@@ -52,7 +65,6 @@ local function seq(...)
 	end
 end
 
--- act: wrap a plain function as a BT leaf (function must return SUCCESS/FAILURE/RUNNING).
 local function act(fn)
 	return function(ai) return fn(ai) end
 end
@@ -60,102 +72,163 @@ end
 -- ── Threat weights ────────────────────────────────────────────────────────────
 
 local THREAT_BUILDING = {
+	Monument      = 200,
 	CommandCenter = 100,
 	Mine          = 60,
 	Barracks      = 50,
-	Workshop      = 40,
 	Turret        = 30,
+	Relay         = 15,
 }
-local THREAT_UNIT = 20
+
+local THREAT_UNIT = {
+	Elite         = 35,
+	Tank          = 30,
+	Soldier       = 20,
+	CreepySoldier = 15,
+	Medic         = 10,
+}
 
 -- ── Difficulty profiles ───────────────────────────────────────────────────────
 
 type DifficultyProfile = {
-	strategyInterval: number,   -- seconds between strategy ticks
-	reactionInterval: number,   -- seconds between reaction ticks
+	strategyInterval: number,
+	reactionInterval: number,
 	maxUnits:         number,
 	maxMines:         number,
 	maxBarracks:      number,
-	maxTurrets:   number,
-	doResearch:   boolean,
+	maxTurrets:       number,
+	maxRelays:        number,
+	buildMonument:    boolean,
 	baseWeights:      { [string]: number },
 	visionRadius:     number,
-	enemyMemory:      number,   -- seconds before forgetting last spotted position
+	enemyMemory:      number,
 	minUnitsToAttack: number,
-	garrisonRatio:    number,   -- fraction of army to keep at base
-	scoutCount:       number,   -- units dedicated to scouting
-	reserveResources: number,   -- do not spend below this balance
+	garrisonRatio:    number,
+	scoutCount:       number,
+	reserveResources: number,
 }
 
-local DIFFICULTY: { [string]: DifficultyProfile } = {
-	easy = {
-		strategyInterval = 10,
-		reactionInterval = 2,
+-- Balanced AI — five distinct difficulty profiles (level 1 = weakest, 5 = brutal).
+-- Territorial and Waves are placeholders that borrow the Balanced profile for now.
+local BALANCED_PROFILES: { DifficultyProfile } = {
+	-- Level 1
+	{
+		strategyInterval = 14,  reactionInterval = 2.5,
 		maxUnits         = 6,
-		maxMines         = 1,
-		maxBarracks      = 1,
-		maxTurrets   = 0,
-		doResearch   = false,
+		maxMines         = 1,   maxBarracks      = 1,   maxTurrets = 1, maxRelays = 0,
+		buildMonument    = false,
 		baseWeights      = { Soldier = 1 },
-		visionRadius     = 45,
-		enemyMemory      = 15,
-		minUnitsToAttack = 3,
-		garrisonRatio    = 0.3,
-		scoutCount       = 0,
-		reserveResources = 50,
+		visionRadius     = 40,  enemyMemory      = 10,
+		minUnitsToAttack = 4,   garrisonRatio    = 0.35,
+		scoutCount       = 0,   reserveResources = 40,
 	},
-	medium = {
-		strategyInterval = 7,
-		reactionInterval = 1.5,
+	-- Level 2
+	{
+		strategyInterval = 11,  reactionInterval = 2,
+		maxUnits         = 10,
+		maxMines         = 2,   maxBarracks      = 1,   maxTurrets = 2, maxRelays = 0,
+		buildMonument    = false,
+		baseWeights      = { Soldier = 3, Tank = 1 },
+		visionRadius     = 50,  enemyMemory      = 25,
+		minUnitsToAttack = 4,   garrisonRatio    = 0.30,
+		scoutCount       = 0,   reserveResources = 60,
+	},
+	-- Level 3
+	{
+		strategyInterval = 8,   reactionInterval = 1.5,
 		maxUnits         = 16,
-		maxMines         = 2,
-		maxBarracks      = 1,
-		maxTurrets   = 2,
-		doResearch   = false,
-		baseWeights      = { Soldier = 6, Tank = 4 },
-		visionRadius     = 58,
-		enemyMemory      = 45,
-		minUnitsToAttack = 6,
-		garrisonRatio    = 0.2,
-		scoutCount       = 1,
-		reserveResources = 100,
+		maxMines         = 2,   maxBarracks      = 2,   maxTurrets = 3, maxRelays = 1,
+		buildMonument    = false,
+		baseWeights      = { Soldier = 3, Tank = 3 },
+		visionRadius     = 58,  enemyMemory      = 45,
+		minUnitsToAttack = 5,   garrisonRatio    = 0.22,
+		scoutCount       = 1,   reserveResources = 90,
 	},
-	hard = {
-		strategyInterval = 5,
-		reactionInterval = 1,
+	-- Level 4
+	{
+		strategyInterval = 6,   reactionInterval = 1.2,
+		maxUnits         = 28,
+		maxMines         = 3,   maxBarracks      = 3,   maxTurrets = 4, maxRelays = 1,
+		buildMonument    = false,
+		baseWeights      = { Soldier = 2, Tank = 5, Elite = 0 },
+		visionRadius     = 65,  enemyMemory      = 70,
+		minUnitsToAttack = 5,   garrisonRatio    = 0.18,
+		scoutCount       = 1,   reserveResources = 130,
+	},
+	-- Level 5 (brutal)
+	{
+		strategyInterval = 4.5, reactionInterval = 0.8,
 		maxUnits         = 999,
-		maxMines         = 3,
-		maxBarracks      = 2,
-		maxTurrets   = 4,
-		doResearch   = true,
+		maxMines         = 4,   maxBarracks      = 4,   maxTurrets = 5, maxRelays = 2,
+		buildMonument    = false,
 		baseWeights      = { Soldier = 2, Tank = 6, Elite = 0 },
-		visionRadius     = 65,
-		enemyMemory      = 120,
-		minUnitsToAttack = 8,
-		garrisonRatio    = 0.2,
-		scoutCount       = 1,
-		reserveResources = 150,
+		visionRadius     = 72,  enemyMemory      = 90,
+		minUnitsToAttack = 6,   garrisonRatio    = 0.15,
+		scoutCount       = 1,   reserveResources = 150,
 	},
 }
 
--- ── Placement candidate offsets ───────────────────────────────────────────────
+local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, nightmare = true }
 
-local BARRACKS_CANDIDATES: { Vector3 } = {
-	Vector3.new( 20, 0,  0), Vector3.new(-20, 0,  0),
-	Vector3.new(  0, 0, 20), Vector3.new(  0, 0,-20),
-	Vector3.new( 20, 0, 20), Vector3.new(-20, 0,-20),
-	Vector3.new( 20, 0,-20), Vector3.new(-20, 0, 20),
-	Vector3.new( 30, 0,  0), Vector3.new(-30, 0,  0),
+-- ── Nightmare profile ─────────────────────────────────────────────────────────
+-- Starting values only — strategyTree overwrites the mutable fields every tick
+-- using exponential scaling based on elapsed time. The AI starts at roughly
+-- level-3 strength and becomes unbound within minutes.
+local NIGHTMARE_PROFILE: DifficultyProfile = {
+	strategyInterval = 8,    reactionInterval = 1.5,
+	maxUnits         = 999,
+	maxMines         = 2,    maxBarracks      = 2,    maxTurrets = 2, maxRelays = 1,
+	buildMonument    = true,
+	baseWeights      = { Soldier = 2, Tank = 4, Elite = 3 },
+	visionRadius     = 85,   enemyMemory      = 999,
+	minUnitsToAttack = 4,    garrisonRatio    = 0.15,
+	scoutCount       = 2,    reserveResources = 0,
 }
 
-local TURRET_CANDIDATES: { Vector3 } = {
-	Vector3.new(-25, 0,  0), Vector3.new( 25, 0,  0),
-	Vector3.new(  0, 0,-25), Vector3.new(  0, 0, 25),
-	Vector3.new(-25, 0,-25), Vector3.new( 25, 0, 25),
-	Vector3.new(-25, 0, 25), Vector3.new( 25, 0,-25),
-	Vector3.new(-35, 0,  0), Vector3.new( 35, 0,  0),
-	Vector3.new(  0, 0,-35), Vector3.new(  0, 0, 35),
-}
+local function buildProfile(personality: string, level: number): DifficultyProfile
+	level = math.clamp(level, 1, 5)
+	if personality == "nightmare" then
+		local weights = {}
+		for k, v in NIGHTMARE_PROFILE.baseWeights do weights[k] = v end
+		return {
+			strategyInterval = NIGHTMARE_PROFILE.strategyInterval,
+			reactionInterval = NIGHTMARE_PROFILE.reactionInterval,
+			maxUnits         = NIGHTMARE_PROFILE.maxUnits,
+			maxMines         = NIGHTMARE_PROFILE.maxMines,
+			maxBarracks      = NIGHTMARE_PROFILE.maxBarracks,
+			maxTurrets       = NIGHTMARE_PROFILE.maxTurrets,
+			maxRelays        = NIGHTMARE_PROFILE.maxRelays,
+			buildMonument    = NIGHTMARE_PROFILE.buildMonument,
+			baseWeights      = weights,
+			visionRadius     = NIGHTMARE_PROFILE.visionRadius,
+			enemyMemory      = NIGHTMARE_PROFILE.enemyMemory,
+			minUnitsToAttack = NIGHTMARE_PROFILE.minUnitsToAttack,
+			garrisonRatio    = NIGHTMARE_PROFILE.garrisonRatio,
+			scoutCount       = NIGHTMARE_PROFILE.scoutCount,
+			reserveResources = NIGHTMARE_PROFILE.reserveResources,
+		}
+	end
+	-- Placeholder personalities borrow balanced behavior (capped at lv 2 for now)
+	if personality == "territorial" or personality == "waves" then
+		level = math.min(level, 2)
+	end
+	local p = BALANCED_PROFILES[level]
+	-- Deep-copy so individual AIs don't share the weights table
+	local weights = {}
+	for k, v in p.baseWeights do weights[k] = v end
+	return {
+		strategyInterval = p.strategyInterval, reactionInterval = p.reactionInterval,
+		maxUnits         = p.maxUnits,
+		maxMines         = p.maxMines,         maxBarracks      = p.maxBarracks,
+		maxTurrets       = p.maxTurrets,       maxRelays        = p.maxRelays,
+		buildMonument    = p.buildMonument,
+		baseWeights      = weights,
+		visionRadius     = p.visionRadius,     enemyMemory      = p.enemyMemory,
+		minUnitsToAttack = p.minUnitsToAttack, garrisonRatio    = p.garrisonRatio,
+		scoutCount       = p.scoutCount,       reserveResources = p.reserveResources,
+	}
+end
+
 
 -- ── Bot spawn configuration ───────────────────────────────────────────────────
 
@@ -181,9 +254,10 @@ local buildingManager: any
 local resourceManager: any
 local researchManager: any
 
-local botByUserId: { [number]: any } = {}
+local botByUserId:  { [number]: any }     = {}
+local takenBaseIdx: { [number]: boolean } = {}  -- AI_BASES index → claimed
 
--- ── Utility ───────────────────────────────────────────────────────────────────
+-- ── Utility helpers ───────────────────────────────────────────────────────────
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -207,30 +281,162 @@ local function canAfford(player: any, cost: number, reserve: number): boolean
 	return resourceManager.get(player) >= cost + reserve
 end
 
+-- Live lookup: scans the Buildings folder for a player's buildings of a given type.
+-- Returns their model Names (= building IDs). Never returns stale IDs.
+local function getOwnedBuildingIds(ownerStr: string, buildType: string): { string }
+	local ids: { string } = {}
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return ids end
+	for _, model in folder:GetChildren() do
+		local ov = model:FindFirstChild("OwnerId")
+		local tv = model:FindFirstChild("BuildingType")
+		if ov and ov.Value == ownerStr and tv and tv.Value == buildType then
+			table.insert(ids, model.Name)
+		end
+	end
+	return ids
+end
+
+-- Count how many of a given building type a player currently owns (live).
+local function countOwnedBuildings(ownerStr: string, buildType: string): number
+	return #getOwnedBuildingIds(ownerStr, buildType)
+end
+
+-- Count all owned structures (any building type, for EyeUpgrade threshold).
+local function countAllOwnedBuildings(ownerStr: string): number
+	local n = 0
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return n end
+	for _, model in folder:GetChildren() do
+		local ov = model:FindFirstChild("OwnerId")
+		if ov and ov.Value == ownerStr then n += 1 end
+	end
+	return n
+end
+
 local function nearestFreeDeposit(fromPos: Vector3): Vector3?
 	local folder = workspace:FindFirstChild("Deposits")
 	if not folder then return nil end
-	local best, bestDist = nil :: Vector3?, math.huge
+
+	-- Build a set of positions that already have a Mine on them
+	local minedKeys: { [string]: true } = {}
+	local buildingsF = workspace:FindFirstChild("Buildings")
+	if buildingsF then
+		for _, model in buildingsF:GetChildren() do
+			local btv = model:FindFirstChild("BuildingType")
+			if btv and btv.Value == "Mine" then
+				local base = model:FindFirstChild("Base")
+				if base and base:IsA("BasePart") then
+					local p = base.Position
+					minedKeys[math.round(p.X) .. "," .. math.round(p.Z)] = true
+				end
+			end
+		end
+	end
+
+	local baseXZ   = Vector3.new(fromPos.X, 0, fromPos.Z)
+	local best: Vector3?, bestDist = nil :: Vector3?, math.huge
 	for _, obj in folder:GetChildren() do
 		local wpos = obj:GetPivot().Position
 		local p2   = Vector3.new(wpos.X, 0, wpos.Z)
-		local d    = (p2 - Vector3.new(fromPos.X, 0, fromPos.Z)).Magnitude
+		local key  = math.round(p2.X) .. "," .. math.round(p2.Z)
+		if minedKeys[key] then continue end  -- already has a mine
+		local d = (p2 - baseXZ).Magnitude
 		if d < bestDist then bestDist = d; best = p2 end
 	end
 	return best
 end
 
-local function tryPlace(player: any, base: Vector3, buildingType: string, candidates: { Vector3 }): (boolean, string?)
-	for _, offset in candidates do
-		local ok, id = buildingManager.placeForPlayer(player, snapGrid(base + offset), buildingType)
-		if ok then return true, id end
+-- ── Placement helpers ─────────────────────────────────────────────────────────
+
+-- Try up to 20 random positions around an anchor at a random distance in [minR, maxR].
+-- Fully random each call — no two AI games will build identically.
+local function tryPlaceRandom(player: any, anchor: Vector3, buildType: string, minR: number, maxR: number): boolean
+	for _ = 1, 20 do
+		local angle = math.random() * math.pi * 2
+		local r     = minR + math.random() * (maxR - minR)
+		local pos   = snapGrid(anchor + Vector3.new(math.cos(angle) * r, 0, math.sin(angle) * r))
+		if buildingManager.placeForPlayer(player, pos, buildType) then return true end
 	end
-	return false, nil
+	return false
+end
+
+-- Collect positions of all owned Relays so buildings can be anchored to them.
+local function getRelayAnchors(ownerStr: string): { Vector3 }
+	local anchors: { Vector3 } = {}
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return anchors end
+	for _, model in folder:GetChildren() do
+		local ov = model:FindFirstChild("OwnerId")
+		local tv = model:FindFirstChild("BuildingType")
+		if ov and ov.Value == ownerStr and tv and tv.Value == "Relay" then
+			local base = model:FindFirstChild("Base") :: BasePart?
+			if base then table.insert(anchors, Vector3.new(base.Position.X, 0, base.Position.Z)) end
+		end
+	end
+	return anchors
+end
+
+-- Try placing around the AI's CC base, then around any owned Relays.
+-- This is what lets Relays actually extend the build zone for the AI.
+local function tryPlaceAnywhere(player: any, ownerStr: string, base: Vector3, buildType: string, minR: number, maxR: number): boolean
+	if tryPlaceRandom(player, base, buildType, minR, maxR) then return true end
+	for _, anchor in getRelayAnchors(ownerStr) do
+		if tryPlaceRandom(player, anchor, buildType, 5, maxR) then return true end
+	end
+	return false
+end
+
+-- ── Research grants ───────────────────────────────────────────────────────────
+
+-- Grant a tech directly (AI shortcut — ResearchManager.startForPlayer bypasses conditions).
+-- Silently skips if already done or tech doesn't exist.
+local function grantTech(player: any, techName: string)
+	if not researchManager then return end
+	researchManager.startForPlayer(player, "", techName)
+end
+
+-- Called each strategy tick. Grants techs the AI has earned based on internal
+-- tracking. For kill-based techs, we grant them by time / kill milestone instead.
+local function checkAndGrantResearch(ai: any)
+	if not researchManager then return end
+
+	local lv        = ai.level
+	if lv < 2 then return end  -- level 1 gets no research
+
+	local bBarracks = ai.builtBarracks
+	local bTurrets  = ai.builtTurrets
+	local bMines    = ai.builtMines
+	local tSoldiers = ai.trainedSoldiers
+	local tTanks    = ai.trainedTanks
+	local bTotal    = countAllOwnedBuildings(ai.ownerStr)
+
+	-- Level 2+: basic economy and elite unlock
+	if bTurrets >= 2 then grantTech(ai.player, "BetterMines") end
+	if tSoldiers >= 5 then grantTech(ai.player, "EliteUnits") end
+
+	-- Level 3+: build-zone expansion, medics, turret upgrades
+	if lv >= 3 then
+		if bBarracks >= 2 then grantTech(ai.player, "Relay") end
+		if bBarracks >= 3 then grantTech(ai.player, "MedicUnit") end
+		if bTurrets  >= 3 then grantTech(ai.player, "TurretUpgrades") end
+	end
+
+	-- Level 4+: vision upgrade and mobile CC
+	if lv >= 4 then
+		if bTotal >= 8 then grantTech(ai.player, "EyeUpgrade") end
+		if bMines >= 2  then grantTech(ai.player, "MobileCC") end
+	end
+
+	-- Level 5: combat techs (monument-building AI)
+	if lv >= 5 then
+		grantTech(ai.player, "ConcussionShells")
+		if tTanks >= 3 then grantTech(ai.player, "RocketBarrage") end
+	end
 end
 
 -- ── Fog-of-war vision ─────────────────────────────────────────────────────────
 
--- Gathers world positions of all own units + buildings as "eye" positions.
 local function gatherEyes(myStr: string): { Vector3 }
 	local eyes: { Vector3 } = {}
 	local unitsF     = workspace:FindFirstChild("Units")
@@ -255,75 +461,42 @@ local function gatherEyes(myStr: string): { Vector3 }
 	return eyes
 end
 
--- Kept from v2: returns nearest detected enemy position, or nil.
-local function detectEnemiesInVision(ai: any): Vector3?
-	local myStr = tostring(ai.player.UserId)
-	local r2    = ai.diff.visionRadius * ai.diff.visionRadius
-	local eyes  = gatherEyes(myStr)
-	if #eyes == 0 then return nil end
+-- ── Threat scanning ───────────────────────────────────────────────────────────
 
-	local bestPos: Vector3? = nil
-	local bestD2  = math.huge
+type ThreatResult = {
+	priorityTarget:  Vector3?,
+	enemyTurretCount: number,
+	enemyUnitCount:  number,
+	baseUnderAttack: boolean,  -- enemy units within 55 studs of AI base
+}
 
-	local function check(epos: Vector3)
-		for _, eye in eyes do
-			local dx = epos.X - eye.X
-			local dz = epos.Z - eye.Z
-			local d2 = dx * dx + dz * dz
-			if d2 <= r2 and d2 < bestD2 then
-				bestD2  = d2
-				bestPos = epos
-			end
-		end
-	end
+local function scanThreats(ai: any): ThreatResult
+	local myStr   = ai.ownerStr
+	local r2      = ai.diff.visionRadius * ai.diff.visionRadius
+	local vR      = ai.diff.visionRadius
+	local eyes    = gatherEyes(myStr)
 
-	local unitsF     = workspace:FindFirstChild("Units")
-	local buildingsF = workspace:FindFirstChild("Buildings")
-	if unitsF then
-		for _, p in unitsF:GetChildren() do
-			local ov = p:FindFirstChild("OwnerId")
-			if not ov or ov.Value == myStr then continue end
-			if p:IsA("BasePart") then check((p :: BasePart).Position) end
-		end
-	end
-	if buildingsF then
-		for _, model in buildingsF:GetChildren() do
-			local ov = model:FindFirstChild("OwnerId")
-			if not ov or ov.Value == myStr then continue end
-			local base = model:FindFirstChild("Base") :: BasePart?
-			if base then check(base.Position) end
-		end
-	end
-	return bestPos
-end
+	local result: ThreatResult = {
+		priorityTarget   = nil,
+		enemyTurretCount = 0,
+		enemyUnitCount   = 0,
+		baseUnderAttack  = false,
+	}
 
--- ── Threat scoring ────────────────────────────────────────────────────────────
+	if #eyes == 0 then return result end
 
--- Scans all enemies in vision range, scores each target, and returns:
---   (priorityTarget, enemyTurretCount, enemyUnitCount)
--- Higher threat score = more valuable target to attack.
-local function scanThreats(ai: any): (Vector3?, number, number)
-	local myStr    = tostring(ai.player.UserId)
-	local r2       = ai.diff.visionRadius * ai.diff.visionRadius
-	local visionR  = ai.diff.visionRadius
-	local eyes     = gatherEyes(myStr)
-	if #eyes == 0 then return nil, 0, 0 end
-
-	local function inVision(epos: Vector3): (boolean, number)
+	local function minDistToEyes(epos: Vector3): number
 		local minD2 = math.huge
 		for _, eye in eyes do
 			local dx = epos.X - eye.X
 			local dz = epos.Z - eye.Z
 			local d2 = dx * dx + dz * dz
-			if d2 <= r2 and d2 < minD2 then minD2 = d2 end
+			if d2 < minD2 then minD2 = d2 end
 		end
-		return minD2 <= r2, math.sqrt(minD2)
+		return math.sqrt(minD2)
 	end
 
-	local bestScore   = -math.huge
-	local bestPos: Vector3? = nil
-	local turretCount = 0
-	local unitCount   = 0
+	local bestScore = -math.huge
 
 	local buildingsF = workspace:FindFirstChild("Buildings")
 	local unitsF     = workspace:FindFirstChild("Units")
@@ -334,57 +507,95 @@ local function scanThreats(ai: any): (Vector3?, number, number)
 			if not ov or ov.Value == myStr then continue end
 			local base = model:FindFirstChild("Base") :: BasePart?
 			if not base then continue end
-			local vis, dist = inVision(base.Position)
-			if not vis then continue end
+
+			local dist = minDistToEyes(base.Position)
+			if dist > vR then continue end
 
 			local tv    = model:FindFirstChild("BuildingType")
 			local btype = tv and tv.Value or "Barracks"
-			if btype == "Turret" then turretCount += 1 end
+			if btype == "Turret" then result.enemyTurretCount += 1 end
 
-			local base_score  = THREAT_BUILDING[btype] or 30
-			local distFactor  = 1 - math.clamp(dist / visionR, 0, 0.8)
-			local score       = base_score * (1 + distFactor)
-			if score > bestScore then bestScore = score; bestPos = base.Position end
+			local baseScore  = THREAT_BUILDING[btype] or 25
+			local distFactor = 1 - math.clamp(dist / vR, 0, 0.8)
+			local score      = baseScore * (1 + distFactor)
+			if score > bestScore then
+				bestScore = score
+				result.priorityTarget = Vector3.new(base.Position.X, 0, base.Position.Z)
+			end
 		end
 	end
 
 	if unitsF then
+		local baseXZ = Vector3.new(ai.base.X, 0, ai.base.Z)
 		for _, p in unitsF:GetChildren() do
 			local ov = p:FindFirstChild("OwnerId")
 			if not ov or ov.Value == myStr then continue end
 			if not p:IsA("BasePart") then continue end
 			local epos = (p :: BasePart).Position
-			local vis, dist = inVision(epos)
-			if not vis then continue end
-			unitCount += 1
 
-			local distFactor = 1 - math.clamp(dist / visionR, 0, 0.8)
-			local score      = THREAT_UNIT * (1 + distFactor)
-			if score > bestScore then bestScore = score; bestPos = epos end
+			local dist = minDistToEyes(epos)
+			if dist > vR then continue end
+			result.enemyUnitCount += 1
+
+			-- Check if enemy is near our base
+			local distToBase = (Vector3.new(epos.X, 0, epos.Z) - baseXZ).Magnitude
+			if distToBase < 55 then result.baseUnderAttack = true end
+
+			local ut = p:FindFirstChild("UnitType")
+			local utype = ut and ut.Value or "Soldier"
+			local baseScore  = (THREAT_UNIT :: any)[utype] or 20
+			local distFactor = 1 - math.clamp(dist / vR, 0, 0.8)
+			local score      = baseScore * (1 + distFactor)
+			if score > bestScore then
+				bestScore = score
+				result.priorityTarget = Vector3.new(epos.X, 0, epos.Z)
+			end
 		end
 	end
 
-	return bestPos, turretCount, unitCount
+	return result
 end
 
 -- ── Exploration waypoints ─────────────────────────────────────────────────────
+-- 36 points in 5 concentric layers from own base outward to enemy base.
+-- Random jitter per point so no two AI games patrol identically.
 
--- Kept from v2: ordered patrol route from home → enemy territory.
 local function generateExplorePoints(base: Vector3): { Vector3 }
-	local sx = -math.sign(base.X)
-	local sz = -math.sign(base.Z)
-	return {
-		snapGrid(Vector3.new(base.X + sx * 30, 0, base.Z)),
-		snapGrid(Vector3.new(base.X,            0, base.Z + sz*30)),
-		snapGrid(Vector3.new(sx * 70,  0, sz * 30)),
-		snapGrid(Vector3.new(sx * 30,  0, sz * 70)),
-		Vector3.new(0, 0, 0),
-		snapGrid(Vector3.new(sx * 100, 0, 0)),
-		snapGrid(Vector3.new(0,        0, sz * 100)),
-		snapGrid(Vector3.new(sx * 120, 0, sz * 40)),
-		snapGrid(Vector3.new(sx * 40,  0, sz * 120)),
-		snapGrid(Vector3.new(sx * 120, 0, sz * 120)),
-	}
+	local pts: { Vector3 } = {}
+	local B = 380  -- safe bound (map is ±432)
+
+	local function ringPt(cx: number, cz: number, r: number, i: number, n: number): Vector3
+		local a = (i / n) * math.pi * 2 + (math.random() - 0.5) * (math.pi * 2 / n) * 0.6
+		return snapGrid(Vector3.new(
+			math.clamp(cx + math.cos(a) * r, -B, B), 0,
+			math.clamp(cz + math.sin(a) * r, -B, B)
+		))
+	end
+
+	-- Layer 1: own perimeter (8 pts, ~45 studs from base)
+	for i = 0, 7 do
+		table.insert(pts, ringPt(base.X, base.Z, 45 + math.random(-8, 8), i, 8))
+	end
+	-- Layer 2: mid own territory (8 pts)
+	local m1x, m1z = base.X * 0.55, base.Z * 0.55
+	for i = 0, 7 do
+		table.insert(pts, ringPt(m1x, m1z, 70 + math.random(-12, 12), i, 8))
+	end
+	-- Layer 3: map centre zone (8 pts)
+	for i = 0, 7 do
+		table.insert(pts, ringPt(0, 0, 75 + math.random(-15, 15), i, 8))
+	end
+	-- Layer 4: enemy territory (8 pts)
+	local m2x, m2z = -base.X * 0.55, -base.Z * 0.55
+	for i = 0, 7 do
+		table.insert(pts, ringPt(m2x, m2z, 65 + math.random(-12, 12), i, 8))
+	end
+	-- Layer 5: near enemy base (4 pts)
+	for i = 0, 3 do
+		table.insert(pts, ringPt(-base.X, -base.Z, 45 + math.random(-8, 8), i, 4))
+	end
+
+	return pts  -- 36 total
 end
 
 -- ── Squad partitioning ────────────────────────────────────────────────────────
@@ -397,10 +608,10 @@ local function rebuildSquads(ai: any)
 		return
 	end
 
-	local scoutN    = math.min(ai.diff.scoutCount, total)
+	local scoutN    = math.min(ai.diff.scoutCount, math.max(0, total - 2))
 	local remaining = total - scoutN
-	local garrisonN = math.floor(remaining * ai.diff.garrisonRatio)
-	-- main force gets the rest
+	local garrisonN = math.max(1, math.floor(remaining * ai.diff.garrisonRatio))
+	local mainN     = remaining - garrisonN
 
 	ai.scouts    = {}
 	ai.garrison  = {}
@@ -409,7 +620,7 @@ local function rebuildSquads(ai: any)
 	for i, ud in allUnits do
 		if i <= scoutN then
 			table.insert(ai.scouts, ud.id)
-		elseif i <= scoutN + (remaining - garrisonN) then
+		elseif i <= scoutN + mainN then
 			table.insert(ai.mainForce, ud.id)
 		else
 			table.insert(ai.garrison, ud.id)
@@ -417,27 +628,49 @@ local function rebuildSquads(ai: any)
 	end
 end
 
--- ── Adaptive unit composition ─────────────────────────────────────────────────
+-- ── Adaptive composition ──────────────────────────────────────────────────────
 
 local function updateComposition(ai: any)
-	local w = {}
+	-- Nightmare: fully randomize composition each tick for unpredictability
+	if ai.isNightmare then
+		local hasElite = researchManager and researchManager.hasResearch(ai.player, "EliteUnits")
+		local hasMedic = researchManager and researchManager.hasResearch(ai.player, "MedicUnit")
+		ai.currentWeights = {
+			Soldier = math.random(1, 5),
+			Tank    = math.random(1, 6),
+			Elite   = hasElite and math.random(0, 5) or 0,
+			Medic   = hasMedic and math.random(0, 3) or 0,
+		}
+		return
+	end
+
+	local w: { [string]: number } = {}
 	for k, v in ai.diff.baseWeights do w[k] = v end
 
-	-- Lots of enemy turrets → lean on Elite (longer range, outranges turrets)
+	-- Lots of enemy turrets → lean Elite (30-stud range outpaces turrets)
 	if ai.enemyTurretCount >= 2 then
-		w["Elite"]   = (w["Elite"]   or 0) + ai.enemyTurretCount * 2
+		w["Elite"]   = (w["Elite"]   or 0) + ai.enemyTurretCount * 3
 		w["Soldier"] = math.max(1, (w["Soldier"] or 1) - 1)
 	end
 
-	-- Lots of enemy units → lean on Tank (splash + HP pool)
+	-- Lots of enemy units → lean Tank (splash clears blobs, high HP)
 	if ai.enemyUnitCount >= 4 then
 		w["Tank"] = (w["Tank"] or 0) + math.floor(ai.enemyUnitCount / 2)
 	end
 
-	-- Respect research gate: zero Elite weight until unlocked
+	-- Gate Elite on research
 	if (w["Elite"] or 0) > 0 then
-		local unlocked = researchManager and researchManager.hasResearch(ai.player, "EliteUnits")
-		if not unlocked then w["Elite"] = 0 end
+		if not (researchManager and researchManager.hasResearch(ai.player, "EliteUnits")) then
+			w["Elite"] = 0
+		end
+	end
+
+	-- Add Medic slot once unlocked and army is large enough
+	if researchManager and researchManager.hasResearch(ai.player, "MedicUnit") then
+		local totalArmy = unitManager.getUnitCount(ai.player)
+		if totalArmy >= 6 then
+			w["Medic"] = math.max(w["Medic"] or 0, 1)
+		end
 	end
 
 	ai.currentWeights = w
@@ -453,85 +686,110 @@ local function btBuildCC(ai)
 end
 
 local function btBuildFirstMine(ai)
-	if ai.mineCount >= 1 then return SUCCESS end
+	if ai.builtMines >= 1 then return SUCCESS end
 	local deposit = nearestFreeDeposit(ai.base)
 	if not deposit then return FAILURE end
 	if not canAfford(ai.player, Config.MINE_COST, 0) then return RUNNING end
 	local ok = buildingManager.placeForPlayer(ai.player, deposit, "Mine")
-	if ok then ai.mineCount += 1; return SUCCESS end
+	if ok then ai.builtMines += 1; return SUCCESS end
 	return RUNNING
 end
 
 local function btBuildFirstBarracks(ai)
-	if #ai.barrackIds >= 1 then return SUCCESS end
+	local live = countOwnedBuildings(ai.ownerStr, "Barracks")
+	if live >= 1 then
+		if ai.builtBarracks < 1 then ai.builtBarracks = 1 end
+		return SUCCESS
+	end
 	if not canAfford(ai.player, Config.BUILDING_COST, ai.diff.reserveResources) then return RUNNING end
-	local ok, id = tryPlace(ai.player, ai.base, "Barracks", BARRACKS_CANDIDATES)
-	if ok and id then table.insert(ai.barrackIds, id); return SUCCESS end
+	if tryPlaceRandom(ai.player, ai.base, "Barracks", 15, 35) then
+		ai.builtBarracks += 1; return SUCCESS
+	end
 	return RUNNING
 end
 
--- Expansion: runs all opportunistic actions; always returns SUCCESS so the
--- seq continues. Each sub-action is best-effort (ignored on failure).
 local function btExpansionPhase(ai)
-	-- More mines
-	if ai.mineCount < ai.diff.maxMines then
+	-- Sync live counts (buildings can be destroyed)
+	local liveMines    = countOwnedBuildings(ai.ownerStr, "Mine")
+	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Barracks")
+	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
+	local liveRelays   = countOwnedBuildings(ai.ownerStr, "Relay")
+
+	-- Priority 1: Replace lost barracks first (army production)
+	if liveBarracks < math.min(ai.diff.maxBarracks, ai.builtBarracks) then
+		if canAfford(ai.player, Config.BUILDING_COST, ai.diff.reserveResources) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+				ai.builtBarracks += 1
+			end
+		end
+	end
+
+	-- Priority 2: More mines (economy)
+	if liveMines < ai.diff.maxMines then
 		if canAfford(ai.player, Config.MINE_COST, ai.diff.reserveResources) then
 			local deposit = nearestFreeDeposit(ai.base)
 			if deposit then
-				local ok = buildingManager.placeForPlayer(ai.player, deposit, "Mine")
-				if ok then ai.mineCount += 1 end
+				if buildingManager.placeForPlayer(ai.player, deposit, "Mine") then
+					ai.builtMines += 1
+				end
 			end
 		end
 	end
 
-	-- More barracks
-	if #ai.barrackIds < ai.diff.maxBarracks then
+	-- Priority 3: Expand barracks (up to cap)
+	if liveBarracks < ai.diff.maxBarracks then
 		if canAfford(ai.player, Config.BUILDING_COST, ai.diff.reserveResources) then
-			local rest: { Vector3 } = {}
-			for i = 2, #BARRACKS_CANDIDATES do table.insert(rest, BARRACKS_CANDIDATES[i]) end
-			local ok, id = tryPlace(ai.player, ai.base, "Barracks", rest)
-			if ok and id then table.insert(ai.barrackIds, id) end
-		end
-	end
-
-	-- Turrets
-	if ai.turretCount < ai.diff.maxTurrets then
-		if canAfford(ai.player, Config.TURRET_COST, ai.diff.reserveResources) then
-			local ok = tryPlace(ai.player, ai.base, "Turret", TURRET_CANDIDATES)
-			if ok then ai.turretCount += 1 end
-		end
-	end
-
-	-- Research (hard AI only): BetterMines → EliteUnits.
-	-- Requires CC (always available once hasCC is true).
-	if ai.diff.doResearch and ai.hasCC and researchManager then
-		local order = { "BetterMines", "EliteUnits" }
-		for _, tech in order do
-			if not researchManager.hasResearch(ai.player, tech) then
-				researchManager.startForPlayer(ai.player, "cc", tech)
-				break   -- only queue one at a time
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1)
 			end
 		end
 	end
 
-	-- Rebuild squads and update composition
-	rebuildSquads(ai)
+	-- Priority 4: Relays (push the build zone outward before placing more buildings)
+	if liveRelays < ai.diff.maxRelays then
+		if researchManager and researchManager.hasResearch(ai.player, "Relay") then
+			if canAfford(ai.player, Config.RELAY_COST, ai.diff.reserveResources) then
+				if tryPlaceRandom(ai.player, ai.base, "Relay", 45, 75) then
+					ai.builtRelays += 1
+				end
+			end
+		end
+	end
+
+	-- Priority 5: Turrets (defense) — anchor to base or any relay for spread coverage
+	if liveTurrets < ai.diff.maxTurrets then
+		if canAfford(ai.player, Config.TURRET_COST, ai.diff.reserveResources) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 20, 45) then
+				ai.builtTurrets = math.max(ai.builtTurrets, liveTurrets + 1)
+			end
+		end
+	end
+
+	-- Grant research based on current progress
+	checkAndGrantResearch(ai)
+
+	-- Only reshuffle squads when army size changes to avoid constant direction reversals
+	local currentCount = unitManager.getUnitCount(ai.player)
+	if currentCount ~= ai.lastSquadCount then
+		rebuildSquads(ai)
+		ai.lastSquadCount = currentCount
+	end
 	updateComposition(ai)
 
 	return SUCCESS
 end
 
--- Reaction leaves (all three always run via direct calls)
+-- ── Reaction leaves ───────────────────────────────────────────────────────────
 
 local function btUpdateVision(ai)
-	local detected = detectEnemiesInVision(ai)
-	local priority, turrets, enemyUnits = scanThreats(ai)
+	local threats = scanThreats(ai)
 
-	ai.enemyTurretCount = turrets
-	ai.enemyUnitCount   = enemyUnits
+	ai.enemyTurretCount = threats.enemyTurretCount
+	ai.enemyUnitCount   = threats.enemyUnitCount
+	ai.baseUnderAttack  = threats.baseUnderAttack
 
-	if detected then
-		ai.lastKnownEnemyPos = detected
+	if threats.priorityTarget then
+		ai.lastKnownEnemyPos = threats.priorityTarget
 		ai.lastEnemySeenTick = tick()
 	elseif ai.lastKnownEnemyPos then
 		if tick() - ai.lastEnemySeenTick > ai.diff.enemyMemory then
@@ -539,75 +797,213 @@ local function btUpdateVision(ai)
 		end
 	end
 
-	ai.priorityTarget = priority or ai.lastKnownEnemyPos
+	-- Priority target: fresh scan > memory
+	ai.priorityTarget = threats.priorityTarget or ai.lastKnownEnemyPos
 	return SUCCESS
 end
 
 local function btTrainUnit(ai)
 	if unitManager.getUnitCount(ai.player) >= ai.diff.maxUnits then return FAILURE end
-	if #ai.barrackIds == 0 then return FAILURE end
+
+	local barrackIds = getOwnedBuildingIds(ai.ownerStr, "Barracks")
+	if #barrackIds == 0 then return FAILURE end
 
 	local unitType = pickWeighted(ai.currentWeights)
 	local typeDef  = Config.UNIT_TYPES[unitType]
 	local cost     = typeDef and typeDef.cost or 25
 	if not canAfford(ai.player, cost, ai.diff.reserveResources) then return FAILURE end
 
-	for _, barrackId in ai.barrackIds do
+	-- Check research gate (Elite / Medic)
+	if typeDef and typeDef.researchReq then
+		if not (researchManager and researchManager.hasResearch(ai.player, typeDef.researchReq)) then
+			-- Fallback to Soldier
+			unitType = "Soldier"
+			local sd = Config.UNIT_TYPES["Soldier"]
+			cost     = sd and sd.cost or 25
+			if not canAfford(ai.player, cost, ai.diff.reserveResources) then return FAILURE end
+		end
+	end
+
+	for _, barrackId in barrackIds do
 		if unitManager.trainFromBarracks(barrackId, unitType, ai.player) then
+			-- Track training counts for research grants
+			if unitType == "Soldier" then
+				ai.trainedSoldiers += 1
+			elseif unitType == "Tank" then
+				ai.trainedTanks += 1
+			end
 			return SUCCESS
 		end
 	end
 	return FAILURE
 end
 
+-- Send units in small groups with a random spread so they don't all stack on one tile.
+local function sendSpread(player, units, target)
+	local SPREAD = 10
+	for i = 1, #units, 3 do
+		local chunk = {}
+		for j = i, math.min(i + 2, #units) do table.insert(chunk, units[j]) end
+		local angle = math.random() * math.pi * 2
+		local r     = math.random(0, SPREAD)
+		local dest  = snapGrid(target + Vector3.new(math.cos(angle) * r, 0, math.sin(angle) * r))
+		unitManager.sendUnitsTo(player, chunk, dest)
+	end
+end
+
+-- Fan a unit list across multiple waypoints: each group of GROUP_SIZE gets a
+-- different point from the explore list, spaced evenly apart so the army
+-- covers different sectors of the map simultaneously.
+local function fanAcrossMap(ai, units, pts, groupSize)
+	local n         = #units
+	if n == 0 then return end
+	local numGroups = math.ceil(n / groupSize)
+	local ptSpread  = math.max(1, math.floor(#pts / numGroups))
+	for g = 0, numGroups - 1 do
+		local chunk = {}
+		for j = g * groupSize + 1, math.min((g + 1) * groupSize, n) do
+			table.insert(chunk, units[j])
+		end
+		local ptIdx = ((ai.exploreIdx - 1 + g * ptSpread) % #pts) + 1
+		sendSpread(ai.player, chunk, pts[ptIdx])
+	end
+end
+
 local function btCommandArmy(ai)
 	local armySize = unitManager.getUnitCount(ai.player)
 	if armySize == 0 then return FAILURE end
 
-	-- Main force: attack priority target or explore
-	if #ai.mainForce > 0 then
-		if ai.priorityTarget and armySize >= ai.diff.minUnitsToAttack then
-			unitManager.sendUnitsTo(ai.player, ai.mainForce, ai.priorityTarget)
-		else
-			local target = ai.explorePoints[ai.exploreIdx]
-			unitManager.sendUnitsTo(ai.player, ai.mainForce, target)
-			ai.exploreTimer += ai.diff.reactionInterval
-			if ai.exploreTimer >= 12 then
-				ai.exploreTimer = 0
-				ai.exploreIdx   = (ai.exploreIdx % #ai.explorePoints) + 1
+	local pts            = ai.explorePoints
+	local garrisonTarget = ai.baseUnderAttack and ai.base
+		or snapGrid(ai.base + Vector3.new(0, 0, 18))
+
+	-- Helper: advance scouts to a random point in the far half (enemy territory)
+	local function updateScouts()
+		if #ai.scouts == 0 then return end
+		ai.scoutTimer += ai.diff.reactionInterval
+		if ai.scoutTimer >= 10 then
+			ai.scoutTimer = 0
+			local farStart = math.floor(#pts * 0.6)
+			ai.scoutIdx    = math.random(farStart, #pts)
+		end
+		unitManager.sendUnitsTo(ai.player, ai.scouts, pts[ai.scoutIdx])
+	end
+
+	-- ── Nightmare ─────────────────────────────────────────────────────────────
+	if ai.isNightmare then
+		if ai.priorityTarget then
+			sendSpread(ai.player, ai.mainForce, ai.priorityTarget)
+			if math.random() < 0.5 and #ai.garrison > 0 then
+				sendSpread(ai.player, ai.garrison, ai.priorityTarget)
 			end
+			if #ai.scouts > 0 then
+				sendSpread(ai.player, ai.scouts, ai.priorityTarget)
+			end
+		else
+			-- Fan main force; 25 % chance any group picks a totally random spot
+			local n         = #ai.mainForce
+			local numGroups = math.ceil(n / 2)
+			local ptSpread  = math.max(1, math.floor(#pts / math.max(numGroups, 1)))
+			for g = 0, numGroups - 1 do
+				local chunk = {}
+				for j = g * 2 + 1, math.min((g + 1) * 2, n) do
+					table.insert(chunk, ai.mainForce[j])
+				end
+				local ptIdx = math.random() < 0.25
+					and math.random(1, #pts)
+					or  ((ai.exploreIdx - 1 + g * ptSpread) % #pts) + 1
+				sendSpread(ai.player, chunk, pts[ptIdx])
+			end
+			ai.exploreTimer += ai.diff.reactionInterval
+			if ai.exploreTimer >= 6 then
+				ai.exploreTimer = 0
+				ai.exploreIdx   = (ai.exploreIdx % #pts) + 1
+			end
+			if #ai.garrison > 0 then
+				unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
+			end
+			updateScouts()
+		end
+		return SUCCESS
+	end
+
+	-- ── Standard AI ───────────────────────────────────────────────────────────
+
+	-- Garrison always holds (or defends)
+	if #ai.garrison > 0 then
+		unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
+	end
+
+	-- If base is under attack, pull main force home too
+	if ai.baseUnderAttack then
+		if #ai.mainForce > 0 then
+			sendSpread(ai.player, ai.mainForce, ai.base)
+		end
+		updateScouts()
+		return SUCCESS
+	end
+
+	-- Known enemy: converge main force and scouts onto target
+	if ai.priorityTarget and armySize >= ai.diff.minUnitsToAttack then
+		sendSpread(ai.player, ai.mainForce, ai.priorityTarget)
+		if #ai.scouts > 0 then
+			sendSpread(ai.player, ai.scouts, ai.priorityTarget)
+		end
+		return SUCCESS
+	end
+
+	-- No known enemy: fan main force across different sectors simultaneously.
+	-- Groups of 2 each patrol a different waypoint so the whole map gets covered.
+	if #ai.mainForce > 0 then
+		fanAcrossMap(ai, ai.mainForce, pts, 2)
+		ai.exploreTimer += ai.diff.reactionInterval
+		if ai.exploreTimer >= 8 then
+			ai.exploreTimer = 0
+			ai.exploreIdx   = (ai.exploreIdx % #pts) + 1
 		end
 	end
 
-	-- Garrison: hold near base
-	if #ai.garrison > 0 then
-		local guardPos = snapGrid(ai.base + Vector3.new(0, 0, 18))
-		unitManager.sendUnitsTo(ai.player, ai.garrison, guardPos)
-	end
-
-	-- Scouts: patrol a different waypoint for vision coverage
-	if #ai.scouts > 0 then
-		local scoutIdx = ((ai.exploreIdx + 4) % #ai.explorePoints) + 1
-		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.explorePoints[scoutIdx])
-	end
+	-- Scouts probe enemy territory independently
+	updateScouts()
 
 	return SUCCESS
 end
 
 -- ── Behavior Trees ────────────────────────────────────────────────────────────
 
--- Strategy tree: build order + squad management.
--- seq means early phases block later ones until done.
--- Once CC/mine/barracks are built they always return SUCCESS, so btExpansionPhase
--- runs every strategy tick without delay.
-local strategyTree = seq(
-	act(btBuildCC),
-	act(btBuildFirstMine),
-	act(btBuildFirstBarracks),
-	act(btExpansionPhase)
-)
+local function strategyTree(ai)
+	-- Nightmare: exponential scaling — every stat grows with elapsed time.
+	-- scale ≈ 2× at 1 min, ≈ 7× at 3 min, ≈ 28× at 5 min (math.exp(t/90)).
+	if ai.isNightmare then
+		local elapsed = tick() - ai.startTime
+		local scale   = math.exp(elapsed / 90)
 
--- Reaction tree: always runs all three regardless of individual outcomes.
+		ai.diff.maxMines         = math.ceil(2   * scale)
+		ai.diff.maxBarracks      = math.ceil(2   * scale)
+		ai.diff.maxTurrets       = math.ceil(2   * scale)
+		ai.diff.maxRelays        = math.max(1, math.ceil(scale - 0.5))
+		ai.diff.strategyInterval = math.max(0.5, 8   / math.sqrt(scale))
+		ai.diff.reactionInterval = math.max(0.2, 1.5 / math.sqrt(scale))
+		ai.diff.minUnitsToAttack = math.max(1,   math.floor(4 / scale))
+		ai.diff.garrisonRatio    = math.max(0.01, 0.15 / scale)
+
+		local current = resourceManager.get(ai.player)
+		if current < 9999 then
+			resourceManager.add(ai.player, 9999 - current)
+		end
+	end
+
+	-- CC must be placed first; if it hasn't been, don't do anything else
+	if btBuildCC(ai) ~= SUCCESS then return end
+
+	-- Mine and barracks are best-effort starters — their failure doesn't block
+	-- the expansion phase (which handles all building anyway).
+	btBuildFirstMine(ai)
+	btBuildFirstBarracks(ai)
+
+	btExpansionPhase(ai)
+end
+
 local function reactionTree(ai)
 	btUpdateVision(ai)
 	btTrainUnit(ai)
@@ -618,23 +1014,36 @@ end
 
 type AIState = {
 	player:      any,
+	ownerStr:    string,
 	diff:        DifficultyProfile,
 	base:        Vector3,
+	personality: string,
+	level:       number,
+	isNightmare: boolean,
 
-	-- Infrastructure
+	-- Infrastructure flags
 	hasCC:       boolean,
-	mineCount:   number,
-	barrackIds:  { string },
-	turretCount: number,
+	hasMonument: boolean,
+
+	-- Lifetime counters (used for research grant thresholds; not decremented on building death)
+	builtMines:    number,
+	builtBarracks: number,
+	builtTurrets:  number,
+	builtRelays:   number,
+
+	-- Unit training counters
+	trainedSoldiers: number,
+	trainedTanks:    number,
 
 	-- Vision memory
 	lastKnownEnemyPos: Vector3?,
 	lastEnemySeenTick: number,
 	priorityTarget:    Vector3?,
 
-	-- Threat intel
+	-- Threat intel (updated every reaction tick)
 	enemyTurretCount: number,
 	enemyUnitCount:   number,
+	baseUnderAttack:  boolean,
 
 	-- Squads
 	mainForce: { string },
@@ -649,9 +1058,18 @@ type AIState = {
 	exploreIdx:    number,
 	exploreTimer:  number,
 
+	-- Scout patrol (independent from main force)
+	scoutIdx:   number,
+	scoutTimer: number,
+
+	-- Squad rebuild gate (only reshuffle when count changes)
+	lastSquadCount: number,
+
 	-- Tick accumulators
 	strategyTimer: number,
 	reactionTimer: number,
+
+	startTime: number,  -- wall-clock time of spawn/reset (for nightmare scaling)
 }
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -670,14 +1088,19 @@ function AIManager.resetBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end
 	ai.hasCC             = false
-	ai.mineCount         = 0
-	ai.barrackIds        = {}
-	ai.turretCount       = 0
+	ai.hasMonument       = false
+	ai.builtMines        = 0
+	ai.builtBarracks     = 0
+	ai.builtTurrets      = 0
+	ai.builtRelays       = 0
+	ai.trainedSoldiers   = 0
+	ai.trainedTanks      = 0
 	ai.lastKnownEnemyPos = nil
 	ai.lastEnemySeenTick = 0
 	ai.priorityTarget    = nil
 	ai.enemyTurretCount  = 0
 	ai.enemyUnitCount    = 0
+	ai.baseUnderAttack   = false
 	ai.mainForce         = {}
 	ai.garrison          = {}
 	ai.scouts            = {}
@@ -685,57 +1108,108 @@ function AIManager.resetBot(userId: number)
 	for k, v in ai.diff.baseWeights do ai.currentWeights[k] = v end
 	ai.exploreIdx        = 1
 	ai.exploreTimer      = 0
-	ai.strategyTimer     = ai.diff.strategyInterval   -- trigger strategy on next tick
+	ai.scoutIdx          = math.floor(#ai.explorePoints * 0.6) + 1
+	ai.scoutTimer        = 0
+	ai.lastSquadCount    = 0
+	ai.strategyTimer     = ai.diff.strategyInterval
 	ai.reactionTimer     = ai.diff.reactionInterval
+	ai.startTime         = tick()
 	resourceManager.add(ai.player, Config.STARTING_RESOURCES)
-	print("[AIManager] Bot", userId, "eliminated — resetting to rebuild")
+	print("[AIManager] Bot", userId, "reset to rebuild")
 end
 
 function AIManager.resetAllBots()
-	for userId, _ in botByUserId do
+	takenBaseIdx = {}
+	for userId in botByUserId do
 		AIManager.resetBot(userId)
 	end
 end
 
-local function correctDifficulty(input: string): string?
-	if DIFFICULTY[input] then return input end
-	-- Anagram-based correction: "ahrd" → "hard", "mdeimu" → "medium", etc.
-	local function sortChars(s: string): string
-		local t = {}
-		for c in s:gmatch(".") do table.insert(t, c) end
-		table.sort(t)
-		return table.concat(t)
+-- Pick the AI_BASES corner that is furthest from all existing Command Centers
+-- (player CCs already placed + other AI bases already claimed this session).
+local function pickBestBase(): (Vector3, number)
+	local existingCCPositions: { Vector3 } = {}
+
+	-- Scan workspace for all placed CCs
+	local buildingsF = workspace:FindFirstChild("Buildings")
+	if buildingsF then
+		for _, model in buildingsF:GetChildren() do
+			local tv = model:FindFirstChild("BuildingType")
+			if tv and tv.Value == "CommandCenter" then
+				local base = model:FindFirstChild("Base") :: BasePart?
+				if base then
+					table.insert(existingCCPositions, Vector3.new(base.Position.X, 0, base.Position.Z))
+				end
+			end
+		end
 	end
-	local sortedInput = sortChars(input)
-	for key in DIFFICULTY do
-		if sortChars(key) == sortedInput then return key end
+
+	-- Also treat already-claimed base corners as occupied
+	for idx, taken in takenBaseIdx do
+		if taken then
+			local c = AI_BASES[idx]
+			table.insert(existingCCPositions, Vector3.new(c.X, 0, c.Z))
+		end
 	end
-	return nil
+
+	-- Find the unclaimed corner with the greatest minimum distance to all CCs
+	local bestIdx: number = -1
+	local bestScore = -1
+
+	for i, corner in AI_BASES do
+		if takenBaseIdx[i] then continue end
+		local cornerXZ = Vector3.new(corner.X, 0, corner.Z)
+		local minDist = math.huge
+		for _, ccPos in existingCCPositions do
+			local d = (cornerXZ - ccPos).Magnitude
+			if d < minDist then minDist = d end
+		end
+		if #existingCCPositions == 0 then minDist = math.huge end
+		if minDist > bestScore then
+			bestScore = minDist
+			bestIdx   = i
+		end
+	end
+
+	-- Fallback: any unclaimed corner
+	if bestIdx == -1 then
+		for i in AI_BASES do
+			if not takenBaseIdx[i] then bestIdx = i; break end
+		end
+	end
+
+	-- Last resort: cycle
+	if bestIdx == -1 then
+		bestIdx = ((aiCounter - 1) % #AI_BASES) + 1
+	end
+
+	takenBaseIdx[bestIdx] = true
+	return AI_BASES[bestIdx], bestIdx
 end
 
-function AIManager.spawnAI(difficulty: string): boolean
-	local corrected = correctDifficulty(difficulty)
-	if not corrected then
-		warn("[AIManager] Unknown difficulty:", difficulty, "— use easy / medium / hard")
+function AIManager.spawnAI(personality: string, level: number): boolean
+	personality = tostring(personality):lower()
+	level       = math.clamp(math.floor(tonumber(level) or 3), 1, 5)
+
+	if not VALID_PERSONALITIES[personality] then
+		warn("[AIManager] Unknown personality:", personality, "— use balanced / territorial / waves / nightmare")
 		return false
 	end
-	if corrected ~= difficulty then
-		warn("[AIManager] Auto-corrected difficulty:", difficulty, "→", corrected)
-	end
-	local diff = DIFFICULTY[corrected]
+
+	local diff = buildProfile(personality, level)
 
 	aiCounter += 1
-	local idx = ((aiCounter - 1) % #AI_BASES) + 1
+	local base, colorIdx = pickBestBase()
 
 	local team          = Instance.new("Team")
-	team.Name           = "AI [" .. difficulty .. "] " .. aiCounter
-	team.TeamColor      = AI_COLORS[idx]
+	team.Name           = string.format("AI [%s lv%d] %d", personality, level, aiCounter)
+	team.TeamColor      = AI_COLORS[colorIdx]
 	team.AutoAssignable = false
 	team.Parent         = Teams
 
 	local aiPlayer = {
 		UserId    = -aiCounter,
-		TeamColor = AI_COLORS[idx],
+		TeamColor = AI_COLORS[colorIdx],
 		Team      = team,
 		Name      = "AI_" .. aiCounter,
 		Parent    = workspace,
@@ -743,47 +1217,63 @@ function AIManager.spawnAI(difficulty: string): boolean
 
 	resourceManager.add(aiPlayer, Config.STARTING_RESOURCES)
 
-	local base = AI_BASES[idx]
-	local initWeights = {}
-	for k, v in diff.baseWeights do initWeights[k] = v end
-
 	local ai: AIState = {
-		player     = aiPlayer,
-		diff       = diff,
-		base       = base,
+		player      = aiPlayer,
+		ownerStr    = tostring(aiPlayer.UserId),
+		diff        = diff,
+		base        = base,
+		personality = personality,
+		level       = personality == "nightmare" and 5 or level,
+		isNightmare = personality == "nightmare",
 
 		hasCC       = false,
-		mineCount   = 0,
-		barrackIds  = {},
-		turretCount = 0,
+		hasMonument = false,
+
+		builtMines    = 0,
+		builtBarracks = 0,
+		builtTurrets  = 0,
+		builtRelays   = 0,
+
+		trainedSoldiers = 0,
+		trainedTanks    = 0,
 
 		lastKnownEnemyPos = nil,
 		lastEnemySeenTick = 0,
 		priorityTarget    = nil,
 
-		enemyTurretCount  = 0,
-		enemyUnitCount    = 0,
+		enemyTurretCount = 0,
+		enemyUnitCount   = 0,
+		baseUnderAttack  = false,
 
 		mainForce = {},
 		garrison  = {},
 		scouts    = {},
 
-		currentWeights = initWeights,
+		currentWeights = diff.baseWeights,
 
 		explorePoints = generateExplorePoints(base),
 		exploreIdx    = 1,
 		exploreTimer  = 0,
 
-		-- Trigger both trees on the very first master tick
+		scoutIdx   = 0,  -- resolved below after explorePoints is computed
+		scoutTimer = 0,
+
+		lastSquadCount = 0,
+
 		strategyTimer = diff.strategyInterval,
 		reactionTimer = diff.reactionInterval,
+
+		startTime = tick(),
 	}
+
+	-- Start scouts in enemy territory (far half of the explore list)
+	ai.scoutIdx = math.floor(#ai.explorePoints * 0.6) + 1
 
 	botByUserId[aiPlayer.UserId] = ai
 
 	task.spawn(function()
 		while true do
-			local dt = task.wait(0.5)   -- master tick: 2 Hz
+			local dt = task.wait(0.5)
 			ai.strategyTimer += dt
 			ai.reactionTimer += dt
 
@@ -801,8 +1291,7 @@ function AIManager.spawnAI(difficulty: string): boolean
 		end
 	end)
 
-	print(string.format("[AIManager] Spawned %s AI #%d at %s",
-		difficulty, aiCounter, tostring(base)))
+	print(string.format("[AIManager] Spawned %s AI lv%d #%d at %s", personality, level, aiCounter, tostring(base)))
 	return true
 end
 
