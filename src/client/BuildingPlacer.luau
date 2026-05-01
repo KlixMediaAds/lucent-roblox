@@ -1,6 +1,7 @@
 local Players           = game:GetService("Players")
 local UserInputService  = game:GetService("UserInputService")
 local RunService        = game:GetService("RunService")
+local SoundService      = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -33,6 +34,15 @@ local lineGhosts:     { Part }  = {}
 local getResources:   (() -> number)? = nil
 
 local GRID = Config.BUILDING_GRID
+
+local placeSound        = Instance.new("Sound")
+placeSound.SoundId      = "rbxassetid://138637105380663"
+placeSound.Volume       = 1
+placeSound.Parent       = SoundService
+
+local function playPlaceSound()
+	placeSound:Play()
+end
 
 -- Returns true if pos is within any owned build zone (CC or Relay).
 local function isInBuildZone(pos: Vector3): boolean
@@ -332,6 +342,7 @@ local function confirmLineDrag()
 	isLineDragging = false
 	lineDragStart  = nil
 	if placed > 0 then
+		playPlaceSound()
 		task.defer(BuildingPlacer.exitPlacementMode)
 	end
 end
@@ -380,6 +391,7 @@ function BuildingPlacer.init(network, cameraModule)
 				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 				if pos then
 					network.placeBuilding(snap(pos), "Mine")
+					playPlaceSound()
 					task.defer(BuildingPlacer.exitPlacementMode)
 				end
 
@@ -389,6 +401,7 @@ function BuildingPlacer.init(network, cameraModule)
 					local pos   = cameraModule.getPositionAtHeight(halfH)
 					if pos then
 						network.placeBuilding(snap(pos), "CommandCenter")
+						playPlaceSound()
 						task.defer(BuildingPlacer.exitPlacementMode)
 					end
 				end
@@ -404,6 +417,7 @@ function BuildingPlacer.init(network, cameraModule)
 					return
 				end
 				network.placeBuilding(snap(pos), currentType)
+				playPlaceSound()
 				task.defer(BuildingPlacer.exitPlacementMode)
 			end
 

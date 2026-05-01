@@ -869,6 +869,59 @@ local function fanAcrossMap(ai, units, pts, groupSize)
 	end
 end
 
+-- ── Combat helpers ───────────────────────────────────────────────────────────
+
+-- Return a random position among enemy buildings of [btype], or nil.
+local function findEnemyBuilding(ownerStr: string, btype: string): Vector3?
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return nil end
+	local found: { Vector3 } = {}
+	for _, model in folder:GetChildren() do
+		local ov = model:FindFirstChild("OwnerId")
+		local tv = model:FindFirstChild("BuildingType")
+		if ov and ov.Value ~= ownerStr and tv and tv.Value == btype then
+			local base = model:FindFirstChild("Base") :: BasePart?
+			if base then
+				table.insert(found, Vector3.new(base.Position.X, 0, base.Position.Z))
+			end
+		end
+	end
+	if #found == 0 then return nil end
+	return found[math.random(1, #found)]
+end
+
+-- Weighted target pick: visible target (45%) > Mine (20%) > Barracks (17%) > CC (18%).
+local function pickAttackTarget(ai): Vector3?
+	local own = ai.ownerStr
+	if ai.priorityTarget and math.random() < 0.45 then
+		return ai.priorityTarget
+	end
+	local r = math.random()
+	local t: Vector3?
+	if r < 0.36 then
+		t = findEnemyBuilding(own, "Mine")
+	elseif r < 0.67 then
+		t = findEnemyBuilding(own, "Barracks")
+	else
+		t = findEnemyBuilding(own, "CommandCenter")
+	end
+	return t or ai.priorityTarget or findEnemyBuilding(own, "CommandCenter")
+end
+
+-- Point at [dist] studs from [target] at [angle] radians, clamped to map bounds.
+local function approachPoint(target: Vector3, angle: number, dist: number): Vector3
+	local B = 380
+	return snapGrid(Vector3.new(
+		math.clamp(target.X + math.cos(angle) * dist, -B, B), 0,
+		math.clamp(target.Z + math.sin(angle) * dist, -B, B)
+	))
+end
+
+-- ── Army command: 4-phase combat state machine ───────────────────────────────
+--  gather  → spread army across map until enemy found + enough force assembled
+--  staging → hold at rally point for a random delay (masks intent)
+--  attack  → commit; optional 65/35 flanking split; retreat on losses/timeout
+--  retreat → pull back to base for cooldown, then re-enter gather
 local function btCommandArmy(ai)
 	local armySize = unitManager.getUnitCount(ai.player)
 	if armySize == 0 then return FAILURE end
@@ -877,7 +930,7 @@ local function btCommandArmy(ai)
 	local garrisonTarget = ai.baseUnderAttack and ai.base
 		or snapGrid(ai.base + Vector3.new(0, 0, 18))
 
-	-- Helper: advance scouts to a random point in the far half (enemy territory)
+	-- Scouts probe enemy territory independently every 10 s
 	local function updateScouts()
 		if #ai.scouts == 0 then return end
 		ai.scoutTimer += ai.diff.reactionInterval
@@ -889,18 +942,45 @@ local function btCommandArmy(ai)
 		unitManager.sendUnitsTo(ai.player, ai.scouts, pts[ai.scoutIdx])
 	end
 
-	-- ── Nightmare ─────────────────────────────────────────────────────────────
+	-- Garrison always holds / defends
+	if #ai.garrison > 0 then
+		unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
+	end
+	updateScouts()
+
+	-- Snap to retreat when base is suddenly under attack
+	if ai.baseUnderAttack and ai.combatPhase ~= "retreat" then
+		if #ai.mainForce > 0 then
+			sendSpread(ai.player, ai.mainForce, ai.base)
+		end
+		ai.combatPhase     = "retreat"
+		ai.phaseTimer      = 0
+		ai.attackTarget    = nil
+		ai.feintTarget     = nil
+		ai.retreatDuration = math.random(8, 18)
+		return SUCCESS
+	end
+
+	-- ── Nightmare: no phases, immediate attack + random flanking ──────────────
 	if ai.isNightmare then
-		if ai.priorityTarget then
-			sendSpread(ai.player, ai.mainForce, ai.priorityTarget)
-			if math.random() < 0.5 and #ai.garrison > 0 then
-				sendSpread(ai.player, ai.garrison, ai.priorityTarget)
-			end
-			if #ai.scouts > 0 then
-				sendSpread(ai.player, ai.scouts, ai.priorityTarget)
+		local target = pickAttackTarget(ai)
+		if target then
+			local n = #ai.mainForce
+			if n >= 4 and math.random() < 0.4 then
+				local mainCount = math.floor(n * 0.6)
+				local mainChunk, flankChunk = {}, {}
+				for i, id in ai.mainForce do
+					if i <= mainCount then table.insert(mainChunk, id)
+					else               table.insert(flankChunk, id) end
+				end
+				local fa = math.random() * math.pi * 2
+				local ft = approachPoint(target, fa, 35 + math.random(0, 30))
+				sendSpread(ai.player, mainChunk,  target)
+				sendSpread(ai.player, flankChunk, ft)
+			else
+				sendSpread(ai.player, ai.mainForce, target)
 			end
 		else
-			-- Fan main force; 25 % chance any group picks a totally random spot
 			local n         = #ai.mainForce
 			local numGroups = math.ceil(n / 2)
 			local ptSpread  = math.max(1, math.floor(#pts / math.max(numGroups, 1)))
@@ -919,52 +999,111 @@ local function btCommandArmy(ai)
 				ai.exploreTimer = 0
 				ai.exploreIdx   = (ai.exploreIdx % #pts) + 1
 			end
-			if #ai.garrison > 0 then
-				unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
-			end
-			updateScouts()
 		end
 		return SUCCESS
 	end
 
-	-- ── Standard AI ───────────────────────────────────────────────────────────
+	-- ── Standard AI: phase state machine ──────────────────────────────────────
+	ai.phaseTimer += ai.diff.reactionInterval
 
-	-- Garrison always holds (or defends)
-	if #ai.garrison > 0 then
-		unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
-	end
+	-- GATHER: fan force across map until target found and army is ready
+	if ai.combatPhase == "gather" then
+		if #ai.mainForce > 0 then
+			fanAcrossMap(ai, ai.mainForce, pts, 2)
+			ai.exploreTimer += ai.diff.reactionInterval
+			if ai.exploreTimer >= 8 then
+				ai.exploreTimer = 0
+				ai.exploreIdx   = (ai.exploreIdx % #pts) + 1
+			end
+		end
 
-	-- If base is under attack, pull main force home too
-	if ai.baseUnderAttack then
+		if ai.priorityTarget and armySize >= ai.diff.minUnitsToAttack then
+			local target = pickAttackTarget(ai)
+			if target then
+				local approachAngle  = math.random() * math.pi * 2
+				ai.combatPhase       = "staging"
+				ai.phaseTimer        = 0
+				ai.attackTarget      = target
+				ai.flankAngle        = approachAngle + math.pi + (math.random() - 0.5) * 1.2
+				ai.stageDuration     = math.random(7, 18)
+				ai.rallyPoint        = approachPoint(target, approachAngle, 50 + math.random(0, 25))
+				ai.retreatThreshold  = 0.30 + math.random() * 0.25
+				ai.attackDuration    = math.random(18, 40)
+				ai.retreatDuration   = math.random(10, 25)
+				ai.lastArmySize      = armySize
+			end
+		end
+
+	-- STAGING: hold at rally point for stageDuration before committing
+	elseif ai.combatPhase == "staging" then
+		if #ai.mainForce > 0 and ai.rallyPoint then
+			sendSpread(ai.player, ai.mainForce, ai.rallyPoint)
+		end
+
+		if not ai.priorityTarget and not ai.attackTarget then
+			ai.combatPhase = "gather"
+			ai.phaseTimer  = 0
+		elseif ai.phaseTimer >= ai.stageDuration then
+			local doFlank = ai.level >= 3 and math.random() < 0.30 and #ai.mainForce >= 5
+			ai.isFlankingAttack = doFlank
+			if doFlank then
+				local btypes    = { "Mine", "Barracks", "Turret" }
+				local candidate = findEnemyBuilding(ai.ownerStr, btypes[math.random(1, 3)])
+				ai.feintTarget  = (candidate ~= ai.attackTarget) and candidate or nil
+				if not ai.feintTarget then ai.isFlankingAttack = false end
+			end
+			ai.combatPhase = "attack"
+			ai.phaseTimer  = 0
+			ai.wavesSent  += 1
+		end
+
+	-- ATTACK: strike target; optional 65/35 flank; retreat on losses or timeout
+	elseif ai.combatPhase == "attack" then
+		local target = ai.attackTarget or ai.priorityTarget
+		if not target then
+			ai.combatPhase = "gather"
+			ai.phaseTimer  = 0
+			return SUCCESS
+		end
+
+		local n = #ai.mainForce
+		if ai.isFlankingAttack and ai.feintTarget and n >= 5 then
+			local mainCount = math.floor(n * 0.65)
+			local mainChunk, flankChunk = {}, {}
+			for i, id in ai.mainForce do
+				if i <= mainCount then table.insert(mainChunk, id)
+				else               table.insert(flankChunk, id) end
+			end
+			sendSpread(ai.player, mainChunk,  target)
+			sendSpread(ai.player, flankChunk, ai.feintTarget)
+		else
+			sendSpread(ai.player, ai.mainForce, target)
+		end
+
+		local lossRatio = ai.lastArmySize > 0
+			and (ai.lastArmySize - armySize) / ai.lastArmySize
+			or 0
+		if lossRatio >= ai.retreatThreshold or ai.phaseTimer >= ai.attackDuration then
+			ai.combatPhase      = "retreat"
+			ai.phaseTimer       = 0
+			ai.feintTarget      = nil
+			ai.isFlankingAttack = false
+		end
+
+	-- RETREAT: pull back to base; then re-enter gather for next wave
+	elseif ai.combatPhase == "retreat" then
 		if #ai.mainForce > 0 then
 			sendSpread(ai.player, ai.mainForce, ai.base)
 		end
-		updateScouts()
-		return SUCCESS
-	end
-
-	-- Known enemy: converge main force and scouts onto target
-	if ai.priorityTarget and armySize >= ai.diff.minUnitsToAttack then
-		sendSpread(ai.player, ai.mainForce, ai.priorityTarget)
-		if #ai.scouts > 0 then
-			sendSpread(ai.player, ai.scouts, ai.priorityTarget)
-		end
-		return SUCCESS
-	end
-
-	-- No known enemy: fan main force across different sectors simultaneously.
-	-- Groups of 2 each patrol a different waypoint so the whole map gets covered.
-	if #ai.mainForce > 0 then
-		fanAcrossMap(ai, ai.mainForce, pts, 2)
-		ai.exploreTimer += ai.diff.reactionInterval
-		if ai.exploreTimer >= 8 then
-			ai.exploreTimer = 0
-			ai.exploreIdx   = (ai.exploreIdx % #pts) + 1
+		if ai.phaseTimer >= ai.retreatDuration then
+			ai.combatPhase  = "gather"
+			ai.phaseTimer   = 0
+			ai.attackTarget = nil
+			ai.rallyPoint   = nil
+			ai.feintTarget  = nil
+			ai.lastArmySize = 0
 		end
 	end
-
-	-- Scouts probe enemy territory independently
-	updateScouts()
 
 	return SUCCESS
 end
@@ -1065,6 +1204,21 @@ type AIState = {
 	-- Squad rebuild gate (only reshuffle when count changes)
 	lastSquadCount: number,
 
+	-- Combat state machine
+	combatPhase:        string,
+	phaseTimer:         number,
+	attackTarget:       Vector3?,
+	rallyPoint:         Vector3?,
+	feintTarget:        Vector3?,
+	flankAngle:         number,
+	isFlankingAttack:   boolean,
+	lastArmySize:       number,
+	retreatThreshold:   number,
+	stageDuration:      number,
+	attackDuration:     number,
+	retreatDuration:    number,
+	wavesSent:          number,
+
 	-- Tick accumulators
 	strategyTimer: number,
 	reactionTimer: number,
@@ -1111,6 +1265,19 @@ function AIManager.resetBot(userId: number)
 	ai.scoutIdx          = math.floor(#ai.explorePoints * 0.6) + 1
 	ai.scoutTimer        = 0
 	ai.lastSquadCount    = 0
+	ai.combatPhase       = "gather"
+	ai.phaseTimer        = 0
+	ai.attackTarget      = nil
+	ai.rallyPoint        = nil
+	ai.feintTarget       = nil
+	ai.flankAngle        = 0
+	ai.isFlankingAttack  = false
+	ai.lastArmySize      = 0
+	ai.retreatThreshold  = 0.40
+	ai.stageDuration     = 12
+	ai.attackDuration    = 25
+	ai.retreatDuration   = 15
+	ai.wavesSent         = 0
 	ai.strategyTimer     = ai.diff.strategyInterval
 	ai.reactionTimer     = ai.diff.reactionInterval
 	ai.startTime         = tick()
@@ -1259,6 +1426,20 @@ function AIManager.spawnAI(personality: string, level: number): boolean
 		scoutTimer = 0,
 
 		lastSquadCount = 0,
+
+		combatPhase      = "gather",
+		phaseTimer       = 0,
+		attackTarget     = nil,
+		rallyPoint       = nil,
+		feintTarget      = nil,
+		flankAngle       = 0,
+		isFlankingAttack = false,
+		lastArmySize     = 0,
+		retreatThreshold = 0.40,
+		stageDuration    = 12,
+		attackDuration   = 25,
+		retreatDuration  = 15,
+		wavesSent        = 0,
 
 		strategyTimer = diff.strategyInterval,
 		reactionTimer = diff.reactionInterval,
