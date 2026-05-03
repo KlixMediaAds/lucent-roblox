@@ -186,53 +186,113 @@ for _, player in Players:GetPlayers() do
 	connectChatForPlayer(player)
 end
 
+-- ── Symmetric player base positions ──────────────────────────────────────────
+-- CCs are placed in 180°-opposite pairs so each player starts on a different
+-- side of the map.  Assigned in join order (1st human gets index 1, etc.).
+-- Y = COMMAND_CENTER_SIZE.Y / 2 so the base sits on the Y=0 floor.
+local PLAYER_BASES: { Vector3 } = {
+	Vector3.new(-120, Config.COMMAND_CENTER_SIZE.Y / 2, -280),  -- south-west
+	Vector3.new( 120, Config.COMMAND_CENTER_SIZE.Y / 2,  280),  -- north-east (opposite)
+	Vector3.new( 120, Config.COMMAND_CENTER_SIZE.Y / 2, -280),  -- south-east
+	Vector3.new(-120, Config.COMMAND_CENTER_SIZE.Y / 2,  280),  -- north-west (opposite)
+}
+local nextBaseIndex = 0
+
+-- Returns two mine positions offset from ccPos in its home direction.
+local function minePositionsFor(ccPos: Vector3): (Vector3, Vector3)
+	local GRID    = Config.BUILDING_GRID
+	local mineY   = Config.BUILDING_SIZE.Y / 2
+	local flat    = Vector3.new(ccPos.X, 0, ccPos.Z)
+	local homeDir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(0, 0, 1)
+	local perpDir = Vector3.new(-homeDir.Z, 0, homeDir.X)
+	local function snap(v: Vector3): Vector3
+		return Vector3.new(
+			math.round(v.X / GRID) * GRID,
+			mineY,
+			math.round(v.Z / GRID) * GRID
+		)
+	end
+	return
+		snap(flat + homeDir * 28 + perpDir *  20),
+		snap(flat + homeDir * 28 + perpDir * -20)
+end
+
+-- Seats the player's avatar on top of their CC and locks them there.
+-- The Seat is parented to the CC model so model:PivotTo() (mobile CC) carries it along.
+local function seatAvatarOnCC(player: Player, ccId: string)
+	task.spawn(function()
+		local buildingsF = workspace:FindFirstChild("Buildings") :: Folder?
+		if not buildingsF then return end
+		local ccModel = buildingsF:FindFirstChild(ccId) :: Model?
+		if not ccModel or not ccModel:IsA("Model") then return end
+		local ccBase = ccModel:FindFirstChild("Base") :: BasePart?
+		if not ccBase then return end
+
+		local seat        = Instance.new("Seat")
+		seat.Name         = "AvatarSeat"
+		seat.Size         = Vector3.new(4, 0.05, 4)
+		seat.Transparency = 1
+		seat.CanCollide   = false
+		seat.Anchored     = false
+		seat.CFrame       = ccBase.CFrame * CFrame.new(0, Config.COMMAND_CENTER_SIZE.Y / 2 + 0.05, 0)
+		seat.Parent       = ccModel
+
+		-- Weld keeps the seat rigid with the base even if physics nudges it
+		local weld  = Instance.new("WeldConstraint")
+		weld.Part0  = ccBase
+		weld.Part1  = seat
+		weld.Parent = seat
+
+		local char = player.Character or player.CharacterAdded:Wait()
+		local hum  = char:WaitForChild("Humanoid", 5) :: Humanoid?
+		if not hum or not seat.Parent then return end
+
+		task.wait(0.3)  -- let character physics settle before sitting
+		if not seat.Parent then return end
+		seat:Sit(hum)
+		hum.JumpPower = 0
+	end)
+end
+
+-- Auto-sets up a human player's starting base: CC + deposits + 2 instant mines.
+local function setupPlayerBase(player: Player)
+	nextBaseIndex += 1
+	local base = PLAYER_BASES[nextBaseIndex] or PLAYER_BASES[1]
+
+	local _, ccId = BuildingManager.placeForPlayer(player, base, "CommandCenter")
+	MineralManager.spawnDepositsForBase(base, 5)
+
+	local m1, m2 = minePositionsFor(base)
+	ResourceManager.add(player, Config.MINE_COST)
+	BuildingManager.placeInstantForPlayer(player, m1, "Mine")
+	ResourceManager.add(player, Config.MINE_COST)
+	BuildingManager.placeInstantForPlayer(player, m2, "Mine")
+
+	if ccId then seatAvatarOnCC(player, ccId) end
+end
+
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
 LobbyManager.init(MineralManager, TerrainManager, function(aiQueue)
 	gameStartTime = os.clock()
+	nextBaseIndex = 0
 
-	-- Send all human players to CC placement mode
-	local humanPlayers = Players:GetPlayers()
-	for _, player in humanPlayers do
-		task.delay(1, function()
-			if player.Parent then
-				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-			end
-		end)
+	-- Auto-place every human player's CC, deposits, and starter mines
+	for _, player in Players:GetPlayers() do
+		setupPlayerBase(player)
 	end
 
+	-- Late joiners also get auto-placed bases
 	Players.PlayerAdded:Connect(function(player)
-		task.delay(2, function()
-			if player.Parent then
-				RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+		task.delay(1, function()
+			if player.Parent and not BuildingManager.hasCommandCenter(player) then
+				setupPlayerBase(player)
 			end
 		end)
 	end)
 
-	-- Spawn AI bots AFTER all human players have placed their Command Centers.
-	-- This prevents AI CCs from blocking player spawn locations.
+	-- Spawn AI bots immediately — no need to wait since CCs are already placed
 	if #aiQueue > 0 then
 		task.spawn(function()
-			local CC_WAIT_TIMEOUT = 300  -- 5 minutes max
-			local elapsed = 0
-
-			while elapsed < CC_WAIT_TIMEOUT do
-				task.wait(1)
-				elapsed += 1
-
-				local allPlaced = true
-				local humanCount = 0
-				for _, player in Players:GetPlayers() do
-					humanCount += 1
-					if not BuildingManager.hasCommandCenter(player) then
-						allPlaced = false
-					end
-				end
-
-				-- Proceed once all connected humans have placed, or if nobody remains
-				if humanCount == 0 or allPlaced then break end
-			end
-
-			-- Spawn each queued AI with a small stagger so base-selection is accurate
 			for _, entry in aiQueue do
 				AIManager.spawnAI(entry.personality, entry.level)
 				task.wait(0.8)

@@ -430,6 +430,44 @@ end
 function MineralManager.setBuildingManager(_bm: any) end
 function MineralManager.setResearchManager(_rm: any) end
 
+-- Spawns `count` deposits clustered in the home direction of ccPos (away from map
+-- centre), snapped to BUILDING_GRID.  Call after init() so depositsFolder exists.
+function MineralManager.spawnDepositsForBase(ccPos: Vector3, count: number)
+	local GRID    = Config.BUILDING_GRID
+	local flatCC  = Vector3.new(ccPos.X, 0, ccPos.Z)
+	local homeDir = flatCC.Magnitude > 0.1 and flatCC.Unit or Vector3.new(0, 0, 1)
+	local perpDir = Vector3.new(-homeDir.Z, 0, homeDir.X)
+
+	-- Fan-pattern offsets: (studs along homeDir, studs along perpDir)
+	local OFFSETS = {
+		{ h = 35, p =   0 },
+		{ h = 45, p =  20 },
+		{ h = 45, p = -20 },
+		{ h = 60, p =  12 },
+		{ h = 60, p = -12 },
+	}
+
+	for i = 1, math.min(count, #OFFSETS) do
+		local o   = OFFSETS[i]
+		local raw = flatCC + homeDir * o.h + perpDir * o.p
+		local x   = math.round(raw.X / GRID) * GRID
+		local z   = math.round(raw.Z / GRID) * GRID
+		local pos = Vector3.new(x, 0, z)
+		local key = posKey(pos)
+
+		if depositResources[key] then continue end  -- already occupied
+
+		table.insert(depositList, pos)
+		depositResources[key] = Config.DEPOSIT_TOTAL_RESOURCES
+		makeDepositPart(pos)
+	end
+
+	-- Sync the full updated deposit list to all connected clients
+	RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
+		MineralManager.getUnclaimedPositions()
+	)
+end
+
 -- ── Init ──────────────────────────────────────────────────────────────────────
 
 function MineralManager.init(rm)

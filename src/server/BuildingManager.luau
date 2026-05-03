@@ -29,6 +29,7 @@ local monumentHeartbeatAccum = 0
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
+local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 
 -- ── Mobile CC state ───────────────────────────────────────────────────────────
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
@@ -169,15 +170,37 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		model.PrimaryPart = base   -- needed for PivotTo during mobile movement
 		playerCCId[player.UserId] = id
 
-		local spire        = Instance.new("Part")
-		spire.Name         = "Spire"
-		spire.Size         = Vector3.new(3, 18, 3)
-		spire.Position     = position + Vector3.new(0, size.Y + 9, 0)
-		spire.BrickColor   = BrickColor.new("Institutional white")
-		spire.Material     = Enum.Material.Neon
-		spire.Anchored     = true
-		spire.CastShadow   = false
-		spire.Parent       = model
+		local cx = position.X
+		local cz = position.Z
+		local hw = size.X / 2   -- 7
+		local hd = size.Z / 2   -- 7
+
+		-- Two thin neon collar rings on the sides (nothing rises above the base top).
+		-- The avatar sits on the open centre of the roof completely unobstructed.
+		local collars = {
+			position.Y + size.Y - 0.45,  -- top collar
+			position.Y          + 0.45,  -- bottom collar
+		}
+		for _, cY in collars do
+			local strips = {
+				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,       cY,  hd + 0.15) },
+				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,       cY, -hd - 0.15) },
+				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new( hw+0.15, cY,  cz       ) },
+				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(-hw-0.15, cY,  cz       ) },
+			}
+			for _, s in strips do
+				local strip       = Instance.new("Part")
+				strip.Name        = "Collar"
+				strip.Size        = s.sz
+				strip.Position    = s.pos
+				strip.BrickColor  = player.TeamColor
+				strip.Material    = Enum.Material.Neon
+				strip.Anchored    = true
+				strip.CanCollide  = false
+				strip.CastShadow  = false
+				strip.Parent      = model
+			end
+		end
 
 	elseif buildingType == "Mine" then
 		-- Dark-metal base platform
@@ -413,6 +436,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 	local maxHp     = (Config.BUILDING_HP :: any)[buildingType] or 400
 	local buildTime = (buildingType ~= "CommandCenter")
+		and not skipNextConstruction
 		and ((Config.BUILD_TIME :: any)[buildingType] or 0)
 		or 0
 
@@ -443,7 +467,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		id, player.UserId, position, buildingType
 	)
 
-	-- ── Construction animation ────────────────────────────────────────────
+	-- ── Construction animation ────────────────────────────────────────────────
 	if buildTime > 0 then
 		model:PivotTo(CFrame.new(position.X, 0, position.Z))
 
@@ -1045,6 +1069,19 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		researchManagerRef.recordBuildingPlaced(player, buildingType)
 	end
 	return true, id
+end
+
+-- Bypasses build-time so the building is fully-constructed the moment it's placed.
+-- Intended for server-side game-start setup only.
+function BuildingManager.placeInstantForPlayer(player: any, position: Vector3, buildingType: string): (boolean, string?)
+	skipNextConstruction = true
+	local ok, id = BuildingManager.placeForPlayer(player, position, buildingType)
+	skipNextConstruction = false
+	-- registerMine runs inside placeForPlayer, so setMineReady is safe to call now
+	if ok and id and buildingType == "Mine" and mineralManager then
+		mineralManager.setMineReady(id)
+	end
+	return ok, id
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────

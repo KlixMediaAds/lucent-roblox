@@ -1,23 +1,16 @@
 --[[
-	FogManager v3 — Starcraft 2-style fog of war
+	FogManager v4 — Starcraft 2-style fog of war
 
-	Improvements over v2:
-	  1. Ghost accuracy   — enemy buildings only ghost if we've actually seen them;
-	                        Destroying fires on the client when they die, removing
-	                        the ghost immediately.
-	  2. Smooth unit fade — enemy units fade in/out over 0.15 s via TweenService
-	                        instead of snapping to visible/invisible.
-	  3. Finer grid       — CELL_SIZE 12, GRID_CELLS 36 (was 20 / 22). Rounder
-	                        vision circles and tighter tile edges.
-	  4. Per-type vision  — CC=75, Barracks=50, Mine=45, Turret=40 (was flat 55).
-	  5. Source caching   — own-part lists rebuilt only when folders change;
-	                        positions are read fresh every tick (units move).
-	  6. rc precomputed   — Source stores the bounding-box cell radius so
-	                        math.sqrt is never called inside the hot inner loop.
-	  7. Fog resets on CC loss — FogManager.reset() wipes explored memory and
-	                        returns the map to black (called from init.client).
-	  8. Deposits hidden  — mineral deposits are invisible in unexplored cells;
-	                        visible/explored cells show them normally.
+	Improvements over v3:
+	  1. Feathered vision edges — boundary cells get fractional transparency
+	                              using quadratic falloff (no sqrt in hot loop).
+	  2. Smaller cell size      — CELL_SIZE 12 → 8 for rounder circles.
+	  3. Animated fog drift     — two large sinusoidally-drifting planes give
+	                              a subtle living-fog effect over unexplored tiles.
+	  5. Soft reveal            — tiles tween to transparent when first revealed
+	                              instead of snapping (0.22 s Quad-out).
+	  6. Depth layers           — the two drift planes at different Y heights
+	                              create an inexpensive parallax depth effect.
 --]]
 
 local TweenService = game:GetService("TweenService")
@@ -27,9 +20,10 @@ local FogManager  = {}
 local localPlayer = Players.LocalPlayer
 
 -- ── Config ────────────────────────────────────────────────────────────────────
-local CELL_SIZE  = 12     -- studs per fog tile
-local GRID_CELLS = 72     -- tiles per axis  →  ±432 stud coverage
-local HALF       = GRID_CELLS / 2  -- 18
+local CELL_SIZE    = 8      -- studs per fog tile
+local GRID_CELLS   = 108    -- tiles per axis  →  ±432 stud coverage (108 × 8 = 864)
+local HALF         = GRID_CELLS / 2  -- 54
+local FEATHER_FRAC = 0.22   -- outer feather band as fraction of each vision radius
 
 local FOG_Y        = 0.15
 local SHROUD_TRANS = 0.45  -- explored-but-not-visible overlay opacity (0 = fully opaque)
@@ -50,16 +44,19 @@ local STATE_UNEXPLORED = 0
 local STATE_EXPLORED   = 1
 local STATE_VISIBLE    = 2
 
-local FADE_INFO = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
+local FADE_INFO        = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
+local TILE_REVEAL_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- Effective unit vision (may be boosted by EyeUpgrade)
 local effVIS_UNIT = VIS_UNIT
 
--- Precomputed squared radii + cell-radii for unit / miner (recalculated when eye upgrade activates)
-local UNIT_R2  = VIS_UNIT  * VIS_UNIT
-local UNIT_RC  = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
-local MINER_R2 = VIS_MINER * VIS_MINER
-local MINER_RC = math.ceil(VIS_MINER / CELL_SIZE) + 1
+-- Precomputed squared radii + cell-radii + inner squared radii (feather start)
+local UNIT_R2   = VIS_UNIT  * VIS_UNIT
+local UNIT_RC   = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
+local UNIT_RI2  = (VIS_UNIT  * (1 - FEATHER_FRAC)) ^ 2
+local MINER_R2  = VIS_MINER * VIS_MINER
+local MINER_RC  = math.ceil(VIS_MINER / CELL_SIZE) + 1
+local MINER_RI2 = (VIS_MINER * (1 - FEATHER_FRAC)) ^ 2
 
 -- ── Module state ──────────────────────────────────────────────────────────────
 local localUserId: number
@@ -75,13 +72,17 @@ local tileState:   { { number } } = {}
 local exploredMap: { [number]: { [number]: true } } = {}
 
 -- ── Source cache ──────────────────────────────────────────────────────────────
-type Source = { x: number, z: number, r2: number, rc: number }
+type Source = { x: number, z: number, r2: number, rc: number, ri2: number }
 
 -- Cached lists of own parts — rebuilt only when a folder child changes
 local ownUnitParts:    { BasePart } = {}
-local ownBuildingData: { { part: BasePart, r2: number, rc: number } } = {}
+local ownBuildingData: { { part: BasePart, r2: number, rc: number, ri2: number } } = {}
 local ownMinerParts:   { BasePart } = {}
 local sourcesDirty = true
+
+-- Drift plane handles (created in init)
+local driftPlane1: Part?
+local driftPlane2: Part?
 
 -- ── Ghost building tracking ───────────────────────────────────────────────────
 -- Keyed by model.Name (building ID). Entry exists only while building is alive
@@ -170,7 +171,7 @@ end
 
 -- ── Source cache helpers ──────────────────────────────────────────────────────
 
-local function buildingTypeRadius(btype: string): (number, number)
+local function buildingTypeRadius(btype: string): (number, number, number)
 	local r: number
 	if      btype == "CommandCenter" then r = VIS_CC
 	elseif  btype == "Monument"      then r = VIS_CC
@@ -179,7 +180,10 @@ local function buildingTypeRadius(btype: string): (number, number)
 	elseif  btype == "Turret"        then r = VIS_TURRET
 	else                                  r = VIS_BARRACKS
 	end
-	return r * r, math.ceil(r / CELL_SIZE) + 1
+	local r2  = r * r
+	local rc  = math.ceil(r / CELL_SIZE) + 1
+	local ri2 = (r * (1 - FEATHER_FRAC)) ^ 2
+	return r2, rc, ri2
 end
 
 local function rebuildSourceList()
@@ -207,8 +211,8 @@ local function rebuildSourceList()
 				if base and base:IsA("BasePart") then
 					local btv   = model:FindFirstChild("BuildingType")
 					local btype = btv and btv.Value or "Barracks"
-					local r2, rc = buildingTypeRadius(btype)
-					table.insert(ownBuildingData, { part = base :: BasePart, r2 = r2, rc = rc })
+					local r2, rc, ri2 = buildingTypeRadius(btype)
+					table.insert(ownBuildingData, { part = base :: BasePart, r2 = r2, rc = rc, ri2 = ri2 })
 				end
 			end
 		end
@@ -239,23 +243,25 @@ local function collectSources(): { Source }
 	local out: { Source } = {}
 	for _, p in ownUnitParts do
 		local pos = p.Position
-		table.insert(out, { x = pos.X, z = pos.Z, r2 = UNIT_R2, rc = UNIT_RC })
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = UNIT_R2, rc = UNIT_RC, ri2 = UNIT_RI2 })
 	end
 	for _, bd in ownBuildingData do
 		local pos = bd.part.Position
-		table.insert(out, { x = pos.X, z = pos.Z, r2 = bd.r2, rc = bd.rc })
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = bd.r2, rc = bd.rc, ri2 = bd.ri2 })
 	end
 	for _, p in ownMinerParts do
 		local pos = p.Position
-		table.insert(out, { x = pos.X, z = pos.Z, r2 = MINER_R2, rc = MINER_RC })
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = MINER_R2, rc = MINER_RC, ri2 = MINER_RI2 })
 	end
 	return out
 end
 
 -- ── Visibility grid ───────────────────────────────────────────────────────────
+-- Returns 0–1 per cell: 1.0 = fully visible, 0 = not visible.
+-- Cells in the feather band (ri2 < d2 <= r2) get a quadratic falloff value.
 
-local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: true } }
-	local visGrid: { [number]: { [number]: true } } = {}
+local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: number } }
+	local visGrid: { [number]: { [number]: number } } = {}
 	for _, src in sources do
 		local cRow, cCol = worldToCell(src.x, src.z)
 		for dr = -src.rc, src.rc do
@@ -268,8 +274,19 @@ local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: 
 				local cwx, cwz = cellCentre(row, col)
 				local dx = cwx - src.x
 				local dz = cwz - src.z
-				if dx * dx + dz * dz <= src.r2 then
-					visGrid[row][col] = true
+				local d2 = dx * dx + dz * dz
+				if d2 <= src.r2 then
+					local level: number
+					if d2 <= src.ri2 then
+						level = 1.0
+					else
+						-- Quadratic falloff in feather band — avoids sqrt
+						level = 1.0 - (d2 - src.ri2) / (src.r2 - src.ri2)
+					end
+					local prev = visGrid[row][col]
+					if not prev or level > prev then
+						visGrid[row][col] = level
+					end
 				end
 			end
 		end
@@ -277,10 +294,10 @@ local function computeVisibleGrid(sources: { Source }): { [number]: { [number]: 
 	return visGrid
 end
 
-local function posIsVisible(pos: Vector3, visGrid: { [number]: { [number]: true } }): boolean
+local function posIsVisible(pos: Vector3, visGrid: { [number]: { [number]: number } }): boolean
 	local row, col = worldToCell(pos.X, pos.Z)
 	if not inBounds(row, col) then return false end
-	return visGrid[row] ~= nil and visGrid[row][col] == true
+	return visGrid[row] ~= nil and (visGrid[row][col] or 0) > 0
 end
 
 local function posIsExplored(pos: Vector3): boolean
@@ -361,16 +378,43 @@ local function updateFog()
 		local visRow = visGrid[row]
 		local expRow = exploredMap[row]
 		for col = 1, GRID_CELLS do
-			local vis = visRow ~= nil and visRow[col] == true
-			local exp = expRow ~= nil and expRow[col] == true
+			local visLevel = if visRow then (visRow[col] or 0) else 0
+			local exp      = expRow ~= nil and expRow[col] == true
+			local oldState = tileState[row][col]
 			local newState: number
-			if vis then           newState = STATE_VISIBLE
+			if visLevel > 0 then  newState = STATE_VISIBLE
 			elseif exp then       newState = STATE_EXPLORED
 			else                  newState = STATE_UNEXPLORED
 			end
-			if newState ~= tileState[row][col] then
-				tileState[row][col] = newState
-				applyTileState(row, col, newState)
+			local stateChanged = newState ~= oldState
+			if stateChanged then tileState[row][col] = newState end
+
+			-- Target transparencies
+			local blackT: number
+			local shroudT: number
+			if visLevel >= 1.0 then
+				blackT = 1; shroudT = 1
+			elseif visLevel > 0 then
+				blackT = visLevel; shroudT = 1  -- feathered edge
+			elseif exp then
+				blackT = 1; shroudT = SHROUD_TRANS
+			else
+				blackT = 0; shroudT = 1
+			end
+
+			if stateChanged then
+				-- Soft reveal: tween black tile out when a cell first becomes fully visible
+				if newState == STATE_VISIBLE and visLevel >= 1.0 then
+					TweenService:Create(blackLayer[row][col], TILE_REVEAL_INFO, { Transparency = 1 }):Play()
+				else
+					blackLayer[row][col].Transparency = blackT
+				end
+				shroudLayer[row][col].Transparency = shroudT
+			elseif visLevel > 0 then
+				-- Keep visible tiles in sync every tick — fixes stale feather values
+				-- when a cell moves from the feather band back to full visibility.
+				blackLayer[row][col].Transparency  = blackT
+				shroudLayer[row][col].Transparency = shroudT
 			end
 		end
 	end
@@ -543,13 +587,14 @@ function FogManager.setXray(enabled: boolean)
 end
 
 -- Called client-side when EyeUpgrade research completes.
--- Recomputes UNIT_R2/UNIT_RC so the next fog tick uses the wider vision radius.
+-- Recomputes UNIT_R2/RC/RI2 so the next fog tick uses the wider vision radius.
 function FogManager.setEyeUpgrade(active: boolean)
 	local Config = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Config"))
 	local mult   = if active then Config.EYE_VISION_MULT else 1.0
 	effVIS_UNIT  = VIS_UNIT * mult
 	UNIT_R2      = effVIS_UNIT * effVIS_UNIT
 	UNIT_RC      = math.ceil(effVIS_UNIT / CELL_SIZE) + 1
+	UNIT_RI2     = (effVIS_UNIT * (1 - FEATHER_FRAC)) ^ 2
 end
 
 -- Call when the local player is eliminated (CC destroyed). Wipes exploration
@@ -578,6 +623,45 @@ function FogManager.init(userId: number)
 	localUserId = userId
 	buildFogGrid()
 
+	-- ── Animated drift planes (options 3 & 6) ─────────────────────────────
+	-- Two large translucent neon planes oscillate in XZ via sine waves.
+	-- They sit just above the fog tiles and cover unexplored areas, giving a
+	-- subtle drifting depth effect with near-zero tile overhead.
+	local function makeDriftPlane(y: number, color: Color3, trans: number): Part
+		local p = Instance.new("Part")
+		p.Name         = "DriftLayer"
+		p.Size         = Vector3.new(920, 0.1, 920)
+		p.Position     = Vector3.new(0, y, 0)
+		p.Color        = color
+		p.Material     = Enum.Material.Neon
+		p.Transparency = trans
+		p.Anchored     = true
+		p.CanCollide   = false
+		p.CastShadow   = false
+		p.CanQuery     = false
+		p.Parent       = fogFolder
+		return p
+	end
+
+	driftPlane1 = makeDriftPlane(FOG_Y + 0.20, Color3.fromRGB(3, 6, 18),  0.92)
+	driftPlane2 = makeDriftPlane(FOG_Y + 0.38, Color3.fromRGB(0, 3, 12),  0.95)
+
+	task.spawn(function()
+		local t = 0
+		while driftPlane1 and driftPlane1.Parent do
+			t += 0.1
+			driftPlane1.Position = Vector3.new(
+				math.sin(t * math.pi * 2 / 30) * 18,
+				FOG_Y + 0.20,
+				math.cos(t * math.pi * 2 / 38) * 12)
+			driftPlane2.Position = Vector3.new(
+				math.cos(t * math.pi * 2 / 24) * 14,
+				FOG_Y + 0.38,
+				math.sin(t * math.pi * 2 / 28) * 16)
+			task.wait(0.1)
+		end
+	end)
+
 	task.spawn(function()
 		-- Wire dirty flags to folder changes so source/deposit lists
 		-- are rebuilt only when membership actually changes.
@@ -594,12 +678,18 @@ function FogManager.init(userId: number)
 		watch("Buildings", dirtySource)
 		watch("Miners",    dirtySource)
 
-		task.wait(1)  -- let world geometry and remotes settle
 		while true do
 			updateFog()
 			task.wait(TICK)
 		end
 	end)
+end
+
+-- Immediately clears fog around current sources without waiting for the next tick.
+-- Call this when the player's own buildings are placed so fog lifts instantly.
+function FogManager.forceRefresh()
+	sourcesDirty = true
+	updateFog()
 end
 
 return FogManager

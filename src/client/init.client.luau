@@ -363,11 +363,13 @@ ccBtn.MouseButton1Click:Connect(function()
 	BuildingPlacer.enterPlacementMode("CommandCenter")
 end)
 
-Network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
+Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
 		ownCCId = id
 		HUD.setCommandCenterMode(false)
 		Tutorial.notify("cc_placed")
+		CameraModule.setFocus(pos)
+		FogManager.forceRefresh()
 	end
 
 	if buildingType == "Monument" then

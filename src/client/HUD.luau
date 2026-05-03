@@ -13,6 +13,7 @@
 local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local SoundService     = game:GetService("SoundService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
@@ -597,6 +598,16 @@ function HUD.create(): (Frame, TextButton)
 	return dragFrame, ccBtn
 end
 
+-- ── Error sound ──────────────────────────────────────────────────────────────
+local function playErrorSound()
+	local s = Instance.new("Sound")
+	s.SoundId = "rbxassetid://125485586882683"
+	s.Volume  = 1
+	s.Parent  = SoundService
+	s:Play()
+	s.Ended:Once(function() s:Destroy() end)
+end
+
 -- ── Notification toast ────────────────────────────────────────────────────────
 -- Shows a small pill at the top-right that auto-dismisses after 4 s.
 -- Multiple calls stack vertically (each new toast appears below the previous).
@@ -791,7 +802,8 @@ function HUD.wire(
 			if not isUnlocked(n.btype) then return end
 			local info = BUILDING_INFO[n.btype]
 			if info and currentResources < info.cost then
-				HUD.showNotification("⚠ Not enough resources  (need ◆ " .. info.cost .. ")", C.GOLD)
+				playErrorSound()
+				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. info.cost, C.RED)
 				return
 			end
 			hidePanelsFn()
@@ -839,7 +851,8 @@ function HUD.wire(
 				if not isUnlocked(node.btype) then return end
 				local info = BUILDING_INFO[node.btype]
 				if info and currentResources < info.cost then
-					HUD.showNotification("⚠ Not enough resources  (need ◆ " .. info.cost .. ")", C.GOLD)
+					playErrorSound()
+				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. info.cost, C.RED)
 					return
 				end
 				hidePanelsFn()

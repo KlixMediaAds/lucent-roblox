@@ -196,6 +196,9 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		player.TeamColor = BrickColor.new(colorName)
 	end)
 
+	-- Default AI so solo players always have an opponent
+	table.insert(aiQueue, { personality = "balanced", level = 3 })
+
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false
 	end
