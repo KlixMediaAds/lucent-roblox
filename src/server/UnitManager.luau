@@ -25,6 +25,7 @@ type UnitData = {
 	moveSpeed   : number,    -- max speed in studs/s
 	accel       : number,    -- velocity lerp factor (higher = snappier)
 	focusBldId  : string?,   -- building ID to focus-fire (nil = none)
+	hpBarHideAt : number?,   -- tick() timestamp; hide health bar after this time
 	slowUntil          : number?,  -- tick() timestamp; unit moves at TANK_SLOW_MULT speed until then
 	stimUntil          : number?,  -- tick() timestamp; soldier stims active until then
 	stimCooldownUntil  : number?,  -- tick() timestamp; stims cannot reactivate until then
@@ -54,6 +55,7 @@ local barrackIsTraining: { [string]: boolean }       = {}
 local barrackTrainStart: { [string]: number }        = {}
 
 local MAX_QUEUE = 5
+local laneModeActive = false
 
 local aggroScanFrame = 0
 local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
@@ -61,6 +63,39 @@ local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
 local SEP_DIST   = 5.5   -- studs: same-team separation trigger radius
 local SEP_PUSH   = 0.18  -- studs pushed per frame per overlapping neighbour
 local MOVE_BOUND = 427   -- studs: clamp units inside the ±432 boundary walls
+local HP_BAR_SHOW_SECS = 3
+
+-- Spatial grid rebuilt each Heartbeat; maps a packed (cx, cz) integer key to the
+-- list of unit IDs in that cell.  GRID_CELL > SEP_DIST so separation queries cover
+-- at most a 2×2 block; AGGRO queries cover a small fixed neighbourhood regardless of n.
+local GRID_CELL   = 16    -- studs per cell side
+local GRID_OFFSET = 30    -- shifts cell index: world [-432..432] → cx/cz [3..57]
+local GRID_STRIDE = 70    -- column count for packing (cx, cz) into one integer key
+local spatialGrid: { [number]: { string } } = {}
+local gridOccupied: { number }               = {}
+local gridOccupiedCount                      = 0
+
+local function rebuildSpatialGrid()
+	for i = 1, gridOccupiedCount do
+		local cell = spatialGrid[gridOccupied[i]]
+		for j = 1, #cell do cell[j] = nil end
+	end
+	gridOccupiedCount = 0
+	for id, data in units do
+		local pos = data.part.Position
+		local cx  = math.floor(pos.X / GRID_CELL) + GRID_OFFSET
+		local cz  = math.floor(pos.Z / GRID_CELL) + GRID_OFFSET
+		local k   = cx * GRID_STRIDE + cz
+		local cell = spatialGrid[k]
+		if not cell then
+			cell = {}
+			spatialGrid[k] = cell
+			gridOccupiedCount += 1
+			gridOccupied[gridOccupiedCount] = k
+		end
+		cell[#cell + 1] = id
+	end
+end
 
 -- ── Health bar ────────────────────────────────────────────────────────────────
 
@@ -217,7 +252,7 @@ local function addHealthBar(part: BasePart)
 	fill.Parent         = bg
 end
 
-local function applyHP(data: UnitData)
+local function applyHP(data: UnitData, tookDamage: boolean?)
 	local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
 	if not bb then return end
 	local ratio = math.clamp(data.hp / data.maxHp, 0, 1)
@@ -230,7 +265,19 @@ local function applyHP(data: UnitData)
 		local g = math.clamp(2 * ratio, 0, 1)
 		fill.BackgroundColor3 = Color3.new(r, g, 0)
 	end
-	bb.Enabled = data.hp < data.maxHp
+	if data.hp >= data.maxHp then
+		bb.Enabled       = false
+		data.hpBarHideAt = nil
+	elseif tookDamage then
+		bb.Enabled = true
+		local t = tick() + HP_BAR_SHOW_SECS
+		data.hpBarHideAt = t
+		task.delay(HP_BAR_SHOW_SECS, function()
+			if data.hpBarHideAt == t and bb.Parent then
+				bb.Enabled = false
+			end
+		end)
+	end
 end
 
 -- Returns the effective damage dealt to a unit after applying Hardened Armor.
@@ -582,7 +629,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	local data   = units[bestId]
 	local hitPos = data.part.Position + Vector3.new(0, data.part.Size.Y * 0.5, 0)
 	data.hp -= calcDamage(data, damage)
-	applyHP(data)
+	applyHP(data, true)
 	if data.hp <= 0 then
 		-- If this was a trapper, release slow on any units it had harpooned
 		if data.trapperHarpooned then
@@ -622,8 +669,24 @@ function UnitManager.init(resourceManager)
 	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
 	local healBeamRemote = RemoteHandler.get(Config.REMOTES.HealBeam)
 
+	-- Terrain-height snapping: cast straight down to find the surface Y at any XZ.
+	-- Filters to Terrain only so buildings/units don't interfere.
+	local terrainRp = RaycastParams.new()
+	terrainRp.FilterType = Enum.RaycastFilterType.Include
+	terrainRp.FilterDescendantsInstances = { workspace.Terrain }
+
+	local function getGroundY(x: number, z: number, halfSizeY: number): number
+		local result = workspace:Raycast(
+			Vector3.new(x, 22, z),
+			Vector3.new(0, -34, 0),
+			terrainRp
+		)
+		return if result then result.Position.Y + halfSizeY else halfSizeY + 0.1
+	end
+
 	RunService.Heartbeat:Connect(function(dt)
 		local toRemove: { string } = {}
+		rebuildSpatialGrid()
 		aggroScanFrame = (aggroScanFrame + 1) % AGGRO_SCAN_EVERY
 		local doAggro  = aggroScanFrame == 0
 
@@ -707,7 +770,8 @@ function UnitManager.init(resourceManager)
 					end
 				else
 					local step   = math.min(Config.ROLLER_CHARGE_SPEED * dt, cDist)
-					local newPos = pos + cDelta.Unit * step
+					local np     = pos + cDelta.Unit * step
+					local newPos = Vector3.new(np.X, getGroundY(np.X, np.Z, data.part.Size.Y / 2), np.Z)
 					data.rollerAngle = ((data.rollerAngle or 0) + step * Config.ROLLER_ROLL_PER_STUD) % (2 * math.pi)
 					data.part.CFrame = CFrame.lookAt(newPos, newPos + cDelta.Unit) * CFrame.Angles(-data.rollerAngle, 0, 0)
 				end
@@ -741,8 +805,11 @@ function UnitManager.init(resourceManager)
 						if isRoller then effSpeed = effSpeed * Config.ROLLER_SPEED_MULT end
 						desired = delta.Unit * effSpeed
 
-						-- Terrain obstacle avoidance: repel from obstacle edges
-						local terrainF = workspace:FindFirstChild("TerrainObstacles")
+						-- Terrain obstacle avoidance: repel from obstacle edges.
+						-- Elevated units (on ramps/platforms) skip this so the platform
+						-- obstacle parts don't push them sideways off the terrain.
+						local unitIsElevated = pos.Y > data.part.Size.Y / 2 + 4
+						local terrainF = if unitIsElevated then nil else workspace:FindFirstChild("TerrainObstacles")
 						if terrainF then
 							local repX, repZ = 0, 0
 							local AVOID_R = Config.TERRAIN_AVOIDANCE_RADIUS
@@ -791,7 +858,8 @@ function UnitManager.init(resourceManager)
 				if vel.Magnitude > 0.15 then
 					local newX   = math.clamp(pos.X + vel.X * dt, -MOVE_BOUND, MOVE_BOUND)
 					local newZ   = math.clamp(pos.Z + vel.Z * dt, -MOVE_BOUND, MOVE_BOUND)
-					local newPos = Vector3.new(newX, pos.Y, newZ)
+					local newY   = getGroundY(newX, newZ, data.part.Size.Y / 2)
+					local newPos = Vector3.new(newX, newY, newZ)
 					local flatVel = Vector3.new(vel.X, 0, vel.Z)
 					if flatVel.Magnitude > 0.5 then
 						if isRoller then
@@ -812,12 +880,25 @@ function UnitManager.init(resourceManager)
 					local myStr = tostring(data.owner.UserId)
 					local myPos = data.part.Position
 					local bestId2, bestDist2 = nil :: string?, AGGRO + 1
-					for otherId, other in units do
-						if other.hp <= 0 then continue end
-						if tostring(other.owner.UserId) == myStr then continue end
-						local d = (other.part.Position - myPos).Magnitude
-						if d <= AGGRO and d < bestDist2 then
-							bestDist2 = d; bestId2 = otherId
+					local acx0 = math.floor((myPos.X - AGGRO) / GRID_CELL) + GRID_OFFSET
+					local acx1 = math.floor((myPos.X + AGGRO) / GRID_CELL) + GRID_OFFSET
+					local acz0 = math.floor((myPos.Z - AGGRO) / GRID_CELL) + GRID_OFFSET
+					local acz1 = math.floor((myPos.Z + AGGRO) / GRID_CELL) + GRID_OFFSET
+					for gx = acx0, acx1 do
+						for gz = acz0, acz1 do
+							local cell = spatialGrid[gx * GRID_STRIDE + gz]
+							if not cell then continue end
+							for _, otherId in cell do
+								local other = units[otherId]
+								if not other or other.hp <= 0 then continue end
+								if tostring(other.owner.UserId) == myStr then continue end
+								local dx = other.part.Position.X - myPos.X
+								local dz = other.part.Position.Z - myPos.Z
+								local d  = math.sqrt(dx * dx + dz * dz)
+								if d <= AGGRO and d < bestDist2 then
+									bestDist2 = d; bestId2 = otherId
+								end
+							end
 						end
 					end
 					if bestId2 then
@@ -991,7 +1072,7 @@ function UnitManager.init(resourceManager)
 							if tostring(other.owner.UserId) == myOwnerStr then continue end
 							if (other.part.Position - centre).Magnitude <= splashR then
 								other.hp -= calcDamage(other, splashDmg)
-								applyHP(other)
+								applyHP(other, true)
 								if hasConcussion then other.slowUntil = slowEnd end
 								if other.hp <= 0 then table.insert(toRemove, otherId) end
 							end
@@ -1040,7 +1121,7 @@ function UnitManager.init(resourceManager)
 							local other = units[bestId2]
 							hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 							other.hp -= calcDamage(other, shotDmg)
-							applyHP(other)
+							applyHP(other, true)
 							if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
 							if other.hp <= 0 then table.insert(toRemove, bestId2) end
 							for _ = 1, shotCount do
@@ -1069,7 +1150,7 @@ function UnitManager.init(resourceManager)
 						local other = units[bestId2]
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= calcDamage(other, data.attackDmg)
-						applyHP(other)
+						applyHP(other, true)
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
 						if not data.rollerCharging and not data.rollerChargingOut then
 							data.rollerCharging     = true
@@ -1121,7 +1202,7 @@ function UnitManager.init(resourceManager)
 						local other = units[bestId2]
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= calcDamage(other, data.attackDmg)
-						applyHP(other)
+						applyHP(other, true)
 						if other.hp <= 0 then table.insert(toRemove, bestId2) end
 					elseif buildingManagerRef then
 						local bId: string?, bPos: Vector3?
@@ -1169,25 +1250,35 @@ function UnitManager.init(resourceManager)
 		end
 
 		-- ── Separation pass ────────────────────────────────────────────────────
-		-- Nudge overlapping same-team units apart so they don't stack.
-		-- Runs every frame; n is small enough that O(n²) is fine.
 		for id, data in units do
 			local myPos = data.part.Position
 			local myStr = tostring(data.owner.UserId)
 			local pushX, pushZ = 0, 0
 			local count = 0
 
-			for otherId, other in units do
-				if otherId == id then continue end
-				if tostring(other.owner.UserId) ~= myStr then continue end
-				local dx   = myPos.X - other.part.Position.X
-				local dz   = myPos.Z - other.part.Position.Z
-				local dist = math.sqrt(dx * dx + dz * dz)
-				if dist < SEP_DIST and dist > 0.01 then
-					local strength = (SEP_DIST - dist) / SEP_DIST
-					pushX += (dx / dist) * strength
-					pushZ += (dz / dist) * strength
-					count += 1
+			local scx0 = math.floor((myPos.X - SEP_DIST) / GRID_CELL) + GRID_OFFSET
+			local scx1 = math.floor((myPos.X + SEP_DIST) / GRID_CELL) + GRID_OFFSET
+			local scz0 = math.floor((myPos.Z - SEP_DIST) / GRID_CELL) + GRID_OFFSET
+			local scz1 = math.floor((myPos.Z + SEP_DIST) / GRID_CELL) + GRID_OFFSET
+			for gx = scx0, scx1 do
+				for gz = scz0, scz1 do
+					local cell = spatialGrid[gx * GRID_STRIDE + gz]
+					if not cell then continue end
+					for _, otherId in cell do
+						if otherId == id then continue end
+						local other = units[otherId]
+						if not other then continue end
+						if tostring(other.owner.UserId) ~= myStr then continue end
+						local dx   = myPos.X - other.part.Position.X
+						local dz   = myPos.Z - other.part.Position.Z
+						local dist = math.sqrt(dx * dx + dz * dz)
+						if dist < SEP_DIST and dist > 0.01 then
+							local strength = (SEP_DIST - dist) / SEP_DIST
+							pushX += (dx / dist) * strength
+							pushZ += (dz / dist) * strength
+							count += 1
+						end
+					end
 				end
 			end
 
@@ -1196,8 +1287,7 @@ function UnitManager.init(resourceManager)
 				if mag > 0.01 then
 					local nx = myPos.X + (pushX / mag) * SEP_PUSH
 					local nz = myPos.Z + (pushZ / mag) * SEP_PUSH
-					-- Preserve facing rotation, only move position
-					data.part.CFrame = CFrame.new(nx, myPos.Y, nz) * data.part.CFrame.Rotation
+					data.part.CFrame = CFrame.new(nx, getGroundY(nx, nz, data.part.Size.Y / 2), nz) * data.part.CFrame.Rotation
 				end
 			end
 		end
@@ -1311,6 +1401,30 @@ function UnitManager.init(resourceManager)
 		end
 	end)
 
+	RemoteHandler.get(Config.REMOTES.SpawnLaneUnit).OnServerEvent:Connect(function(player, unitType)
+		if not laneModeActive then return end
+		if type(unitType) ~= "string" then return end
+		local typeDef = Config.UNIT_TYPES[unitType]
+		if not typeDef or unitType == "CreepySoldier" then return end
+		if not resourceManagerRef.spend(player, typeDef.cost) then return end
+		local ccPos = buildingManagerRef and buildingManagerRef.getCCPosition(player)
+		if not ccPos then
+			resourceManagerRef.add(player, typeDef.cost)
+			return
+		end
+		local id = spawnUnit(player, Vector3.new(ccPos.X, 0, ccPos.Z), unitType)
+		if id then
+			local data = units[id]
+			if data then
+				-- Auto-march toward enemy end of the lane
+				local marchTarget = Vector3.new(ccPos.X, 0, -ccPos.Z * 1.2)
+				data.target    = marchTarget
+				data.home      = marchTarget
+				data.atkMoveDest = marchTarget
+			end
+		end
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
 		local toRemove = {}
 		for id, data in units do
@@ -1332,6 +1446,10 @@ function UnitManager.init(resourceManager)
 			barrackTrainStart[bid] = nil
 		end
 	end)
+end
+
+function UnitManager.setLaneMode(enabled: boolean)
+	laneModeActive = enabled
 end
 
 return UnitManager

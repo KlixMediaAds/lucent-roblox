@@ -121,8 +121,19 @@ local function triggerEndGame(winnerUserId: number, reason: string)
 	AIManager.resetAllBots()
 	gameStartTime = os.clock()
 
+	-- Notify clients to reset their CC state
 	for _, player in Players:GetPlayers() do
 		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+	end
+
+	-- In lane mode, immediately auto-place CCs again
+	if currentGamemode == "Lane" then
+		nextBaseIndex = 0
+		nextLaneAIIdx = 0
+		task.wait(0.1)  -- let NeedCommandCenter process first
+		for _, player in Players:GetPlayers() do
+			setupLanePlayerBase(player)
+		end
 	end
 
 	gameResetInProgress = false
@@ -198,6 +209,21 @@ local PLAYER_BASES: { Vector3 } = {
 }
 local nextBaseIndex = 0
 
+-- Lane mode bases: players at the south end (Z≈−290), AI at the north end (Z≈+290)
+local LANE_PLAYER_BASES: { Vector3 } = {
+	Vector3.new(  0, Config.COMMAND_CENTER_SIZE.Y / 2, -290),
+	Vector3.new(-50, Config.COMMAND_CENTER_SIZE.Y / 2, -290),
+	Vector3.new( 50, Config.COMMAND_CENTER_SIZE.Y / 2, -290),
+	Vector3.new(  0, Config.COMMAND_CENTER_SIZE.Y / 2, -310),
+}
+local LANE_AI_BASES: { Vector3 } = {
+	Vector3.new(  0, Config.COMMAND_CENTER_SIZE.Y / 2,  290),
+	Vector3.new(-50, Config.COMMAND_CENTER_SIZE.Y / 2,  290),
+	Vector3.new( 50, Config.COMMAND_CENTER_SIZE.Y / 2,  290),
+}
+local nextLaneAIIdx   = 0
+local currentGamemode = "Default"
+
 -- Returns two mine positions offset from ccPos in its home direction.
 local function minePositionsFor(ccPos: Vector3): (Vector3, Vector3)
 	local GRID    = Config.BUILDING_GRID
@@ -271,30 +297,64 @@ local function setupPlayerBase(player: Player)
 	if ccId then seatAvatarOnCC(player, ccId) end
 end
 
--- ── Lobby → game handoff ──────────────────────────────────────────────────────
-LobbyManager.init(MineralManager, TerrainManager, function(aiQueue)
-	gameStartTime = os.clock()
-	nextBaseIndex = 0
+-- Sets up a player base for lane mode: auto-placed CC + extra starting resources.
+local function setupLanePlayerBase(player: Player)
+	nextBaseIndex += 1
+	local base = LANE_PLAYER_BASES[((nextBaseIndex - 1) % #LANE_PLAYER_BASES) + 1]
+	local _, ccId = BuildingManager.placeForPlayer(player, base, "CommandCenter")
+	ResourceManager.add(player, 600)  -- extra resources since there are no mines
+	if ccId then seatAvatarOnCC(player, ccId) end
+end
 
-	-- Auto-place every human player's CC, deposits, and starter mines
+-- ── Lobby → game handoff ──────────────────────────────────────────────────────
+LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
+	gameStartTime     = os.clock()
+	nextBaseIndex     = 0
+	nextLaneAIIdx     = 0
+	currentGamemode   = gamemode or "Default"
+
+	local isLane = currentGamemode == "Lane"
+
+	BuildingManager.setLaneMode(isLane)
+	UnitManager.setLaneMode(isLane)
+
+	if isLane then
+		TerrainManager.generateLane()
+	end
+
+	-- Auto-place every human player's base
 	for _, player in Players:GetPlayers() do
-		setupPlayerBase(player)
+		if isLane then
+			setupLanePlayerBase(player)
+		else
+			setupPlayerBase(player)
+		end
 	end
 
 	-- Late joiners also get auto-placed bases
 	Players.PlayerAdded:Connect(function(player)
 		task.delay(1, function()
 			if player.Parent and not BuildingManager.hasCommandCenter(player) then
-				setupPlayerBase(player)
+				if isLane then
+					setupLanePlayerBase(player)
+				else
+					setupPlayerBase(player)
+				end
 			end
 		end)
 	end)
 
-	-- Spawn AI bots immediately — no need to wait since CCs are already placed
+	-- Spawn AI bots
 	if #aiQueue > 0 then
 		task.spawn(function()
 			for _, entry in aiQueue do
-				AIManager.spawnAI(entry.personality, entry.level)
+				if isLane then
+					local laneBase = LANE_AI_BASES[(nextLaneAIIdx % #LANE_AI_BASES) + 1]
+					nextLaneAIIdx += 1
+					AIManager.spawnAI(entry.personality, entry.level, laneBase)
+				else
+					AIManager.spawnAI(entry.personality, entry.level)
+				end
 				task.wait(0.8)
 			end
 		end)

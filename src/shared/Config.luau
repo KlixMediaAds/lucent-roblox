@@ -1,5 +1,8 @@
 local Config = {}
 
+-- Gamemodes
+Config.GAMEMODES = { Default = "Default", Lane = "Lane" }
+
 -- Economy
 Config.STARTING_RESOURCES   = 400
 Config.BUILDING_COST         = 50   -- Barracks cost
@@ -258,6 +261,8 @@ Config.REMOTES = {
 	MobilizeCC              = "MobilizeCC",
 	MoveMobileCC            = "MoveMobileCC",
 	CCMobileSync            = "CCMobileSync",
+	LobbySetGamemode        = "LobbySetGamemode",
+	SpawnLaneUnit           = "SpawnLaneUnit",
 }
 
 return Config

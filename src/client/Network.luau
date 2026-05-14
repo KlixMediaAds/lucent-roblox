@@ -188,4 +188,8 @@ function Network.onTentacleTargets(fn: (string, Vector3, Vector3?, Vector3?, Vec
 	RemoteHandler.get(Config.REMOTES.TentacleTargets).OnClientEvent:Connect(fn)
 end
 
+function Network.spawnLaneUnit(unitType: string)
+	RemoteHandler.get(Config.REMOTES.SpawnLaneUnit):FireServer(unitType)
+end
+
 return Network

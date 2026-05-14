@@ -27,6 +27,7 @@ local rerollCooldown   = false
 local active           = true
 local terrainEnabled   = false
 local terrainManagerRef: any = nil
+local currentGamemode  = "Default"
 
 type AIEntry = { personality: string, level: number }
 local aiQueue: { AIEntry } = {}
@@ -58,7 +59,8 @@ local function syncAll(mineralManager)
 		buildReadyList(),
 		mineralManager.getUnclaimedPositions(),
 		terrainEnabled,
-		aiQueue
+		aiQueue,
+		currentGamemode
 	)
 end
 
@@ -85,13 +87,13 @@ local function checkAllReady(mineralManager, onLobbyEnd)
 		for _, entry in aiQueue do
 			table.insert(snapshot, { personality = entry.personality, level = entry.level })
 		end
-		onLobbyEnd(snapshot)
+		onLobbyEnd(snapshot, currentGamemode)
 	end)
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
 
-function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntry }) -> ())
+function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntry }, string) -> ())
 
 	terrainManagerRef = terrainManager
 
@@ -105,7 +107,8 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 				buildReadyList(),
 				mineralManager.getUnclaimedPositions(),
 				terrainEnabled,
-				aiQueue
+				aiQueue,
+				currentGamemode
 			)
 		end)
 		syncAll(mineralManager)
@@ -131,7 +134,9 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		rerollCooldown = true
 		resetAllReady()
 		mineralManager.rerollDeposits()
-		if terrainEnabled and terrainManagerRef then
+		if currentGamemode == "Lane" and terrainManagerRef then
+			terrainManagerRef.generateLane()
+		elseif terrainEnabled and terrainManagerRef then
 			terrainManagerRef.generate()
 		end
 		syncAll(mineralManager)
@@ -140,11 +145,29 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 
 	RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle).OnServerEvent:Connect(function(_player)
 		if not active then return end
+		if currentGamemode == "Lane" then return end  -- terrain toggle disabled in lane mode
 		terrainEnabled = not terrainEnabled
 		resetAllReady()
 		if terrainEnabled and terrainManagerRef then
 			terrainManagerRef.generate()
 		elseif not terrainEnabled and terrainManagerRef then
+			terrainManagerRef.clear()
+		end
+		syncAll(mineralManager)
+	end)
+
+	RemoteHandler.get(Config.REMOTES.LobbySetGamemode).OnServerEvent:Connect(function(_player, gamemode: any)
+		if not active then return end
+		if type(gamemode) ~= "string" then return end
+		if gamemode ~= "Default" and gamemode ~= "Lane" then return end
+		if currentGamemode == gamemode then return end
+		currentGamemode = gamemode
+		resetAllReady()
+		if currentGamemode == "Lane" and terrainManagerRef then
+			terrainManagerRef.generateLane()
+		elseif terrainEnabled and terrainManagerRef then
+			terrainManagerRef.generate()
+		else
 			terrainManagerRef.clear()
 		end
 		syncAll(mineralManager)

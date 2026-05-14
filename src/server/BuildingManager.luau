@@ -16,7 +16,7 @@ local unitManagerRef: any
 local researchManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
-type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean, turretUpgrade: string? }
+type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
@@ -30,6 +30,7 @@ local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire time
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
+local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
 -- ── Mobile CC state ───────────────────────────────────────────────────────────
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
@@ -114,7 +115,7 @@ local function addHealthBar(part: BasePart)
 	bb.Size             = UDim2.new(0, 80, 0, 9)
 	bb.StudsOffset      = Vector3.new(0, part.Size.Y / 2 + 2.5, 0)
 	bb.AlwaysOnTop      = false
-	bb.Enabled          = true
+	bb.Enabled          = false
 	bb.Parent           = part
 
 	local bg            = Instance.new("Frame")
@@ -131,7 +132,9 @@ local function addHealthBar(part: BasePart)
 	fill.Parent         = bg
 end
 
-local function applyHP(data: BuildingData)
+local HP_BAR_SHOW_SECS = 3
+
+local function applyHP(data: BuildingData, tookDamage: boolean?)
 	local bb = data.base:FindFirstChild("HealthBar") :: BillboardGui?
 	if not bb then return end
 	local ratio = math.clamp(data.hp / data.maxHp, 0, 1)
@@ -144,7 +147,19 @@ local function applyHP(data: BuildingData)
 		local g = math.clamp(2 * ratio, 0, 1)
 		fill.BackgroundColor3 = Color3.new(r, g, 0)
 	end
-	bb.Enabled = data.hp < data.maxHp
+	if data.hp >= data.maxHp then
+		bb.Enabled       = false
+		data.hpBarHideAt = nil
+	elseif tookDamage then
+		bb.Enabled = true
+		local t = tick() + HP_BAR_SHOW_SECS
+		data.hpBarHideAt = t
+		task.delay(HP_BAR_SHOW_SECS, function()
+			if data.hpBarHideAt == t and bb.Parent then
+				bb.Enabled = false
+			end
+		end)
+	end
 end
 
 -- ── Building creation ─────────────────────────────────────────────────────────
@@ -912,7 +927,7 @@ function BuildingManager.damage(id: string, amount: number)
 	local data = buildingData[id]
 	if not data then return end
 	data.hp = math.max(0, data.hp - amount)
-	applyHP(data)
+	applyHP(data, true)
 
 	-- Notify owner when their CC is being attacked (throttled)
 	if data.buildingType == "CommandCenter" and data.hp > 0 then
@@ -1301,6 +1316,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.PlaceBuilding).OnServerEvent:Connect(function(player, pos, buildingType)
 		if typeof(pos) ~= "Vector3" then return end
 		if type(buildingType) ~= "string" then return end
+		if laneModeActive and buildingType ~= "CommandCenter" then return end
 
 		local snapped = snapGrid(pos)
 
@@ -1518,6 +1534,18 @@ function BuildingManager.buildMonument(player: any): boolean
 	-- Signal construction started
 	RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(player.UserId, -1)
 	return true
+end
+
+function BuildingManager.setLaneMode(enabled: boolean)
+	laneModeActive = enabled
+end
+
+function BuildingManager.getCCPosition(player: any): Vector3?
+	local ccId = playerCCId[player.UserId]
+	if not ccId then return nil end
+	local data = buildingData[ccId]
+	if not data then return nil end
+	return data.base.Position
 end
 
 return BuildingManager

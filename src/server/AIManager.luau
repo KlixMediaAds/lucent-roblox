@@ -1354,7 +1354,7 @@ local function pickBestBase(): (Vector3, number)
 	return AI_BASES[bestIdx], bestIdx
 end
 
-function AIManager.spawnAI(personality: string, level: number): boolean
+function AIManager.spawnAI(personality: string, level: number, baseOverride: Vector3?): boolean
 	personality = tostring(personality):lower()
 	level       = math.clamp(math.floor(tonumber(level) or 3), 1, 5)
 
@@ -1366,7 +1366,14 @@ function AIManager.spawnAI(personality: string, level: number): boolean
 	local diff = buildProfile(personality, level)
 
 	aiCounter += 1
-	local base, colorIdx = pickBestBase()
+	local base: Vector3
+	local colorIdx: number
+	if baseOverride then
+		colorIdx = ((aiCounter - 1) % #AI_COLORS) + 1
+		base     = baseOverride
+	else
+		base, colorIdx = pickBestBase()
+	end
 
 	local team          = Instance.new("Team")
 	team.Name           = string.format("AI [%s lv%d] %d", personality, level, aiCounter)

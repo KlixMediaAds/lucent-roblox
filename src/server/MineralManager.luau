@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+local FungiCluster      = require(Shared:WaitForChild("FungiCluster"))
 
 local MineralManager = {}
 
@@ -16,7 +17,8 @@ type MineData = {
 local depositResources: { [string]: number } = {}  -- posKey → resources remaining
 local depositList:      { Vector3 }           = {}
 local mines:            { [string]: MineData } = {}
-local mineActive:       { [string]: boolean } = {}  -- tracks which mines currently have deposits in range
+local mineActive:            { [string]: boolean } = {}  -- tracks which mines currently have deposits in range
+local depositThresholdBand:  { [string]: number }  = {}  -- posKey → last visual band (4/3/2/1/0)
 local waveScheduled     = false
 local extractAccum      = 0
 
@@ -30,38 +32,35 @@ end
 -- ── Deposit visuals ───────────────────────────────────────────────────────────
 
 local function makeDepositPart(pos: Vector3)
-	local model      = Instance.new("Model")
-	model.Name       = posKey(pos)
-	model.Parent     = depositsFolder
+	-- Derive a stable seed from grid position so every deposit looks unique but
+	-- regenerates identically on round reset.
+	local seed    = math.abs(math.round(pos.X) * 1000 + math.round(pos.Z) * 7919) % 999983 + 1
+	local cluster = FungiCluster.create(pos, seed, 1.0)
+	cluster.Name  = posKey(pos)
+	cluster.Parent = depositsFolder
+	depositThresholdBand[posKey(pos)] = 4
+end
 
-	local COLOR    = BrickColor.new("Bright yellow")
-	local MAT      = Enum.Material.Neon
-
-	local function shard(size: Vector3, offset: Vector3, rx: number, ry: number, rz: number): Part
-		local p         = Instance.new("Part")
-		p.Size          = size
-		p.CFrame        = CFrame.new(pos.X + offset.X, offset.Y, pos.Z + offset.Z)
-		                * CFrame.Angles(rx, ry, rz)
-		p.BrickColor    = COLOR
-		p.Material      = MAT
-		p.Anchored      = true
-		p.CanCollide    = false
-		p.CanQuery      = false
-		p.CastShadow    = false
-		p.Parent        = model
-		return p
+local function depositBand(fullness: number): number
+	if fullness >= 0.75 then return 4
+	elseif fullness >= 0.50 then return 3
+	elseif fullness >= 0.25 then return 2
+	elseif fullness >= 0.10 then return 1
+	else return 0
 	end
+end
 
-	local r = math.rad
-
-	local center = shard(Vector3.new(2.4, 9, 2.4),   Vector3.new( 0,   4.5,  0),   r(6),  r(0),  r(-4))
-	              shard(Vector3.new(1.8, 7, 1.8),    Vector3.new(-2.2, 3.5,  0.4), r(0),  r(15), r(22))
-	              shard(Vector3.new(1.5, 6, 1.5),    Vector3.new( 2.1, 3.0, -0.6), r(-4), r(-12),r(-18))
-	              shard(Vector3.new(1.3, 5.5, 1.3),  Vector3.new( 0.6, 2.8, -2.0), r(16), r(5),  r(4))
-	              shard(Vector3.new(1.0, 4, 1.0),    Vector3.new(-1.4, 2.0,  1.8), r(-10),r(8),  r(-7))
-	              shard(Vector3.new(0.8, 2.5, 0.8),  Vector3.new( 1.5, 1.2, -1.2), r(-5), r(20), r(12))
-
-	model.PrimaryPart = center
+local function checkColonyRebuild(pos: Vector3)
+	local key      = posKey(pos)
+	local cur      = depositResources[key] or 0
+	local fullness = cur / Config.DEPOSIT_TOTAL_RESOURCES
+	local band     = depositBand(fullness)
+	if depositThresholdBand[key] == band then return end
+	depositThresholdBand[key] = band
+	local colonyModel = depositsFolder:FindFirstChild(key)
+	if colonyModel and colonyModel:IsA("Model") then
+		FungiCluster.rebuild(colonyModel, fullness)
+	end
 end
 
 -- ── Deposit generation ────────────────────────────────────────────────────────
@@ -300,6 +299,8 @@ local function extractionTick()
 			totalIncome += extract
 			if depositResources[key] <= 0 then
 				anyDepleted = true
+			else
+				checkColonyRebuild(pos)
 			end
 		end
 
@@ -322,7 +323,8 @@ local function extractionTick()
 				local model = depositsFolder:FindFirstChild(key)
 				if model then model:Destroy() end
 				table.remove(depositList, i)
-				depositResources[key] = nil
+				depositResources[key]     = nil
+				depositThresholdBand[key] = nil
 			end
 			i -= 1
 		end
@@ -352,9 +354,10 @@ function MineralManager.getUnclaimedPositions(): { Vector3 }
 end
 
 function MineralManager.rerollDeposits()
-	depositList      = {}
-	depositResources = {}
-	waveScheduled    = false
+	depositList          = {}
+	depositResources     = {}
+	depositThresholdBand = {}
+	waveScheduled        = false
 	for _, model in depositsFolder:GetChildren() do model:Destroy() end
 	generateDeposits()
 	for _, pos in depositList do makeDepositPart(pos) end
@@ -406,11 +409,12 @@ function MineralManager.removeAllMinesFor(player: any)
 end
 
 function MineralManager.resetAll()
-	mines            = {}
-	mineActive       = {}
-	depositList      = {}
-	depositResources = {}
-	waveScheduled    = false
+	mines                = {}
+	mineActive           = {}
+	depositList          = {}
+	depositResources     = {}
+	depositThresholdBand = {}
+	waveScheduled        = false
 	extractAccum     = 0
 	for _, model in depositsFolder:GetChildren() do model:Destroy() end
 	generateDeposits()

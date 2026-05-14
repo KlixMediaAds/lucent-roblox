@@ -32,7 +32,7 @@ local WORLD_HALF = 432
 local PREVIEW_PX = 370    -- map preview side length in design pixels
 local PANEL_W    = 300
 local PANEL_H    = 370
-local OPT_H      = 192    -- options dropdown card height
+local OPT_H      = 244    -- options dropdown card height
 
 -- Minimap constants — must match MiniMap.luau
 local MINIMAP_SIZE = 180
@@ -98,6 +98,8 @@ local rerollOnCooldown  = false
 local pendingRerollAnim = false
 local optionsOpen       = false
 local lobbyTerrainEnabled = false
+local lobbyGamemode     = "Default"
+local gamemodeBtns: { [string]: TextButton } = {}
 
 type AIEntry = { personality: string, level: number }
 local localAIQueue: { AIEntry } = {}
@@ -396,7 +398,7 @@ end
   t=3.38  bg fades (0.25s)
   t=3.63  sg:Destroy()
 ]]
-local function playGameStartTransition(onComplete: () -> ())
+local function playGameStartTransition(onComplete: (string) -> ())
 	readyBtn.Active  = false
 	optionsBtn.Active = false
 
@@ -513,7 +515,7 @@ local function playGameStartTransition(onComplete: () -> ())
 				end
 
 				task.delay(0.28, function()
-					onComplete()
+					onComplete(lobbyGamemode)
 					TweenService:Create(bg,
 						TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 						{ BackgroundTransparency = 1 }
@@ -531,6 +533,15 @@ local function setOptionsOpen(open: boolean)
 	optionsBtn.BackgroundColor3 = open and C_OPTIONS_ON or C_OPTIONS_BTN
 	optionsBtn.Text = open and "OPTIONS  ▲" or "OPTIONS  ▼"
 	optionsCard.Visible = open
+end
+
+-- ── Gamemode buttons ─────────────────────────────────────────────────────────
+local function updateGamemodeButtons()
+	for gid, btn in gamemodeBtns do
+		local isActive = lobbyGamemode == gid
+		btn.BackgroundColor3 = isActive and C_READY_ON or C_OPTIONS_BTN
+		btn.TextColor3       = isActive and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 185, 235)
+	end
 end
 
 -- ── Build UI ──────────────────────────────────────────────────────────────────
@@ -699,6 +710,27 @@ local function buildUI()
 		C_TERRAIN_OFF, Color3.fromRGB(185, 155, 110), 12)
 	stroke(terrainToggleBtn, C_BORDER, 1); oy += 30
 
+	label(optionsCard, "GAMEMODE", 10, C_SUBTEXT, Enum.Font.GothamBold,
+		UDim2.new(1, -20, 0, 12), UDim2.fromOffset(10, oy), Enum.TextXAlignment.Left)
+	oy += 16
+
+	local GMB_W = math.floor((PANEL_W - 28) / 2)  -- 136
+	for i, gm in ipairs({ { id = "Default", text = "DEFAULT" }, { id = "Lane", text = "LANE" } }) do
+		local isActive = lobbyGamemode == gm.id
+		local xPos = 10 + (i - 1) * (GMB_W + 8)
+		local gmBtn = makeBtn(optionsCard, gm.text,
+			UDim2.fromOffset(GMB_W, 26), UDim2.fromOffset(xPos, oy),
+			isActive and C_READY_ON or C_OPTIONS_BTN,
+			isActive and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 185, 235), 11)
+		stroke(gmBtn, C_BORDER, 1)
+		gamemodeBtns[gm.id] = gmBtn
+		local gmId = gm.id
+		gmBtn.MouseButton1Click:Connect(function()
+			RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(gmId)
+		end)
+	end
+	oy += 30
+
 	label(optionsCard, "AI PERSONALITIES", 10, C_SUBTEXT, Enum.Font.GothamBold,
 		UDim2.new(1, -20, 0, 12), UDim2.fromOffset(10, oy), Enum.TextXAlignment.Left)
 	oy += 16
@@ -729,7 +761,7 @@ local function buildUI()
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
-function LobbyUI.init(onGameStart: () -> ())
+function LobbyUI.init(onGameStart: (string) -> ())
 	buildUI()
 
 	-- Scale to fit viewport
@@ -750,11 +782,16 @@ function LobbyUI.init(onGameStart: () -> ())
 			readyList: { { name: string, ready: boolean } },
 			positions: { Vector3 },
 			terrainOn: boolean,
-			aiList:    { AIEntry }?
+			aiList:    { AIEntry }?,
+			gamemode:  string?
 		)
 			syncPlayers(readyList)
 			localAIQueue = aiList or {}
 			rebuildAIList()
+			if gamemode and gamemode ~= lobbyGamemode then
+				lobbyGamemode = gamemode
+				updateGamemodeButtons()
+			end
 			if pendingRerollAnim then
 				pendingRerollAnim = false
 				playMapScan(function()

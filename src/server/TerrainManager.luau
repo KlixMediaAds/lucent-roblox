@@ -1,177 +1,235 @@
 --!strict
 --[[
-    TerrainManager v2 — Starcraft-style structured map terrain.
+	TerrainManager v3 — Roblox Terrain grass platforms with smooth ramps.
 
-    Symmetry: X-axis reflection.  Everything generated for the top half
-    (z > 0) is mirrored to the bottom half (z → -z), giving both players
-    structurally identical environments.
+	Symmetry: Z reflection.  Platforms defined for z > 0 are mirrored to z < 0.
 
-    Map layout (one half):
+	Layout (one half, z > 0):
+	  • West + East flank platforms — 1 ramp each, elevated corridor blockers
+	  • Center-left + Center-right choke plateaux — 2 ramps each, with a
+	    ~160-stud ground-level gap between them for units to pass through
 
-        ┌──────────────────────────────────────────┐
-        │ [L-WALL] corner           corner [L-WALL] │  ← enclosed base pockets
-        │                                            │
-        │       [side slab]     [side slab]          │  ← extra corridor detail
-        │                                            │
-        │ ████████████████  gap  ████████████████   │  ← choke wall pair
-        │                                            │
-        │               open center                  │
-        └────────────────── z=0 ────────────────────┘  (mirror line)
-
-    Structural elements per half (mirrored to other half → 16 Parts total):
-      • 2 corner L-enclosures  × 2 pieces each = 4 pieces  (one per map corner)
-      • 1 choke wall pair                       = 2 pieces  (full-width minus gap)
-      • 2 side pocket slabs                     = 2 pieces  (mid-corridor detail)
-
-    All obstacles: CanCollide = false.  Building-placement and unit-movement
-    enforcement is done entirely in code.
+	Invisible BaseParts in TerrainObstacles preserve the isPositionBlocked API
+	used by BuildingManager / BuildingPlacer.
 ]]
 
 local TerrainManager = {}
 
+local Terrain         = workspace.Terrain
 local obstaclesFolder: Folder? = nil
-local HALF       = 432   -- map half-extent in studs  (matches WORLD_HALF everywhere)
-local OBS_HEIGHT = 16    -- all terrain pieces this tall
 
--- ── Part factory ─────────────────────────────────────────────────────────────
+local HALF   = 432  -- map half-extent (studs)
+local PLAT_H = 10   -- platform height above Y=0
+local RAMP_D = 20   -- horizontal depth of each ramp
 
-local function makePart(cx: number, cz: number, hw: number, hd: number)
-    local part            = Instance.new("Part")
-    part.Name             = "TerrainObstacle"
-    part.Size             = Vector3.new(math.max(hw * 2, 1), OBS_HEIGHT, math.max(hd * 2, 1))
-    part.CFrame           = CFrame.new(cx, OBS_HEIGHT / 2, cz)
-    part.Material         = Enum.Material.Rock
-    part.BrickColor       = BrickColor.new("Slate grey")
-    part.Anchored         = true
-    part.CanCollide       = false
-    part.CanQuery         = false
-    part.CastShadow       = true
-    part.Parent           = obstaclesFolder
+-- ── Base ground ───────────────────────────────────────────────────────────────
+-- Mirrors the fill in init.server.luau.  Called after Terrain:Clear() to restore
+-- the flat grass floor so the rest of the game is unaffected.
+
+local function fillBaseGround()
+	Terrain:FillBlock(
+		CFrame.new(0, -8, 0),
+		Vector3.new(960, 8, 960),
+		Enum.Material.Grass
+	)
 end
 
--- ── Generation ───────────────────────────────────────────────────────────────
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+
+-- Invisible Part added to TerrainObstacles so code-level placement/movement
+-- checks (isPositionBlocked) still see elevated terrain as blocked.
+local function addObstacle(cx: number, cz: number, hw: number, hd: number)
+	local p           = Instance.new("Part")
+	p.Name            = "TerrainObstacle"
+	p.Size            = Vector3.new(hw * 2, PLAT_H, hd * 2)
+	p.CFrame          = CFrame.new(cx, PLAT_H / 2, cz)
+	p.Anchored        = true
+	p.CanCollide      = false
+	p.CanQuery        = false
+	p.Transparency    = 1
+	p.CastShadow      = false
+	p.Parent          = obstaclesFolder
+end
+
+-- Raised grass column that fills from terrain base (Y=-12) up to Y=PLAT_H.
+local function fillPlatform(cx: number, cz: number, pw: number, pd: number)
+	local totalH  = PLAT_H + 12
+	local centerY = (PLAT_H - 12) / 2   -- centres the fill so top = PLAT_H, bottom = -12
+	Terrain:FillBlock(
+		CFrame.new(cx, centerY, cz),
+		Vector3.new(pw, totalH, pd),
+		Enum.Material.Grass
+	)
+end
+
+-- Wedge ramp from ground (Y=0) up to the platform face at highFaceZ.
+--   southward = true  → ramp is on the south face of a z>0 platform:
+--     high end at highFaceZ (+Z), low end at highFaceZ − RAMP_D (−Z).
+--     FillWedge default orientation has full height at local +Z → no rotation needed.
+--   southward = false → ramp is on the north face of a mirrored z<0 platform:
+--     high end at highFaceZ (−Z), low end at highFaceZ + RAMP_D (+Z).
+--     Rotate 180° around Y so the full-height end faces −Z.
+local function fillRamp(cx: number, highFaceZ: number, rampW: number, southward: boolean)
+	local size = Vector3.new(rampW, PLAT_H, RAMP_D)
+	local cf: CFrame
+	if southward then
+		cf = CFrame.new(cx, PLAT_H / 2, highFaceZ - RAMP_D / 2)
+	else
+		cf = CFrame.new(cx, PLAT_H / 2, highFaceZ + RAMP_D / 2)
+		     * CFrame.Angles(0, math.pi, 0)
+	end
+	Terrain:FillWedge(cf, size, Enum.Material.Grass)
+end
+
+-- ── Generation ────────────────────────────────────────────────────────────────
 
 function TerrainManager.generate(seed: number?)
-    TerrainManager.clear()
+	-- Clear existing platforms and obstacle markers
+	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
+	Terrain:Clear()
+	fillBaseGround()
 
-    obstaclesFolder        = Instance.new("Folder")
-    obstaclesFolder.Name   = "TerrainObstacles"
-    obstaclesFolder.Parent = workspace
+	obstaclesFolder        = Instance.new("Folder")
+	obstaclesFolder.Name   = "TerrainObstacles"
+	obstaclesFolder.Parent = workspace
 
-    local rng = Random.new(seed or math.floor(os.clock() * 7919))
+	local rng = Random.new(seed or math.floor(os.clock() * 7919))
+	local function r(base: number, spread: number): number
+		return base + rng:NextNumber(-spread, spread)
+	end
 
-    -- Convenience: random value centred on `base` with ±`spread`.
-    local function r(base: number, spread: number): number
-        return base + rng:NextNumber(-spread, spread)
-    end
+	type RampSpec = { xOff: number, w: number }
+	type PlatSpec = { cx: number, cz: number, pw: number, pd: number, ramps: { RampSpec } }
 
-    -- Pieces defined for the TOP half (z > 0); each is auto-mirrored to z < 0.
-    type Piece = { cx: number, cz: number, hw: number, hd: number }
-    local half: { Piece } = {}
+	-- All platforms defined for the z > 0 half; each is mirrored to z < 0 below.
+	local platforms: { PlatSpec } = {
 
-    -- ── 1. Corner L-enclosures ────────────────────────────────────────────
-    --
-    -- Each corner gets two pieces forming an L open toward the map centre.
-    -- The horizontal cap seals the far edge; the vertical slab runs down
-    -- the side, leaving an opening that faces inward.
-    --
-    --   cap:  ██████████████████
-    --   slab: ██
-    --         ██
-    --         ██                ← opening here (unit can enter from below/right)
-    --
-    -- Left corner L (top-left when looking down):
-    local capCZ   = r(375, 12)          -- cap sits near the top edge
-    local capHW   = r(115, 12)          -- how far inward the cap reaches
-    local capHD   = r(18,   3)
-    local capCX   = -(HALF - capHW)     -- cap's right edge at roughly -HALF, left at ~-HALF+2*capHW
+		-- ── West flank ─────────────────────────────────────────────────────
+		-- Elevated ledge that narrows the west side corridor without fully sealing it.
+		{
+			cx    = r(-340, 12),
+			cz    = r(220, 15),
+			pw    = r(75, 8),
+			pd    = r(100, 10),
+			ramps = { { xOff = 0, w = r(44, 5) } },
+		},
 
-    local slabCX  = r(-410,  8)         -- slab hugs the left edge
-    local slabCZ  = r(295,  15)         -- slab centre; top end ≈ capCZ, bottom ~= slabCZ - slabHD
-    local slabHW  = r( 16,   3)
-    local slabHD  = r( 80,  10)         -- bottom edge stays safely above the choke
+		-- ── East flank (X-mirror of west) ───────────────────────────────────
+		{
+			cx    = r(340, 12),
+			cz    = r(220, 15),
+			pw    = r(75, 8),
+			pd    = r(100, 10),
+			ramps = { { xOff = 0, w = r(44, 5) } },
+		},
 
-    -- Left corner
-    table.insert(half, { cx =  capCX,  cz = capCZ,  hw = capHW,  hd = capHD  })
-    table.insert(half, { cx =  slabCX, cz = slabCZ, hw = slabHW, hd = slabHD })
-    -- Right corner (mirror X)
-    table.insert(half, { cx = -capCX,  cz = capCZ,  hw = capHW,  hd = capHD  })
-    table.insert(half, { cx = -slabCX, cz = slabCZ, hw = slabHW, hd = slabHD })
+		-- ── Center-left choke plateau ───────────────────────────────────────
+		-- Spans most of the left half; leaves a ~160-stud gap to the right plateau.
+		{
+			cx    = r(-195, 12),
+			cz    = r(135, 12),
+			pw    = r(210, 15),
+			pd    = r(60, 6),
+			ramps = {
+				{ xOff = r(-55, 12), w = r(40, 5) },
+				{ xOff = r( 55, 12), w = r(40, 5) },
+			},
+		},
 
-    -- ── 2. Full-width choke wall pair ─────────────────────────────────────
-    --
-    -- Two long horizontal walls that span the entire map width, broken only
-    -- by a central gap.  Units must funnel through that gap to cross between
-    -- the two halves — exactly like a Starcraft natural choke.
-    --
-    --   ████████████████  [gap]  ████████████████
-    --
-    local chokeZ    = r(130, 20)        -- how far from z=0 the choke sits
-    local chokeHD   = r(16,   3)        -- wall thickness (Z direction)
-    local gapHalf   = r(80,  12)        -- half-width of the central opening
-    --   Each wall's half-width  = (HALF - gapHalf) / 2   (so two walls + gap = full map)
-    --   Each wall's centre X    = ±(gapHalf + chokeHW)  = ±(gapHalf + (HALF-gapHalf)/2)
-    --                           = ±(gapHalf/2 + HALF/2) = ±(HALF + gapHalf) / 2
-    local chokeHW   = (HALF - gapHalf) / 2
-    local chokeCX   = (HALF + gapHalf) / 2   -- centre of RIGHT wall (positive)
+		-- ── Center-right choke plateau (X-mirror) ──────────────────────────
+		{
+			cx    = r(195, 12),
+			cz    = r(135, 12),
+			pw    = r(210, 15),
+			pd    = r(60, 6),
+			ramps = {
+				{ xOff = r(-55, 12), w = r(40, 5) },
+				{ xOff = r( 55, 12), w = r(40, 5) },
+			},
+		},
+	}
 
-    table.insert(half, { cx = -chokeCX, cz = chokeZ, hw = chokeHW, hd = chokeHD })
-    table.insert(half, { cx =  chokeCX, cz = chokeZ, hw = chokeHW, hd = chokeHD })
+	for _, pl in platforms do
+		local southFaceZ = pl.cz - pl.pd / 2  -- z > 0 platform's face toward map centre
+		local northFaceZ = -(pl.cz - pl.pd / 2)  -- mirrored platform's face toward map centre
 
-    -- ── 3. Side pocket slabs ──────────────────────────────────────────────
-    --
-    -- Thin vertical slabs placed along the edges between the corner L and the
-    -- choke wall.  They pinch the side corridor slightly, creating secondary
-    -- choke-like passages on the flanks and breaking up long straight runs.
-    --
-    local pocketX   = r(385, 15)        -- close to the side edge
-    local pocketCZ  = r(225, 20)        -- between choke (z≈130) and corner slab
-    local pocketHW  = r( 14,  3)        -- thin in X
-    local pocketHD  = r( 55, 10)        -- moderate height in Z
+		-- z > 0 half
+		fillPlatform(pl.cx,  pl.cz, pl.pw, pl.pd)
+		addObstacle(pl.cx,   pl.cz, pl.pw / 2, pl.pd / 2)
 
-    table.insert(half, { cx = -pocketX, cz = pocketCZ, hw = pocketHW, hd = pocketHD })
-    table.insert(half, { cx =  pocketX, cz = pocketCZ, hw = pocketHW, hd = pocketHD })
+		-- z < 0 half
+		fillPlatform(pl.cx, -pl.cz, pl.pw, pl.pd)
+		addObstacle(pl.cx,  -pl.cz, pl.pw / 2, pl.pd / 2)
 
-    -- ── 4. Centre accent rocks ────────────────────────────────────────────
-    --
-    -- A few rocks in the open centre area (below the choke) give units
-    -- something to hide behind in mid-map battles.
-    local accentCount = rng:NextInteger(2, 4)
-    for _ = 1, accentCount do
-        local ax = rng:NextNumber(-160, 160)
-        local az = r(55, 30)   -- safely below the choke: z ≈ 25–85
-        table.insert(half, { cx = ax, cz = az, hw = r(16, 5), hd = r(11, 4) })
-    end
+		for _, rp in pl.ramps do
+			local rx = pl.cx + rp.xOff
+			-- Ramps intentionally have NO obstacle Part — units must be free to walk
+			-- up them without being repelled by the avoidance system.
+			fillRamp(rx,  southFaceZ, rp.w, true)
+			fillRamp(rx, -southFaceZ, rp.w, false)
+		end
+	end
+end
 
-    -- ── Place everything: top half + mirrored bottom half ─────────────────
-    for _, p in half do
-        makePart( p.cx,  p.cz, p.hw, p.hd)   -- top half  (z > 0)
-        makePart( p.cx, -p.cz, p.hw, p.hd)   -- bottom half (z < 0)
-    end
+-- ── Lane mode terrain ─────────────────────────────────────────────────────────
+-- Clears all platforms and fills rocky walls on both sides of a 300-stud-wide
+-- corridor centred on X=0.  Players start at the south end (Z≈−290), AI at
+-- the north end (Z≈+290).
+
+function TerrainManager.generateLane()
+	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
+	Terrain:Clear()
+	fillBaseGround()
+
+	obstaclesFolder        = Instance.new("Folder")
+	obstaclesFolder.Name   = "TerrainObstacles"
+	obstaclesFolder.Parent = workspace
+
+	local LANE_HALF = 150                       -- half-width of the open lane
+	local WALL_FILL = HALF - LANE_HALF          -- 282 studs wide per rock wall
+	local WALL_CX   = LANE_HALF + WALL_FILL / 2 -- centre X of each wall  (291)
+	local WALL_H    = 26
+	local totalH    = WALL_H + 12
+	local centerY   = (WALL_H - 12) / 2
+
+	-- East rocky wall
+	Terrain:FillBlock(
+		CFrame.new(WALL_CX, centerY, 0),
+		Vector3.new(WALL_FILL, totalH, HALF * 2 + 40),
+		Enum.Material.Rock
+	)
+	addObstacle(WALL_CX, 0, WALL_FILL / 2, HALF + 20)
+
+	-- West rocky wall
+	Terrain:FillBlock(
+		CFrame.new(-WALL_CX, centerY, 0),
+		Vector3.new(WALL_FILL, totalH, HALF * 2 + 40),
+		Enum.Material.Rock
+	)
+	addObstacle(-WALL_CX, 0, WALL_FILL / 2, HALF + 20)
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function TerrainManager.clear()
-    if obstaclesFolder then
-        obstaclesFolder:Destroy()
-        obstaclesFolder = nil
-    end
+	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
+	Terrain:Clear()
+	fillBaseGround()
 end
 
--- Returns true if a box centred at pos.X / pos.Z with the given half-extents
--- overlaps any terrain obstacle.  Used by BuildingManager and BuildingPlacer.
+-- Returns true if a box centred at pos.X/pos.Z with the given half-extents
+-- overlaps any terrain obstacle Part.  Used by BuildingManager and BuildingPlacer.
 function TerrainManager.isPositionBlocked(pos: Vector3, halfW: number, halfD: number): boolean
-    local folder = workspace:FindFirstChild("TerrainObstacles")
-    if not folder then return false end
-    for _, part in folder:GetChildren() do
-        if not part:IsA("BasePart") then continue end
-        if math.abs(pos.X - part.Position.X) < halfW + part.Size.X / 2
-            and math.abs(pos.Z - part.Position.Z) < halfD + part.Size.Z / 2 then
-            return true
-        end
-    end
-    return false
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+	if not folder then return false end
+	for _, part in folder:GetChildren() do
+		if not part:IsA("BasePart") then continue end
+		if math.abs(pos.X - part.Position.X) < halfW + part.Size.X / 2
+			and math.abs(pos.Z - part.Position.Z) < halfD + part.Size.Z / 2 then
+			return true
+		end
+	end
+	return false
 end
 
 return TerrainManager

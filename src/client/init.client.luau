@@ -24,6 +24,7 @@ local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager   = require(script:WaitForChild("CometManager"))
+local DepositFX      = require(script:WaitForChild("DepositFX"))
 local LobbyUI        = require(script:WaitForChild("LobbyUI"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
@@ -125,15 +126,19 @@ local function isBlocked(): boolean
 	return BuildingPlacer.isActive()
 end
 
-local function startGame()
+local function startGame(gamemode: string?)
+
+local isLane = gamemode == "Lane"
 
 CameraModule.init()
+DepositFX.start()
 SpiderLegs.init(workspace.CurrentCamera)
 CreepyLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
 
 local dragFrame, ccBtn = HUD.create()
+if isLane then HUD.setLaneMode(true) end
 Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
@@ -305,6 +310,11 @@ HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
 end)
 HUD.setHasResearch(function(techName: string) return researchedTechs[techName] == true end)
 ccBtn.MouseButton1Click:Connect(hideBuildingPanels)
+if isLane then
+	HUD.wireLane(function(unitType: string)
+		Network.spawnLaneUnit(unitType)
+	end)
+end
 
 -- R shortcut: open/close workshop panel (mirrors the HUD upgrades button)
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)

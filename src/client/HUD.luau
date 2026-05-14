@@ -71,6 +71,9 @@ local currentResources = 0
 local currentIncome    = 0
 local buildMenuOpen    = false
 local currentActivePlacing: string? = nil
+local isLaneModeActive = false
+local lanePanel:     Frame?
+local laneUnitBtns:  { [string]: TextButton } = {}
 
 local playerCounts: { [string]: number } = {}
 local hasResearchFn: ((string) -> boolean)?
@@ -95,6 +98,14 @@ local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string }
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 }
 local CHILD_SPACING = 95   -- px between child centres
+
+-- Lane mode unit spawn panel definitions
+local LANE_UNIT_DEFS: { { utype: string, icon: string, color: Color3 } } = {
+	{ utype = "Soldier", icon = "⚔",  color = C.BARRACKS                       },
+	{ utype = "Tank",    icon = "🛡",  color = Color3.fromRGB(60,  140,  60)    },
+	{ utype = "Elite",   icon = "⭐",  color = Color3.fromRGB(200, 160,  40)    },
+	{ utype = "Medic",   icon = "➕",  color = Color3.fromRGB(40,  160, 140)    },
+}
 
 -- ── Horizontal node refs ──────────────────────────────────────────────────────
 type ChildNode = {
@@ -181,12 +192,23 @@ end
 local function refreshResDisplay()
 	if resLabel then resLabel.Text = tostring(currentResources) end
 	if incLabel then
-		if currentIncome > 0 then
-			incLabel.Text       = string.format("+%.0f/min", currentIncome)
-			incLabel.TextColor3 = C.GREEN
-		else
-			incLabel.Text = ""
+		incLabel.Text = currentIncome > 0
+			and string.format("↑ %.0f / min", currentIncome)
+			or  ""
+	end
+end
+
+-- ── Lane panel affordability ──────────────────────────────────────────────────
+local function refreshLaneButtons()
+	if not isLaneModeActive then return end
+	for utype, btn in laneUnitBtns do
+		local typeDef = (Config.UNIT_TYPES :: any)[utype]
+		local cost    = typeDef and typeDef.cost or 0
+		local costLbl = btn:FindFirstChild("CostLabel") :: TextLabel?
+		if costLbl then
+			costLbl.TextColor3 = currentResources >= cost and C.GOLD or C.RED
 		end
+		btn.BackgroundTransparency = currentResources >= cost and 0.35 or 0.62
 	end
 end
 
@@ -293,33 +315,76 @@ function HUD.create(): (Frame, TextButton)
 	-- ── Resource bar (top-left) ───────────────────────────────────────────────
 	local resBar                    = Instance.new("Frame")
 	resBar.Name                     = "ResourceBar"
-	resBar.Size                     = UDim2.fromOffset(272, 40)
+	resBar.Size                     = UDim2.fromOffset(190, 64)
 	resBar.Position                 = UDim2.fromOffset(12, 12)
 	resBar.BackgroundColor3         = C.BG_PANEL
-	resBar.BackgroundTransparency   = 0.08
+	resBar.BackgroundTransparency   = 0.04
 	resBar.BorderSizePixel          = 0
 	resBar.ZIndex                   = 4
 	resBar.Parent                   = sg
-	UILib.corner(resBar, 8)
-	UILib.stroke(resBar, C.BORDER, 1)
+	UILib.corner(resBar, 10)
 
-	UILib.lbl(resBar, "◆",
-		UDim2.fromOffset(22, 40), UDim2.fromOffset(8, 0),
-		{ bold = true, size = 18, color = C.GOLD, align = Enum.TextXAlignment.Center, zIndex = 5 })
+	-- Gold stroke to tie into the icon colour
+	local resStroke                 = Instance.new("UIStroke")
+	resStroke.Color                 = Color3.fromRGB(120, 85, 10)
+	resStroke.Thickness             = 1
+	resStroke.ApplyStrokeMode       = Enum.ApplyStrokeMode.Border
+	resStroke.Parent                = resBar
 
-	local rLbl = UILib.lbl(resBar, "400",
-		UDim2.fromOffset(100, 40), UDim2.fromOffset(30, 0),
-		{ bold = true, size = 16, color = C.GOLD, align = Enum.TextXAlignment.Left, zIndex = 5 })
+	-- Subtle gradient: slightly lighter top-left, darker bottom-right
+	local resGrad                   = Instance.new("UIGradient")
+	resGrad.Color                   = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 26, 50)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB( 7, 11, 22)),
+	})
+	resGrad.Rotation                = 130
+	resGrad.Parent                  = resBar
+
+	-- Gold left-edge accent stripe
+	local resAccent                 = Instance.new("Frame")
+	resAccent.Size                  = UDim2.new(0, 3, 1, -16)
+	resAccent.Position              = UDim2.fromOffset(7, 8)
+	resAccent.BackgroundColor3      = C.GOLD
+	resAccent.BorderSizePixel       = 0
+	resAccent.ZIndex                = 5
+	resAccent.Parent                = resBar
+	UILib.corner(resAccent, 2)
+
+	-- Icon circle (amber-tinted background, gold ring)
+	local resIconBg                 = Instance.new("Frame")
+	resIconBg.Size                  = UDim2.fromOffset(38, 38)
+	resIconBg.Position              = UDim2.fromOffset(17, 13)
+	resIconBg.BackgroundColor3      = Color3.fromRGB(50, 35, 5)
+	resIconBg.BackgroundTransparency = 0.1
+	resIconBg.BorderSizePixel       = 0
+	resIconBg.ZIndex                = 5
+	resIconBg.Parent                = resBar
+	UILib.corner(resIconBg, 19)
+	UILib.stroke(resIconBg, C.GOLD, 1)
+
+	local resIconLbl                = Instance.new("TextLabel")
+	resIconLbl.Size                 = UDim2.new(1, 0, 1, 0)
+	resIconLbl.BackgroundTransparency = 1
+	resIconLbl.Text                 = "◆"
+	resIconLbl.TextSize             = 19
+	resIconLbl.TextColor3           = C.GOLD
+	resIconLbl.Font                 = Enum.Font.GothamBold
+	resIconLbl.TextXAlignment       = Enum.TextXAlignment.Center
+	resIconLbl.TextYAlignment       = Enum.TextYAlignment.Center
+	resIconLbl.ZIndex               = 6
+	resIconLbl.Parent               = resIconBg
+
+	-- Resource count — large, prominent
+	local rLbl = UILib.lbl(resBar, "0",
+		UDim2.fromOffset(126, 30), UDim2.fromOffset(62, 6),
+		{ bold = true, size = 26, color = C.TEXT, align = Enum.TextXAlignment.Left, zIndex = 5 })
 	rLbl.Name = "ResLabel"
 	resLabel   = rLbl
 
-	UILib.lbl(resBar, "·",
-		UDim2.fromOffset(14, 40), UDim2.fromOffset(132, 0),
-		{ size = 16, color = C.SUBTEXT, align = Enum.TextXAlignment.Center, zIndex = 5 })
-
+	-- Income row — small, subordinate
 	local iLbl = UILib.lbl(resBar, "",
-		UDim2.fromOffset(112, 40), UDim2.fromOffset(148, 0),
-		{ size = 13, color = C.GREEN, align = Enum.TextXAlignment.Left, zIndex = 5 })
+		UDim2.fromOffset(126, 18), UDim2.fromOffset(63, 38),
+		{ size = 12, color = C.GREEN, align = Enum.TextXAlignment.Left, zIndex = 5 })
 	iLbl.Name = "IncLabel"
 	incLabel   = iLbl
 
@@ -595,6 +660,129 @@ function HUD.create(): (Frame, TextButton)
 	end
 
 	updateAllNodes()
+
+	-- ── Lane mode spawn panel ──────────────────────────────────────────────────
+	do
+		local BTN_W  = 84
+		local BTN_H  = 88
+		local GAP    = 6
+		local PAD    = 10
+		local HEADER = 22
+		local nUnits = #LANE_UNIT_DEFS
+		local panelW = PAD * 2 + nUnits * BTN_W + (nUnits - 1) * GAP
+		local panelH = PAD + HEADER + GAP + BTN_H + PAD
+
+		local panel                     = Instance.new("Frame")
+		panel.Name                      = "LanePanel"
+		panel.Size                      = UDim2.fromOffset(panelW, panelH)
+		panel.Position                  = UDim2.new(0, 12, 1, -(panelH + 12))
+		panel.BackgroundColor3          = C.BG_PANEL
+		panel.BackgroundTransparency    = 0.06
+		panel.BorderSizePixel           = 0
+		panel.ZIndex                    = 3
+		panel.Visible                   = false
+		panel.Parent                    = sg
+		UILib.corner(panel, 12)
+		UILib.stroke(panel, C.ACCENT, 1.5)
+
+		local panelGrad                 = Instance.new("UIGradient")
+		panelGrad.Color                 = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(8,  22, 42)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(4,  11, 22)),
+		})
+		panelGrad.Rotation              = 90
+		panelGrad.Parent                = panel
+
+		local headerLbl                 = Instance.new("TextLabel")
+		headerLbl.Size                  = UDim2.new(1, -PAD * 2, 0, HEADER)
+		headerLbl.Position              = UDim2.fromOffset(PAD, PAD - 2)
+		headerLbl.BackgroundTransparency = 1
+		headerLbl.Text                  = "SPAWN UNIT"
+		headerLbl.Font                  = Enum.Font.GothamBold
+		headerLbl.TextSize              = 13
+		headerLbl.TextColor3            = C.ACCENT
+		headerLbl.TextXAlignment        = Enum.TextXAlignment.Left
+		headerLbl.ZIndex                = 4
+		headerLbl.Parent                = panel
+
+		for i, def in LANE_UNIT_DEFS do
+			local bx    = PAD + (i - 1) * (BTN_W + GAP)
+			local by    = PAD + HEADER + GAP
+			local uType = def.utype
+			local col   = def.color
+
+			local btn                       = Instance.new("TextButton")
+			btn.Name                        = uType .. "Btn"
+			btn.Size                        = UDim2.fromOffset(BTN_W, BTN_H)
+			btn.Position                    = UDim2.fromOffset(bx, by)
+			btn.BackgroundColor3            = col
+			btn.BackgroundTransparency      = 0.35
+			btn.BorderSizePixel             = 0
+			btn.AutoButtonColor             = false
+			btn.Text                        = ""
+			btn.ZIndex                      = 4
+			btn.Parent                      = panel
+			UILib.corner(btn, 10)
+
+			local btnStroke                 = Instance.new("UIStroke")
+			btnStroke.Color                 = col
+			btnStroke.Thickness             = 2
+			btnStroke.Parent                = btn
+
+			local iconLbl                   = Instance.new("TextLabel")
+			iconLbl.Size                    = UDim2.new(1, 0, 0, 34)
+			iconLbl.Position                = UDim2.fromOffset(0, 7)
+			iconLbl.BackgroundTransparency  = 1
+			iconLbl.Text                    = def.icon
+			iconLbl.Font                    = Enum.Font.GothamBold
+			iconLbl.TextSize                = 26
+			iconLbl.TextColor3              = C.TEXT
+			iconLbl.TextXAlignment          = Enum.TextXAlignment.Center
+			iconLbl.ZIndex                  = 5
+			iconLbl.Parent                  = btn
+
+			local nameLbl                   = Instance.new("TextLabel")
+			nameLbl.Size                    = UDim2.new(1, -4, 0, 18)
+			nameLbl.Position                = UDim2.fromOffset(2, 43)
+			nameLbl.BackgroundTransparency  = 1
+			nameLbl.Text                    = uType:upper()
+			nameLbl.Font                    = Enum.Font.GothamBold
+			nameLbl.TextSize                = 10
+			nameLbl.TextColor3              = C.TEXT
+			nameLbl.TextXAlignment          = Enum.TextXAlignment.Center
+			nameLbl.ZIndex                  = 5
+			nameLbl.Parent                  = btn
+
+			local typeDef                   = (Config.UNIT_TYPES :: any)[uType]
+			local cost                      = typeDef and typeDef.cost or 0
+			local costLbl                   = Instance.new("TextLabel")
+			costLbl.Name                    = "CostLabel"
+			costLbl.Size                    = UDim2.new(1, -4, 0, 18)
+			costLbl.Position                = UDim2.fromOffset(2, 62)
+			costLbl.BackgroundTransparency  = 1
+			costLbl.Text                    = "◆ " .. cost
+			costLbl.Font                    = Enum.Font.GothamBold
+			costLbl.TextSize                = 11
+			costLbl.TextColor3              = C.GOLD
+			costLbl.TextXAlignment          = Enum.TextXAlignment.Center
+			costLbl.ZIndex                  = 5
+			costLbl.Parent                  = btn
+
+			btn.MouseEnter:Connect(function()
+				TweenService:Create(btn,       TweenInfo.new(0.12), { BackgroundTransparency = 0.15 }):Play()
+				TweenService:Create(btnStroke, TweenInfo.new(0.12), { Thickness = 3.5 }):Play()
+			end)
+			btn.MouseLeave:Connect(function()
+				TweenService:Create(btn,       TweenInfo.new(0.12), { BackgroundTransparency = 0.35 }):Play()
+				TweenService:Create(btnStroke, TweenInfo.new(0.12), { Thickness = 2 }):Play()
+			end)
+
+			laneUnitBtns[uType] = btn
+		end
+
+		lanePanel = panel
+	end
+
 	return dragFrame, ccBtn
 end
 
@@ -692,6 +880,7 @@ end
 function HUD.setResources(n: number)
 	currentResources = n
 	refreshResDisplay()
+	refreshLaneButtons()
 end
 
 function HUD.setIncome(perMin: number)
@@ -702,11 +891,12 @@ end
 local ccPulseActive = false
 
 function HUD.setCommandCenterMode(isCC: boolean)
-	if buildOverlay  then buildOverlay.Visible  = not isCC end
-	if ccBtnInternal then ccBtnInternal.Visible = isCC     end
+	if buildOverlay  then buildOverlay.Visible  = not isCC and not isLaneModeActive end
+	if ccBtnInternal then ccBtnInternal.Visible = isCC and not isLaneModeActive     end
+	if lanePanel     then lanePanel.Visible     = not isCC and isLaneModeActive     end
 	if isCC and buildMenuOpen then collapseMenu() end
 
-	if isCC then
+	if isCC and not isLaneModeActive then
 		-- Pop-in spring
 		if ccScaleRef then
 			ccScaleRef.Scale = 0.78
@@ -759,6 +949,27 @@ function HUD.setUpgradesVisible(visible: boolean)
 	local w = upgradesBtnWrapper
 	if not w then return end
 	w.Visible = visible
+end
+
+function HUD.setLaneMode(enabled: boolean)
+	isLaneModeActive = enabled
+	if lanePanel then lanePanel.Visible = false end  -- shown by setCommandCenterMode(false)
+end
+
+function HUD.wireLane(onSpawnFn: (string) -> ())
+	for utype, btn in laneUnitBtns do
+		local ut = utype
+		btn.MouseButton1Click:Connect(function()
+			local typeDef = (Config.UNIT_TYPES :: any)[ut]
+			local cost    = typeDef and typeDef.cost or 0
+			if currentResources < cost then
+				playErrorSound()
+				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
+				return
+			end
+			onSpawnFn(ut)
+		end)
+	end
 end
 
 -- ── HUD.wire ──────────────────────────────────────────────────────────────────
