@@ -425,15 +425,50 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		end
 
 	else
-		-- Barracks flag
-		local flag      = Instance.new("Part")
-		flag.Name       = "Flag"
-		flag.Size       = Vector3.new(0.6, 5, 0.6)
-		flag.Position   = position + Vector3.new(0, size.Y + 2.5, 0)
-		flag.BrickColor = player.TeamColor
-		flag.Material   = Enum.Material.Neon
-		flag.Anchored   = true
-		flag.Parent     = model
+		-- Barracks: open-top training facility.
+		-- base stays as the invisible 10×8×10 logic box (health-bar anchor, raycast target).
+		base.Transparency = 1
+
+		local col  = player.TeamColor
+		local grey = BrickColor.new("Dark stone grey")
+
+		local function bp(sz: Vector3, pos: Vector3, col2: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
+			local p          = Instance.new("Part")
+			if shape then (p :: any).Shape = shape end
+			p.Size           = sz
+			p.Position       = position + pos
+			p.BrickColor     = col2
+			p.Material       = mat
+			p.Anchored       = true
+			p.CanCollide     = false
+			p.CastShadow     = false
+			p.Parent         = model
+			return p
+		end
+
+		-- Foundation
+		bp(Vector3.new(10, 0.7, 10),    Vector3.new(0, 0.35, 0),       grey, Enum.Material.Metal)
+		-- Side walls (extend full depth so corners are filled)
+		bp(Vector3.new(0.7, 6.3, 10.7), Vector3.new(-5.35, 3.85, 0),   col,  Enum.Material.SmoothPlastic)
+		bp(Vector3.new(0.7, 6.3, 10.7), Vector3.new( 5.35, 3.85, 0),   col,  Enum.Material.SmoothPlastic)
+		-- Back wall (narrower so side walls handle the corner seam)
+		bp(Vector3.new(9.3, 6.3, 0.7),  Vector3.new(0, 3.85, -5.35),   col,  Enum.Material.SmoothPlastic)
+		-- Front pillars (open facade)
+		bp(Vector3.new(0.7, 6.3, 0.7),  Vector3.new(-4.65, 3.85, 5.35), col, Enum.Material.SmoothPlastic)
+		bp(Vector3.new(0.7, 6.3, 0.7),  Vector3.new( 4.65, 3.85, 5.35), col, Enum.Material.SmoothPlastic)
+		-- Top beam connecting front pillars
+		bp(Vector3.new(10.7, 0.6, 0.7), Vector3.new(0, 7.3, 5.35),     col,  Enum.Material.SmoothPlastic)
+		-- Training pad (glowing floor, visible from above)
+		local pad = bp(Vector3.new(4, 0.2, 4), Vector3.new(0, 0.8, 0), col,  Enum.Material.Neon)
+		pad.Name = "TrainingPad"
+		-- Neon accent strip along top of back wall
+		bp(Vector3.new(9.3, 0.3, 0.3),  Vector3.new(0, 7.3, -5.35),    col,  Enum.Material.Neon)
+		-- Corner accent lights (back-top)
+		bp(Vector3.new(0.7, 0.7, 0.7),  Vector3.new(-5.35, 7.3, -5.35), col, Enum.Material.Neon, Enum.PartType.Ball)
+		bp(Vector3.new(0.7, 0.7, 0.7),  Vector3.new( 5.35, 7.3, -5.35), col, Enum.Material.Neon, Enum.PartType.Ball)
+		-- Flag pole and flag on back wall
+		bp(Vector3.new(0.35, 3, 0.35),  Vector3.new(0, 8.5, -4.5),     grey, Enum.Material.Metal)
+		bp(Vector3.new(0.15, 1.4, 2.4), Vector3.new(1.25, 9.5, -4.5),  col,  Enum.Material.Neon)
 	end
 
 	local ov        = Instance.new("StringValue")

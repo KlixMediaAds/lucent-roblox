@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 -- ── UI scaling ────────────────────────────────────────────────────────────────
 -- All pixel offsets are authored at 1920×1080.  UIScale adjusts them uniformly
@@ -633,6 +634,8 @@ function HUD.create(): (Frame, TextButton)
 		local wrapper, btn = UILib.radialNode(ov, def.btype, def.icon, def.color, rootPos, 60, 4)
 		wrapper.Visible = false
 
+		UILib.setNodeViewport(btn, ViewportPreview.forBuilding(def.btype, Vector2.new(60, 60)))
+
 		local stroke  = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label   = wrapper:FindFirstChild("NodeLabel") :: TextLabel
 
@@ -729,17 +732,10 @@ function HUD.create(): (Frame, TextButton)
 			btnStroke.Thickness             = 2
 			btnStroke.Parent                = btn
 
-			local iconLbl                   = Instance.new("TextLabel")
-			iconLbl.Size                    = UDim2.new(1, 0, 0, 34)
-			iconLbl.Position                = UDim2.fromOffset(0, 7)
-			iconLbl.BackgroundTransparency  = 1
-			iconLbl.Text                    = def.icon
-			iconLbl.Font                    = Enum.Font.GothamBold
-			iconLbl.TextSize                = 26
-			iconLbl.TextColor3              = C.TEXT
-			iconLbl.TextXAlignment          = Enum.TextXAlignment.Center
-			iconLbl.ZIndex                  = 5
-			iconLbl.Parent                  = btn
+			local iconVpf                   = ViewportPreview.forUnit(uType, Vector2.new(BTN_W - 8, 40))
+			iconVpf.Position                = UDim2.fromOffset(4, 4)
+			iconVpf.ZIndex                  = 5
+			iconVpf.Parent                  = btn
 
 			local nameLbl                   = Instance.new("TextLabel")
 			nameLbl.Size                    = UDim2.new(1, -4, 0, 18)

@@ -14,7 +14,9 @@
       "Bash(Head -50)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox\\\\src\" -Recurse -File)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(Sort-Object)"
+      "Bash(Sort-Object)",
+      "PowerShell(head *)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox\\\\src\" -Recurse -File | Where-Object { $_.Extension -eq \".luau\" -or $_.Extension -eq \".lua\" } | Select-Object -ExpandProperty FullName | Sort-Object)"
     ]
   }
 }

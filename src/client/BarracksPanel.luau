@@ -13,7 +13,10 @@ local Players      = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
+local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 
 local BarracksPanel  = {}
 local localPlayer    = Players.LocalPlayer
@@ -27,6 +30,102 @@ local getMultiIdsFn:    (() -> {string})?
 
 local lastTrainingState: { [string]: { queue: {string}, progress: number } } = {}
 local lastQueueKeys:     { [string]: string  } = {}   -- barrackId -> "Soldier,Tank,..." for diff-check
+
+-- ── 3D training model state ───────────────────────────────────────────────────
+-- One Model per barracks showing the unit being assembled on the training pad.
+-- PAD_Y_ABOVE_BOTTOM: world-Y offset from the building's ground level to the top of
+-- the training pad neon surface (matches the 0.2-tall pad sitting on the 0.7 floor).
+local TRAIN_PAD_Y = 0.9
+
+local trainingModels:     { [string]: Model  } = {}
+local trainingModelTypes: { [string]: string } = {}
+
+local function destroyTrainingModel(barrackId: string)
+	local m = trainingModels[barrackId]
+	if m and m.Parent then m:Destroy() end
+	trainingModels[barrackId]     = nil
+	trainingModelTypes[barrackId] = nil
+end
+
+function BarracksPanel.cleanupAllTrainingModels()
+	for id in trainingModels do destroyTrainingModel(id) end
+end
+
+local function updateTrainingVisual3D(barrackId: string, queue: {string}, progress: number)
+	if #queue == 0 then
+		destroyTrainingModel(barrackId)
+		return
+	end
+
+	local unitType = queue[1]
+
+	-- Locate the barracks base part
+	local bf    = workspace:FindFirstChild("Buildings") :: Folder?
+	local bldg  = bf and bf:FindFirstChild(barrackId)
+	local base  = bldg and bldg:FindFirstChild("Base") :: BasePart?
+	if not base then destroyTrainingModel(barrackId); return end
+
+	-- Rebuild model when unit type changes
+	if trainingModelTypes[barrackId] ~= unitType then
+		destroyTrainingModel(barrackId)
+	end
+
+	-- Create model on first appearance
+	if not trainingModels[barrackId] then
+		local m = Instance.new("Model")
+		m.Name  = "_BarracksTrain_" .. barrackId
+		UnitVisuals.buildUnitPreview(m, unitType)
+
+		-- PrimaryPart: the body (named after the unit type) or any BasePart
+		local primary: BasePart?
+		for _, child in m:GetChildren() do
+			if child:IsA("BasePart") and child.Name == unitType then
+				primary = child :: BasePart; break
+			end
+		end
+		if not primary then
+			for _, child in m:GetChildren() do
+				if child:IsA("BasePart") then primary = child :: BasePart; break end
+			end
+		end
+		if not primary then m:Destroy(); return end
+
+		m.PrimaryPart = primary
+		m.Parent      = workspace
+		trainingModels[barrackId]     = m
+		trainingModelTypes[barrackId] = unitType
+
+		-- Auto-clean when the barracks is destroyed mid-training
+		local conn: RBXScriptConnection
+		conn = base.Destroying:Connect(function()
+			conn:Disconnect()
+			destroyTrainingModel(barrackId)
+		end)
+	end
+
+	local model = trainingModels[barrackId]
+	if not model or not model.Parent then return end
+
+	-- Smoothstep for a gradual ease-in from underground
+	local eased = progress * progress * (3 - 2 * progress)
+
+	local buildingBottom = base.Position.Y - base.Size.Y / 2
+	local padTop         = buildingBottom + TRAIN_PAD_Y
+	local bottomOffset   = UnitVisuals.getUnitPreviewBottomOffset(unitType)
+
+	-- Rise: starts 3 studs underground, reaches resting position at progress=1
+	local centreY = padTop + bottomOffset + (eased - 1) * 3
+
+	model:PivotTo(CFrame.new(base.Position.X, centreY, base.Position.Z))
+
+	-- Ghost transparency: nearly invisible at start, solid at end
+	local trans = 0.78 * (1 - eased)
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") then
+			(part :: BasePart).Transparency = trans
+		end
+	end
+end
 
 local UNIT_ICON: { [string]: string } = {
 	Soldier       = "⚔",
@@ -322,6 +421,8 @@ function BarracksPanel.init(network, hasResearch, getMultiIds)
 		local wrapper, btn = UILib.radialNode(ov, def.label, def.icon, def.color, ROOT_POS, 70, 11)
 		wrapper.Visible    = false
 
+		UILib.setNodeViewport(btn, ViewportPreview.forUnit(def.key, Vector2.new(70, 70)))
+
 		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
 
@@ -350,6 +451,7 @@ function BarracksPanel.init(network, hasResearch, getMultiIds)
 	network.onTrainingUpdate(function(barrackId: string, queue: {string}, progress: number)
 		lastTrainingState[barrackId] = { queue = queue, progress = progress }
 		updateWorldQueueDisplay(barrackId, queue, progress)
+		updateTrainingVisual3D(barrackId, queue, progress)
 		if barrackId == activeBarracksId then
 			updateRootLabel(queue, progress)
 		end

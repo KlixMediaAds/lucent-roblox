@@ -16,6 +16,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local TurretPanel  = {}
 local localPlayer  = Players.LocalPlayer
@@ -203,6 +204,8 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_, getMultiIds)
 		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
 		local wrapper, btn = UILib.radialNode(ov, def.key, def.icon, def.color, ROOT_POS, 70, 11)
 		wrapper.Visible    = false
+
+		UILib.setNodeViewport(btn, ViewportPreview.forBuilding("Turret", Vector2.new(70, 70), nil, def.key))
 
 		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel

@@ -182,17 +182,15 @@ local function addCreepyEyes(body: BasePart, unitType: string)
 	end
 
 	if unitType == "Soldier" then
-		-- Large eyes bulging out from each side of the soldier (mutant insect look)
-		local halfX   = body.Size.X / 2
-		local eyeSize = 2.4
-		-- Left eye: mounted on left face, pupil faces outward (-X)
+		-- Eyes bulge from the sides of the pill body (radius 1.0)
+		local halfX   = 1.0   -- pill side radius
+		local eyeSize = 1.4
 		makeEye(
-			body.CFrame * CFrame.new(-halfX + eyeSize * 0.1, 0, 0) * CFrame.Angles(0, math.pi / 2, 0),
+			body.CFrame * CFrame.new(-halfX + eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, math.pi / 2, 0),
 			"_EyeL", eyeSize
 		)
-		-- Right eye: mounted on right face, pupil faces outward (+X)
 		makeEye(
-			body.CFrame * CFrame.new(halfX - eyeSize * 0.1, 0, 0) * CFrame.Angles(0, -math.pi / 2, 0),
+			body.CFrame * CFrame.new(halfX - eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, -math.pi / 2, 0),
 			"_EyeR", eyeSize
 		)
 	else
@@ -227,6 +225,54 @@ local function addMedicCross(body: BasePart)
 	end
 	makeBar(body.Size.X * 0.55, 0.7)  -- horizontal
 	makeBar(0.7, body.Size.Z * 0.55)  -- vertical
+end
+
+local function buildSoldierVisuals(body: BasePart)
+	local color = body.BrickColor
+	body.Transparency = 1   -- hide the logic bounding box; pill parts carry the visual
+
+	local function weld(a: BasePart, b: BasePart)
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = a; w.Part1 = b; w.Parent = a
+	end
+
+	local function child(shape: Enum.PartType?, sz: Vector3, cf: CFrame, col: BrickColor, mat: Enum.Material): BasePart
+		local p         = Instance.new("Part")
+		if shape then (p :: any).Shape = shape end
+		p.Size          = sz
+		p.CFrame        = cf
+		p.BrickColor    = col
+		p.Material      = mat
+		p.Anchored      = false
+		p.CanCollide    = false
+		p.CastShadow    = false
+		p.CanQuery      = false
+		p.Parent        = body
+		weld(body, p)
+		return p
+	end
+
+	-- Pill body: upright cylinder (long axis rotated to Y)
+	child(Enum.PartType.Cylinder,
+		Vector3.new(1.5, 2.0, 2.0),
+		body.CFrame * CFrame.Angles(0, 0, math.pi / 2),
+		color, Enum.Material.SmoothPlastic)
+
+	-- Rounded caps
+	child(Enum.PartType.Ball,
+		Vector3.new(2.0, 2.0, 2.0),
+		body.CFrame * CFrame.new(0,  0.75, 0),
+		color, Enum.Material.SmoothPlastic)
+	child(Enum.PartType.Ball,
+		Vector3.new(2.0, 2.0, 2.0),
+		body.CFrame * CFrame.new(0, -0.75, 0),
+		color, Enum.Material.SmoothPlastic)
+
+	-- Gun: simple dark rectangle held to the right, barrel pointing forward
+	child(nil,
+		Vector3.new(0.3, 0.25, 1.6),
+		body.CFrame * CFrame.new(1.15, 0.15, -0.3),
+		BrickColor.new("Dark stone grey"), Enum.Material.SmoothPlastic)
 end
 
 local function addHealthBar(part: BasePart)
@@ -331,6 +377,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
+	if unitType == "Soldier" then buildSoldierVisuals(part) end
 	if unitType == "Tank"  then
 		addTankTreads(part)
 		local hv   = Instance.new("NumberValue")

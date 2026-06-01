@@ -462,4 +462,21 @@ function UILib.connectorLineBetween(
 	return line
 end
 
+-- ── Viewport node icon ────────────────────────────────────────────────────────
+
+--[[
+	Replaces a radialNode button's emoji text with a ViewportFrame.
+	Call after UILib.radialNode(); pass the returned `btn` and the ViewportFrame.
+	`margin`: pixel inset on each side (default 6).
+]]
+function UILib.setNodeViewport(btn: TextButton, vpf: ViewportFrame, margin: number?)
+	local m = margin or 6
+	local d = btn.Size.X.Offset
+	btn.Text             = ""
+	vpf.Size             = UDim2.fromOffset(d - m * 2, d - m * 2)
+	vpf.Position         = UDim2.fromOffset(m, m)
+	vpf.BackgroundTransparency = 1
+	vpf.Parent           = btn
+end
+
 return UILib

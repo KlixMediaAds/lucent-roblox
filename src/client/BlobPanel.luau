@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local BlobPanel   = {}
 local localPlayer = Players.LocalPlayer
@@ -173,6 +174,20 @@ function BlobPanel.init(network: any, getResourcesFn: () -> number, _hasResearch
 		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
 		local wrapper, btn = UILib.radialNode(ov, def.label .. "\n◆ " .. def.cost, def.icon, def.color, ROOT_POS, 70, 11)
 		wrapper.Visible    = false
+
+		do
+			local k = def.key
+			local vpf: ViewportFrame
+			if k == "CreepySoldier" then
+				vpf = ViewportPreview.forUnit("CreepySoldier", Vector2.new(70, 70))
+			elseif k == "CreepyWorm" then
+				vpf = ViewportPreview.forBuilding("CreepyWorm", Vector2.new(70, 70))
+			else
+				-- CreepyTurret: show a turret with the Creepy upgrade applied
+				vpf = ViewportPreview.forBuilding("Turret", Vector2.new(70, 70), nil, "Creepy")
+			end
+			UILib.setNodeViewport(btn, vpf)
+		end
 
 		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label  = wrapper:FindFirstChild("NodeLabel") :: TextLabel

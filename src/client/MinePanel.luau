@@ -10,6 +10,7 @@ local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local MinePanel   = {}
 local localPlayer = Players.LocalPlayer
@@ -44,6 +45,8 @@ function MinePanel.init(network, _getResourcesFn, _hasResearchFn)
 
 	local rootWrapper, rBtn = UILib.radialNode(ov, "MINE", "⛏", C.MINE, ROOT_POS, 70, 11)
 	rootLbl = rootWrapper:FindFirstChild("NodeLabel") :: TextLabel?
+
+	UILib.setNodeViewport(rBtn, ViewportPreview.forBuilding("Mine", Vector2.new(70, 70)))
 
 	rBtn.MouseButton1Click:Connect(function()
 		MinePanel.hide()

@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 local Fusion            = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Fusion"))
 
 local WorkshopPanel = {}
@@ -570,6 +571,35 @@ local function buildNode(canvas: Frame, techName: string)
     barFill.ZIndex                   = 54
     barFill.Parent                   = barBg
     UILib.corner(barFill, 2)
+
+    -- Inject a 3D viewport for techs that unlock a specific unit or building.
+    -- Techs representing passive stat upgrades keep their emoji icon.
+    local TECH_UNIT_MAP:     { [string]: string } = {
+        EliteUnits = "Elite",
+        MedicUnit  = "Medic",
+    }
+    local TECH_BUILDING_MAP: { [string]: string } = {
+        TurretUpgrades = "Turret",
+        Relay          = "Relay",
+        CreepyBlob     = "CreepyBlob",
+    }
+
+    local vpfUnit     = TECH_UNIT_MAP[techName]
+    local vpfBuilding = TECH_BUILDING_MAP[techName]
+    if vpfUnit or vpfBuilding then
+        local vpSize = Vector2.new(D - 8, D - 8)
+        local vpf: ViewportFrame
+        if vpfUnit then
+            vpf = ViewportPreview.forUnit(vpfUnit, vpSize)
+        else
+            vpf = ViewportPreview.forBuilding(vpfBuilding :: string, vpSize)
+        end
+        vpf.Position         = UDim2.fromOffset(4, 4)
+        vpf.BackgroundTransparency = 1
+        vpf.ZIndex           = iconLbl.ZIndex
+        vpf.Parent           = circle
+        iconLbl.TextTransparency = 1  -- hide emoji, keep it for state-driven color
+    end
 
     nodeRefs[techName] = {
         circle  = circle,

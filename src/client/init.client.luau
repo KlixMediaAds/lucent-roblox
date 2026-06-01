@@ -352,6 +352,7 @@ local function enterCCMode()
 	refreshRequirements()
 	HUD.setCommandCenterMode(true)
 	BarracksPanel.hide()
+	BarracksPanel.cleanupAllTrainingModels()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
@@ -2407,6 +2408,32 @@ Network.onHealBeam(function(fromPos: Vector3, toPos: Vector3)
 	spawnHealBeam(fromPos, toPos)
 end)
 
+-- Plays a short 3D-positional sound at `pos` and auto-destroys when finished.
+local SND_SOLDIER = "rbxassetid://138651783706047"
+local SND_TANK    = "rbxassetid://122500594085328"
+
+local function playSound3D(pos: Vector3, soundId: string, volume: number)
+	local p            = Instance.new("Part")
+	p.Anchored         = true
+	p.CanCollide       = false
+	p.CanTouch         = false
+	p.CanQuery         = false
+	p.CastShadow       = false
+	p.Transparency     = 1
+	p.Size             = Vector3.new(1, 1, 1)
+	p.Position         = pos
+	p.Parent           = workspace
+	local snd                  = Instance.new("Sound")
+	snd.SoundId                = soundId
+	snd.Volume                 = volume
+	snd.RollOffMaxDistance     = 120
+	snd.RollOffMinDistance     = 10
+	snd.RollOffMode            = Enum.RollOffMode.Linear
+	snd.Parent                 = p
+	snd:Play()
+	snd.Ended:Once(function() p:Destroy() end)
+end
+
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then
 		spawnEliteProjectile(fromPos, toPos)
@@ -2415,18 +2442,24 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 
 	if unitType == "TankBarrage" then
 		spawnRocketBarrage(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.7)
 		return
 	end
 
 	if unitType == "TankHarpoon" then
 		spawnTrapperHarpoon(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.65)
 		return
 	end
 
 	if unitType == "Tank" then
 		spawnTankShell(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.7)
 		return
 	end
+
+	-- Soldier (and CreepySoldier) — quick gunshot
+	playSound3D(fromPos, SND_SOLDIER, 0.55)
 
 	-- Soldier: small fast yellow bullet with simple impact flash
 	local origin = fromPos + Vector3.new(0, 1.5, 0)
@@ -2786,10 +2819,13 @@ end
 Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: string?)
 	if upgradeType == "Flamethrower" then
 		spawnFlamethrowerShot(fromPos, toPos)
+		playSound3D(fromPos, SND_SOLDIER, 0.5)   -- lighter rapid burst
 	elseif upgradeType == "RocketLauncher" then
 		spawnRocketShot(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.75)
 	else
 		spawnBaseTurretShot(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.65)
 	end
 end)
 
