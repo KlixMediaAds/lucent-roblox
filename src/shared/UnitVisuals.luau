@@ -197,6 +197,47 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	if unitType == "Tank" then
 		addTankTreads(body)
 	end
+	if unitType == "Howitzer" then
+		-- Static preview: all parts anchored, parented directly to parent (no welds).
+		local grey = BrickColor.new("Dark stone grey")
+		local col  = body.BrickColor
+		local bp   = body.Position       -- (0, 0, 0) in preview context
+		local halfX = body.Size.X / 2 + 0.90  -- 4 + 0.9
+		local halfY = body.Size.Y / 2          -- 2.5
+
+		local function ap(sz: Vector3, pos: Vector3, bc: BrickColor, mat: Enum.Material): Part
+			local p = makePart(parent)
+			p.Size     = sz
+			p.Position = pos
+			p.BrickColor = bc
+			p.Material   = mat
+			return p
+		end
+
+		-- Treads (wider than tank to match 8-stud hull)
+		local treadY = bp.Y - halfY + 1.3
+		for _, side in { -1, 1 } do
+			ap( Vector3.new(1.65, 2.55, body.Size.Z + 1.65),
+				Vector3.new(bp.X + side * halfX, treadY, bp.Z),
+				grey, Enum.Material.SmoothPlastic )
+		end
+		-- Upper armored hull
+		ap( Vector3.new(5.2, 2.0, 7.5),
+			Vector3.new(bp.X, bp.Y + halfY + 1.0, bp.Z + 0.5),
+			col, Enum.Material.SmoothPlastic )
+		-- Barrel mount (turret ring)
+		ap( Vector3.new(2.5, 1.6, 2.5),
+			Vector3.new(bp.X, bp.Y + halfY + 2.8, bp.Z - 0.3),
+			grey, Enum.Material.SmoothPlastic )
+		-- Long barrel pointing forward (-Z)
+		ap( Vector3.new(0.80, 0.80, 8.2),
+			Vector3.new(bp.X, bp.Y + halfY + 2.8, bp.Z - 3.3),
+			grey, Enum.Material.Metal )
+		-- Neon accent strip on hull rear
+		ap( Vector3.new(5.2, 0.25, 0.3),
+			Vector3.new(bp.X, bp.Y + halfY + 2.05, bp.Z + 4.2),
+			col, Enum.Material.Neon )
+	end
 	if unitType == "Medic" then
 		addMedicCross(parent, body)
 	end
@@ -429,6 +470,30 @@ function UnitVisuals.buildBuildingPreview(
 			spine.CFrame        = CFrame.new(position + Vector3.new(math.cos(angle) * r, size.Y + 0.75, math.sin(angle) * r))
 				* CFrame.Angles(math.sin(angle) * 0.28, 0, -math.cos(angle) * 0.28)
 		end
+
+	elseif buildingType == "Deployer" then
+		-- Deployer: armored auto-spawn bay (preview).
+		base.Size      = Vector3.new(10, 0.5, 10)
+		base.Position  = Vector3.new(0, 0.25, 0)
+		base.BrickColor = BrickColor.new("Dark stone grey")
+		base.Material   = Enum.Material.Metal
+
+		local grey = BrickColor.new("Dark stone grey")
+
+		local bw2 = makePart(parent); bw2.Size = Vector3.new(9.3, 4.5, 0.7); bw2.Position = Vector3.new(0, 2.75, -5.35);   bw2.BrickColor = color; bw2.Material = Enum.Material.SmoothPlastic
+		local lw2 = makePart(parent); lw2.Size = Vector3.new(0.7, 4.5, 10.7); lw2.Position = Vector3.new(-5.35, 2.75, 0); lw2.BrickColor = color; lw2.Material = Enum.Material.SmoothPlastic
+		local rw2 = makePart(parent); rw2.Size = Vector3.new(0.7, 4.5, 10.7); rw2.Position = Vector3.new( 5.35, 2.75, 0); rw2.BrickColor = color; rw2.Material = Enum.Material.SmoothPlastic
+		local rf2 = makePart(parent); rf2.Size = Vector3.new(9.3, 0.4, 5.3);  rf2.Position = Vector3.new(0, 5.2, -2.65);   rf2.BrickColor = grey;  rf2.Material = Enum.Material.DiamondPlate
+		local ob2 = makePart(parent); ob2.Size = Vector3.new(10.7, 0.5, 0.7); ob2.Position = Vector3.new(0, 5.2, 2.35);    ob2.BrickColor = color; ob2.Material = Enum.Material.SmoothPlastic
+		local rl  = makePart(parent); rl.Size  = Vector3.new(0.4, 1.2, 4);    rl.Position  = Vector3.new(-4.8, 1.1, 2.5);  rl.BrickColor  = grey;  rl.Material  = Enum.Material.Metal
+		local rr  = makePart(parent); rr.Size  = Vector3.new(0.4, 1.2, 4);    rr.Position  = Vector3.new( 4.8, 1.1, 2.5);  rr.BrickColor  = grey;  rr.Material  = Enum.Material.Metal
+		local dp  = makePart(parent); dp.Name  = "DeployPad"; dp.Size = Vector3.new(6, 0.2, 6); dp.Position = Vector3.new(0, 0.7, 0); dp.BrickColor = color; dp.Material = Enum.Material.Neon
+		local ns2 = makePart(parent); ns2.Size = Vector3.new(9.3, 0.3, 0.3);  ns2.Position = Vector3.new(0, 5.2, -5.35);   ns2.BrickColor = color; ns2.Material = Enum.Material.Neon
+		local sl  = makePart(parent); sl.Shape = Enum.PartType.Ball; sl.Size = Vector3.new(0.8, 0.8, 0.8); sl.Position = Vector3.new(-5.35, 5.45, -5.35); sl.BrickColor = color; sl.Material = Enum.Material.Neon
+		local sr  = makePart(parent); sr.Shape = Enum.PartType.Ball; sr.Size = Vector3.new(0.8, 0.8, 0.8); sr.Position = Vector3.new( 5.35, 5.45, -5.35); sr.BrickColor = color; sr.Material = Enum.Material.Neon
+		local ap  = makePart(parent); ap.Size  = Vector3.new(0.3, 2.5, 0.3);  ap.Position  = Vector3.new(0, 6.5, -4.5);    ap.BrickColor  = grey;  ap.Material  = Enum.Material.Metal
+		local an  = makePart(parent); an.Size  = Vector3.new(0.15, 1.2, 1.8); an.Position  = Vector3.new(1.1, 7.35, -4.5); an.BrickColor  = color; an.Material  = Enum.Material.Neon
+		local _ = bw2; _ = lw2; _ = rw2; _ = rf2; _ = ob2; _ = rl; _ = rr; _ = dp; _ = ns2; _ = sl; _ = sr; _ = ap; _ = an
 
 	else
 		-- Barracks: open-top training facility (preview).

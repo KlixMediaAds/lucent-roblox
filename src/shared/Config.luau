@@ -7,19 +7,23 @@ Config.GAMEMODES = { Default = "Default", Lane = "Lane" }
 Config.STARTING_RESOURCES   = 400
 Config.BUILDING_COST         = 50   -- Barracks cost
 Config.MINE_COST             = 75   -- Mine building cost
+Config.DEPLOYER_COST         = 100  -- Deployer building cost
+Config.DEPLOYER_MAX_UNITS    = 4    -- max simultaneous auto-deployed soldiers per Deployer
+Config.DEPLOYER_SPAWN_INTERVAL = 15 -- seconds between auto-spawn checks
 
 -- Unit types (trained from Barracks)
 Config.UNIT_TYPES = {
 	Soldier       = { cost = 25,  size = Vector3.new(4, 4, 4) },
 	Tank          = { cost = 60,  size = Vector3.new(7, 5, 9)  },
+	Howitzer      = { cost = 90,  size = Vector3.new(8, 5, 10) },
 	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
 	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Elite = 20, Medic = 22, CreepySoldier = 24 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Elite = 8,  Medic = 10, CreepySoldier = 14 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -188,15 +192,15 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Elite = 18, Medic = 10, CreepySoldier = 0 }
+Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
-Config.BUILDING_HP         = { Barracks = 500, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
+Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance

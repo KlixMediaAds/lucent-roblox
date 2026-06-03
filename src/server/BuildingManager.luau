@@ -19,7 +19,8 @@ local onCCDestroyedCb: ((any) -> ())?
 type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
-local turretTimers: { [string]: number }        = {}   -- attackTimer per turret id
+local turretTimers:   { [string]: number } = {}   -- attackTimer per turret id
+local deployerTimers: { [string]: number } = {}   -- auto-spawn cooldown per deployer id
 local onPlayerWonCb: ((number) -> ())?
 
 local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
@@ -424,6 +425,53 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			spine.Parent        = model
 		end
 
+	elseif buildingType == "Deployer" then
+		-- Deployer: low armored bay that auto-spawns soldiers.
+		base.Transparency = 1
+
+		local col  = player.TeamColor
+		local grey = BrickColor.new("Dark stone grey")
+
+		local function bp(sz: Vector3, pos: Vector3, col2: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
+			local p          = Instance.new("Part")
+			if shape then (p :: any).Shape = shape end
+			p.Size           = sz
+			p.Position       = position + pos
+			p.BrickColor     = col2
+			p.Material       = mat
+			p.Anchored       = true
+			p.CanCollide     = false
+			p.CastShadow     = false
+			p.Parent         = model
+			return p
+		end
+
+		-- Foundation slab (wide, low-profile)
+		bp(Vector3.new(10, 0.5, 10),    Vector3.new(0, 0.25, 0),         grey, Enum.Material.Metal)
+		-- Back wall (solid, stocky)
+		bp(Vector3.new(9.3, 4.5, 0.7),  Vector3.new(0, 2.75, -5.35),     col,  Enum.Material.SmoothPlastic)
+		-- Side walls (short and armored)
+		bp(Vector3.new(0.7, 4.5, 10.7), Vector3.new(-5.35, 2.75, 0),     col,  Enum.Material.SmoothPlastic)
+		bp(Vector3.new(0.7, 4.5, 10.7), Vector3.new( 5.35, 2.75, 0),     col,  Enum.Material.SmoothPlastic)
+		-- Partial metal roof (back half only)
+		bp(Vector3.new(9.3, 0.4, 5.3),  Vector3.new(0, 5.2, -2.65),      grey, Enum.Material.DiamondPlate)
+		-- Front overhang beam
+		bp(Vector3.new(10.7, 0.5, 0.7), Vector3.new(0, 5.2, 2.35),       col,  Enum.Material.SmoothPlastic)
+		-- Side rail guides flanking the deploy ramp (front half)
+		bp(Vector3.new(0.4, 1.2, 4),    Vector3.new(-4.8, 1.1, 2.5),     grey, Enum.Material.Metal)
+		bp(Vector3.new(0.4, 1.2, 4),    Vector3.new( 4.8, 1.1, 2.5),     grey, Enum.Material.Metal)
+		-- Central deploy pad (neon, wider than barracks training pad)
+		local pad = bp(Vector3.new(6, 0.2, 6), Vector3.new(0, 0.7, 0),   col,  Enum.Material.Neon)
+		pad.Name = "DeployPad"
+		-- Neon accent strip on back wall top
+		bp(Vector3.new(9.3, 0.3, 0.3),  Vector3.new(0, 5.2, -5.35),      col,  Enum.Material.Neon)
+		-- Signal lights on back top corners
+		bp(Vector3.new(0.8, 0.8, 0.8),  Vector3.new(-5.35, 5.45, -5.35), col,  Enum.Material.Neon, Enum.PartType.Ball)
+		bp(Vector3.new(0.8, 0.8, 0.8),  Vector3.new( 5.35, 5.45, -5.35), col,  Enum.Material.Neon, Enum.PartType.Ball)
+		-- Antenna pole and banner
+		bp(Vector3.new(0.3, 2.5, 0.3),  Vector3.new(0, 6.5, -4.5),       grey, Enum.Material.Metal)
+		bp(Vector3.new(0.15, 1.2, 1.8), Vector3.new(1.1, 7.35, -4.5),    col,  Enum.Material.Neon)
+
 	else
 		-- Barracks: open-top training facility.
 		-- base stays as the invisible 10×8×10 logic box (health-bar anchor, raycast target).
@@ -511,6 +559,9 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	end
 	if buildingType == "Turret" then
 		turretTimers[id] = 0
+	end
+	if buildingType == "Deployer" then
+		deployerTimers[id] = 0
 	end
 
 	RemoteHandler.get(Config.REMOTES.BuildingPlaced):FireAllClients(
@@ -764,6 +815,7 @@ function BuildingManager.resetAll()
 	buildingData             = {}
 	playerHasCC              = {}
 	turretTimers             = {}
+	deployerTimers           = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -979,8 +1031,9 @@ function BuildingManager.damage(id: string, amount: number)
 	local wasCC       = data.buildingType == "CommandCenter"
 	local wasMonument = data.buildingType == "Monument"
 	local owner       = data.owner
-	buildingData[id] = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
-	turretTimers[id] = nil
+	buildingData[id]  = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
+	turretTimers[id]  = nil
+	deployerTimers[id] = nil
 
 	if data.buildingType == "Mine" and mineralManager then
 		mineralManager.removeMine(id)
@@ -1029,6 +1082,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		if not data then continue end
 		buildingData[id]    = nil
 		turretTimers[id]    = nil
+		deployerTimers[id]  = nil
 		monumentWinTimer[id] = nil
 		blobCooldowns[id]   = nil
 		if data.buildingType == "Mine" and mineralManager then
@@ -1087,10 +1141,11 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return false end
 	end
 
-	-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay needs research
+	-- Requirement check: Barracks needs a Mine; Turret/Deployer needs a Barracks; Relay needs research
 	-- AI bots (UserId < 0) bypass the mine prerequisite — deposits may be outside their build zone.
 	if buildingType == "Barracks" and player.UserId > 0 and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
@@ -1100,6 +1155,7 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 
 	local cost = buildingType == "Mine"       and Config.MINE_COST
 		or buildingType == "Turret"     and Config.TURRET_COST
+		or buildingType == "Deployer"   and Config.DEPLOYER_COST
 		or buildingType == "Relay"      and Config.RELAY_COST
 		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 		or Config.BUILDING_COST
@@ -1239,6 +1295,22 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 				-- Tell all clients to show a projectile
 				RemoteHandler.get(Config.REMOTES.TurretShot):FireAllClients(barrelTip, visualTarget, data.turretUpgrade)
+			end
+		end
+
+		-- ── Deployer auto-spawn ───────────────────────────────────────────────
+		for id, data in buildingData do
+			if data.buildingType ~= "Deployer" then continue end
+			if data.isConstructing then continue end
+			deployerTimers[id] = (deployerTimers[id] or 0) + dt
+			if deployerTimers[id] < Config.DEPLOYER_SPAWN_INTERVAL then continue end
+			deployerTimers[id] -= Config.DEPLOYER_SPAWN_INTERVAL
+			if unitManagerRef then
+				local aliveCount = unitManagerRef.getDeployerAliveCount(id)
+				if aliveCount < Config.DEPLOYER_MAX_UNITS then
+					local spawnPos = data.base.Position + Vector3.new(Config.BUILDING_SIZE.X + 2, 0, 0)
+					unitManagerRef.spawnForDeployer(id, data.owner, spawnPos)
+				end
 			end
 		end
 
@@ -1404,12 +1476,13 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Turret=true, Relay=true, CreepyBlob=true }
+		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Barracks needs a Mine; Turret needs a Barracks; Relay/Blob need research
+		-- Requirement check: Barracks needs a Mine; Turret/Deployer need a Barracks; Relay/Blob need research
 		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
+		if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
@@ -1419,6 +1492,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		local cost = buildingType == "Mine"      and Config.MINE_COST
 			or buildingType == "Turret"    and Config.TURRET_COST
+			or buildingType == "Deployer"  and Config.DEPLOYER_COST
 			or buildingType == "Relay"     and Config.RELAY_COST
 			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 			or Config.BUILDING_COST

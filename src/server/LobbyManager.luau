@@ -32,7 +32,7 @@ local currentGamemode  = "Default"
 type AIEntry = { personality: string, level: number }
 local aiQueue: { AIEntry } = {}
 
-local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true }
+local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, trainer = true }
 
 local function findAIEntry(personality: string): (number?, AIEntry?)
 	for i, entry in aiQueue do
@@ -220,7 +220,7 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 	end)
 
 	-- Default AI so solo players always have an opponent
-	table.insert(aiQueue, { personality = "balanced", level = 3 })
+	table.insert(aiQueue, { personality = "trainer", level = 1 })
 
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false

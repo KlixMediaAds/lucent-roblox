@@ -168,7 +168,21 @@ local BALANCED_PROFILES: { DifficultyProfile } = {
 	},
 }
 
-local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, nightmare = true }
+local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, nightmare = true, trainer = true }
+
+-- ── Trainer profile ───────────────────────────────────────────────────────────
+-- Stat caps are dynamically overridden each strategy tick based on the human
+-- player's current state. These are startup defaults only.
+local TRAINER_PROFILE: DifficultyProfile = {
+	strategyInterval = 10,  reactionInterval = 2,
+	maxUnits         = 8,   -- overridden by mirror logic every tick
+	maxMines         = 1,   maxBarracks = 1, maxTurrets = 1, maxRelays = 0,
+	buildMonument    = false,
+	baseWeights      = { Soldier = 3, Tank = 1 },
+	visionRadius     = 52,  enemyMemory = 30,
+	minUnitsToAttack = 4,   garrisonRatio = 0.35,
+	scoutCount       = 0,   reserveResources = 55,
+}
 
 -- ── Nightmare profile ─────────────────────────────────────────────────────────
 -- Starting values only — strategyTree overwrites the mutable fields every tick
@@ -206,6 +220,28 @@ local function buildProfile(personality: string, level: number): DifficultyProfi
 			garrisonRatio    = NIGHTMARE_PROFILE.garrisonRatio,
 			scoutCount       = NIGHTMARE_PROFILE.scoutCount,
 			reserveResources = NIGHTMARE_PROFILE.reserveResources,
+		}
+	end
+	-- Trainer: fixed moderate profile; level ignored (all logic is dynamic)
+	if personality == "trainer" then
+		local weights = {}
+		for k, v in TRAINER_PROFILE.baseWeights do weights[k] = v end
+		return {
+			strategyInterval = TRAINER_PROFILE.strategyInterval,
+			reactionInterval = TRAINER_PROFILE.reactionInterval,
+			maxUnits         = TRAINER_PROFILE.maxUnits,
+			maxMines         = TRAINER_PROFILE.maxMines,
+			maxBarracks      = TRAINER_PROFILE.maxBarracks,
+			maxTurrets       = TRAINER_PROFILE.maxTurrets,
+			maxRelays        = TRAINER_PROFILE.maxRelays,
+			buildMonument    = TRAINER_PROFILE.buildMonument,
+			baseWeights      = weights,
+			visionRadius     = TRAINER_PROFILE.visionRadius,
+			enemyMemory      = TRAINER_PROFILE.enemyMemory,
+			minUnitsToAttack = TRAINER_PROFILE.minUnitsToAttack,
+			garrisonRatio    = TRAINER_PROFILE.garrisonRatio,
+			scoutCount       = TRAINER_PROFILE.scoutCount,
+			reserveResources = TRAINER_PROFILE.reserveResources,
 		}
 	end
 	-- Placeholder personalities borrow balanced behavior (capped at lv 2 for now)
@@ -385,6 +421,44 @@ local function tryPlaceAnywhere(player: any, ownerStr: string, base: Vector3, bu
 		if tryPlaceRandom(player, anchor, buildType, 5, maxR) then return true end
 	end
 	return false
+end
+
+-- ── Trainer helpers ───────────────────────────────────────────────────────────
+
+-- Count buildings owned by real (human) players — UserId > 0.
+-- Pass "any" for buildType to count all structures.
+local function countHumanBuildings(btype: string): number
+	local n = 0
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return n end
+	for _, model in folder:GetChildren() do
+		local ov = model:FindFirstChild("OwnerId")
+		if not ov then continue end
+		local uid = tonumber(ov.Value) or 0
+		if uid <= 0 then continue end
+		if btype == "any" then
+			n += 1
+		else
+			local tv = model:FindFirstChild("BuildingType")
+			if tv and tv.Value == btype then n += 1 end
+		end
+	end
+	return n
+end
+
+-- Count all units currently owned by real players.
+local function countHumanArmy(): number
+	local n = 0
+	local folder = workspace:FindFirstChild("Units")
+	if not folder then return n end
+	for _, p in folder:GetChildren() do
+		if not p:IsA("BasePart") then continue end
+		local ov = p:FindFirstChild("OwnerId")
+		if not ov then continue end
+		local uid = tonumber(ov.Value) or 0
+		if uid > 0 then n += 1 end
+	end
+	return n
 end
 
 -- ── Research grants ───────────────────────────────────────────────────────────
@@ -1108,9 +1182,307 @@ local function btCommandArmy(ai)
 	return SUCCESS
 end
 
+-- ── Trainer personality ────────────────────────────────────────────────────────
+--[[
+	The Trainer is a teaching opponent. It:
+	  • Mirrors the human player's economy and army size (with a lag)
+	  • Sends probing waves every 60-110 seconds — never all-in
+	  • Commits only 50-60 % of its main force per wave; rest holds at rally
+	  • Retreats quickly (20-40 s) then gives a long breathing gap (40-70 s)
+	  • Backs off further when the player is actively building
+	  • Never builds a Monument (cannot win by design)
+	  • Enters Concede after the player kills ≥ 8 trainer units across waves
+	    OR destroys ≥ 2 trainer buildings — after that it stops training and
+	    stops attacking so the player can clean it up.
+	  • Hard time-cap: also concedes after 7 minutes regardless.
+--]]
+
+-- Trainer strategy: mirror player builds, manage building caps, check concede.
+local function trainerStrategyTree(ai: any)
+
+	-- ── Mirror player economy / army ──────────────────────────────────────────
+	local playerMines    = countHumanBuildings("Mine")
+	local playerBarracks = countHumanBuildings("Barracks")
+	local playerAllBld   = countHumanBuildings("any")
+	local playerArmy     = countHumanArmy()
+
+	-- Cap mirrors: stay slightly behind the player, never too strong
+	ai.diff.maxMines    = math.clamp(playerMines,    1, 2)
+	ai.diff.maxBarracks = math.clamp(playerBarracks, 1, 2)
+	ai.diff.maxTurrets  = 1     -- one turret for light base defence only
+	ai.diff.maxRelays   = 0
+	-- Army cap: player count + 1-2 unit buffer, hard-capped at 14
+	ai.diff.maxUnits    = math.clamp(playerArmy + math.random(1, 2), 4, 14)
+
+	-- ── Detect building activity (player is expanding → give breathing room) ──
+	local playerBldGrew = playerAllBld > (ai.trainerLastBldCount or 0)
+	ai.trainerLastBldCount = playerAllBld
+	if playerBldGrew then
+		-- Push the next wave interval out if player is clearly expanding
+		ai.trainerWaveInterval = math.max(ai.trainerWaveInterval, 70)
+	end
+
+	-- ── Track own building losses ──────────────────────────────────────────────
+	local ownBldNow = countAllOwnedBuildings(ai.ownerStr)
+	if ownBldNow < (ai.trainerLastOwnBldCount or 0) then
+		ai.trainerBldLost += (ai.trainerLastOwnBldCount - ownBldNow)
+	end
+	ai.trainerLastOwnBldCount = ownBldNow
+
+	-- ── Concede check ──────────────────────────────────────────────────────────
+	if not ai.trainerConceded then
+		local elapsed = tick() - ai.startTime
+		if ai.trainerUnitsLost >= 8 or ai.trainerBldLost >= 2 or elapsed >= 420 then
+			ai.trainerConceded = true
+			ai.trainerMode     = "concede"
+			print("[Trainer] Conceding — unitsLost:", ai.trainerUnitsLost,
+				"bldLost:", ai.trainerBldLost,
+				"elapsed:", math.floor(elapsed) .. "s")
+		end
+	end
+
+	-- ── Mode escalation: shadow → press after first wave lands ────────────────
+	if ai.trainerMode == "shadow" and ai.wavesSent >= 1 then
+		ai.trainerMode = "press"
+	end
+
+	-- ── Build order ────────────────────────────────────────────────────────────
+	if btBuildCC(ai) ~= SUCCESS then return end
+	btBuildFirstMine(ai)
+	btBuildFirstBarracks(ai)
+
+	-- In concede: stop all expansion so the player can finish off the AI
+	if ai.trainerConceded then
+		local currentCount = unitManager.getUnitCount(ai.player)
+		if currentCount ~= ai.lastSquadCount then
+			rebuildSquads(ai)
+			ai.lastSquadCount = currentCount
+		end
+		return
+	end
+
+	-- Inline expansion (bypasses checkAndGrantResearch to keep trainer tech-free)
+	local liveMines    = countOwnedBuildings(ai.ownerStr, "Mine")
+	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Barracks")
+	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
+
+	-- Replace destroyed barracks first (army production)
+	if liveBarracks < math.min(ai.diff.maxBarracks, ai.builtBarracks) then
+		if canAfford(ai.player, Config.BUILDING_COST, ai.diff.reserveResources) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+				ai.builtBarracks += 1
+			end
+		end
+	end
+	-- More mines (follow player economy)
+	if liveMines < ai.diff.maxMines then
+		if canAfford(ai.player, Config.MINE_COST, ai.diff.reserveResources) then
+			local deposit = nearestFreeDeposit(ai.base)
+			if deposit and buildingManager.placeForPlayer(ai.player, deposit, "Mine") then
+				ai.builtMines += 1
+			end
+		end
+	end
+	-- More barracks (follow player)
+	if liveBarracks < ai.diff.maxBarracks then
+		if canAfford(ai.player, Config.BUILDING_COST, ai.diff.reserveResources) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1)
+			end
+		end
+	end
+	-- One defensive turret
+	if liveTurrets < 1 then
+		if canAfford(ai.player, Config.TURRET_COST, ai.diff.reserveResources) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 20, 40) then
+				ai.builtTurrets = math.max(ai.builtTurrets, 1)
+			end
+		end
+	end
+	-- Relay research + placement once player has 2+ barracks (extends build zone)
+	if ai.builtBarracks >= 2 then
+		grantTech(ai.player, "Relay")
+		local liveRelays = countOwnedBuildings(ai.ownerStr, "Relay")
+		if liveRelays < 1 then
+			if canAfford(ai.player, Config.RELAY_COST, ai.diff.reserveResources) then
+				if tryPlaceRandom(ai.player, ai.base, "Relay", 45, 70) then
+					ai.builtRelays += 1
+				end
+			end
+		end
+	end
+
+	-- Squad rebuild and composition when army count changes
+	local currentCount = unitManager.getUnitCount(ai.player)
+	if currentCount ~= ai.lastSquadCount then
+		rebuildSquads(ai)
+		ai.lastSquadCount = currentCount
+	end
+	updateComposition(ai)
+end
+
+-- Trainer army: wave-based probing with partial commitment and long cooling-off.
+local function btCommandArmyTrainer(ai: any)
+	local armySize = unitManager.getUnitCount(ai.player)
+	if armySize == 0 then return FAILURE end
+
+	local garrisonTarget = ai.baseUnderAttack and ai.base
+		or snapGrid(ai.base + Vector3.new(0, 0, 18))
+
+	-- Garrison always stays close to base
+	if #ai.garrison > 0 then
+		unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget)
+	end
+
+	-- ── Concede: everyone retreats home, AI stops fighting ────────────────────
+	if ai.trainerConceded then
+		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
+		if #ai.garrison   > 0 then unitManager.sendUnitsTo(ai.player, ai.garrison, ai.base) end
+		ai.combatPhase = "gather"
+		return SUCCESS
+	end
+
+	-- ── Emergency defence: snap to base if attacked ───────────────────────────
+	if ai.baseUnderAttack and ai.combatPhase ~= "retreat" then
+		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
+		ai.combatPhase      = "retreat"
+		ai.phaseTimer       = 0
+		ai.retreatDuration  = math.random(20, 35)
+		ai.trainerWaveTimer = 0  -- reset so next gather starts fresh
+		return SUCCESS
+	end
+
+	ai.phaseTimer += ai.diff.reactionInterval
+
+	-- ── GATHER: patrol own perimeter; wait for wave interval ─────────────────
+	if ai.combatPhase == "gather" then
+		ai.trainerWaveTimer += ai.diff.reactionInterval
+
+		-- Only patrol own near territory — no deep scouting
+		local pts = ai.explorePoints
+		local nearPts: { Vector3 } = {}
+		for i = 1, math.min(8, #pts) do table.insert(nearPts, pts[i]) end
+		if #ai.mainForce > 0 and #nearPts > 0 then
+			ai.exploreTimer += ai.diff.reactionInterval
+			if ai.exploreTimer >= 10 then
+				ai.exploreTimer = 0
+				ai.exploreIdx   = (ai.exploreIdx % #nearPts) + 1
+			end
+			fanAcrossMap(ai, ai.mainForce, nearPts, 3)
+		end
+
+		-- Launch wave when interval ready, army ready, target visible
+		local waveReady = ai.trainerWaveTimer >= ai.trainerWaveInterval
+		local armyReady = armySize >= ai.diff.minUnitsToAttack
+		if waveReady and armyReady and ai.priorityTarget then
+			local target = pickAttackTarget(ai)
+			if target then
+				local approachAngle  = math.random() * math.pi * 2
+				ai.combatPhase       = "staging"
+				ai.phaseTimer        = 0
+				ai.attackTarget      = target
+				ai.rallyPoint        = approachPoint(target, approachAngle, 60 + math.random(0, 20))
+				ai.stageDuration     = math.random(5, 10)
+				ai.attackDuration    = math.random(10, 16)
+				ai.retreatDuration   = math.random(20, 40)
+				-- Retreat earlier if losing units — triggers at 20-30 % losses
+				ai.retreatThreshold  = 0.20 + math.random() * 0.10
+				ai.lastArmySize      = armySize
+				ai.trainerAttackStartArmy = armySize
+			end
+		end
+
+	-- ── STAGING: hold at rally point before committing ────────────────────────
+	elseif ai.combatPhase == "staging" then
+		if #ai.mainForce > 0 and ai.rallyPoint then
+			sendSpread(ai.player, ai.mainForce, ai.rallyPoint)
+		end
+		-- Abandon if target lost
+		if not ai.priorityTarget and not ai.attackTarget then
+			ai.combatPhase = "gather"
+			ai.phaseTimer  = 0
+		elseif ai.phaseTimer >= ai.stageDuration then
+			ai.combatPhase = "attack"
+			ai.phaseTimer  = 0
+			ai.wavesSent  += 1
+		end
+
+	-- ── ATTACK: commit 50-60 % of main force; rest holds at rally ────────────
+	elseif ai.combatPhase == "attack" then
+		local target = ai.attackTarget or ai.priorityTarget
+		if not target then
+			ai.combatPhase = "retreat"
+			ai.phaseTimer  = 0
+			return SUCCESS
+		end
+
+		-- Split: commit chunk rushes target, hold chunk waits at rally
+		local n           = #ai.mainForce
+		local commitRatio = 0.50 + math.random() * 0.10  -- 50-60 %
+		local commitCount = math.max(1, math.floor(n * commitRatio))
+		local commitChunk: { string } = {}
+		local holdChunk:   { string } = {}
+		for i, id in ai.mainForce do
+			if i <= commitCount then table.insert(commitChunk, id)
+			else                     table.insert(holdChunk, id)   end
+		end
+		sendSpread(ai.player, commitChunk, target)
+		if ai.rallyPoint and #holdChunk > 0 then
+			sendSpread(ai.player, holdChunk, ai.rallyPoint)
+		end
+
+		-- Loss check (compare vs. army size when attack started)
+		local lossRatio = ai.trainerAttackStartArmy > 0
+			and (ai.trainerAttackStartArmy - armySize) / ai.trainerAttackStartArmy
+			or 0
+		if lossRatio >= ai.retreatThreshold or ai.phaseTimer >= ai.attackDuration then
+			-- Record kills for concede counter before leaving
+			ai.trainerUnitsLost += math.max(0, ai.trainerAttackStartArmy - armySize)
+			ai.combatPhase       = "retreat"
+			ai.phaseTimer        = 0
+			ai.feintTarget       = nil
+			ai.isFlankingAttack  = false
+		end
+
+	-- ── RETREAT: pull back; then set next wave interval and re-enter gather ───
+	elseif ai.combatPhase == "retreat" then
+		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
+		if ai.phaseTimer >= ai.retreatDuration then
+			ai.combatPhase  = "gather"
+			ai.phaseTimer   = 0
+			ai.attackTarget = nil
+			ai.rallyPoint   = nil
+			ai.feintTarget  = nil
+			ai.lastArmySize = 0
+
+			-- Next wave interval: longer if player is actively growing their army
+			local playerArmy    = countHumanArmy()
+			local playerGrowing = playerArmy > (ai.trainerLastPlayerArmy or 0)
+			ai.trainerWaveInterval   = playerGrowing
+				and math.random(60, 90)   -- give them breathing room while they build
+				or  math.random(40, 65)   -- standard gap
+			ai.trainerLastPlayerArmy = playerArmy
+			ai.trainerWaveTimer      = 0  -- start fresh countdown in gather
+		end
+	end
+
+	return SUCCESS
+end
+
+-- Trainer reaction tree
+local function trainerReactionTree(ai: any)
+	btUpdateVision(ai)
+	-- Do not train once conceding
+	if not ai.trainerConceded then
+		btTrainUnit(ai)
+	end
+	btCommandArmyTrainer(ai)
+end
+
 -- ── Behavior Trees ────────────────────────────────────────────────────────────
 
 local function strategyTree(ai)
+	if ai.personality == "trainer" then trainerStrategyTree(ai); return end
 	-- Nightmare: exponential scaling — every stat grows with elapsed time.
 	-- scale ≈ 2× at 1 min, ≈ 7× at 3 min, ≈ 28× at 5 min (math.exp(t/90)).
 	if ai.isNightmare then
@@ -1144,6 +1516,7 @@ local function strategyTree(ai)
 end
 
 local function reactionTree(ai)
+	if ai.personality == "trainer" then trainerReactionTree(ai); return end
 	btUpdateVision(ai)
 	btTrainUnit(ai)
 	btCommandArmy(ai)
@@ -1224,6 +1597,18 @@ type AIState = {
 	reactionTimer: number,
 
 	startTime: number,  -- wall-clock time of spawn/reset (for nightmare scaling)
+
+	-- Trainer personality state (initialized for all AIs; only used when personality == "trainer")
+	trainerMode:            string,   -- "shadow" | "press" | "concede"
+	trainerWaveTimer:       number,   -- seconds since gather phase started
+	trainerWaveInterval:    number,   -- seconds to wait before next wave
+	trainerUnitsLost:       number,   -- cumulative AI units killed during attacks
+	trainerBldLost:         number,   -- cumulative AI buildings destroyed by player
+	trainerAttackStartArmy: number,   -- army size at start of current attack
+	trainerLastBldCount:    number,   -- human building count last strategy tick
+	trainerLastOwnBldCount: number,   -- own building count last strategy tick
+	trainerLastPlayerArmy:  number,   -- human army count last retreat end
+	trainerConceded:        boolean,  -- whether concede mode has been triggered
 }
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -1281,6 +1666,16 @@ function AIManager.resetBot(userId: number)
 	ai.strategyTimer     = ai.diff.strategyInterval
 	ai.reactionTimer     = ai.diff.reactionInterval
 	ai.startTime         = tick()
+	ai.trainerMode            = "shadow"
+	ai.trainerWaveTimer       = 0
+	ai.trainerWaveInterval    = 60
+	ai.trainerUnitsLost       = 0
+	ai.trainerBldLost         = 0
+	ai.trainerAttackStartArmy = 0
+	ai.trainerLastBldCount    = 0
+	ai.trainerLastOwnBldCount = 0
+	ai.trainerLastPlayerArmy  = 0
+	ai.trainerConceded        = false
 	resourceManager.add(ai.player, Config.STARTING_RESOURCES)
 	print("[AIManager] Bot", userId, "reset to rebuild")
 end
@@ -1397,7 +1792,7 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		diff        = diff,
 		base        = base,
 		personality = personality,
-		level       = personality == "nightmare" and 5 or level,
+		level       = personality == "nightmare" and 5 or personality == "trainer" and 1 or level,
 		isNightmare = personality == "nightmare",
 
 		hasCC       = false,
@@ -1452,6 +1847,18 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		reactionTimer = diff.reactionInterval,
 
 		startTime = tick(),
+
+		-- Trainer state (safe defaults; only meaningful when personality == "trainer")
+		trainerMode            = "shadow",
+		trainerWaveTimer       = 0,
+		trainerWaveInterval    = 60,  -- first wave after ~60 s of gather
+		trainerUnitsLost       = 0,
+		trainerBldLost         = 0,
+		trainerAttackStartArmy = 0,
+		trainerLastBldCount    = 0,
+		trainerLastOwnBldCount = 0,
+		trainerLastPlayerArmy  = 0,
+		trainerConceded        = false,
 	}
 
 	-- Start scouts in enemy territory (far half of the explore list)

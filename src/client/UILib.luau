@@ -29,6 +29,7 @@ UILib.C = {
 	-- Building-type colours (used for accent bars & button tints)
 	MINE     = Color3.fromRGB(200, 150,  20),
 	BARRACKS = Color3.fromRGB( 50, 115, 225),
+	DEPLOYER = Color3.fromRGB( 60, 185,  70),
 	TURRET   = Color3.fromRGB(215,  95,  20),
 	WORKSHOP = Color3.fromRGB(135,  55, 230),
 	TEAL     = Color3.fromRGB(  0, 190, 160),

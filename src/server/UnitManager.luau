@@ -57,6 +57,10 @@ local barrackTrainStart: { [string]: number }        = {}
 local MAX_QUEUE = 5
 local laneModeActive = false
 
+-- Deployer unit tracking: forward (deployerId → set of unitIds) and reverse maps
+local deployerUnits:   { [string]: { [string]: boolean } } = {}
+local unitToDeployer:  { [string]: string }                = {}
+
 local aggroScanFrame = 0
 local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
 
@@ -385,6 +389,49 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		hv.Value   = 0
 		hv.Parent  = part
 	end
+	if unitType == "Howitzer" then
+		local grey = BrickColor.new("Dark stone grey")
+		local col  = part.BrickColor
+		local halfX = part.Size.X / 2 + 0.90
+		local halfY = part.Size.Y / 2
+
+		local function welded(sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material): Part
+			local p          = Instance.new("Part")
+			p.Size           = sz
+			p.BrickColor     = bc
+			p.Material       = mat
+			p.Anchored       = false
+			p.CanCollide     = false
+			p.CastShadow     = false
+			p.CanQuery       = false
+			p.CFrame         = cf
+			p.Parent         = part
+			local w          = Instance.new("WeldConstraint")
+			w.Part0          = part
+			w.Part1          = p
+			w.Parent         = part
+			return p
+		end
+
+		local treadY = -halfY + 1.3
+		for _, side in { -1, 1 } do
+			welded( Vector3.new(1.65, 2.55, part.Size.Z + 1.65),
+					part.CFrame * CFrame.new(side * halfX, treadY, 0),
+					grey, Enum.Material.SmoothPlastic )
+		end
+		welded( Vector3.new(5.2, 2.0, 7.5),
+				part.CFrame * CFrame.new(0, halfY + 1.0, 0.5),
+				col,  Enum.Material.SmoothPlastic )
+		welded( Vector3.new(2.5, 1.6, 2.5),
+				part.CFrame * CFrame.new(0, halfY + 2.8, -0.3),
+				grey, Enum.Material.SmoothPlastic )
+		welded( Vector3.new(0.80, 0.80, 8.2),
+				part.CFrame * CFrame.new(0, halfY + 2.8, -3.3),
+				grey, Enum.Material.Metal )
+		welded( Vector3.new(5.2, 0.25, 0.3),
+				part.CFrame * CFrame.new(0, halfY + 2.05, 4.2),
+				col,  Enum.Material.Neon )
+	end
 	if unitType == "Medic" then addMedicCross(part)  end
 	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(part, unitType) end
 
@@ -584,6 +631,27 @@ function UnitManager.spawnUnitNow(player: Player, position: Vector3, unitType: s
 	return spawnUnit(player, position, unitType)
 end
 
+-- Spawns a Soldier for a Deployer and records it in the tracking tables.
+function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3)
+	local uid = spawnUnit(player, spawnPos, "Soldier")
+	if uid then
+		if not deployerUnits[deployerId] then deployerUnits[deployerId] = {} end
+		deployerUnits[deployerId][uid] = true
+		unitToDeployer[uid] = deployerId
+	end
+end
+
+-- Returns the number of soldiers currently alive that belong to this Deployer.
+function UnitManager.getDeployerAliveCount(deployerId: string): number
+	local set = deployerUnits[deployerId]
+	if not set then return 0 end
+	local count = 0
+	for uid in set do
+		if units[uid] then count += 1 end
+	end
+	return count
+end
+
 function UnitManager.getUnitCount(player: Player): number
 	local n = 0
 	for _, data in units do
@@ -625,6 +693,11 @@ function UnitManager.removeAllUnitsFor(player: any)
 	for _, id in toRemove do
 		units[id].part:Destroy()
 		units[id] = nil
+		local dep = unitToDeployer[id]
+		if dep then
+			unitToDeployer[id] = nil
+			if deployerUnits[dep] then deployerUnits[dep][id] = nil end
+		end
 	end
 end
 
@@ -698,6 +771,11 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 		end
 		data.part:Destroy()
 		units[bestId] = nil
+		local dep = unitToDeployer[bestId]
+		if dep then
+			unitToDeployer[bestId] = nil
+			if deployerUnits[dep] then deployerUnits[dep][bestId] = nil end
+		end
 	end
 	return true, hitPos
 end
@@ -1359,6 +1437,11 @@ function UnitManager.init(resourceManager)
 				end
 				d.part:Destroy()
 				units[id] = nil
+				local dep = unitToDeployer[id]
+				if dep then
+					unitToDeployer[id] = nil
+					if deployerUnits[dep] then deployerUnits[dep][id] = nil end
+				end
 			end
 		end
 	end)
@@ -1480,6 +1563,11 @@ function UnitManager.init(resourceManager)
 		for _, id in toRemove do
 			units[id].part:Destroy()
 			units[id] = nil
+			local dep = unitToDeployer[id]
+			if dep then
+				unitToDeployer[id] = nil
+				if deployerUnits[dep] then deployerUnits[dep][id] = nil end
+			end
 		end
 		local qToClean = {}
 		for barrackId, q in barrackQueues do

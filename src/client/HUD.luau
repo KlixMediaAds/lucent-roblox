@@ -84,6 +84,7 @@ type BuildingInfo = { cost: number, requires: { [string]: number }, researchReq:
 local BUILDING_INFO: { [string]: BuildingInfo } = {
 	Mine       = { cost = Config.MINE_COST,         requires = {},             researchReq = nil          },
 	Barracks   = { cost = Config.BUILDING_COST,     requires = { Mine = 1 },   researchReq = nil          },
+	Deployer   = { cost = Config.DEPLOYER_COST,     requires = { Barracks = 1 }, researchReq = nil        },
 	Turret     = { cost = Config.TURRET_COST,       requires = { Barracks = 1 }, researchReq = nil        },
 	Relay      = { cost = Config.RELAY_COST,        requires = {},             researchReq = "Relay"      },
 	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
@@ -94,6 +95,7 @@ local BUILDING_INFO: { [string]: BuildingInfo } = {
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
 	{ btype = "Mine",       icon = "⛏", color = C.MINE,                        desc = "Harvests nearby mineral deposits"              },
 	{ btype = "Barracks",   icon = "⚔", color = C.BARRACKS,                    desc = "Trains and deploys combat units"               },
+	{ btype = "Deployer",   icon = "🚀", color = C.DEPLOYER,                    desc = "Auto-spawns up to 4 soldiers"                  },
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
 	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },

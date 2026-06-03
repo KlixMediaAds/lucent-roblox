@@ -130,6 +130,7 @@ end
 local UNIT_ICON: { [string]: string } = {
 	Soldier       = "⚔",
 	Tank          = "⬡",
+	Howitzer      = "💣",
 	Elite         = "★",
 	Medic         = "✚",
 	CreepySoldier = "🪲",
@@ -137,6 +138,7 @@ local UNIT_ICON: { [string]: string } = {
 local UNIT_COLOR: { [string]: Color3 } = {
 	Soldier       = C.GREEN,
 	Tank          = C.BARRACKS,
+	Howitzer      = Color3.fromRGB(138, 168, 52),   -- military olive
 	Elite         = Color3.fromRGB(160,  80, 230),
 	Medic         = Color3.fromRGB( 50, 200, 160),
 	CreepySoldier = Color3.fromRGB( 50, 170,  80),
@@ -150,8 +152,9 @@ local overlay:  Frame?
 local rootNode: TextButton?
 
 -- ── Unit definitions ──────────────────────────────────────────────────────────
-local PURPLE     = Color3.fromRGB(160, 80, 230)
-local MEDIC_TEAL = Color3.fromRGB(50, 200, 160)
+local PURPLE       = Color3.fromRGB(160,  80, 230)
+local MEDIC_TEAL   = Color3.fromRGB( 50, 200, 160)
+local HOWITZER_OLV = Color3.fromRGB(138, 168,  52)
 
 type UnitDef = {
 	key:   string,
@@ -163,10 +166,11 @@ type UnitDef = {
 }
 
 local UNIT_DEFS: { UnitDef } = {
-	{ key = "Soldier", label = "Soldier\n◆ 25",  icon = "⚔", color = C.GREEN,    cost = 25,  angle = -135 },
-	{ key = "Tank",    label = "Tank\n◆ 60",      icon = "⬡", color = C.BARRACKS, cost = 60,  angle = -90  },
-	{ key = "Elite",   label = "Elite\n◆ 100",    icon = "★", color = PURPLE,     cost = 100, angle = -45  },
-	{ key = "Medic",   label = "Medic\n◆ 60",     icon = "✚", color = MEDIC_TEAL, cost = 60,  angle = 0    },
+	{ key = "Soldier",  label = "Soldier\n◆ 25",   icon = "⚔",  color = C.GREEN,      cost = 25,  angle = -135 },
+	{ key = "Tank",     label = "Tank\n◆ 60",       icon = "⬡",  color = C.BARRACKS,   cost = 60,  angle = -90  },
+	{ key = "Howitzer", label = "Howitzer\n◆ 90",   icon = "💣", color = HOWITZER_OLV, cost = 90,  angle = -45  },
+	{ key = "Elite",    label = "Elite\n◆ 100",     icon = "★",  color = PURPLE,       cost = 100, angle = 0    },
+	{ key = "Medic",    label = "Medic\n◆ 60",      icon = "✚",  color = MEDIC_TEAL,   cost = 60,  angle = 45   },
 }
 
 local RADIUS   = 155  -- px from root centre to child centre

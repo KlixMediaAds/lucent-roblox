@@ -26,6 +26,7 @@ local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager   = require(script:WaitForChild("CometManager"))
 local DepositFX      = require(script:WaitForChild("DepositFX"))
 local LobbyUI        = require(script:WaitForChild("LobbyUI"))
+local ShaderManager  = require(script:WaitForChild("ShaderManager"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -197,6 +198,16 @@ do
 			xrayOn = not xrayOn
 			FogManager.setXray(xrayOn)
 		end
+	end)
+end
+
+-- ── /shader chat command ──────────────────────────────────────────────────────
+-- /shader 1  → enable Gloomy Atmosphere preset
+-- /shader 0  → disable and restore original lighting
+do
+	Players.LocalPlayer.Chatted:Connect(function(msg)
+		local arg = msg:match("^%s*/shader%s+(.+)$")
+		if arg then ShaderManager.handleCommand(arg) end
 	end)
 end
 
@@ -2408,6 +2419,281 @@ Network.onHealBeam(function(fromPos: Vector3, toPos: Vector3)
 	spawnHealBeam(fromPos, toPos)
 end)
 
+-- ── Howitzer VFX ──────────────────────────────────────────────────────────────
+
+-- Impact: dirt geysers fly out of the ground and a dark crater fades over time.
+local function spawnHowitzerImpact(pos: Vector3)
+	local groundPos = Vector3.new(pos.X, 0.15, pos.Z)
+
+	-- ── Core burst ────────────────────────────────────────────────────────────
+	local core        = Instance.new("Part")
+	core.Name         = "_HwCore"
+	core.Shape        = Enum.PartType.Ball
+	core.Size         = Vector3.new(4, 4, 4)
+	core.Color        = Color3.fromRGB(255, 240, 195)
+	core.Material     = Enum.Material.Neon
+	core.Anchored     = true; core.CanCollide = false; core.CanQuery = false; core.CastShadow = false
+	core.Position     = pos
+	core.Parent       = workspace
+
+	-- ── Shockwave ring ────────────────────────────────────────────────────────
+	-- Cylinder: axis along local X.  Rotate 90° on Z so it lies flat.
+	local ring        = Instance.new("Part")
+	ring.Name         = "_HwRing"
+	ring.Shape        = Enum.PartType.Cylinder
+	ring.Size         = Vector3.new(0.40, 1, 1)
+	ring.Color        = Color3.fromRGB(210, 145, 40)
+	ring.Material     = Enum.Material.Neon
+	ring.Anchored     = true; ring.CanCollide = false; ring.CanQuery = false; ring.CastShadow = false
+	ring.CFrame       = CFrame.new(groundPos) * CFrame.Angles(0, 0, math.pi / 2)
+	ring.Parent       = workspace
+
+	-- ── Dust puffs ────────────────────────────────────────────────────────────
+	type DustData = { part: Part, vx: number, vy: number, vz: number, dur: number }
+	local dustPuffs: { DustData } = {}
+	for i = 1, 5 do
+		local a   = (i / 5) * math.pi * 2 + math.random() * 0.7
+		local spd = 3 + math.random() * 4
+		local d: Part = Instance.new("Part")
+		d.Name        = "_HwDust"
+		d.Shape       = Enum.PartType.Ball
+		d.Size        = Vector3.new(2.5, 2.5, 2.5)
+		d.Color       = Color3.fromRGB(126, 108, 80)
+		d.Material    = Enum.Material.SmoothPlastic
+		d.Transparency = 0.22
+		d.Anchored    = true; d.CanCollide = false; d.CanQuery = false; d.CastShadow = false
+		d.Position    = groundPos + Vector3.new(math.cos(a) * 1.5, 0.4, math.sin(a) * 1.5)
+		d.Parent      = workspace
+		table.insert(dustPuffs, {
+			part = d,
+			vx   = math.cos(a) * spd,
+			vy   = 3 + math.random() * 3,
+			vz   = math.sin(a) * spd,
+			dur  = 0.36 + math.random() * 0.22,
+		})
+	end
+
+	-- ── Dirt chunks ───────────────────────────────────────────────────────────
+	type DirtChunk = { part: Part, vx: number, vy: number, vz: number }
+	local DIRT_COLS = {
+		Color3.fromRGB(68, 48, 30),
+		Color3.fromRGB(84, 62, 40),
+		Color3.fromRGB(98, 74, 50),
+		Color3.fromRGB(54, 40, 26),
+	}
+	local chunks: { DirtChunk } = {}
+	for i = 1, 14 do
+		local a   = (i / 14) * math.pi * 2 + (math.random() - 0.5) * 0.45
+		local spd = 9 + math.random() * 14
+		local sz  = 0.5 + math.random() * 1.4
+		local d: Part = Instance.new("Part")
+		d.Name        = "_HwDirt"
+		d.Size        = Vector3.new(sz, sz, sz)
+		d.Color       = DIRT_COLS[math.random(1, #DIRT_COLS)]
+		d.Material    = Enum.Material.SmoothPlastic
+		d.Anchored    = true; d.CanCollide = false; d.CanQuery = false; d.CastShadow = false
+		d.Position    = groundPos + Vector3.new(
+			(math.random() - 0.5) * 2.5, 0.3, (math.random() - 0.5) * 2.5)
+		d.Parent      = workspace
+		table.insert(chunks, {
+			part = d,
+			vx   = math.cos(a) * spd,
+			vy   = 18 + math.random() * 22,   -- strong upward launch
+			vz   = math.sin(a) * spd,
+		})
+	end
+
+	-- ── Crater (outer + inner ring, fades over ~9 seconds) ────────────────────
+	local crater      = Instance.new("Part")
+	crater.Name       = "_HwCrater"
+	crater.Shape      = Enum.PartType.Cylinder
+	crater.Size       = Vector3.new(0.28, 8.5, 8.5)
+	crater.Color      = Color3.fromRGB(36, 24, 14)
+	crater.Material   = Enum.Material.SmoothPlastic
+	crater.Anchored   = true; crater.CanCollide = false; crater.CanQuery = false; crater.CastShadow = false
+	crater.CFrame     = CFrame.new(groundPos) * CFrame.Angles(0, 0, math.pi / 2)
+	crater.Parent     = workspace
+
+	local craterInner      = Instance.new("Part")
+	craterInner.Name       = "_HwCraterIn"
+	craterInner.Shape      = Enum.PartType.Cylinder
+	craterInner.Size       = Vector3.new(0.30, 4.0, 4.0)
+	craterInner.Color      = Color3.fromRGB(16, 10, 6)
+	craterInner.Material   = Enum.Material.SmoothPlastic
+	craterInner.Anchored   = true; craterInner.CanCollide = false; craterInner.CanQuery = false; craterInner.CastShadow = false
+	craterInner.CFrame     = CFrame.new(groundPos + Vector3.new(0, 0.02, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+	craterInner.Parent     = workspace
+
+	-- ── Animate all short-lived effects in one connection ─────────────────────
+	local CORE_DUR = 0.13
+	local RING_DUR = 0.30
+	local DIRT_DUR = 0.92
+	local GRAVITY  = 34
+
+	local elapsed = 0
+	local hwConn: RBXScriptConnection
+	hwConn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+
+		if core then
+			if elapsed < CORE_DUR then
+				local p = elapsed / CORE_DUR
+				local s = 4 + p * 7
+				core.Size         = Vector3.new(s, s, s)
+				core.Transparency = p
+			else
+				core:Destroy(); core = nil :: any
+			end
+		end
+
+		if ring then
+			if elapsed < RING_DUR then
+				local p = elapsed / RING_DUR
+				local d = 1 + p * 17
+				ring.Size         = Vector3.new(0.40, d, d)
+				ring.Transparency = 0.10 + p * 0.90
+			else
+				ring:Destroy(); ring = nil :: any
+			end
+		end
+
+		for _, dc in dustPuffs do
+			if dc.part then
+				if elapsed < dc.dur then
+					local p = elapsed / dc.dur
+					dc.vy -= 14 * dt
+					dc.part.Position = dc.part.Position
+						+ Vector3.new(dc.vx * dt, dc.vy * dt, dc.vz * dt)
+					local s = 2.5 + p * 3.0
+					dc.part.Size         = Vector3.new(s, s, s)
+					dc.part.Transparency = 0.22 + p * 0.78
+				else
+					dc.part:Destroy(); dc.part = nil :: any
+				end
+			end
+		end
+
+		for _, c in chunks do
+			if c.part then
+				if elapsed < DIRT_DUR then
+					c.vy -= GRAVITY * dt
+					c.part.Position = c.part.Position
+						+ Vector3.new(c.vx * dt, c.vy * dt, c.vz * dt)
+					c.part.Transparency = elapsed / DIRT_DUR
+				else
+					c.part:Destroy(); c.part = nil :: any
+				end
+			end
+		end
+
+		if elapsed >= DIRT_DUR then hwConn:Disconnect() end
+	end)
+
+	-- Crater fades independently over a long duration
+	task.spawn(function()
+		local CRATER_LIFE = 9
+		local ct = 0
+		while crater.Parent do
+			ct += task.wait(0.15)
+			local p = math.clamp(ct / CRATER_LIFE, 0, 1)
+			if crater.Parent       then crater.Transparency       = p end
+			if craterInner.Parent  then craterInner.Transparency  = p end
+			if p >= 1 then
+				if crater.Parent       then crater:Destroy()      end
+				if craterInner.Parent  then craterInner:Destroy() end
+				break
+			end
+		end
+	end)
+end
+
+-- Howitzer shell: large oriented tracer streak lobbed on a high arc.
+-- The shell rotates along the arc (oriented toward its velocity direction at every
+-- frame) giving a satisfying "arcing artillery round" appearance.
+local function spawnHowitzerShell(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL     = 0.72   -- seconds — slow enough to appreciate the arc
+	local ARC        = 20.0   -- studs — dramatic high parabola
+	local STREAK_LEN = 4.0    -- stud length of the shell body
+
+	local origin = fromPos + Vector3.new(0, 2.5, 0)
+	local dest   = toPos   + Vector3.new(0, 0.5, 0)
+
+	local rawDir = dest - origin
+	local dist   = rawDir.Magnitude
+	local tUnit  = if dist > 0.01 then rawDir / dist else Vector3.new(0, 0, -1)
+
+	-- ── Muzzle flash at barrel ────────────────────────────────────────────────
+	local muzzle          = Instance.new("Part")
+	muzzle.Name           = "_HwMuzzle"
+	muzzle.Size           = Vector3.new(1.0, 1.0, 1.0)
+	muzzle.Shape          = Enum.PartType.Ball
+	muzzle.Color          = Color3.fromRGB(255, 246, 205)
+	muzzle.Material       = Enum.Material.Neon
+	muzzle.Anchored       = true; muzzle.CanCollide = false; muzzle.CanQuery = false; muzzle.CastShadow = false
+	muzzle.Position       = origin
+	muzzle.Parent         = workspace
+	task.delay(0.08, function() if muzzle.Parent then muzzle:Destroy() end end)
+
+	-- ── Shell body — oriented along arc tangent (velocity direction) ──────────
+	-- At t=0 the shell points steeply upward; at peak it's horizontal;
+	-- on descent it dips nose-down toward the target — exactly like a real shell.
+	local initVY  = math.cos(0) * math.pi * ARC            -- π * 20 ≈ 62.8 upward
+	local initVel = rawDir + Vector3.new(0, initVY, 0)
+	local initDir = if initVel.Magnitude > 0.01 then initVel.Unit else tUnit
+	local initCF  = CFrame.lookAt(origin - initDir * (STREAK_LEN * 0.5), origin + initDir)
+
+	-- Inner core: thin bright near-white rod
+	local proj        = Instance.new("Part")
+	proj.Name         = "_HwShell"
+	proj.Size         = Vector3.new(0.18, 0.18, STREAK_LEN)
+	proj.Color        = Color3.fromRGB(255, 235, 165)
+	proj.Material     = Enum.Material.Neon
+	proj.Anchored     = true; proj.CanCollide = false; proj.CanQuery = false; proj.CastShadow = false
+	proj.CFrame       = initCF
+	proj.Parent       = workspace
+
+	-- Outer glow: wider amber-orange shell
+	local glow        = Instance.new("Part")
+	glow.Name         = "_HwShellGlow"
+	glow.Size         = Vector3.new(0.44, 0.44, STREAK_LEN + 0.8)
+	glow.Color        = Color3.fromRGB(255, 128, 28)
+	glow.Material     = Enum.Material.Neon
+	glow.Transparency = 0.42
+	glow.Anchored     = true; glow.CanCollide = false; glow.CanQuery = false; glow.CastShadow = false
+	glow.CFrame       = initCF
+	glow.Parent       = workspace
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t = math.min(elapsed / TRAVEL, 1)
+
+		-- Arc position: lerp + sine arc
+		local currentPos = origin + tUnit * (t * dist)
+			+ Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+
+		-- Velocity tangent: derivative of arc with respect to t
+		-- d/dt[lerp] = rawDir;  d/dt[sin(π*t)*ARC] = cos(π*t)*π*ARC
+		local vY  = math.cos(t * math.pi) * math.pi * ARC
+		local vel = rawDir + Vector3.new(0, vY, 0)
+		local dir = if vel.Magnitude > 0.01 then vel.Unit else Vector3.new(0, -1, 0)
+
+		-- Place center half a streak behind the leading edge so tip == currentPos
+		local center = currentPos - dir * (STREAK_LEN * 0.5)
+		local cf     = CFrame.lookAt(center, center + dir)
+		proj.CFrame  = cf
+		glow.CFrame  = cf
+
+		if t >= 1 then
+			conn:Disconnect()
+			proj:Destroy()
+			glow:Destroy()
+			spawnHowitzerImpact(dest)
+		end
+	end)
+end
+
 -- Plays a short 3D-positional sound at `pos` and auto-destroys when finished.
 local SND_SOLDIER = "rbxassetid://138651783706047"
 local SND_TANK    = "rbxassetid://122500594085328"
@@ -2458,49 +2744,122 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 		return
 	end
 
+	if unitType == "Howitzer" then
+		spawnHowitzerShell(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.85)
+		return
+	end
+
 	-- Soldier (and CreepySoldier) — quick gunshot
 	playSound3D(fromPos, SND_SOLDIER, 0.55)
 
-	-- Soldier: small fast yellow bullet with simple impact flash
+	-- Soldier: oriented tracer streak — thin neon rod aimed at target,
+	-- outer glow shell, muzzle flash at barrel, expanding impact bloom on hit.
+	local TRAVEL     = 0.10   -- seconds; snappy and readable at RTS distances
+	local STREAK_LEN = 2.4    -- stud length of the tracer body
+
 	local origin = fromPos + Vector3.new(0, 1.5, 0)
 	local dest   = toPos   + Vector3.new(0, 1.0, 0)
 
-	local proj          = Instance.new("Part")
-	proj.Name           = "_UnitProj"
-	proj.Size           = Vector3.new(0.45, 0.45, 0.45)
-	proj.Shape          = Enum.PartType.Ball
-	proj.BrickColor     = BrickColor.new("Bright yellow")
-	proj.Material       = Enum.Material.Neon
-	proj.Position       = origin
-	proj.Anchored       = true
-	proj.CanCollide     = false
-	proj.CanQuery       = false
-	proj.CastShadow     = false
-	proj.Parent         = workspace
+	local rawDir = dest - origin
+	local dist   = rawDir.Magnitude
+	-- Safe unit vector (guard against origin == dest edge case)
+	local unit   = if dist > 0.01 then rawDir / dist else Vector3.new(0, 0, -1)
+
+	-- ── Muzzle flash — brief bright point at the barrel ───────────────────────
+	local muzzle          = Instance.new("Part")
+	muzzle.Name           = "_MuzzleFlash"
+	muzzle.Size           = Vector3.new(0.50, 0.50, 0.50)
+	muzzle.Shape          = Enum.PartType.Ball
+	muzzle.Color          = Color3.fromRGB(255, 250, 210)
+	muzzle.Material       = Enum.Material.Neon
+	muzzle.Anchored       = true
+	muzzle.CanCollide     = false
+	muzzle.CanQuery       = false
+	muzzle.CastShadow     = false
+	muzzle.Position       = origin
+	muzzle.Parent         = workspace
+	task.delay(0.05, function() if muzzle.Parent then muzzle:Destroy() end end)
+
+	-- ── Inner core — very thin, very bright tracer rod ────────────────────────
+	-- CFrame.lookAt(center, center+unit): part's LookVector (−Z) faces unit dir,
+	-- so the block's Z length runs along the travel axis.
+	-- Center sits half a streak-length behind the leading edge so the tip lines
+	-- up with the bullet's current world position each frame.
+	local initCenter = origin - unit * (STREAK_LEN * 0.5)
+	local initCF     = CFrame.lookAt(initCenter, initCenter + unit)
+
+	local proj        = Instance.new("Part")
+	proj.Name         = "_SoldierBullet"
+	proj.Size         = Vector3.new(0.09, 0.09, STREAK_LEN)
+	proj.Color        = Color3.fromRGB(255, 248, 185)   -- near-white hot yellow
+	proj.Material     = Enum.Material.Neon
+	proj.Anchored     = true
+	proj.CanCollide   = false
+	proj.CanQuery     = false
+	proj.CastShadow   = false
+	proj.CFrame       = initCF
+	proj.Parent       = workspace
+
+	-- ── Outer glow — wider, semi-transparent shell around the core ───────────
+	local glow        = Instance.new("Part")
+	glow.Name         = "_SoldierBulletGlow"
+	glow.Size         = Vector3.new(0.24, 0.24, STREAK_LEN + 0.5)
+	glow.Color        = Color3.fromRGB(255, 210, 60)    -- warmer amber halo
+	glow.Material     = Enum.Material.Neon
+	glow.Transparency = 0.50
+	glow.Anchored     = true
+	glow.CanCollide   = false
+	glow.CanQuery     = false
+	glow.CastShadow   = false
+	glow.CFrame       = initCF
+	glow.Parent       = workspace
 
 	local elapsed = 0
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function(dt)
 		elapsed += dt
-		local t = math.min(elapsed / 0.14, 1)
-		proj.Position = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * 0.8, 0)
+		local t = math.min(elapsed / TRAVEL, 1)
+
+		-- Straight-line travel — no arc, bullets don't lob
+		local tip    = origin + unit * (t * dist)
+		local center = tip - unit * (STREAK_LEN * 0.5)
+		local cf     = CFrame.lookAt(center, center + unit)
+		proj.CFrame  = cf
+		glow.CFrame  = cf
 
 		if t >= 1 then
 			conn:Disconnect()
 			proj:Destroy()
-			local flash         = Instance.new("Part")
-			flash.Name          = "_UnitImpact"
-			flash.Size          = Vector3.new(1.5, 1.5, 1.5)
-			flash.Shape         = Enum.PartType.Ball
-			flash.BrickColor    = BrickColor.new("Bright yellow")
-			flash.Material      = Enum.Material.Neon
-			flash.Position      = dest
-			flash.Anchored      = true
-			flash.CanCollide    = false
-			flash.CanQuery      = false
-			flash.CastShadow    = false
-			flash.Parent        = workspace
-			task.delay(0.09, function() flash:Destroy() end)
+			glow:Destroy()
+
+			-- ── Impact bloom — small bright core that expands and fades ────────
+			local flash        = Instance.new("Part")
+			flash.Name         = "_BulletImpact"
+			flash.Size         = Vector3.new(0.7, 0.7, 0.7)
+			flash.Shape        = Enum.PartType.Ball
+			flash.Color        = Color3.fromRGB(255, 238, 145)
+			flash.Material     = Enum.Material.Neon
+			flash.Transparency = 0
+			flash.Anchored     = true
+			flash.CanCollide   = false
+			flash.CanQuery     = false
+			flash.CastShadow   = false
+			flash.Position     = dest
+			flash.Parent       = workspace
+
+			local ft = 0
+			local fconn: RBXScriptConnection
+			fconn = RunService.RenderStepped:Connect(function(fdt)
+				ft += fdt
+				local p = math.min(ft / 0.11, 1)
+				flash.Size         = Vector3.new(1, 1, 1) * (0.7 + p * 1.4)
+				flash.Transparency = p
+				if p >= 1 then
+					fconn:Disconnect()
+					flash:Destroy()
+				end
+			end)
 		end
 	end)
 end)
