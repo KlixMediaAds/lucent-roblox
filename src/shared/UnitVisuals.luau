@@ -330,26 +330,83 @@ function UnitVisuals.buildBuildingPreview(
 		emitter.Material  = Enum.Material.Neon
 
 	elseif buildingType == "Turret" then
-		local head         = makePart(parent)
-		head.Name          = "Head"
-		head.Size          = Vector3.new(5, 3, 5)
-		head.Position      = position + Vector3.new(0, size.Y + 1.5, 0)
-		head.BrickColor    = BrickColor.new("Dark stone grey")
-		head.Material      = Enum.Material.Metal
+		-- Military tripod machine gun — matches BuildingManager's in-world geometry
+		local grey = BrickColor.new("Dark stone grey")
 
-		local barrel       = makePart(parent)
-		barrel.Name        = "Barrel"
-		barrel.Size        = Vector3.new(1.2, 1.2, 7)
-		barrel.Position    = position + Vector3.new(0, size.Y + 1.5, 3.5)
-		barrel.BrickColor  = BrickColor.new("Dark stone grey")
-		barrel.Material    = Enum.Material.Metal
+		-- Repurpose base as the central mounting hub/platform
+		base.BrickColor = grey
+		base.Material   = Enum.Material.Metal
+		base.Size       = Vector3.new(9, 2.5, 7)
+		base.Position   = position + Vector3.new(0, 5.75, 0)
 
-		local ring         = makePart(parent)
-		ring.Name          = "Ring"
-		ring.Size          = Vector3.new(7, 0.4, 7)
-		ring.Position      = position + Vector3.new(0, size.Y + 0.2, 0)
-		ring.BrickColor    = BrickColor.new("Bright red")
-		ring.Material      = Enum.Material.Neon
+		-- Three tripod legs (two front, one rear)
+		local legDefs = {
+			{ top = Vector3.new(-2.5, 5.5,  1.5), foot = Vector3.new(-7, 0.4,  8) },
+			{ top = Vector3.new( 2.5, 5.5,  1.5), foot = Vector3.new( 7, 0.4,  8) },
+			{ top = Vector3.new( 0,   5.5, -1.5), foot = Vector3.new( 0, 0.4, -8) },
+		}
+		for _, l in legDefs do
+			local topW  = position + l.top
+			local footW = position + l.foot
+			local mid   = (topW + footW) * 0.5
+			local len   = (topW - footW).Magnitude
+			local leg   = makePart(parent)
+			leg.Name    = "Leg"
+			leg.Size    = Vector3.new(1.6, len, 1.6)
+			leg.BrickColor = grey; leg.Material = Enum.Material.Metal
+			leg.CFrame  = CFrame.lookAt(mid, footW) * CFrame.Angles(math.pi / 2, 0, 0)
+			local pad   = makePart(parent)
+			pad.Name    = "FootPad"
+			pad.Size    = Vector3.new(3, 0.5, 3)
+			pad.Position = position + Vector3.new(l.foot.X, 0.25, l.foot.Z)
+			pad.BrickColor = grey; pad.Material = Enum.Material.Metal
+		end
+
+		-- Vertical post connecting hub to gun mount
+		local post     = makePart(parent)
+		post.Name      = "Post"
+		post.Size      = Vector3.new(1.4, 2.5, 1.4)
+		post.Position  = position + Vector3.new(0, 8.25, 0)
+		post.BrickColor = grey; post.Material = Enum.Material.Metal
+
+		-- Machine gun receiver — MUST remain "Head" (attack system rotates this)
+		local head     = makePart(parent)
+		head.Name      = "Head"
+		head.Size      = Vector3.new(3.2, 2, 4)
+		head.Position  = position + Vector3.new(0, 9.75, 0)
+		head.BrickColor = grey; head.Material = Enum.Material.Metal
+
+		-- Barrel — MUST remain "Barrel"
+		local barrel   = makePart(parent)
+		barrel.Name    = "Barrel"
+		barrel.Size    = Vector3.new(0.7, 0.7, 7)
+		barrel.Position = position + Vector3.new(0, 9.75, 3.5)
+		barrel.BrickColor = grey; barrel.Material = Enum.Material.Metal
+
+		-- Rear sight stub
+		local sight    = makePart(parent)
+		sight.Name     = "Sight"
+		sight.Size     = Vector3.new(0.4, 0.7, 0.4)
+		sight.Position = position + Vector3.new(0, 10.85, -1.2)
+		sight.BrickColor = grey; sight.Material = Enum.Material.Metal
+
+		-- Muzzle device
+		local muzzle   = makePart(parent)
+		muzzle.Name    = "Muzzle"
+		muzzle.Size    = Vector3.new(1.1, 1.1, 0.6)
+		muzzle.Position = position + Vector3.new(0, 9.75, 7.25)
+		muzzle.BrickColor = grey; muzzle.Material = Enum.Material.Metal
+
+		-- Neon accent ring at post/gun junction — MUST remain "Ring"
+		local ring     = makePart(parent)
+		ring.Name      = "Ring"
+		ring.Size      = Vector3.new(3.2, 0.4, 3.2)
+		ring.Position  = position + Vector3.new(0, 8.75, 0)
+		ring.BrickColor = BrickColor.new("Bright red")
+		ring.Material  = Enum.Material.Neon
+
+		-- suppress unused-var warnings
+		local _ = sight; _ = muzzle
 
 		-- Apply upgrade visuals if requested
 		if upgradeType == "Flamethrower" then

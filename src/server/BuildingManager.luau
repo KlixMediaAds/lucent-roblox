@@ -199,10 +199,10 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		}
 		for _, cY in collars do
 			local strips = {
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,       cY,  hd + 0.15) },
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,       cY, -hd - 0.15) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new( hw+0.15, cY,  cz       ) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(-hw-0.15, cY,  cz       ) },
+				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,           cY, cz + hd + 0.15) },
+				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,           cY, cz - hd - 0.15) },
+				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(cx + hw+0.15, cY, cz            ) },
+				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(cx - hw-0.15, cY, cz            ) },
 			}
 			for _, s in strips do
 				local strip       = Instance.new("Part")
@@ -265,34 +265,75 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		emitter.Parent    = model
 
 	elseif buildingType == "Turret" then
-		-- Rotating head on top of the base
-		local head         = Instance.new("Part")
-		head.Name          = "Head"
-		head.Size          = Vector3.new(5, 3, 5)
-		head.Position      = position + Vector3.new(0, size.Y + 1.5, 0)
-		head.BrickColor    = BrickColor.new("Dark stone grey")
-		head.Material      = Enum.Material.Metal
-		head.Anchored      = true
-		head.Parent        = model
-		-- Barrel: center offset 3.5 studs in +Z so back end starts at head center
-		local barrel       = Instance.new("Part")
-		barrel.Name        = "Barrel"
-		barrel.Size        = Vector3.new(1.2, 1.2, 7)
-		barrel.Position    = position + Vector3.new(0, size.Y + 1.5, 3.5)
-		barrel.BrickColor  = BrickColor.new("Dark stone grey")
-		barrel.Material    = Enum.Material.Metal
-		barrel.Anchored    = true
-		barrel.Parent      = model
-		-- Neon ring accent at the base of the head
-		local ring         = Instance.new("Part")
-		ring.Name          = "Ring"
-		ring.Size          = Vector3.new(7, 0.4, 7)
-		ring.Position      = position + Vector3.new(0, size.Y + 0.2, 0)
-		ring.BrickColor    = BrickColor.new("Bright red")
-		ring.Material      = Enum.Material.Neon
-		ring.Anchored      = true
-		ring.CastShadow    = false
-		ring.Parent        = model
+		-- Military tripod-mounted machine gun
+		local grey = BrickColor.new("Dark stone grey")
+
+		-- Helper: create a dark-metal part parented to model
+		local function mp(nm: string, sz: Vector3, pos: Vector3): Part
+			local p         = Instance.new("Part")
+			p.Name          = nm
+			p.Size          = sz
+			p.Position      = pos
+			p.BrickColor    = grey
+			p.Material      = Enum.Material.Metal
+			p.Anchored      = true
+			p.CanCollide    = false
+			p.CastShadow    = false
+			p.Parent        = model
+			return p
+		end
+
+		-- Repurpose base as the central mounting hub/platform
+		base.BrickColor = grey
+		base.Material   = Enum.Material.Metal
+		base.Size       = Vector3.new(9, 2.5, 7)
+		base.Position   = position + Vector3.new(0, 5.75, 0)
+
+		-- Three tripod legs (two front, one rear) using CFrame orientation
+		local legDefs = {
+			{ top = Vector3.new(-2.5, 5.5,  1.5), foot = Vector3.new(-7, 0.4,  8) },
+			{ top = Vector3.new( 2.5, 5.5,  1.5), foot = Vector3.new( 7, 0.4,  8) },
+			{ top = Vector3.new( 0,   5.5, -1.5), foot = Vector3.new( 0, 0.4, -8) },
+		}
+		for _, l in legDefs do
+			local topW  = position + l.top
+			local footW = position + l.foot
+			local mid   = (topW + footW) * 0.5
+			local len   = (topW - footW).Magnitude
+			local leg   = mp("Leg", Vector3.new(1.6, len, 1.6), mid)
+			leg.CFrame  = CFrame.lookAt(mid, footW) * CFrame.Angles(math.pi / 2, 0, 0)
+			-- Small foot pad at each leg base
+			mp("FootPad", Vector3.new(3, 0.5, 3),
+				position + Vector3.new(l.foot.X, 0.25, l.foot.Z))
+		end
+
+		-- Vertical post: hub → gun mount
+		mp("Post", Vector3.new(1.4, 2.5, 1.4), position + Vector3.new(0, 8.25, 0))
+
+		-- Machine gun receiver (rotates to track targets) — MUST remain "Head"
+		local head   = mp("Head", Vector3.new(3.2, 2, 4), position + Vector3.new(0, 9.75, 0))
+
+		-- Gun barrel (full 3-D aim updated each attack tick) — MUST remain "Barrel"
+		local barrel = mp("Barrel", Vector3.new(0.7, 0.7, 7),
+			position + Vector3.new(0, 9.75, 3.5))
+
+		-- Rear sight stub above receiver
+		mp("Sight", Vector3.new(0.4, 0.7, 0.4), position + Vector3.new(0, 10.85, -1.2))
+
+		-- Muzzle device at barrel tip
+		mp("Muzzle", Vector3.new(1.1, 1.1, 0.6), position + Vector3.new(0, 9.75, 7.25))
+
+		-- Neon accent ring at post-to-gun junction — MUST remain "Ring" (upgrade system uses it)
+		local ring       = Instance.new("Part")
+		ring.Name        = "Ring"
+		ring.Size        = Vector3.new(3.2, 0.4, 3.2)
+		ring.Position    = position + Vector3.new(0, 8.75, 0)
+		ring.BrickColor  = BrickColor.new("Bright red")
+		ring.Material    = Enum.Material.Neon
+		ring.Anchored    = true
+		ring.CanCollide  = false
+		ring.CastShadow  = false
+		ring.Parent      = model
 
 	elseif buildingType == "Monument" then
 		-- Shaft: stone-grey, non-neon so it's not blinding

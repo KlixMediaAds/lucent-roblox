@@ -79,6 +79,19 @@ local spatialGrid: { [number]: { string } } = {}
 local gridOccupied: { number }               = {}
 local gridOccupiedCount                      = 0
 
+-- Reusable scratch buffer for grid-range queries — avoids a table alloc per lookup.
+local gridScratch: { string } = {}
+local gridScratchN             = 0
+
+-- Per-unit anchored decorator parts (treads, pill body, eyes, etc.).
+-- Replaced unanchored+WeldConstraint parts to cut physics body count.
+type Decorator = { part: Part, localCF: CFrame }
+local unitDecorators: { [string]: { Decorator } } = {}
+
+-- Live unit count per player userId (for unit cap enforcement).
+local playerUnitCount: { [number]: number } = {}
+local MAX_UNITS_PER_PLAYER = 30
+
 local function rebuildSpatialGrid()
 	for i = 1, gridOccupiedCount do
 		local cell = spatialGrid[gridOccupied[i]]
@@ -101,182 +114,171 @@ local function rebuildSpatialGrid()
 	end
 end
 
+-- Fill gridScratch with every unit ID whose cell overlaps a circle of `range` around
+-- `fromPos`. No table allocation — callers iterate gridScratch[1..gridScratchN].
+local function fillGridScratch(fromPos: Vector3, range: number)
+	gridScratchN = 0
+	local cx0 = math.floor((fromPos.X - range) / GRID_CELL) + GRID_OFFSET
+	local cx1 = math.floor((fromPos.X + range) / GRID_CELL) + GRID_OFFSET
+	local cz0 = math.floor((fromPos.Z - range) / GRID_CELL) + GRID_OFFSET
+	local cz1 = math.floor((fromPos.Z + range) / GRID_CELL) + GRID_OFFSET
+	for cx = cx0, cx1 do
+		for cz = cz0, cz1 do
+			local cell = spatialGrid[cx * GRID_STRIDE + cz]
+			if cell then
+				for _, id in cell do
+					gridScratchN += 1
+					gridScratch[gridScratchN] = id
+				end
+			end
+		end
+	end
+end
+
 -- ── Health bar ────────────────────────────────────────────────────────────────
 
-local function addTankTreads(body: BasePart)
-	-- Body is 7 × 5 × 9.  Treads sit flush with the bottom, just outside each side.
-	-- Unanchored + WeldConstraint so they follow the anchored body automatically.
-	local halfX    = body.Size.X / 2 + 0.75   -- 3.5 + 0.75 = 4.25
-	local offsetY  = -(body.Size.Y / 2) + 1.1  -- flush with bottom edge
-
+local function addTankTreads(id: string, body: BasePart)
+	-- Treads are Anchored (no physics body, no WeldConstraint).
+	-- Their CFrame is updated manually in the Heartbeat via unitDecorators.
+	local halfX   = body.Size.X / 2 + 0.75
+	local offsetY = -(body.Size.Y / 2) + 1.1
+	local decs    = unitDecorators[id]
 	for _, side in { -1, 1 } do
+		local localCF      = CFrame.new(side * halfX, offsetY, 0)
 		local tread        = Instance.new("Part")
 		tread.Name         = "Tread"
 		tread.Size         = Vector3.new(1.5, 2.2, body.Size.Z + 1.5)
 		tread.BrickColor   = BrickColor.new("Dark stone grey")
 		tread.Material     = Enum.Material.SmoothPlastic
-		tread.Anchored     = false
+		tread.Anchored     = true
 		tread.CanCollide   = false
 		tread.CastShadow   = false
 		tread.CanQuery     = false
-		tread.CFrame       = body.CFrame * CFrame.new(side * halfX, offsetY, 0)
+		tread.CFrame       = body.CFrame * localCF
 		tread.Parent       = body
-
-		local weld         = Instance.new("WeldConstraint")
-		weld.Part0         = body
-		weld.Part1         = tread
-		weld.Parent        = body
+		decs[#decs + 1]    = { part = tread, localCF = localCF }
 	end
 end
 
 -- Track which players have the Eye Upgrade so newly spawned units get eyes too
 local eyeUpgradePlayers: { [number]: boolean } = {}
 
-local function addCreepyEyes(body: BasePart, unitType: string)
+local function addCreepyEyes(id: string, body: BasePart, unitType: string)
 	if body:FindFirstChild("_EyeL") then return end
+	local decs = unitDecorators[id]
 
-	local function makeEye(cf: CFrame, name: string, eyeSize: number)
-		-- Jaundiced, sickly sclera
+	local function makeEye(localCF: CFrame, name: string, eyeSize: number)
+		local irisLocal  = localCF * CFrame.new(0, 0, -eyeSize * 0.3)
+		local pupilLocal = localCF * CFrame.new(0, 0, -eyeSize * 0.44)
+
 		local sclera        = Instance.new("Part")
 		sclera.Name         = name
 		sclera.Shape        = Enum.PartType.Ball
 		sclera.Size         = Vector3.new(eyeSize, eyeSize, eyeSize)
 		sclera.Color        = Color3.fromRGB(255, 255, 255)
 		sclera.Material     = Enum.Material.SmoothPlastic
-		sclera.Anchored     = false
+		sclera.Anchored     = true
 		sclera.CanCollide   = false
 		sclera.CastShadow   = false
 		sclera.CanQuery     = false
-		sclera.CFrame       = cf
+		sclera.CFrame       = body.CFrame * localCF
 		sclera.Parent       = body
-		local w1 = Instance.new("WeldConstraint")
-		w1.Part0 = body; w1.Part1 = sclera; w1.Parent = body
+		decs[#decs + 1]     = { part = sclera, localCF = localCF }
 
-		-- Blood-red neon iris
 		local iris          = Instance.new("Part")
 		iris.Name           = "_Iris"
 		iris.Shape          = Enum.PartType.Ball
 		iris.Size           = Vector3.new(eyeSize * 0.42, eyeSize * 0.42, eyeSize * 0.42)
 		iris.Color          = Color3.fromRGB(255, 30, 0)
 		iris.Material       = Enum.Material.Neon
-		iris.Anchored       = false
+		iris.Anchored       = true
 		iris.CanCollide     = false
 		iris.CastShadow     = false
 		iris.CanQuery       = false
-		iris.CFrame         = cf * CFrame.new(0, 0, -eyeSize * 0.3)  -- flush with sclera front surface
+		iris.CFrame         = body.CFrame * irisLocal
 		iris.Parent         = body
-		local w2 = Instance.new("WeldConstraint")
-		w2.Part0 = body; w2.Part1 = iris; w2.Parent = body
+		decs[#decs + 1]     = { part = iris, localCF = irisLocal }
 
-		-- Void-black pupil (protrudes just past sclera surface so it's clearly visible)
 		local pupil         = Instance.new("Part")
 		pupil.Name          = "_Pupil"
 		pupil.Shape         = Enum.PartType.Ball
 		pupil.Size          = Vector3.new(eyeSize * 0.2, eyeSize * 0.2, eyeSize * 0.2)
 		pupil.Color         = Color3.fromRGB(0, 0, 0)
 		pupil.Material      = Enum.Material.SmoothPlastic
-		pupil.Anchored      = false
+		pupil.Anchored      = true
 		pupil.CanCollide    = false
 		pupil.CastShadow    = false
 		pupil.CanQuery      = false
-		pupil.CFrame        = cf * CFrame.new(0, 0, -eyeSize * 0.44)  -- sits on iris surface
+		pupil.CFrame        = body.CFrame * pupilLocal
 		pupil.Parent        = body
-		local w3 = Instance.new("WeldConstraint")
-		w3.Part0 = body; w3.Part1 = pupil; w3.Parent = body
+		decs[#decs + 1]     = { part = pupil, localCF = pupilLocal }
 	end
 
 	if unitType == "Soldier" then
-		-- Eyes bulge from the sides of the pill body (radius 1.0)
-		local halfX   = 1.0   -- pill side radius
+		local halfX   = 1.0
 		local eyeSize = 1.4
-		makeEye(
-			body.CFrame * CFrame.new(-halfX + eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, math.pi / 2, 0),
-			"_EyeL", eyeSize
-		)
-		makeEye(
-			body.CFrame * CFrame.new(halfX - eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, -math.pi / 2, 0),
-			"_EyeR", eyeSize
-		)
+		makeEye(CFrame.new(-halfX + eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0,  math.pi / 2, 0), "_EyeL", eyeSize)
+		makeEye(CFrame.new( halfX - eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, -math.pi / 2, 0), "_EyeR", eyeSize)
 	else
-		-- Front-facing eyes for all other unit types
 		local topY    = body.Size.Y / 2
 		local halfX   = body.Size.X * 0.22
 		local fwdZ    = -(body.Size.Z / 2) + 0.15
 		local eyeSize = 1.5
-		makeEye(body.CFrame * CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
-		makeEye(body.CFrame * CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
+		makeEye(CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
+		makeEye(CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
 	end
 end
 
-local function addMedicCross(body: BasePart)
-	-- Two white bars forming a "+" on top of the medic body so it's visually distinct.
-	local topY = body.Size.Y / 2 + 0.18
+local function addMedicCross(id: string, body: BasePart)
+	local topY    = body.Size.Y / 2 + 0.18
+	local localCF = CFrame.new(0, topY, 0)
+	local decs    = unitDecorators[id]
 	local function makeBar(sx: number, sz: number)
 		local bar         = Instance.new("Part")
 		bar.Size          = Vector3.new(sx, 0.3, sz)
 		bar.BrickColor    = BrickColor.new("White")
 		bar.Material      = Enum.Material.SmoothPlastic
-		bar.Anchored      = false
+		bar.Anchored      = true
 		bar.CanCollide    = false
 		bar.CastShadow    = false
 		bar.CanQuery      = false
-		bar.CFrame        = body.CFrame * CFrame.new(0, topY, 0)
+		bar.CFrame        = body.CFrame * localCF
 		bar.Parent        = body
-		local w           = Instance.new("WeldConstraint")
-		w.Part0           = body
-		w.Part1           = bar
-		w.Parent          = body
+		decs[#decs + 1]   = { part = bar, localCF = localCF }
 	end
-	makeBar(body.Size.X * 0.55, 0.7)  -- horizontal
-	makeBar(0.7, body.Size.Z * 0.55)  -- vertical
+	makeBar(body.Size.X * 0.55, 0.7)
+	makeBar(0.7, body.Size.Z * 0.55)
 end
 
-local function buildSoldierVisuals(body: BasePart)
+local function buildSoldierVisuals(id: string, body: BasePart)
 	local color = body.BrickColor
-	body.Transparency = 1   -- hide the logic bounding box; pill parts carry the visual
+	body.Transparency = 1
+	local decs = unitDecorators[id]
 
-	local function weld(a: BasePart, b: BasePart)
-		local w = Instance.new("WeldConstraint")
-		w.Part0 = a; w.Part1 = b; w.Parent = a
-	end
-
-	local function child(shape: Enum.PartType?, sz: Vector3, cf: CFrame, col: BrickColor, mat: Enum.Material): BasePart
+	-- All sub-parts are Anchored; their CFrames are maintained via unitDecorators.
+	local function child(shape: Enum.PartType?, sz: Vector3, localCF: CFrame, col: BrickColor, mat: Enum.Material)
 		local p         = Instance.new("Part")
 		if shape then (p :: any).Shape = shape end
 		p.Size          = sz
-		p.CFrame        = cf
+		p.CFrame        = body.CFrame * localCF
 		p.BrickColor    = col
 		p.Material      = mat
-		p.Anchored      = false
+		p.Anchored      = true
 		p.CanCollide    = false
 		p.CastShadow    = false
 		p.CanQuery      = false
 		p.Parent        = body
-		weld(body, p)
-		return p
+		decs[#decs + 1] = { part = p, localCF = localCF }
 	end
 
-	-- Pill body: upright cylinder (long axis rotated to Y)
-	child(Enum.PartType.Cylinder,
-		Vector3.new(1.5, 2.0, 2.0),
-		body.CFrame * CFrame.Angles(0, 0, math.pi / 2),
-		color, Enum.Material.SmoothPlastic)
-
-	-- Rounded caps
-	child(Enum.PartType.Ball,
-		Vector3.new(2.0, 2.0, 2.0),
-		body.CFrame * CFrame.new(0,  0.75, 0),
-		color, Enum.Material.SmoothPlastic)
-	child(Enum.PartType.Ball,
-		Vector3.new(2.0, 2.0, 2.0),
-		body.CFrame * CFrame.new(0, -0.75, 0),
-		color, Enum.Material.SmoothPlastic)
-
-	-- Gun: simple dark rectangle held to the right, barrel pointing forward
-	child(nil,
-		Vector3.new(0.3, 0.25, 1.6),
-		body.CFrame * CFrame.new(1.15, 0.15, -0.3),
-		BrickColor.new("Dark stone grey"), Enum.Material.SmoothPlastic)
+	child(Enum.PartType.Cylinder, Vector3.new(1.5, 2.0, 2.0),
+		CFrame.Angles(0, 0, math.pi / 2),       color, Enum.Material.SmoothPlastic)
+	child(Enum.PartType.Ball,     Vector3.new(2.0, 2.0, 2.0),
+		CFrame.new(0,  0.75, 0),                 color, Enum.Material.SmoothPlastic)
+	child(Enum.PartType.Ball,     Vector3.new(2.0, 2.0, 2.0),
+		CFrame.new(0, -0.75, 0),                 color, Enum.Material.SmoothPlastic)
+	child(nil,                    Vector3.new(0.3, 0.25, 1.6),
+		CFrame.new(1.15, 0.15, -0.3), BrickColor.new("Dark stone grey"), Enum.Material.SmoothPlastic)
 end
 
 local function addHealthBar(part: BasePart)
@@ -345,8 +347,14 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return nil end
 
+	-- Enforce per-player unit cap
+	if (playerUnitCount[player.UserId] or 0) >= MAX_UNITS_PER_PLAYER then return nil end
+
 	counter += 1
 	local id = "u" .. counter
+
+	-- Initialize decorator list before any decoration function is called
+	unitDecorators[id] = {}
 
 	local part          = Instance.new("Part")
 	part.Name           = id
@@ -381,59 +389,47 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
-	if unitType == "Soldier" then buildSoldierVisuals(part) end
+	if unitType == "Soldier" then buildSoldierVisuals(id, part) end
 	if unitType == "Tank"  then
-		addTankTreads(part)
+		addTankTreads(id, part)
 		local hv   = Instance.new("NumberValue")
 		hv.Name    = "HarpoonCount"
 		hv.Value   = 0
 		hv.Parent  = part
 	end
 	if unitType == "Howitzer" then
-		local grey = BrickColor.new("Dark stone grey")
-		local col  = part.BrickColor
+		local grey  = BrickColor.new("Dark stone grey")
+		local col   = part.BrickColor
 		local halfX = part.Size.X / 2 + 0.90
 		local halfY = part.Size.Y / 2
+		local decs  = unitDecorators[id]
 
-		local function welded(sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material): Part
+		local function anchored(sz: Vector3, localCF: CFrame, bc: BrickColor, mat: Enum.Material)
 			local p          = Instance.new("Part")
 			p.Size           = sz
 			p.BrickColor     = bc
 			p.Material       = mat
-			p.Anchored       = false
+			p.Anchored       = true
 			p.CanCollide     = false
 			p.CastShadow     = false
 			p.CanQuery       = false
-			p.CFrame         = cf
+			p.CFrame         = part.CFrame * localCF
 			p.Parent         = part
-			local w          = Instance.new("WeldConstraint")
-			w.Part0          = part
-			w.Part1          = p
-			w.Parent         = part
-			return p
+			decs[#decs + 1]  = { part = p, localCF = localCF }
 		end
 
 		local treadY = -halfY + 1.3
 		for _, side in { -1, 1 } do
-			welded( Vector3.new(1.65, 2.55, part.Size.Z + 1.65),
-					part.CFrame * CFrame.new(side * halfX, treadY, 0),
-					grey, Enum.Material.SmoothPlastic )
+			anchored( Vector3.new(1.65, 2.55, part.Size.Z + 1.65),
+				CFrame.new(side * halfX, treadY, 0), grey, Enum.Material.SmoothPlastic )
 		end
-		welded( Vector3.new(5.2, 2.0, 7.5),
-				part.CFrame * CFrame.new(0, halfY + 1.0, 0.5),
-				col,  Enum.Material.SmoothPlastic )
-		welded( Vector3.new(2.5, 1.6, 2.5),
-				part.CFrame * CFrame.new(0, halfY + 2.8, -0.3),
-				grey, Enum.Material.SmoothPlastic )
-		welded( Vector3.new(0.80, 0.80, 8.2),
-				part.CFrame * CFrame.new(0, halfY + 2.8, -3.3),
-				grey, Enum.Material.Metal )
-		welded( Vector3.new(5.2, 0.25, 0.3),
-				part.CFrame * CFrame.new(0, halfY + 2.05, 4.2),
-				col,  Enum.Material.Neon )
+		anchored( Vector3.new(5.2, 2.0, 7.5),  CFrame.new(0, halfY + 1.0,  0.5), col,  Enum.Material.SmoothPlastic )
+		anchored( Vector3.new(2.5, 1.6, 2.5),  CFrame.new(0, halfY + 2.8, -0.3), grey, Enum.Material.SmoothPlastic )
+		anchored( Vector3.new(0.80, 0.80, 8.2), CFrame.new(0, halfY + 2.8, -3.3), grey, Enum.Material.Metal )
+		anchored( Vector3.new(5.2, 0.25, 0.3),  CFrame.new(0, halfY + 2.05, 4.2), col,  Enum.Material.Neon )
 	end
-	if unitType == "Medic" then addMedicCross(part)  end
-	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(part, unitType) end
+	if unitType == "Medic" then addMedicCross(id, part) end
+	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(id, part, unitType) end
 
 	units[id] = {
 		part        = part,
@@ -456,6 +452,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		focusBldId  = nil,
 	}
 
+	playerUnitCount[player.UserId] = (playerUnitCount[player.UserId] or 0) + 1
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
 	return id
 end
@@ -705,7 +702,9 @@ function UnitManager.resetAll()
 	for id, data in units do
 		if data.part and data.part.Parent then data.part:Destroy() end
 	end
-	units = {}
+	units            = {}
+	unitDecorators   = {}
+	playerUnitCount  = {}
 	eyeUpgradePlayers = {}
 end
 
@@ -726,9 +725,10 @@ end
 -- and marks them so future spawns also get eyes.
 function UnitManager.applyEyeUpgrade(player: any)
 	eyeUpgradePlayers[player.UserId] = true
-	for _, data in units do
+	for id, data in units do
 		if data.owner == player then
-			addCreepyEyes(data.part, data.unitType)
+			if not unitDecorators[id] then unitDecorators[id] = {} end
+			addCreepyEyes(id, data.part, data.unitType)
 		end
 	end
 end
@@ -739,8 +739,11 @@ end
 
 function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number): (boolean, Vector3?)
 	local bestId, bestDist = nil :: string?, math.huge
-	for id, data in units do
-		if data.hp <= 0 then continue end
+	fillGridScratch(fromPos, range)
+	for i = 1, gridScratchN do
+		local id   = gridScratch[i]
+		local data = units[id]
+		if not data or data.hp <= 0 then continue end
 		if tostring(data.owner.UserId) == attackerOwnerIdStr then continue end
 		local d = (data.part.Position - fromPos).Magnitude
 		if d <= range and d < bestDist then bestDist = d; bestId = id end
@@ -751,7 +754,6 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	data.hp -= calcDamage(data, damage)
 	applyHP(data, true)
 	if data.hp <= 0 then
-		-- If this was a trapper, release slow on any units it had harpooned
 		if data.trapperHarpooned then
 			for tId, _ in data.trapperHarpooned do
 				local tgt = units[tId]
@@ -765,10 +767,11 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 			and data.owner.UserId > 0 and data.owner.Parent then
 			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
 		end
-		-- Record kill for attacker (excludes AI-vs-AI and self-damage)
 		if researchManagerRef and data.owner.UserId ~= tonumber(attackerOwnerIdStr) then
 			researchManagerRef.recordEnemyKilled(attackerOwnerIdStr)
 		end
+		unitDecorators[bestId] = nil
+		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
 		data.part:Destroy()
 		units[bestId] = nil
 		local dep = unitToDeployer[bestId]
@@ -1067,11 +1070,14 @@ function UnitManager.init(resourceManager)
 			-- ── Medic: heal most-damaged nearby friendly unit ──────────────────
 			if data.unitType == "Medic" then
 				local bestId2: string?  = nil
-				local lowestRatio       = 1.0   -- only heal units that aren't full
-				for otherId, other in units do
-					if other.hp <= 0 then continue end
-					if tostring(other.owner.UserId) ~= myOwnerStr then continue end
+				local lowestRatio       = 1.0
+				fillGridScratch(myPos, atkRange)
+				for gi = 1, gridScratchN do
+					local otherId = gridScratch[gi]
 					if otherId == id then continue end
+					local other = units[otherId]
+					if not other or other.hp <= 0 then continue end
+					if tostring(other.owner.UserId) ~= myOwnerStr then continue end
 					local ratio = other.hp / other.maxHp
 					if ratio >= 1.0 then continue end
 					local d = (other.part.Position - myPos).Magnitude
@@ -1151,10 +1157,13 @@ function UnitManager.init(resourceManager)
 					if hCount > 0 then
 						local bestId2: string? = nil
 						local bestDist2 = math.huge
-						for otherId, other in units do
-							if other.hp <= 0 then continue end
+						fillGridScratch(myPos, atkRange)
+						for gi = 1, gridScratchN do
+							local otherId = gridScratch[gi]
+							local other = units[otherId]
+							if not other or other.hp <= 0 then continue end
 							if tostring(other.owner.UserId) == myOwnerStr then continue end
-							if hrp[otherId] then continue end  -- already harpooned by this trapper
+							if hrp[otherId] then continue end
 							local d = (other.part.Position - myPos).Magnitude
 							if d <= atkRange and d < bestDist2 then
 								bestDist2 = d; bestId2 = otherId
@@ -1315,8 +1324,11 @@ function UnitManager.init(resourceManager)
 				else
 					-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
 					local bestId2, bestDist2 = nil :: string?, math.huge
-					for otherId, other in units do
-						if other.hp <= 0 then continue end
+					fillGridScratch(myPos, atkRange)
+					for gi = 1, gridScratchN do
+						local otherId = gridScratch[gi]
+						local other = units[otherId]
+						if not other or other.hp <= 0 then continue end
 						if tostring(other.owner.UserId) == myOwnerStr then continue end
 						local d = (other.part.Position - myPos).Magnitude
 						if d <= atkRange and d < bestDist2 then
@@ -1417,11 +1429,21 @@ function UnitManager.init(resourceManager)
 			end
 		end
 
+		-- Update anchored decorator parts (treads, pill body, eyes, etc.) to match body CFrame.
+		-- This replaces the old WeldConstraint physics pass for all decorated units.
+		for id, data in units do
+			local decs = unitDecorators[id]
+			if not decs then continue end
+			local bodyCF = data.part.CFrame
+			for _, d in decs do
+				d.part.CFrame = bodyCF * d.localCF
+			end
+		end
+
 		-- Remove dead units
 		for _, id in toRemove do
 			local d = units[id]
 			if d then
-				-- If this was a trapper, release slow on any units it had harpooned
 				if d.trapperHarpooned then
 					for tId, _ in d.trapperHarpooned do
 						local tgt = units[tId]
@@ -1435,6 +1457,8 @@ function UnitManager.init(resourceManager)
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
 				end
+				unitDecorators[id] = nil
+				playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
 				d.part:Destroy()
 				units[id] = nil
 				local dep = unitToDeployer[id]

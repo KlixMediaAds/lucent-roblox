@@ -27,6 +27,8 @@ local modeCb: ((boolean, string?) -> ())?
 local networkRef: any
 local cameraRef:  any
 
+local ccIsMobileRef  = false   -- true while CC is mobile; suppresses the stale build-zone ring
+
 local lineShiftHeld  = false
 local isLineDragging = false
 local lineDragStart:  Vector3?  = nil
@@ -61,6 +63,7 @@ end
 local function rebuildBuildZoneRing()
 	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
 	if currentType == "CommandCenter" then return end
+	if ccIsMobileRef then return end   -- CC is walking; its old position would be misleading
 	local zones: { { cx: number, cz: number, radius: number } } = {}
 	if ownCcPosition then
 		table.insert(zones, { cx = ownCcPosition.X, cz = ownCcPosition.Z, radius = Config.BUILD_RADIUS })
@@ -636,6 +639,18 @@ end
 
 function BuildingPlacer.setResourceGetter(fn: () -> number)
 	getResources = fn
+end
+
+-- Called when the local player's CC enters or leaves mobile (walking) state.
+-- While mobile the CC is moving so its cached position is stale — hide the ring.
+function BuildingPlacer.setCCMobile(isMobile: boolean)
+	ccIsMobileRef = isMobile
+	if isMobile and buildZoneRing then
+		RangeRing.destroy(buildZoneRing)
+		buildZoneRing = nil
+	elseif not isMobile and isPlacing then
+		rebuildBuildZoneRing()
+	end
 end
 
 return BuildingPlacer

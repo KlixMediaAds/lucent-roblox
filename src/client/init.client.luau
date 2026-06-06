@@ -123,6 +123,94 @@ end
 -- Whether the local player's CC is currently in mobile (walking) state
 local ccIsMobile = false
 
+-- Transparent CC+legs preview shown at cursor while CC is in move mode
+local ccMoveGhost:  Model?   = nil
+local ccMoveTarget: Vector3? = nil   -- last snapped ground target for the ghost
+
+local function destroyCCMoveGhost()
+	if ccMoveGhost then ccMoveGhost:Destroy(); ccMoveGhost = nil end
+	ccMoveTarget = nil
+end
+
+local function buildCCMoveGhost()
+	destroyCCMoveGhost()
+	local color = Players.LocalPlayer.TeamColor
+	local ccSz  = Config.COMMAND_CENTER_SIZE
+	local hw    = ccSz.X / 2
+	local hd    = ccSz.Z / 2
+	local halfH = ccSz.Y / 2
+
+	local m    = Instance.new("Model")
+	m.Name     = "__CCMoveGhost"
+
+	-- Transparent base block
+	local base          = Instance.new("Part")
+	base.Name           = "Base"
+	base.Size           = ccSz
+	base.Position       = Vector3.new(0, halfH, 0)
+	base.BrickColor     = color
+	base.Material       = Enum.Material.SmoothPlastic
+	base.Transparency   = 0.5
+	base.Anchored       = true
+	base.CanCollide     = false
+	base.CanQuery       = false
+	base.CastShadow     = false
+	base.Parent         = m
+	m.PrimaryPart       = base
+
+	-- Neon collar strips (same layout as UnitVisuals.buildBuildingPreview "CommandCenter")
+	for _, cY in { ccSz.Y - 0.45, 0.45 } do
+		local collarStrips = {
+			{ sz = Vector3.new(ccSz.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,         cY,  hd + 0.15) },
+			{ sz = Vector3.new(ccSz.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,         cY, -hd - 0.15) },
+			{ sz = Vector3.new(0.3, 0.9, ccSz.Z + 0.4), pos = Vector3.new( hw + 0.15, cY,  0        ) },
+			{ sz = Vector3.new(0.3, 0.9, ccSz.Z + 0.4), pos = Vector3.new(-hw - 0.15, cY,  0        ) },
+		}
+		for _, s in collarStrips do
+			local strip         = Instance.new("Part")
+			strip.Name          = "Collar"
+			strip.Size          = s.sz
+			strip.Position      = s.pos
+			strip.BrickColor    = color
+			strip.Material      = Enum.Material.Neon
+			strip.Transparency  = 0.4
+			strip.Anchored      = true
+			strip.CanCollide    = false
+			strip.CanQuery      = false
+			strip.CastShadow    = false
+			strip.Parent        = m
+		end
+	end
+
+	-- Static leg stubs (matching MechLegs geometry constants)
+	local HIP_X,  HIP_Y,  HIP_Z  = 5,  2,  5
+	local FOOT_X, FOOT_Y, FOOT_Z = 12, -5, 12
+	local LEG_W                   = 2.2
+	for _, c in { {1, 1}, {-1, -1}, {1, -1}, {-1, 1} } do
+		local xs, zs = c[1], c[2]
+		local hipL   = Vector3.new(xs * HIP_X,  halfH + HIP_Y,  zs * HIP_Z)
+		local footL  = Vector3.new(xs * FOOT_X, halfH + FOOT_Y, zs * FOOT_Z)
+		local mid    = (hipL + footL) * 0.5
+		local len    = (hipL - footL).Magnitude
+
+		local leg           = Instance.new("Part")
+		leg.Name            = "Leg"
+		leg.Size            = Vector3.new(LEG_W, len, LEG_W)
+		leg.Color           = Color3.fromRGB(50, 55, 70)
+		leg.Material        = Enum.Material.Metal
+		leg.Transparency    = 0.4
+		leg.Anchored        = true
+		leg.CanCollide      = false
+		leg.CanQuery        = false
+		leg.CastShadow      = false
+		leg.CFrame          = CFrame.lookAt(mid, footL) * CFrame.Angles(math.pi * 0.5, 0, 0)
+		leg.Parent          = m
+	end
+
+	m.Parent    = workspace
+	ccMoveGhost = m
+end
+
 local function isBlocked(): boolean
 	return BuildingPlacer.isActive()
 end
@@ -352,6 +440,7 @@ local function enterCCMode()
 	BuildingPlacer.exitPlacementMode()
 	BuildingPlacer.clearRelayPositions()
 	clearMineData()
+	destroyCCMoveGhost()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ccIsMobile          = false
@@ -515,7 +604,9 @@ Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boo
 	if ccId ~= ownCCId then return end
 	ccIsMobile = isMobile
 	CCMobilePanel.setMobileState(isUnlocked, isMobile)
+	BuildingPlacer.setCCMobile(isMobile)
 	if isMobile then
+		buildCCMoveGhost()
 		task.spawn(function()
 			local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
 			if not bf then return end
@@ -525,18 +616,36 @@ Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boo
 			if base then MechLegs.attach(ccId, base) end
 		end)
 	else
+		destroyCCMoveGhost()
 		MechLegs.detach(ccId)
 	end
 end)
 
--- Right-click while CC is mobile: issue a move-to command
+-- Update CC move ghost position every frame
+RunService.RenderStepped:Connect(function()
+	if not ccIsMobile or not ccMoveGhost then return end
+	local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
+	local pos   = CameraModule.getPositionAtHeight(halfH)
+	if pos then
+		local G       = Config.BUILDING_GRID
+		local snapped = Vector3.new(
+			math.round(pos.X / G) * G,
+			pos.Y,
+			math.round(pos.Z / G) * G
+		)
+		ccMoveTarget = Vector3.new(snapped.X, 0, snapped.Z)
+		ccMoveGhost:PivotTo(CFrame.new(snapped))
+	end
+end)
+
+-- Right-click while CC is mobile: issue a move-to command at the ghost's snapped position
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
 	if not ccIsMobile or not ownCCId then return end
-	local ground = CameraModule.getGroundPosition()
-	if ground then
-		Network.moveMobileCC(ownCCId, ground)
+	local target = ccMoveTarget or CameraModule.getGroundPosition()
+	if target then
+		Network.moveMobileCC(ownCCId, target)
 	end
 end)
 
