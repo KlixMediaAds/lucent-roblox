@@ -15,7 +15,7 @@ Config.DEPLOYER_SPAWN_INTERVAL = 15 -- seconds between auto-spawn checks
 Config.UNIT_TYPES = {
 	Soldier       = { cost = 25,  size = Vector3.new(4, 4, 4) },
 	Tank          = { cost = 60,  size = Vector3.new(7, 5, 9)  },
-	Howitzer      = { cost = 90,  size = Vector3.new(8, 5, 10) },
+	Howitzer      = { cost = 90,  size = Vector3.new(8, 14, 8) },
 	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
 	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets

@@ -17,6 +17,7 @@ local HUD            = require(script:WaitForChild("HUD"))
 local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
+local WalkerLegs     = require(script:WaitForChild("WalkerLegs"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
@@ -223,6 +224,7 @@ CameraModule.init()
 DepositFX.start()
 SpiderLegs.init(workspace.CurrentCamera)
 CreepyLegs.init(workspace.CurrentCamera)
+WalkerLegs.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
 
@@ -934,6 +936,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			SpiderLegs.attach(unitId, part)
 		elseif tv and tv.Value == "CreepySoldier" then
 			CreepyLegs.attach(unitId, part)
+		elseif tv and tv.Value == "Howitzer" then
+			WalkerLegs.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -2724,24 +2728,58 @@ local function spawnHowitzerShell(fromPos: Vector3, toPos: Vector3)
 	local ARC        = 20.0   -- studs — dramatic high parabola
 	local STREAK_LEN = 4.0    -- stud length of the shell body
 
-	local origin = fromPos + Vector3.new(0, 2.5, 0)
+	local origin = fromPos + Vector3.new(0, 2, 0)
 	local dest   = toPos   + Vector3.new(0, 0.5, 0)
 
 	local rawDir = dest - origin
 	local dist   = rawDir.Magnitude
 	local tUnit  = if dist > 0.01 then rawDir / dist else Vector3.new(0, 0, -1)
 
-	-- ── Muzzle flash at barrel ────────────────────────────────────────────────
+	-- ── Steam muzzle blast (large core + expanding steam ring) ───────────────
 	local muzzle          = Instance.new("Part")
 	muzzle.Name           = "_HwMuzzle"
-	muzzle.Size           = Vector3.new(1.0, 1.0, 1.0)
+	muzzle.Size           = Vector3.new(2.2, 2.2, 2.2)
 	muzzle.Shape          = Enum.PartType.Ball
-	muzzle.Color          = Color3.fromRGB(255, 246, 205)
+	muzzle.Color          = Color3.fromRGB(240, 230, 210)
 	muzzle.Material       = Enum.Material.Neon
 	muzzle.Anchored       = true; muzzle.CanCollide = false; muzzle.CanQuery = false; muzzle.CastShadow = false
 	muzzle.Position       = origin
 	muzzle.Parent         = workspace
-	task.delay(0.08, function() if muzzle.Parent then muzzle:Destroy() end end)
+
+	-- Steam ring expanding from barrel
+	local steamRing        = Instance.new("Part")
+	steamRing.Name         = "_HwSteamRing"
+	steamRing.Shape        = Enum.PartType.Cylinder
+	steamRing.Size         = Vector3.new(0.35, 1, 1)
+	steamRing.Color        = Color3.fromRGB(210, 210, 210)
+	steamRing.Material     = Enum.Material.Neon
+	steamRing.Transparency = 0.3
+	steamRing.Anchored     = true; steamRing.CanCollide = false; steamRing.CanQuery = false; steamRing.CastShadow = false
+	steamRing.CFrame       = CFrame.new(origin) * CFrame.Angles(0, 0, math.pi / 2)
+	steamRing.Parent       = workspace
+
+	-- Animate muzzle flash and steam ring
+	local muzzElapsed = 0
+	local MUZZLE_DUR  = 0.18
+	local muzzConn: RBXScriptConnection
+	muzzConn = RunService.RenderStepped:Connect(function(dt)
+		muzzElapsed += dt
+		local p = math.min(muzzElapsed / MUZZLE_DUR, 1)
+		if muzzle.Parent then
+			muzzle.Size         = Vector3.new(2.2 + p * 3, 2.2 + p * 3, 2.2 + p * 3)
+			muzzle.Transparency = p
+		end
+		if steamRing.Parent then
+			local d = 1 + p * 10
+			steamRing.Size         = Vector3.new(0.35, d, d)
+			steamRing.Transparency = 0.2 + p * 0.8
+		end
+		if p >= 1 then
+			muzzConn:Disconnect()
+			if muzzle.Parent    then muzzle:Destroy()    end
+			if steamRing.Parent then steamRing:Destroy() end
+		end
+	end)
 
 	-- ── Shell body — oriented along arc tangent (velocity direction) ──────────
 	-- At t=0 the shell points steeply upward; at peak it's horizontal;

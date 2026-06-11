@@ -198,45 +198,59 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		addTankTreads(body)
 	end
 	if unitType == "Howitzer" then
-		-- Static preview: all parts anchored, parented directly to parent (no welds).
-		local grey = BrickColor.new("Dark stone grey")
-		local col  = body.BrickColor
-		local bp   = body.Position       -- (0, 0, 0) in preview context
-		local halfX = body.Size.X / 2 + 0.90  -- 4 + 0.9
-		local halfY = body.Size.Y / 2          -- 2.5
+		-- Static preview of the steam walker. Body is at (0,0,0); root is invisible.
+		-- All offsets mirror UnitManager (root center = Y=0 in preview space).
+		-- Negative Z = forward direction in the viewport.
+		local grey  = BrickColor.new("Dark stone grey")
+		local black = BrickColor.new("Black")
+		local brass = BrickColor.new("Warm Yellow")
+		local col   = body.BrickColor
+		body.Transparency = 1  -- root invisible; all visuals are explicit parts
 
-		local function ap(sz: Vector3, pos: Vector3, bc: BrickColor, mat: Enum.Material): Part
+		local function ap(sz: Vector3, pos: Vector3, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
 			local p = makePart(parent)
-			p.Size     = sz
-			p.Position = pos
+			if shape then (p :: any).Shape = shape end
+			p.Size      = sz
+			p.Position  = pos
 			p.BrickColor = bc
 			p.Material   = mat
 			return p
 		end
 
-		-- Treads (wider than tank to match 8-stud hull)
-		local treadY = bp.Y - halfY + 1.3
+		-- Hip plate
+		ap(Vector3.new(8.5, 2, 8.5),   Vector3.new(0, 0, 0),          grey,  Enum.Material.Metal)
+		-- Engine housing
+		ap(Vector3.new(7.5, 4.5, 8),   Vector3.new(0, 3.5, 0),        grey,  Enum.Material.SmoothPlastic)
+		ap(Vector3.new(5, 3.5, 1.5),   Vector3.new(0, 3.5, -5),       grey,  Enum.Material.Metal)
+		-- Boiler
+		ap(Vector3.new(7, 5.5, 8.5),   Vector3.new(0, 8, 0),          grey,  Enum.Material.SmoothPlastic)
+		ap(Vector3.new(7.5, 0.7, 0.5), Vector3.new(0, 9.5, 0),        brass, Enum.Material.SmoothPlastic)
+		ap(Vector3.new(7.5, 0.7, 0.5), Vector3.new(0, 6.5, 0),        brass, Enum.Material.SmoothPlastic)
+		-- Cockpit
+		ap(Vector3.new(4.5, 3.5, 2),   Vector3.new(0, 8, -5.3),       grey,  Enum.Material.Metal)
+		ap(Vector3.new(4.5, 0.5, 0.2), Vector3.new(0, 8.3, -6.35),    col,   Enum.Material.Neon)
+		-- Smokestacks (rear = +Z in preview)
+		ap(Vector3.new(1.6, 7, 1.6),   Vector3.new(-2, 13, 3),        black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+		ap(Vector3.new(1.3, 5.5, 1.3), Vector3.new(-0.3, 12.3, 2),    black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+		-- Cannon
+		ap(Vector3.new(3, 2.5, 3),     Vector3.new(0, 2, -4.5),       grey,  Enum.Material.Metal)
+		ap(Vector3.new(0.9, 0.9, 5.5), Vector3.new(-0.85, 2, -7.3),   grey,  Enum.Material.Metal)
+		ap(Vector3.new(0.9, 0.9, 5.5), Vector3.new( 0.85, 2, -7.3),   grey,  Enum.Material.Metal)
+		-- Pipes
+		ap(Vector3.new(0.5, 3.5, 0.5), Vector3.new(0, 5, -4),         brass, Enum.Material.SmoothPlastic)
+		ap(Vector3.new(6, 0.5, 0.5),   Vector3.new(0, 7.2, -5.5),     brass, Enum.Material.SmoothPlastic)
+		-- Side braces
+		ap(Vector3.new(0.8, 9, 0.8),   Vector3.new(-4.2, 4.5, 0),     grey,  Enum.Material.Metal)
+		ap(Vector3.new(0.8, 9, 0.8),   Vector3.new( 4.2, 4.5, 0),     grey,  Enum.Material.Metal)
+		-- Static legs at rest position (simple blocks; animated version is client-side)
 		for _, side in { -1, 1 } do
-			ap( Vector3.new(1.65, 2.55, body.Size.Z + 1.65),
-				Vector3.new(bp.X + side * halfX, treadY, bp.Z),
-				grey, Enum.Material.SmoothPlastic )
+			-- Upper leg (hip to knee)
+			ap(Vector3.new(2.4, 4, 2.4), Vector3.new(side * 4.4, -2.5, 0),   grey,  Enum.Material.Metal)
+			-- Lower leg (knee to foot)
+			ap(Vector3.new(2.0, 3.5, 2.0), Vector3.new(side * 4.8, -6.3, 0.2), grey, Enum.Material.Metal)
+			-- Foot plate
+			ap(Vector3.new(3.5, 0.9, 4.5), Vector3.new(side * 4.8, -7.5, 0.3), grey, Enum.Material.Metal)
 		end
-		-- Upper armored hull
-		ap( Vector3.new(5.2, 2.0, 7.5),
-			Vector3.new(bp.X, bp.Y + halfY + 1.0, bp.Z + 0.5),
-			col, Enum.Material.SmoothPlastic )
-		-- Barrel mount (turret ring)
-		ap( Vector3.new(2.5, 1.6, 2.5),
-			Vector3.new(bp.X, bp.Y + halfY + 2.8, bp.Z - 0.3),
-			grey, Enum.Material.SmoothPlastic )
-		-- Long barrel pointing forward (-Z)
-		ap( Vector3.new(0.80, 0.80, 8.2),
-			Vector3.new(bp.X, bp.Y + halfY + 2.8, bp.Z - 3.3),
-			grey, Enum.Material.Metal )
-		-- Neon accent strip on hull rear
-		ap( Vector3.new(5.2, 0.25, 0.3),
-			Vector3.new(bp.X, bp.Y + halfY + 2.05, bp.Z + 4.2),
-			col, Enum.Material.Neon )
 	end
 	if unitType == "Medic" then
 		addMedicCross(parent, body)

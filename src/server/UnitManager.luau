@@ -398,15 +398,19 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		hv.Parent  = part
 	end
 	if unitType == "Howitzer" then
+		-- Root is the invisible hip pivot. All visuals are decorator parts.
+		-- Root center sits at Y=7 above ground; negative Z = unit's forward direction.
+		local col   = part.BrickColor  -- team color (save before making root invisible)
+		part.Transparency = 1
 		local grey  = BrickColor.new("Dark stone grey")
-		local col   = part.BrickColor
-		local halfX = part.Size.X / 2 + 0.90
-		local halfY = part.Size.Y / 2
+		local black = BrickColor.new("Black")
+		local brass = BrickColor.new("Warm Yellow")
 		local decs  = unitDecorators[id]
 
-		local function anchored(sz: Vector3, localCF: CFrame, bc: BrickColor, mat: Enum.Material)
+		local function anchored(sz: Vector3, localCF: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?)
 			local p          = Instance.new("Part")
 			p.Size           = sz
+			if shape then (p :: any).Shape = shape end
 			p.BrickColor     = bc
 			p.Material       = mat
 			p.Anchored       = true
@@ -416,17 +420,87 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 			p.CFrame         = part.CFrame * localCF
 			p.Parent         = part
 			decs[#decs + 1]  = { part = p, localCF = localCF }
+			return p
 		end
 
-		local treadY = -halfY + 1.3
-		for _, side in { -1, 1 } do
-			anchored( Vector3.new(1.65, 2.55, part.Size.Z + 1.65),
-				CFrame.new(side * halfX, treadY, 0), grey, Enum.Material.SmoothPlastic )
+		-- Hip / pelvis plate (connects the mechanical legs)
+		anchored(Vector3.new(8.5, 2, 8.5),   CFrame.new(0, 0, 0),          grey, Enum.Material.Metal)
+
+		-- Engine housing (lower torso, below boiler)
+		anchored(Vector3.new(7.5, 4.5, 8),   CFrame.new(0, 3.5, 0),        grey, Enum.Material.SmoothPlastic)
+		-- Front housing flange
+		anchored(Vector3.new(5, 3.5, 1.5),   CFrame.new(0, 3.5, -5),       grey, Enum.Material.Metal)
+
+		-- Main boiler box (the locomotive drum)
+		anchored(Vector3.new(7, 5.5, 8.5),   CFrame.new(0, 8, 0),          grey, Enum.Material.SmoothPlastic)
+		-- Brass boiler bands (horizontal rings)
+		anchored(Vector3.new(7.5, 0.7, 0.5), CFrame.new(0, 9.5, 0),        brass, Enum.Material.SmoothPlastic)
+		anchored(Vector3.new(7.5, 0.7, 0.5), CFrame.new(0, 6.5, 0),        brass, Enum.Material.SmoothPlastic)
+
+		-- Cockpit armored box (front of boiler)
+		anchored(Vector3.new(4.5, 3.5, 2),   CFrame.new(0, 8, -5.3),       grey, Enum.Material.Metal)
+		-- Observation slit (narrow neon strip)
+		anchored(Vector3.new(4.5, 0.5, 0.2), CFrame.new(0, 8.3, -6.35),    col,  Enum.Material.Neon)
+
+		-- Smokestacks (rear of boiler, vertical cylinders)
+		local st1 = anchored(Vector3.new(1.6, 7, 1.6),   CFrame.new(-2, 13, 3),   black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+		st1.Name = "_HwStack1"
+		local st2 = anchored(Vector3.new(1.3, 5.5, 1.3), CFrame.new(-0.3, 12.3, 2), black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+		st2.Name = "_HwStack2"
+
+		-- Cannon mount bracket (front lower body, -Z = forward)
+		anchored(Vector3.new(3, 2.5, 3),     CFrame.new(0, 2, -4.5),       grey, Enum.Material.Metal)
+		-- Dual steam cannon barrels (extend forward along -Z)
+		anchored(Vector3.new(0.9, 0.9, 5.5), CFrame.new(-0.85, 2, -7.3),   grey, Enum.Material.Metal)
+		anchored(Vector3.new(0.9, 0.9, 5.5), CFrame.new( 0.85, 2, -7.3),   grey, Enum.Material.Metal)
+		-- Steam feed pipe (vertical, boiler to cannon)
+		anchored(Vector3.new(0.5, 3.5, 0.5), CFrame.new(0, 5, -4),         brass, Enum.Material.SmoothPlastic)
+		-- Horizontal pressure manifold across front
+		anchored(Vector3.new(6, 0.5, 0.5),   CFrame.new(0, 7.2, -5.5),     brass, Enum.Material.SmoothPlastic)
+
+		-- Vertical side structural braces
+		anchored(Vector3.new(0.8, 9, 0.8),   CFrame.new(-4.2, 4.5, 0),     grey, Enum.Material.Metal)
+		anchored(Vector3.new(0.8, 9, 0.8),   CFrame.new( 4.2, 4.5, 0),     grey, Enum.Material.Metal)
+
+		-- Rear exhaust vent
+		anchored(Vector3.new(3, 0.6, 0.5),   CFrame.new(0, 5.5, 4.5),      grey, Enum.Material.Metal)
+
+		-- Continuous smoke particles from both smokestacks
+		for _, stkPart in { st1, st2 } do
+			local att      = Instance.new("Attachment")
+			att.Position   = Vector3.new(0, stkPart.Size.Y / 2, 0)
+			att.Parent     = stkPart
+			local pe                  = Instance.new("ParticleEmitter")
+			pe.Color                  = ColorSequence.new({
+				ColorSequenceKeypoint.new(0,   Color3.fromRGB(90, 90, 90)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(55, 55, 55)),
+				ColorSequenceKeypoint.new(1,   Color3.fromRGB(28, 28, 28)),
+			})
+			pe.LightEmission          = 0
+			pe.LightInfluence         = 0.5
+			pe.Lifetime               = NumberRange.new(2.0, 3.5)
+			pe.Rate                   = if stkPart == st1 then 10 else 7
+			pe.Rotation               = NumberRange.new(0, 360)
+			pe.RotSpeed               = NumberRange.new(-25, 25)
+			pe.Size                   = NumberSequence.new({
+				NumberSequenceKeypoint.new(0,   0.5),
+				NumberSequenceKeypoint.new(0.5, 2.0),
+				NumberSequenceKeypoint.new(1,   3.2),
+			})
+			pe.Transparency           = NumberSequence.new({
+				NumberSequenceKeypoint.new(0,   0.10),
+				NumberSequenceKeypoint.new(0.5, 0.55),
+				NumberSequenceKeypoint.new(1,   1.00),
+			})
+			pe.Speed                  = NumberRange.new(2.5, 5)
+			pe.SpreadAngle            = Vector2.new(12, 12)
+			pe.VelocityInheritance    = 0.2
+			pe.Parent                 = att
 		end
-		anchored( Vector3.new(5.2, 2.0, 7.5),  CFrame.new(0, halfY + 1.0,  0.5), col,  Enum.Material.SmoothPlastic )
-		anchored( Vector3.new(2.5, 1.6, 2.5),  CFrame.new(0, halfY + 2.8, -0.3), grey, Enum.Material.SmoothPlastic )
-		anchored( Vector3.new(0.80, 0.80, 8.2), CFrame.new(0, halfY + 2.8, -3.3), grey, Enum.Material.Metal )
-		anchored( Vector3.new(5.2, 0.25, 0.3),  CFrame.new(0, halfY + 2.05, 4.2), col,  Enum.Material.Neon )
+
+		-- Push the health bar above the smokestacks
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 17, 0) end
 	end
 	if unitType == "Medic" then addMedicCross(id, part) end
 	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(id, part, unitType) end
