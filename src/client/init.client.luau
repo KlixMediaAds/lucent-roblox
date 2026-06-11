@@ -1,6 +1,7 @@
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
+local SoundService      = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -1603,12 +1604,27 @@ end)
 -- Attack alerts: drop a pulsing ping on the minimap and, less often, a toast.
 -- The server already throttles per region; the toast is throttled again per
 -- category here so sustained fights don't stack toasts.
+local ALERT_SOUND_ID       = "rbxassetid://140638438234714"
 local lastAlertToast: { [string]: number } = { base = 0, army = 0 }
-local ALERT_TOAST_THROTTLE = 8   -- seconds between toasts of the same category
+local ALERT_TOAST_THROTTLE = 8     -- seconds between toasts of the same category
+local lastAlertSound       = 0
+local ALERT_SOUND_THROTTLE = 2.5   -- seconds between alert sounds (any category)
 Network.onAttackAlert(function(worldPos: Vector3, category: string)
 	MiniMap.ping(worldPos, category)
 
 	local now = os.clock()
+
+	-- Alert beep — global throttle so base+army hits don't double up.
+	if now - lastAlertSound >= ALERT_SOUND_THROTTLE then
+		lastAlertSound = now
+		local s    = Instance.new("Sound")
+		s.SoundId  = ALERT_SOUND_ID
+		s.Volume   = 0.6
+		s.Parent   = SoundService
+		s:Play()
+		s.Ended:Once(function() s:Destroy() end)
+	end
+
 	if now - (lastAlertToast[category] or 0) >= ALERT_TOAST_THROTTLE then
 		lastAlertToast[category] = now
 		if category == "army" then
