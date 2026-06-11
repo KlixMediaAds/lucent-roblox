@@ -1,6 +1,7 @@
 local RunService       = game:GetService("RunService")
 local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
 
 local MiniMap     = {}
 local localPlayer = Players.LocalPlayer
@@ -34,6 +35,12 @@ local C_CC_ENEMY    = Color3.fromRGB(220, 100,  30)
 local C_MONUMENT    = Color3.fromRGB(255, 215,   0)  -- gold — always shown
 local C_DEPOSIT     = Color3.fromRGB(255, 248, 160)  -- light yellow — ore deposits
 local C_TERRAIN     = Color3.fromRGB(78,  66,  56)   -- grey-brown — terrain obstacles
+
+-- Attack-alert ping colors, keyed by category
+local PING_COLORS: { [string]: Color3 } = {
+	base = Color3.fromRGB(255,  70,  55),   -- red    — buildings under attack
+	army = Color3.fromRGB(255, 195,  45),   -- amber  — units under attack
+}
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -574,6 +581,62 @@ local function buildUI()
 	lbl.Parent                = border
 
 	return inner, clickArea
+end
+
+-- ── Attack-alert pings ────────────────────────────────────────────────────────
+
+-- Drops a transient, pulsing ping on the minimap at a world position. Used by
+-- the AttackAlert handler to show where the player's base/army is under attack.
+-- `category` is "base" (red) or "army" (amber).
+function MiniMap.ping(worldPos: Vector3, category: string)
+	if not canvas then return end
+	local color = PING_COLORS[category] or PING_COLORS.base
+	local u, v  = w2m(worldPos.X, worldPos.Z)
+
+	-- Persistent center dot (fades out after the pulses finish).
+	local dot              = Instance.new("Frame")
+	dot.Size               = UDim2.fromOffset(7, 7)
+	dot.AnchorPoint        = Vector2.new(0.5, 0.5)
+	dot.Position           = UDim2.fromOffset(u, v)
+	dot.BackgroundColor3   = color
+	dot.BorderSizePixel    = 0
+	dot.ZIndex             = 9
+	Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+	dot.Parent             = canvas
+
+	-- Three expanding ring pulses, staggered for a radar-sweep feel.
+	for i = 0, 2 do
+		task.delay(i * 0.32, function()
+			if not dot.Parent then return end   -- ping was cleaned up early
+			local ring             = Instance.new("Frame")
+			ring.Size              = UDim2.fromOffset(8, 8)
+			ring.AnchorPoint       = Vector2.new(0.5, 0.5)
+			ring.Position          = UDim2.fromOffset(u, v)
+			ring.BackgroundTransparency = 1
+			ring.ZIndex            = 8
+			Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+			local stroke           = Instance.new("UIStroke")
+			stroke.Color           = color
+			stroke.Thickness       = 2
+			stroke.Transparency    = 0
+			stroke.Parent          = ring
+			ring.Parent            = canvas
+
+			local ti = TweenInfo.new(0.85, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			TweenService:Create(ring, ti, { Size = UDim2.fromOffset(36, 36) }):Play()
+			local fade = TweenService:Create(stroke, ti, { Transparency = 1 })
+			fade:Play()
+			fade.Completed:Once(function() ring:Destroy() end)
+		end)
+	end
+
+	-- Fade and remove the center dot once the sweep completes.
+	task.delay(1.7, function()
+		if not dot.Parent then return end
+		local out = TweenService:Create(dot, TweenInfo.new(0.3), { BackgroundTransparency = 1 })
+		out:Play()
+		out.Completed:Once(function() dot:Destroy() end)
+	end)
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

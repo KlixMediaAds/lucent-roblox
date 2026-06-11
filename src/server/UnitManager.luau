@@ -5,6 +5,7 @@ local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local UnitBlueprints    = require(Shared:WaitForChild("UnitBlueprints"))
+local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
 
 local UnitManager = {}
 
@@ -293,6 +294,10 @@ local function addHealthBar(part: BasePart)
 end
 
 local function applyHP(data: UnitData, tookDamage: boolean?)
+	-- Notify the owner that their army is under attack here (throttled per region).
+	if tookDamage and data.hp > 0 then
+		AlertManager.report(data.owner, data.part.Position, "army")
+	end
 	local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
 	if not bb then return end
 	local ratio = math.clamp(data.hp / data.maxHp, 0, 1)
@@ -1546,6 +1551,7 @@ function UnitManager.init(resourceManager)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
+		AlertManager.clearPlayer(player.UserId)
 		local toRemove = {}
 		for id, data in units do
 			if data.owner == player then table.insert(toRemove, id) end

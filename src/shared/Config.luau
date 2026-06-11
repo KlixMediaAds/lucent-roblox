@@ -244,6 +244,7 @@ Config.REMOTES = {
 	MineIncome              = "MineIncome",
 	MineBeams               = "MineBeams",
 	CCAttacked              = "CCAttacked",
+	AttackAlert             = "AttackAlert",
 	MineDepletionWarning    = "MineDepletionWarning",
 	HealBeam                = "HealBeam",
 	CometWave               = "CometWave",

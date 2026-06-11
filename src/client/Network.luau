@@ -158,6 +158,12 @@ function Network.onCCAttacked(fn: () -> ())
 	RemoteHandler.get(Config.REMOTES.CCAttacked).OnClientEvent:Connect(fn)
 end
 
+-- Fired by server when the local player's base/army is under attack (throttled
+-- per region). worldPos = where, category = "base" or "army".
+function Network.onAttackAlert(fn: (worldPos: Vector3, category: string) -> ())
+	RemoteHandler.get(Config.REMOTES.AttackAlert).OnClientEvent:Connect(fn)
+end
+
 -- Fired by server when a mine owned by the local player is depleted
 function Network.onMineDepletionWarning(fn: (mineId: string) -> ())
 	RemoteHandler.get(Config.REMOTES.MineDepletionWarning).OnClientEvent:Connect(fn)

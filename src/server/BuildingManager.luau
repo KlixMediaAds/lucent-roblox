@@ -4,6 +4,7 @@ local Debris            = game:GetService("Debris")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
 
 local rng = Random.new()
 
@@ -1057,7 +1058,12 @@ function BuildingManager.damage(id: string, amount: number)
 	data.hp = math.max(0, data.hp - amount)
 	applyHP(data, true)
 
-	-- Notify owner when their CC is being attacked (throttled)
+	-- Map ping: this part of the owner's base is under attack (throttled per region).
+	if data.hp > 0 then
+		AlertManager.report(data.owner, data.base.Position, "base")
+	end
+
+	-- Extra banner notification for the Command Center specifically (throttled)
 	if data.buildingType == "CommandCenter" and data.hp > 0 then
 		local uid  = data.owner.UserId
 		local now  = os.clock()

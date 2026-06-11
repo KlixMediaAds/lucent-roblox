@@ -1600,6 +1600,25 @@ Network.onCCAttacked(function()
 	HUD.showNotification("⚠ Command Center is under attack!", Color3.fromRGB(230, 60, 60))
 end)
 
+-- Attack alerts: drop a pulsing ping on the minimap and, less often, a toast.
+-- The server already throttles per region; the toast is throttled again per
+-- category here so sustained fights don't stack toasts.
+local lastAlertToast: { [string]: number } = { base = 0, army = 0 }
+local ALERT_TOAST_THROTTLE = 8   -- seconds between toasts of the same category
+Network.onAttackAlert(function(worldPos: Vector3, category: string)
+	MiniMap.ping(worldPos, category)
+
+	local now = os.clock()
+	if now - (lastAlertToast[category] or 0) >= ALERT_TOAST_THROTTLE then
+		lastAlertToast[category] = now
+		if category == "army" then
+			HUD.showNotification("⚔ Your army is under attack!", Color3.fromRGB(255, 195, 45))
+		else
+			HUD.showNotification("⚠ Your base is under attack!", Color3.fromRGB(255, 70, 55))
+		end
+	end
+end)
+
 Network.onMineDepletionWarning(function(_mineId: string)
 	HUD.showNotification("⛏ A Mine has been depleted.", Color3.fromRGB(220, 150, 30))
 end)
