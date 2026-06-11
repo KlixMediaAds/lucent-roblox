@@ -25,10 +25,11 @@ local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
-local CometManager   = require(script:WaitForChild("CometManager"))
-local DepositFX      = require(script:WaitForChild("DepositFX"))
-local LobbyUI        = require(script:WaitForChild("LobbyUI"))
-local ShaderManager  = require(script:WaitForChild("ShaderManager"))
+local CometManager    = require(script:WaitForChild("CometManager"))
+local DepositFX       = require(script:WaitForChild("DepositFX"))
+local LobbyUI         = require(script:WaitForChild("LobbyUI"))
+local ShaderManager   = require(script:WaitForChild("ShaderManager"))
+local ViewportPreview = require(script:WaitForChild("ViewportPreview"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -3730,6 +3731,86 @@ Network.onTentacleTargets(function(turretId: string, _headPos: Vector3, t1: Vect
 		end
 	end
 end)
+
+-- ── Signal flare building icon (ScreenGui overlay — same method as BarracksPanel unit icons) ──
+-- ViewportFrame does not render inside BillboardGui (world-space GUI), so we
+-- mirror the BarracksPanel approach: the preview lives in a ScreenGui and is
+-- repositioned each frame using WorldToViewportPoint.
+do
+	type FlareEntry = { anchor: BasePart, frame: Frame }
+	local flareEntries: { FlareEntry } = {}
+
+	local flareSg              = Instance.new("ScreenGui")
+	flareSg.Name               = "FlareIconOverlay"
+	flareSg.IgnoreGuiInset     = true
+	flareSg.ResetOnSpawn       = false
+	flareSg.ZIndexBehavior     = Enum.ZIndexBehavior.Sibling
+	flareSg.Parent             = Players.LocalPlayer.PlayerGui
+
+	local function registerFlare(model: Model)
+		local anchor = model:WaitForChild("Anchor", 5) :: BasePart?
+		if not anchor or not model.Parent then return end
+		local bt = model:GetAttribute("BuildingType") :: string?
+		if not bt then return end
+
+		local frame                  = Instance.new("Frame")
+		frame.Size                   = UDim2.fromOffset(44, 44)
+		frame.AnchorPoint            = Vector2.new(0.5, 1)
+		frame.BackgroundTransparency = 1  -- transparent: never covers the BillboardGui progress bar
+		frame.BorderSizePixel        = 0
+		frame.ZIndex                 = 15
+		frame.Visible                = false
+		frame.Parent                 = flareSg
+
+		-- 3D building preview — identical mechanism to BarracksPanel unit icons
+		local vpf = ViewportPreview.forBuilding(bt, Vector2.new(38, 38))
+		vpf.Position = UDim2.fromOffset(3, 3)
+		vpf.Parent   = frame
+
+		table.insert(flareEntries, { anchor = anchor, frame = frame })
+
+		model.Destroying:Connect(function()
+			frame:Destroy()
+			for i, e in flareEntries do
+				if e.anchor == anchor then table.remove(flareEntries, i); break end
+			end
+		end)
+	end
+
+	workspace.DescendantAdded:Connect(function(inst)
+		if inst:IsA("Model") and inst.Name == "_SignalFlare" then
+			task.spawn(registerFlare, inst :: Model)
+		end
+	end)
+	for _, d in workspace:GetDescendants() do
+		if d:IsA("Model") and d.Name == "_SignalFlare" then
+			task.spawn(registerFlare, d :: Model)
+		end
+	end
+
+	-- Reposition each icon every frame to track the flare's world position.
+	-- The billboard's StudsOffset is (0,5,0), so its center in screen space is
+	-- anchor + (0,5,0). The icon sits just above the progress bar: bottom of the
+	-- 44px icon aligns with the top 44px slot of the 52px billboard (+18px below
+	-- billboard center with AnchorPoint.Y = 1).
+	RunService:BindToRenderStep("FlareIconPositions", Enum.RenderPriority.Camera.Value + 1, function()
+		if #flareEntries == 0 then return end
+		local cam = workspace.CurrentCamera
+		for _, e in flareEntries do
+			if not e.anchor.Parent then
+				e.frame.Visible = false
+				continue
+			end
+			local sv, onScreen = cam:WorldToViewportPoint(e.anchor.Position + Vector3.new(0, 5, 0))
+			if onScreen and sv.Z > 0 then
+				e.frame.Visible  = true
+				e.frame.Position = UDim2.fromOffset(math.floor(sv.X), math.floor(sv.Y + 8))
+			else
+				e.frame.Visible = false
+			end
+		end
+	end)
+end
 
 end -- startGame
 

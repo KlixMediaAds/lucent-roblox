@@ -1,4 +1,5 @@
 local RunService        = game:GetService("RunService")
+local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris            = game:GetService("Debris")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
@@ -34,6 +35,20 @@ local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() exp
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
+-- ── Drop pod build queue ──────────────────────────────────────────────────────
+local DROP_POD_FLIGHT_TIME = 2.5   -- seconds from CC launch to ground impact
+local BUILD_RISE_TIME      = 1.3   -- seconds for building to rise after pod lands
+local DEPLOY_STAGGER_DELAY = 1.0   -- seconds between sequential pod launches from the same CC
+
+local nextBuildRiseTime: number? = nil  -- overrides BUILD_TIME for the next createBuilding call
+
+type PendingBuild = { buildingType: string, position: Vector3, timeLeft: number, totalTime: number, flare: Model, progressFill: Frame?, player: any, isMine: boolean }
+type ReadyBuild   = { buildingType: string, position: Vector3, flare: Model, player: any, isMine: boolean }
+
+local pendingBuilds: { [number]: { PendingBuild } } = {}
+local deployQueue:   { [number]: { ReadyBuild } }   = {}
+local deployDelay:   { [number]: number }            = {}
+
 -- ── Mobile CC state ───────────────────────────────────────────────────────────
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
 local ccMobile:         { [string]: boolean } = {}  -- ccId   → currently walking
@@ -51,9 +66,9 @@ local function buildingSize(buildingType: string): Vector3
 	return Config.BUILDING_SIZE
 end
 
--- Forward-declared so createBuilding can reference it in a task.spawn closure;
--- the actual body is assigned after spawnDestructionVFX below.
-local spawnWormBurstVFX: (Vector3) -> ()
+-- Forward-declared so functions defined before their bodies can call them.
+local spawnDestructionVFX: (Vector3) -> ()
+local spawnWormBurstVFX:   (Vector3) -> ()
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -369,43 +384,106 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		end
 
 	elseif buildingType == "Relay" then
-		-- Slim antenna pole
-		local pole       = Instance.new("Part")
-		pole.Name        = "Pole"
-		pole.Size        = Vector3.new(1, size.Y + 6, 1)
-		pole.Position    = position + Vector3.new(0, (size.Y + 6) / 2, 0)
-		pole.BrickColor  = BrickColor.new("Dark stone grey")
-		pole.Material    = Enum.Material.Metal
-		pole.Anchored    = true
-		pole.CastShadow  = false
-		pole.Parent      = model
+		-- Mag-Rail Relay: armored electromagnetic launch tower.
+		-- Catches incoming deploy pods and fires them onward toward the target.
+		local grey = BrickColor.new("Dark stone grey")
+		local tc   = player.TeamColor
 
-		-- Glowing orb at the top in team color
-		local orb        = Instance.new("Part")
-		orb.Name         = "Orb"
-		orb.Shape        = Enum.PartType.Ball
-		orb.Size         = Vector3.new(2.5, 2.5, 2.5)
-		orb.Position     = position + Vector3.new(0, size.Y + 7.25, 0)
-		orb.BrickColor   = player.TeamColor
-		orb.Material     = Enum.Material.Neon
-		orb.Anchored     = true
-		orb.CastShadow   = false
-		orb.CanCollide   = false
-		orb.Parent       = model
+		-- Repurpose base as a wide armored foundation slab
+		base.Size       = Vector3.new(8, 1.5, 8)
+		base.Position   = position + Vector3.new(0, 0.75, 0)
+		base.BrickColor = grey
+		base.Material   = Enum.Material.Metal
 
-		-- Small accent ring around orb base
-		local ring        = Instance.new("Part")
-		ring.Name         = "Ring"
-		ring.Shape        = Enum.PartType.Cylinder
-		ring.Size         = Vector3.new(0.3, 4, 4)
-		ring.CFrame       = CFrame.new(position + Vector3.new(0, size.Y + 6, 0))
-		                  * CFrame.Angles(0, 0, math.pi / 2)
-		ring.BrickColor   = player.TeamColor
-		ring.Material     = Enum.Material.Neon
-		ring.Anchored     = true
-		ring.CastShadow   = false
-		ring.CanCollide   = false
-		ring.Parent       = model
+		-- Central launch column (vertical cylinder — the barrel)
+		local col      = Instance.new("Part")
+		col.Name       = "Column"
+		col.Shape      = Enum.PartType.Cylinder
+		col.Size       = Vector3.new(9, 2.6, 2.6)
+		col.CFrame     = CFrame.new(position + Vector3.new(0, 6, 0))
+		              * CFrame.Angles(0, 0, math.pi / 2)
+		col.BrickColor = grey
+		col.Material   = Enum.Material.Metal
+		col.Anchored   = true
+		col.CastShadow = false
+		col.CanCollide = false
+		col.Parent     = model
+
+		-- Three accelerator coil rings along the column (team-color neon)
+		for i, ry in {3.5, 5.7, 7.9} do
+			local coil      = Instance.new("Part")
+			coil.Name       = "CoilRing" .. i
+			coil.Shape      = Enum.PartType.Cylinder
+			coil.Size       = Vector3.new(0.45, 3.4, 3.4)
+			coil.CFrame     = CFrame.new(position + Vector3.new(0, ry, 0))
+			             * CFrame.Angles(0, 0, math.pi / 2)
+			coil.BrickColor = tc
+			coil.Material   = Enum.Material.Neon
+			coil.Anchored   = true
+			coil.CastShadow = false
+			coil.CanCollide = false
+			coil.Parent     = model
+		end
+
+		-- Barrel cap: dark metal disc sealing the column top
+		local cap      = Instance.new("Part")
+		cap.Name       = "BarrelCap"
+		cap.Shape      = Enum.PartType.Cylinder
+		cap.Size       = Vector3.new(0.6, 3.6, 3.6)
+		cap.CFrame     = CFrame.new(position + Vector3.new(0, 10.5, 0))
+		             * CFrame.Angles(0, 0, math.pi / 2)
+		cap.BrickColor = BrickColor.new("Black")
+		cap.Material   = Enum.Material.Metal
+		cap.Anchored   = true
+		cap.CastShadow = false
+		cap.CanCollide = false
+		cap.Parent     = model
+
+		-- CatchRing: large neon mouth at the top — catches and relaunches pods
+		local cr      = Instance.new("Part")
+		cr.Name       = "CatchRing"
+		cr.Shape      = Enum.PartType.Cylinder
+		cr.Size       = Vector3.new(0.7, 7, 7)
+		cr.CFrame     = CFrame.new(position + Vector3.new(0, 11.5, 0))
+		           * CFrame.Angles(0, 0, math.pi / 2)
+		cr.BrickColor = tc
+		cr.Material   = Enum.Material.Neon
+		cr.Anchored   = true
+		cr.CastShadow = false
+		cr.CanCollide = false
+		cr.Parent     = model
+
+		-- Two diagonal support struts bracing the column to the slab
+		for _, sign in {-1, 1} do
+			local topPt = position + Vector3.new(0, 7.5, sign * 0.5)
+			local botPt = position + Vector3.new(0, 1.5, sign * 3.5)
+			local mid   = (topPt + botPt) * 0.5
+			local len   = (topPt - botPt).Magnitude
+			local strut      = Instance.new("Part")
+			strut.Name       = "Strut"
+			strut.Size       = Vector3.new(0.65, len, 0.65)
+			strut.BrickColor = grey
+			strut.Material   = Enum.Material.Metal
+			strut.Anchored   = true
+			strut.CanCollide = false
+			strut.CastShadow = false
+			strut.CFrame = CFrame.lookAt(mid, botPt) * CFrame.Angles(math.pi / 2, 0, 0)
+			strut.Parent = model
+		end
+
+		-- Ambient point light at the catch ring (pulses during relay transit)
+		local glowPart      = Instance.new("Part")
+		glowPart.Name       = "RelayLight"
+		glowPart.Size       = Vector3.one * 0.1
+		glowPart.CFrame     = CFrame.new(position + Vector3.new(0, 11.5, 0))
+		glowPart.Anchored   = true; glowPart.CanCollide = false
+		glowPart.Transparency = 1; glowPart.CastShadow = false
+		glowPart.Parent     = model
+		local rl            = Instance.new("PointLight")
+		rl.Color            = tc.Color
+		rl.Brightness       = 2
+		rl.Range            = 28
+		rl.Parent           = glowPart
 
 	elseif buildingType == "CreepyBlob" then
 		base.BrickColor = BrickColor.new("Black")
@@ -574,11 +652,16 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	model.PrimaryPart = base
 	model.Parent      = buildingsFolder
 
-	local maxHp     = (Config.BUILDING_HP :: any)[buildingType] or 400
-	local buildTime = (buildingType ~= "CommandCenter")
-		and not skipNextConstruction
-		and ((Config.BUILD_TIME :: any)[buildingType] or 0)
-		or 0
+	local maxHp    = (Config.BUILDING_HP :: any)[buildingType] or 400
+	local buildTime: number
+	if buildingType == "CommandCenter" or skipNextConstruction then
+		buildTime = 0
+	elseif nextBuildRiseTime then
+		buildTime        = nextBuildRiseTime
+		nextBuildRiseTime = nil
+	else
+		buildTime = (Config.BUILD_TIME :: any)[buildingType] or 0
+	end
 
 	addHealthBar(base)
 
@@ -612,6 +695,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 	-- ── Construction animation ────────────────────────────────────────────────
 	if buildTime > 0 then
+		model:ScaleTo(0.04)
 		model:PivotTo(CFrame.new(position.X, 0, position.Z))
 
 		task.spawn(function()
@@ -625,20 +709,25 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 				elapsed = math.min(elapsed + dt, buildTime)
 				local progress = elapsed / buildTime
+				-- Ease-out so the grow/rise decelerates into its final position
+				local ease = 1 - (1 - progress) ^ 2
 
 				if buildingType == "CreepyWorm" then
 					-- Smoothstep easing: slow start → fast finish (fighting to get free)
-					local ease  = progress * progress * (3 - 2 * progress)
+					local wEase = progress * progress * (3 - 2 * progress)
 					-- Pure rotation wobble — stays on its X/Z footprint so it looks grounded
 					local tiltX = math.sin(elapsed * 4.1) * math.min(progress * 0.6, 0.14)
 					local tiltZ = math.cos(elapsed * 5.7) * math.min(progress * 0.6, 0.11)
 					local spin  = elapsed * 0.35  -- slow base rotation
 					model:PivotTo(
-						CFrame.new(position.X, ease * finalY, position.Z)
+						CFrame.new(position.X, wEase * finalY, position.Z)
 						* CFrame.Angles(tiltX, spin, tiltZ)
 					)
 				else
-					model:PivotTo(CFrame.new(position.X, progress * finalY, position.Z))
+					-- Grow in scale and rise simultaneously — building emerges from ground up
+					local s = math.max(ease, 0.04)
+					model:ScaleTo(s)
+					model:PivotTo(CFrame.new(position.X, ease * finalY, position.Z))
 				end
 
 				local target = math.max(1, math.floor(progress * maxHp))
@@ -651,6 +740,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 			local data = buildingData[id]
 			if data then
+				model:ScaleTo(1)
 				model:PivotTo(CFrame.new(position.X, finalY, position.Z))
 				data.hp            = math.max(data.hp, maxHp)
 				data.isConstructing = false
@@ -905,6 +995,587 @@ local function startMutantSoldierLoop(turretId: string, data: any, owner: Player
 	end)
 end
 
+-- ── Signal flare (placed at target during queue countdown) ───────────────────
+
+-- Returns (Model, Fill Frame) — fill frame is updated each Heartbeat to show progress.
+local function createSignalFlare(position: Vector3, buildingType: string): (Model, Frame?)
+	local model  = Instance.new("Model")
+	model.Name   = "_SignalFlare"
+	model:SetAttribute("BuildingType", buildingType)
+
+	local function sp(nm: string, sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = nm
+		if shape then (p :: any).Shape = shape end
+		p.Size = sz; p.CFrame = cf; p.BrickColor = bc; p.Material = mat
+		p.Anchored = true; p.CanCollide = false; p.CastShadow = false; p.CanQuery = false
+		p.Parent = model
+		return p
+	end
+
+	-- Minimal ground ring
+	local ring        = sp("Ring",
+		Vector3.new(0.1, 2.25, 2.25),
+		CFrame.new(position + Vector3.new(0, 0.08, 0)) * CFrame.Angles(0, 0, math.pi / 2),
+		BrickColor.new("Bright orange"), Enum.Material.Neon, Enum.PartType.Cylinder)
+	ring.Transparency = 0.45
+
+	-- Very thin, short beam that fades into the sky
+	local beam         = sp("Beam",
+		Vector3.new(0.1, 13, 0.1),
+		CFrame.new(position + Vector3.new(0, 6.5, 0)),
+		BrickColor.new("Bright orange"), Enum.Material.Neon)
+	beam.Transparency  = 0.86
+
+	-- Invisible anchor — hosts the BillboardGui
+	local anchor       = Instance.new("Part")
+	anchor.Name        = "Anchor"
+	anchor.Size        = Vector3.new(0.1, 0.1, 0.1)
+	anchor.Position    = position + Vector3.new(0, 1, 0)
+	anchor.Anchored    = true; anchor.CanCollide = false
+	anchor.CastShadow  = false; anchor.CanQuery  = false
+	anchor.Transparency = 1
+	anchor.Parent      = model
+	model.PrimaryPart  = anchor
+
+	-- ── BillboardGui: 3D building preview + progress bar ────────────────────
+	local bb          = Instance.new("BillboardGui")
+	bb.Name           = "FlareUI"
+	bb.Size           = UDim2.fromOffset(44, 52)
+	bb.StudsOffset    = Vector3.new(0, 5, 0)
+	bb.AlwaysOnTop    = false
+	bb.MaxDistance    = 350
+	bb.LightInfluence = 0
+	bb.Parent         = anchor
+
+	-- Slim progress bar beneath the icon
+	local pbTrack                  = Instance.new("Frame")
+	pbTrack.Size                   = UDim2.new(1, 0, 0, 5)
+	pbTrack.Position               = UDim2.fromOffset(0, 46)
+	pbTrack.BackgroundColor3       = Color3.fromRGB(20, 22, 28)
+	pbTrack.BackgroundTransparency = 0.3
+	pbTrack.BorderSizePixel        = 0
+	pbTrack.Parent                 = bb
+	local _pt = Instance.new("UICorner"); _pt.CornerRadius = UDim.new(1, 0); _pt.Parent = pbTrack
+
+	local fill                     = Instance.new("Frame")
+	fill.Name                      = "Fill"
+	fill.Size                      = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3          = Color3.fromRGB(255, 165, 35)
+	fill.BorderSizePixel           = 0
+	fill.Parent                    = pbTrack
+	local _pf = Instance.new("UICorner"); _pf.CornerRadius = UDim.new(1, 0); _pf.Parent = fill
+
+	model.Parent = workspace
+	return model, fill
+end
+
+-- ── Drop pod model ────────────────────────────────────────────────────────────
+
+local function createDropPodModel(): Model
+	local model = Instance.new("Model")
+	model.Name  = "_DropPod"
+
+	local function ap(nm: string, sz: Vector3, cf: CFrame, col: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = nm
+		if shape then (p :: any).Shape = shape end
+		p.Size = sz; p.CFrame = cf; p.Color = col; p.Material = mat
+		p.Anchored = true; p.CanCollide = false; p.CastShadow = false
+		p.Parent = model
+		return p
+	end
+
+	local anchor        = Instance.new("Part")
+	anchor.Name         = "Anchor"
+	anchor.Size         = Vector3.one * 0.1
+	anchor.Anchored     = true; anchor.CanCollide = false; anchor.CastShadow = false
+	anchor.Transparency = 1
+	anchor.Parent       = model
+	model.PrimaryPart   = anchor
+
+	-- Colours
+	local cBody   = Color3.fromRGB(18, 20, 24)   -- near-black matte
+	local cPlate  = Color3.fromRGB(48, 52, 58)   -- dark steel plate
+	local cCap    = Color3.fromRGB(32, 35, 40)   -- slightly lighter cap
+	local cNeon   = Color3.fromRGB(255, 140, 20) -- amber-orange neon
+
+	-- Core body: X = length (becomes height after 90° Z rotation), Y/Z = diameter
+	ap("Body",
+		Vector3.new(8, 3.5, 3.5),
+		CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.pi / 2),
+		cBody, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+
+	-- Slim neon band around the waist
+	ap("WaistRing",
+		Vector3.new(0.18, 4.1, 4.1),
+		CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.pi / 2),
+		cNeon, Enum.Material.Neon, Enum.PartType.Cylinder)
+
+	-- Cap on top: dark steel block, slightly wider
+	ap("Cap",    Vector3.new(4.2, 1.1, 4.2), CFrame.new(0,  4.55, 0), cCap,  Enum.Material.Metal)
+	ap("CapRim", Vector3.new(4.6, 0.3, 4.6), CFrame.new(0,  4.15, 0), cPlate, Enum.Material.Metal)
+
+	-- Neon exhaust ring at the very top (thruster glow)
+	ap("TopGlow",
+		Vector3.new(0.28, 4.8, 4.8),
+		CFrame.new(0, 4.9, 0) * CFrame.Angles(0, 0, math.pi / 2),
+		cNeon, Enum.Material.Neon, Enum.PartType.Cylinder)
+
+	-- Neon exhaust ring at the bottom
+	ap("BotGlow",
+		Vector3.new(0.22, 3.9, 3.9),
+		CFrame.new(0, -3.8, 0) * CFrame.Angles(0, 0, math.pi / 2),
+		cNeon, Enum.Material.Neon, Enum.PartType.Cylinder)
+
+	-- 4 door panels — hinged at the bottom edge of the core (local Y = -4).
+	-- Outer shell plate + inner neon strip both carry HingeAngle so they animate together.
+	local CORE_R   = 1.75  -- cylinder radius (half of 3.5)
+	local PANEL_H  = 5.5
+	local PANEL_T  = 0.5
+	local PANEL_W  = 3.1
+	local STRIP_T  = 0.12
+	for i = 0, 3 do
+		local beta    = i * math.pi / 2
+		local radial  = Vector3.new(math.cos(beta), 0, math.sin(beta))
+		local tangent = Vector3.new(-math.sin(beta), 0, math.cos(beta))
+		local panelY  = -4 + PANEL_H / 2  -- = -1.25 (flush against bottom half of core)
+
+		-- Outer shell plate
+		local outerPos = radial * (CORE_R + PANEL_T / 2) + Vector3.new(0, panelY, 0)
+		local cf       = CFrame.fromMatrix(outerPos, tangent, Vector3.new(0, 1, 0))
+		local panel    = ap("Door_" .. i, Vector3.new(PANEL_W, PANEL_H, PANEL_T), cf,
+			cPlate, Enum.Material.Metal)
+		panel:SetAttribute("HingeAngle", beta)
+
+		-- Neon inner strip recessed into the panel's inner half — avoids z-fighting
+		-- with the panel's own inner face and the cylinder surface (both at CORE_R).
+		local innerPos = radial * (CORE_R + PANEL_T / 2 - STRIP_T / 2) + Vector3.new(0, panelY, 0)
+		local cfInner  = CFrame.fromMatrix(innerPos, tangent, Vector3.new(0, 1, 0))
+		local strip    = ap("DoorGlow_" .. i,
+			Vector3.new(PANEL_W - 0.4, PANEL_H - 0.3, STRIP_T), cfInner,
+			cNeon, Enum.Material.Neon)
+		strip:SetAttribute("HingeAngle", beta)
+	end
+
+	local glowPart        = Instance.new("Part")
+	glowPart.Name         = "GlowPart"
+	glowPart.Size         = Vector3.one * 0.1
+	glowPart.CFrame       = CFrame.new(0, 0, 0)
+	glowPart.Anchored     = true; glowPart.CanCollide = false
+	glowPart.Transparency = 1; glowPart.CastShadow = false
+	glowPart.Parent       = model
+	local glow            = Instance.new("PointLight")
+	glow.Color            = Color3.fromRGB(255, 140, 20)
+	glow.Brightness       = 5
+	glow.Range            = 28
+	glow.Parent           = glowPart
+
+	return model
+end
+
+-- ── Pending-build cancellation ────────────────────────────────────────────────
+
+local function cancelPendingBuilds(userId: number)
+	local builds = pendingBuilds[userId]
+	if builds then
+		for _, b in builds do
+			if b.flare and b.flare.Parent then b.flare:Destroy() end
+		end
+		pendingBuilds[userId] = nil
+	end
+	local dq = deployQueue[userId]
+	if dq then
+		for _, b in dq do
+			if b.flare and b.flare.Parent then b.flare:Destroy() end
+		end
+		deployQueue[userId] = nil
+	end
+	deployDelay[userId] = nil
+end
+
+-- ── Relay chain helpers ───────────────────────────────────────────────────────
+
+local RELAY_CATCH_HEIGHT = 11  -- studs above relay base position to aim for (top of CatchRing)
+
+-- Returns ordered relay base positions the pod should hop through from ccPos to targetPos.
+-- Each relay in the list is closer to targetPos than the previous hop.
+local function findRelayChain(player: any, ccPos: Vector3, targetPos: Vector3): {Vector3}
+	local relays: {Vector3} = {}
+	for _, data in buildingData do
+		if data.owner == player and data.buildingType == "Relay" then
+			table.insert(relays, data.base.Position)
+		end
+	end
+	local chain: {Vector3} = {}
+	local current            = ccPos
+	local used: {[number]: boolean} = {}
+	for _ = 1, #relays do
+		local tDist = (Vector3.new(current.X, 0, current.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+		local best: number?  = nil
+		local bestDist       = tDist
+		for i, rp in relays do
+			if used[i] then continue end
+			local d = (Vector3.new(rp.X, 0, rp.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+			if d < bestDist then bestDist = d; best = i end
+		end
+		if not best then break end
+		used[best] = true
+		table.insert(chain, relays[best])
+		current = relays[best]
+	end
+	return chain
+end
+
+local function findRelayModelAt(pos: Vector3, owner: any): Model?
+	for _, data in buildingData do
+		if data.owner == owner and data.buildingType == "Relay" then
+			local d = (Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+			        - Vector3.new(pos.X, 0, pos.Z)).Magnitude
+			if d < 5 then return data.base.Parent :: Model end
+		end
+	end
+	return nil
+end
+
+local function relayFlash(model: Model)
+	for _, p in model:GetDescendants() do
+		if not p:IsA("BasePart") or p.Material ~= Enum.Material.Neon then continue end
+		task.spawn(function()
+			local orig = p.Color
+			p.Color = Color3.new(1, 1, 1)
+			task.wait(0.1)
+			if p.Parent then p.Color = orig end
+		end)
+	end
+	local cr = model:FindFirstChild("CatchRing")
+	if cr then
+		local flash      = Instance.new("PointLight")
+		flash.Color      = Color3.fromRGB(180, 230, 255)
+		flash.Brightness = 16
+		flash.Range      = 50
+		flash.Parent     = cr
+		Debris:AddItem(flash, 0.8)
+	end
+end
+
+-- ── Drop pod flight & building deployment ─────────────────────────────────────
+
+-- launchPos: already-elevated world position to fire from (CC roof or relay CatchRing).
+-- relayChain: ordered list of relay base positions to hop through before targetPos.
+local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vector3}, targetPos: Vector3, buildingType: string, isMine: boolean)
+	local isHop = #relayChain > 0
+
+	-- Next landing point: first relay's CatchRing or final ground target
+	local endPos: Vector3
+	if isHop then
+		local rp = relayChain[1]
+		endPos   = Vector3.new(rp.X, rp.Y + RELAY_CATCH_HEIGHT, rp.Z)
+	else
+		endPos = targetPos + Vector3.new(0, 4, 0)
+	end
+
+	local pod      = createDropPodModel()
+	local startPos = launchPos
+
+	local apexPos = Vector3.new(
+		(startPos.X + endPos.X) * 0.5,
+		math.max(startPos.Y, endPos.Y) + 70,
+		(startPos.Z + endPos.Z) * 0.5
+	)
+
+	pod:PivotTo(CFrame.new(startPos))
+	pod.Parent = workspace
+
+	-- Launch sound
+	do
+		local sp  = Instance.new("Part")
+		sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(startPos)
+		sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+		sp.Parent = workspace
+		local snd = Instance.new("Sound")
+		snd.SoundId = "rbxassetid://78110429907701"
+		snd.Volume  = 1
+		snd.Parent  = sp
+		snd:Play()
+		Debris:AddItem(sp, 12)
+	end
+
+	-- Smoke contrail
+	do
+		local anchor = pod.PrimaryPart
+		local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(-1.1, 0, 0); a0.Parent = anchor
+		local a1 = Instance.new("Attachment"); a1.Position = Vector3.new( 1.1, 0, 0); a1.Parent = anchor
+		local tr          = Instance.new("Trail")
+		tr.Attachment0    = a0
+		tr.Attachment1    = a1
+		tr.Color          = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,   Color3.fromRGB(225, 222, 215)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(155, 150, 145)),
+			ColorSequenceKeypoint.new(1,   Color3.fromRGB(60,  58,  55)),
+		})
+		tr.Transparency   = NumberSequence.new({
+			NumberSequenceKeypoint.new(0,    0.2),
+			NumberSequenceKeypoint.new(0.55, 0.65),
+			NumberSequenceKeypoint.new(1,    1.0),
+		})
+		tr.WidthScale     = NumberSequence.new({
+			NumberSequenceKeypoint.new(0,   1.0),
+			NumberSequenceKeypoint.new(1,   0.06),
+		})
+		tr.Lifetime       = 2.0
+		tr.LightEmission  = 0.04
+		tr.LightInfluence = 0.85
+		tr.Parent         = anchor
+	end
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not pod or not pod.Parent then conn:Disconnect(); return end
+		elapsed = elapsed + dt
+		local t    = math.min(elapsed / DROP_POD_FLIGHT_TIME, 1)
+		local ease = t * t * (3 - 2 * t)
+		local u    = 1 - ease
+
+		local pos = startPos * (u * u) + apexPos * (2 * u * ease) + endPos * (ease * ease)
+
+		local tangent = (apexPos - startPos) * (2 * (1 - ease))
+			+ (endPos - apexPos) * (2 * ease)
+		if tangent.Magnitude > 0.5 then
+			pod:PivotTo(CFrame.new(pos, pos + tangent) * CFrame.Angles(-math.pi / 2, 0, 0))
+		else
+			pod:PivotTo(CFrame.new(pos))
+		end
+
+		if t < 1 then return end
+		conn:Disconnect()
+
+		if isHop then
+			-- ── Relay catch: pod enters relay, relay aims and fires it onward ──────
+			pod:Destroy()
+
+			do
+				local sp  = Instance.new("Part")
+				sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(endPos)
+				sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+				sp.Parent = workspace
+				local snd = Instance.new("Sound")
+				snd.SoundId = "rbxassetid://76696468542735"
+				snd.Volume  = 0.35
+				snd.Parent  = sp
+				snd:Play()
+				Debris:AddItem(sp, 5)
+			end
+
+			local relayModel = findRelayModelAt(relayChain[1], player)
+			if relayModel then relayFlash(relayModel) end
+
+			local remaining: {Vector3} = {}
+			for i = 2, #relayChain do table.insert(remaining, relayChain[i]) end
+
+			task.spawn(function()
+				task.wait(0.45)
+				launchDropPod(player, endPos, remaining, targetPos, buildingType, isMine)
+			end)
+
+		else
+			-- ── Final landing sequence ─────────────────────────────────────────────
+			if isOccupied(targetPos, buildingType) or isTerrainBlocked(targetPos, buildingType) then
+				pod:Destroy()
+				return
+			end
+
+			-- Landing sound at impact point
+			do
+				local sp  = Instance.new("Part")
+				sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos)
+				sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+				sp.Parent = workspace
+				local snd = Instance.new("Sound")
+				snd.SoundId = "rbxassetid://76696468542735"
+				snd.Volume  = 0.25
+				snd.Parent  = sp
+				snd:Play()
+				Debris:AddItem(sp, 10)
+			end
+
+			-- Small dirt burst on impact
+			local rng2 = Random.new()
+			for _ = 1, 8 do
+				local d      = Instance.new("Part")
+				d.Shape      = Enum.PartType.Ball
+				d.Size       = Vector3.one * rng2:NextNumber(0.12, 0.38)
+				d.Color      = Color3.fromRGB(
+					rng2:NextInteger(78, 112),
+					rng2:NextInteger(52, 76),
+					rng2:NextInteger(22, 42)
+				)
+				d.Material   = Enum.Material.SmoothPlastic
+				d.Position   = targetPos + Vector3.new(
+					rng2:NextNumber(-2, 2), rng2:NextNumber(0.2, 0.8), rng2:NextNumber(-2, 2)
+				)
+				d.Anchored   = false; d.CanCollide = false; d.CastShadow = false
+				d.Parent     = workspace
+				local bv     = Instance.new("BodyVelocity")
+				bv.Velocity  = Vector3.new(
+					rng2:NextNumber(-9, 9), rng2:NextNumber(5, 12), rng2:NextNumber(-9, 9)
+				)
+				bv.MaxForce  = Vector3.new(1e5, 1e5, 1e5)
+				bv.Parent    = d
+				Debris:AddItem(d, 1.2)
+			end
+
+			-- ── Door-open → pop-off → core fade ──────────────────────────────────
+			task.spawn(function()
+				local OPEN_TIME  = 0.50
+				local FADE_TIME  = 0.40
+				local OPEN_ANGLE = math.rad(100)
+				local CORE_R     = 1.75
+
+				local panelParts = {}
+				local coreParts  = {}
+				for _, d in pod:GetDescendants() do
+					if not d:IsA("BasePart") then continue end
+					if d:GetAttribute("HingeAngle") ~= nil then
+						table.insert(panelParts, d)
+					else
+						table.insert(coreParts, d)
+					end
+				end
+
+				local podCF  = pod:GetPivot()
+				local panels = {}
+				for _, part in panelParts do
+					local beta    = part:GetAttribute("HingeAngle")
+					local radial  = Vector3.new(math.cos(beta), 0, math.sin(beta))
+					local tangent = Vector3.new(-math.sin(beta), 0, math.cos(beta))
+					local hw  = podCF:PointToWorldSpace(radial * CORE_R + Vector3.new(0, -4, 0))
+					local ax  = podCF:VectorToWorldSpace(tangent)
+					local rotCF = CFrame.new(hw) * CFrame.fromAxisAngle(ax, -OPEN_ANGLE) * CFrame.new(hw):Inverse()
+					table.insert(panels, { part = part, closedCF = part.CFrame, openCF = rotCF * part.CFrame })
+				end
+
+				local openElapsed = 0
+				local openConn: RBXScriptConnection
+				openConn = RunService.Heartbeat:Connect(function(dt)
+					openElapsed = openElapsed + dt
+					local ot   = math.min(openElapsed / OPEN_TIME, 1)
+					local ease = 1 - (1 - ot) ^ 3
+					for _, pi in panels do
+						if pi.part.Parent then pi.part.CFrame = pi.closedCF:Lerp(pi.openCF, ease) end
+					end
+					if ot >= 1 then openConn:Disconnect() end
+				end)
+
+				task.wait(OPEN_TIME)
+				nextBuildRiseTime = BUILD_RISE_TIME
+				local id = createBuilding(player, targetPos, buildingType)
+				if buildingType == "Mine" and isMine and mineralManager then
+					mineralManager.registerMine(id, targetPos, player)
+				end
+				if researchManagerRef and buildingType ~= "CommandCenter" then
+					researchManagerRef.recordBuildingPlaced(player, buildingType)
+				end
+
+				do
+					local sp  = Instance.new("Part")
+					sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos + Vector3.new(0, 1, 0))
+					sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+					sp.Parent = workspace
+					local snd = Instance.new("Sound")
+					snd.SoundId = "rbxassetid://104085097305841"
+					snd.Volume  = 0.85
+					snd.Parent  = sp
+					snd:Play()
+					Debris:AddItem(sp, 6)
+				end
+
+				local rng3 = Random.new()
+				local doorPairs: { [number]: { outer: BasePart?, glow: BasePart? } } = {}
+				for _, pi in panels do
+					local nm  = pi.part.Name
+					local idx = tonumber(nm:match("_(%d+)$"))
+					if idx == nil then continue end
+					if not doorPairs[idx] then doorPairs[idx] = { outer = nil, glow = nil } end
+					if nm:find("DoorGlow") then
+						doorPairs[idx].glow  = pi.part
+					else
+						doorPairs[idx].outer = pi.part
+					end
+				end
+
+				for _, pair in doorPairs do
+					local outer = pair.outer
+					local glow  = pair.glow
+					if not outer or not outer.Parent then continue end
+
+					local flatDir = Vector3.new(
+						outer.Position.X - targetPos.X, 0,
+						outer.Position.Z - targetPos.Z
+					)
+					if flatDir.Magnitude < 0.3 then
+						flatDir = Vector3.new(rng3:NextNumber(-1, 1), 0, rng3:NextNumber(-1, 1))
+					end
+					flatDir = flatDir.Unit
+
+					outer.Parent     = workspace
+					outer.Anchored   = false
+					outer.CanCollide = true
+
+					local bv      = Instance.new("BodyVelocity")
+					bv.Velocity   = flatDir * rng3:NextNumber(4, 8) + Vector3.new(0, rng3:NextNumber(2, 4), 0)
+					bv.MaxForce   = Vector3.new(1e5, 1e5, 1e5)
+					bv.Parent     = outer
+					Debris:AddItem(bv, 0.12)
+
+					local bav     = Instance.new("BodyAngularVelocity")
+					bav.AngularVelocity = Vector3.new(
+						rng3:NextNumber(-3, 3), rng3:NextNumber(-3, 3), rng3:NextNumber(-3, 3)
+					)
+					bav.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+					bav.Parent    = outer
+					Debris:AddItem(bav, 0.6)
+
+					if glow and glow.Parent then
+						glow.Parent    = workspace
+						glow.Anchored  = false
+						glow.CanCollide = false
+						local weld     = Instance.new("WeldConstraint")
+						weld.Part0     = outer
+						weld.Part1     = glow
+						weld.Parent    = outer
+						Debris:AddItem(glow, 4.0)
+					end
+
+					Debris:AddItem(outer, 4.0)
+				end
+
+				task.wait(1.5)
+				local startTrans = {}
+				for _, p in coreParts do
+					if p.Parent then startTrans[p] = p.Transparency end
+				end
+				local fadeElapsed = 0
+				local fadeConn: RBXScriptConnection
+				fadeConn = RunService.Heartbeat:Connect(function(dt)
+					fadeElapsed = fadeElapsed + dt
+					local ft = math.min(fadeElapsed / FADE_TIME, 1)
+					for _, p in coreParts do
+						if p.Parent then
+							p.Transparency = startTrans[p] + (1 - startTrans[p]) * ft
+						end
+					end
+					if ft >= 1 then
+						fadeConn:Disconnect()
+						if pod.Parent then pod:Destroy() end
+					end
+				end)
+			end)
+		end
+	end)
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuildingManager.hasCommandCenter(player: any): boolean
@@ -925,6 +1596,20 @@ function BuildingManager.resetAll()
 	ccMobile                 = {}
 	ccMoveTargets            = {}
 	playerCCId               = {}
+	-- Cancel all pending builds and destroy signal flares
+	for userId, builds in pendingBuilds do
+		for _, b in builds do
+			if b.flare and b.flare.Parent then b.flare:Destroy() end
+		end
+	end
+	for userId, queue in deployQueue do
+		for _, b in queue do
+			if b.flare and b.flare.Parent then b.flare:Destroy() end
+		end
+	end
+	pendingBuilds = {}
+	deployQueue   = {}
+	deployDelay   = {}
 end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
@@ -945,7 +1630,7 @@ end
 
 -- ── Destruction VFX (server-side) ────────────────────────────────────────────
 
-local function spawnDestructionVFX(pos: Vector3)
+spawnDestructionVFX = function(pos: Vector3)
 	-- 3D destruction sound
 	local soundPart            = Instance.new("Part")
 	soundPart.Anchored         = true
@@ -1156,6 +1841,7 @@ function BuildingManager.damage(id: string, amount: number)
 
 	if wasCC then
 		playerHasCC[owner.UserId] = nil
+		cancelPendingBuilds(owner.UserId)
 		if onCCDestroyedCb then onCCDestroyedCb(owner) end
 	end
 
@@ -1181,6 +1867,7 @@ function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwner
 end
 
 function BuildingManager.removeAllBuildingsFor(player: any)
+	cancelPendingBuilds(player.UserId)
 	local toRemove = {}
 	for id, data in buildingData do
 		if data.owner == player then table.insert(toRemove, id) end
@@ -1529,6 +2216,74 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				))
 			end
 		end
+
+		-- ── Pending build countdown (parallel timers per player) ──────────────
+		for userId, builds in pendingBuilds do
+			local toPromote: { PendingBuild } = {}
+			local toKeep:    { PendingBuild } = {}
+			for _, b in builds do
+				b.timeLeft -= dt
+				-- Update progress bar fill width
+				if b.progressFill and b.progressFill.Parent then
+					local pct = 1 - math.clamp(b.timeLeft / math.max(b.totalTime, 0.001), 0, 1)
+					b.progressFill.Size = UDim2.new(pct, 0, 1, 0)
+				end
+				if b.timeLeft <= 0 then
+					table.insert(toPromote, b)
+				else
+					table.insert(toKeep, b)
+				end
+			end
+			pendingBuilds[userId] = toKeep
+			if #toKeep == 0 then pendingBuilds[userId] = nil end
+			-- Move finished builds to the deploy queue
+			for _, b in toPromote do
+				if not deployQueue[userId] then deployQueue[userId] = {} end
+				table.insert(deployQueue[userId], {
+					buildingType = b.buildingType,
+					position     = b.position,
+					flare        = b.flare,
+					player       = b.player,
+					isMine       = b.isMine,
+				})
+			end
+		end
+
+		-- ── Deploy queue: launch pods with 1 s stagger ────────────────────────
+		for userId, queue in deployQueue do
+			-- Tick stagger delay down
+			if (deployDelay[userId] or 0) > 0 then
+				deployDelay[userId] -= dt
+				continue
+			end
+			if #queue == 0 then
+				deployQueue[userId] = nil
+				deployDelay[userId] = nil
+				continue
+			end
+
+			local item = table.remove(queue, 1)
+			-- Destroy the signal flare
+			if item.flare and item.flare.Parent then item.flare:Destroy() end
+
+			-- Find CC ground position for this player
+			local ccPos: Vector3? = nil
+			for _, bd in buildingData do
+				if bd.owner == item.player and bd.buildingType == "CommandCenter" then
+					ccPos = Vector3.new(bd.base.Position.X, 0, bd.base.Position.Z)
+					break
+				end
+			end
+
+			if ccPos and item.player.Parent then
+				local ccTopY     = Config.COMMAND_CENTER_SIZE.Y + 2
+				local launchPos  = ccPos + Vector3.new(0, ccTopY, 0)
+				local relayChain = findRelayChain(item.player, ccPos, item.position)
+				launchDropPod(item.player, launchPos, relayChain, item.position, item.buildingType, item.isMine)
+			end
+
+			deployDelay[userId] = DEPLOY_STAGGER_DELAY
+		end
 	end)
 
 	-- ── MobilizeCC remote ────────────────────────────────────────────────
@@ -1666,14 +2421,22 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		resourceManager.spend(player, cost)
-		local id = createBuilding(player, snapped, buildingType)
 
-		if buildingType == "Mine" then
-			mineralManager.registerMine(id, snapped, player)
-		end
-		if researchManagerRef and buildingType ~= "CommandCenter" then
-			researchManagerRef.recordBuildingPlaced(player, buildingType)
-		end
+		-- Place a signal flare and queue the build; a drop pod will launch from
+		-- the CC when the countdown finishes (or immediately if BUILD_TIME = 0).
+		local flare, fill = createSignalFlare(snapped, buildingType)
+		local queueTime   = (Config.BUILD_TIME :: any)[buildingType] or 0
+		if not pendingBuilds[player.UserId] then pendingBuilds[player.UserId] = {} end
+		table.insert(pendingBuilds[player.UserId], {
+			buildingType = buildingType,
+			position     = snapped,
+			timeLeft     = queueTime,
+			totalTime    = queueTime,
+			flare        = flare,
+			progressFill = fill,
+			player       = player,
+			isMine       = buildingType == "Mine",
+		})
 	end)
 
 	-- ── BuildMonument remote ──────────────────────────────────────────────
