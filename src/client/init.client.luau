@@ -3357,6 +3357,169 @@ local function spawnRocketShot(fromPos: Vector3, toPos: Vector3)
 	end)
 end
 
+-- Artillery: a 3-shell volley lobbed on a high arc with a heavy ground explosion.
+local function spawnArtilleryImpact(dest: Vector3)
+	-- White core flash
+	local core        = Instance.new("Part")
+	core.Name         = "_ArtCore"
+	core.Shape        = Enum.PartType.Ball
+	core.Size         = Vector3.new(4.5, 4.5, 4.5)
+	core.BrickColor   = BrickColor.new("White")
+	core.Material     = Enum.Material.Neon
+	core.Anchored     = true; core.CanCollide = false; core.CanQuery = false; core.CastShadow = false
+	core.Position     = dest
+	core.Parent       = workspace
+
+	-- Expanding shockwave ring
+	local ring        = Instance.new("Part")
+	ring.Name         = "_ArtRing"
+	ring.Shape        = Enum.PartType.Cylinder
+	ring.Size         = Vector3.new(0.4, 1, 1)
+	ring.BrickColor   = BrickColor.new("Bright orange")
+	ring.Material     = Enum.Material.Neon
+	ring.Anchored     = true; ring.CanCollide = false; ring.CanQuery = false; ring.CastShadow = false
+	ring.CFrame       = CFrame.new(dest + Vector3.new(0, 0.4, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+	ring.Parent       = workspace
+
+	-- Smoke cloud
+	local smoke       = Instance.new("Part")
+	smoke.Name        = "_ArtSmoke"
+	smoke.Shape       = Enum.PartType.Ball
+	smoke.Size        = Vector3.new(3, 3, 3)
+	smoke.Color       = Color3.fromRGB(80, 72, 64)
+	smoke.Material    = Enum.Material.SmoothPlastic
+	smoke.Anchored    = true; smoke.CanCollide = false; smoke.CanQuery = false; smoke.CastShadow = false
+	smoke.Position    = dest
+	smoke.Parent      = workspace
+
+	-- Debris chunks flung outward on ballistic arcs
+	type Chunk = { part: Part, vx: number, vy: number, vz: number }
+	local chunks: { Chunk } = {}
+	for i = 1, 8 do
+		local a   = (i / 8) * math.pi * 2 + (math.random() - 0.5) * 0.5
+		local spd = 11 + math.random() * 14
+		local sz  = 0.6 + math.random() * 1.3
+		local d   = Instance.new("Part")
+		d.Name        = "_ArtDebris"
+		d.Size        = Vector3.new(sz, sz, sz)
+		d.Color       = Color3.fromRGB(70, 56, 40)
+		d.Material    = Enum.Material.SmoothPlastic
+		d.Anchored    = true; d.CanCollide = false; d.CanQuery = false; d.CastShadow = false
+		d.Position    = dest + Vector3.new(0, 0.5, 0)
+		d.Parent      = workspace
+		chunks[i] = { part = d, vx = math.cos(a) * spd, vy = 16 + math.random() * 18, vz = math.sin(a) * spd }
+	end
+
+	local CORE_DUR, RING_DUR, SMOKE_DUR, DEBRIS_DUR = 0.11, 0.38, 0.55, 0.85
+	local GRAV = 34
+	local e = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		e += dt
+		if core.Parent then
+			if e < CORE_DUR then
+				local p = e / CORE_DUR
+				local s = 4.5 + p * 6
+				core.Size = Vector3.new(s, s, s); core.Transparency = p
+			else core:Destroy() end
+		end
+		if ring.Parent then
+			if e < RING_DUR then
+				local p = e / RING_DUR
+				local dd = 1 + p * 22
+				ring.Size = Vector3.new(0.4, dd, dd); ring.Transparency = 0.1 + p * 0.9
+			else ring:Destroy() end
+		end
+		if smoke.Parent then
+			if e < SMOKE_DUR then
+				local p = e / SMOKE_DUR
+				local s = 3 + p * 9
+				smoke.Size = Vector3.new(s, s, s); smoke.Transparency = 0.1 + p * 0.85
+			else smoke:Destroy() end
+		end
+		for _, c in chunks do
+			if c.part.Parent then
+				if e < DEBRIS_DUR then
+					c.vy -= GRAV * dt
+					c.part.Position += Vector3.new(c.vx * dt, c.vy * dt, c.vz * dt)
+					c.part.Transparency = e / DEBRIS_DUR
+				else c.part:Destroy() end
+			end
+		end
+		if e >= DEBRIS_DUR then conn:Disconnect() end
+	end)
+end
+
+local function spawnArtilleryShell(fromPos: Vector3, toPos: Vector3, bigImpact: boolean)
+	local TRAVEL = 0.55
+	local ARC    = 11
+	local origin = fromPos
+	local dest   = toPos + Vector3.new(0, 0.8, 0)
+	local dir    = dest - origin
+
+	local body        = Instance.new("Part")
+	body.Name         = "_ArtShell"
+	body.Size         = Vector3.new(1.6, 1.6, 5.5)
+	body.BrickColor   = BrickColor.new("Really black")
+	body.Material     = Enum.Material.Metal
+	body.Anchored     = true; body.CanCollide = false; body.CanQuery = false; body.CastShadow = false
+	body.CFrame       = dir.Magnitude > 0.1 and CFrame.new(origin, origin + dir.Unit) or CFrame.new(origin)
+	body.Parent       = workspace
+
+	local tail        = Instance.new("Part")
+	tail.Name         = "_ArtTail"
+	tail.Shape        = Enum.PartType.Ball
+	tail.Size         = Vector3.new(1.6, 1.6, 1.6)
+	tail.BrickColor   = BrickColor.new("Bright orange")
+	tail.Material     = Enum.Material.Neon
+	tail.Anchored     = true; tail.CanCollide = false; tail.CanQuery = false; tail.CastShadow = false
+	tail.Position     = origin
+	tail.Parent       = workspace
+
+	-- Muzzle flash at the nozzle
+	local flash       = Instance.new("Part")
+	flash.Name        = "_ArtMuzzle"
+	flash.Shape       = Enum.PartType.Ball
+	flash.Size        = Vector3.new(3, 3, 3)
+	flash.BrickColor  = BrickColor.new("Bright yellow")
+	flash.Material    = Enum.Material.Neon
+	flash.Anchored    = true; flash.CanCollide = false; flash.CanQuery = false; flash.CastShadow = false
+	flash.Position    = origin
+	flash.Parent      = workspace
+	task.delay(0.07, function() if flash.Parent then flash:Destroy() end end)
+
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		local t   = math.min(elapsed / TRAVEL, 1)
+		local cur = origin:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * ARC, 0)
+		local lookDir = dest - cur
+		body.CFrame = lookDir.Magnitude > 0.1 and CFrame.new(cur, dest) or CFrame.new(cur)
+		local back = lookDir.Magnitude > 0.1 and (lookDir.Unit * -2.8) or Vector3.new(0, 0, 2.8)
+		tail.Position = cur + back
+		if t >= 1 then
+			conn:Disconnect()
+			body:Destroy(); tail:Destroy()
+			if bigImpact then spawnArtilleryImpact(dest) end
+		end
+	end)
+end
+
+local function spawnArtilleryShot(fromPos: Vector3, toPos: Vector3)
+	-- Spread the three shells laterally so they read as a 3-nozzle volley.
+	local flat = (toPos - fromPos) * Vector3.new(1, 0, 1)
+	local right = flat.Magnitude > 0.1 and flat.Unit:Cross(Vector3.new(0, 1, 0)) or Vector3.new(1, 0, 0)
+	local offs = { -2.1, 0, 2.1 }
+	for i, off in offs do
+		local from = fromPos + right * off
+		-- only the centre shell triggers the heavy impact (single damage event)
+		task.delay((i - 1) * 0.06, function()
+			spawnArtilleryShell(from, toPos, off == 0)
+		end)
+	end
+end
+
 Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: string?)
 	if upgradeType == "Flamethrower" then
 		spawnFlamethrowerShot(fromPos, toPos)
@@ -3364,6 +3527,9 @@ Network.onTurretShot(function(fromPos: Vector3, toPos: Vector3, upgradeType: str
 	elseif upgradeType == "RocketLauncher" then
 		spawnRocketShot(fromPos, toPos)
 		playSound3D(fromPos, SND_TANK, 0.75)
+	elseif upgradeType == "Artillery" then
+		spawnArtilleryShot(fromPos, toPos)
+		playSound3D(fromPos, SND_TANK, 0.95)
 	else
 		spawnBaseTurretShot(fromPos, toPos)
 		playSound3D(fromPos, SND_TANK, 0.65)

@@ -176,10 +176,23 @@ Config.ROLLER_SPEED_MULT    = 1.2  -- 20% faster than base soldier
 Config.ROLLER_ROLL_PER_STUD = 0.25 -- radians of X-roll (tire pitch) per stud traveled
 
 -- Turret upgrade paths (mutually exclusive per turret, requires TurretUpgrades research)
-Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225, Creepy = 275, Mutant = 350 }
-Config.TURRET_CREEPY = { range = 45, damage = 12, rate = 0.5 }  -- was Evolved
-Config.TURRET_FLAME  = { range = 28, damage = 35, rate = 0.6  }
-Config.TURRET_ROCKET = { range = 70, damage = 80, rate = 3.5  }
+Config.TURRET_UPGRADE_COST = { Flamethrower = 200, RocketLauncher = 225, Artillery = 400, Creepy = 275, Mutant = 350 }
+Config.TURRET_CREEPY = { range = 45,  damage = 12,  rate = 0.5 }  -- was Evolved
+Config.TURRET_FLAME  = { range = 28,  damage = 35,  rate = 0.6 }
+Config.TURRET_ROCKET = { range = 70,  damage = 80,  rate = 3.5 }
+-- Artillery: 4× base range, devastating, slow. Only fires at targets that are
+-- spotted (within vision of a friendly unit/building) — never blind into fog.
+Config.TURRET_ARTILLERY = { range = 200, damage = 130, rate = 5.0 }
+
+-- Server-side vision (studs) — used by the Artillery spotter check. Mirrors the
+-- fog-of-war reveal radii in FogManager so "can the artillery see it" matches
+-- "is it out of the fog" for the owner.
+Config.VISION_UNIT    = 65
+Config.VISION_DEFAULT = 40
+Config.VISION_RADIUS  = {
+	CommandCenter = 75, Barracks = 50, Mine = 45, Turret = 40,
+	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
+}
 
 -- Mutant turret → creepy soldier spawning
 Config.CREEPY_SOLDIER_MAX            = 3

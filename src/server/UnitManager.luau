@@ -708,7 +708,22 @@ function UnitManager.setMineralManager(mm: any)
 	mineralManagerRef = mm
 end
 
-function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number): (boolean, Vector3?)
+-- Returns world positions of all of `ownerStr`'s living units. Used by the
+-- Artillery spotter check to decide whether a far target is out of the fog.
+function UnitManager.getOwnerUnitPositions(ownerStr: string): { Vector3 }
+	local out: { Vector3 } = {}
+	for _, data in units do
+		if data.hp <= 0 then continue end
+		if tostring(data.owner.UserId) == ownerStr then
+			out[#out + 1] = data.part.Position
+		end
+	end
+	return out
+end
+
+-- `canTarget` (optional): predicate `(targetPos) -> boolean`. When supplied, only
+-- enemies it approves are eligible (Artillery uses it to require a spotter).
+function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number, canTarget: ((Vector3) -> boolean)?): (boolean, Vector3?)
 	local bestId, bestDist = nil :: string?, math.huge
 	fillGridScratch(fromPos, range)
 	for i = 1, gridScratchN do
@@ -717,7 +732,9 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 		if not data or data.hp <= 0 then continue end
 		if tostring(data.owner.UserId) == attackerOwnerIdStr then continue end
 		local d = (data.part.Position - fromPos).Magnitude
-		if d <= range and d < bestDist then bestDist = d; bestId = id end
+		if d <= range and d < bestDist and (not canTarget or canTarget(data.part.Position)) then
+			bestDist = d; bestId = id
+		end
 	end
 	if not bestId then return false, nil end
 	local data   = units[bestId]

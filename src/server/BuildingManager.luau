@@ -17,7 +17,7 @@ local unitManagerRef: any
 local researchManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
-type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
+type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers:   { [string]: number } = {}   -- attackTimer per turret id
@@ -762,6 +762,65 @@ local function applyTurretUpgradeVisuals(id: string, upgradeType: string)
 			ring.Size       = ring.Size + Vector3.new(3, 0, 3)
 		end
 
+	elseif upgradeType == "Artillery" then
+		-- Massive siege piece: huge armored mantlet + three long nozzles, mounted
+		-- on a reinforced pedestal. Mantlet + barrels rotate to aim; the pedestal,
+		-- collar and energy band stay fixed (symmetric, so rotation looks clean).
+		local steel = BrickColor.new("Dark stone grey")
+		local black = BrickColor.new("Really black")
+		local glow  = BrickColor.new("Deep orange")
+
+		local function ap(nm: string, sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
+			local p       = Instance.new("Part")
+			p.Name        = nm
+			if shape then (p :: any).Shape = shape end
+			p.Size        = sz
+			p.CFrame      = cf
+			p.BrickColor  = bc
+			p.Material     = mat
+			p.Anchored    = true
+			p.CanCollide  = false
+			p.CastShadow  = false
+			p.Parent      = model
+			return p
+		end
+
+		if not head then return end
+		local hp = head.Position
+
+		-- Enlarged armored mantlet (~4× the stock gun head) — rotates to aim
+		head.BrickColor = steel
+		head.Material   = Enum.Material.Metal
+		head.Size       = Vector3.new(8, 6, 9)
+
+		-- Original single barrel is replaced by the three nozzles
+		if barrel then barrel.Transparency = 1 end
+
+		-- Wide armored collar at the gun/pedestal junction (symmetric → static-safe)
+		if ring then
+			ring.BrickColor = black
+			ring.Material   = Enum.Material.Metal
+			ring.Size       = Vector3.new(7.5, 1.4, 7.5)
+		end
+
+		-- Fixed reinforced pedestal beneath the mantlet
+		ap("ArtPedestal", Vector3.new(7, 3.5, 7), CFrame.new(hp + Vector3.new(0, -3, 0)), black, Enum.Material.Metal)
+		-- Glowing energy band around the pedestal (cylinder ring, symmetric)
+		ap("ArtCore", Vector3.new(0.7, 7.6, 7.6),
+			CFrame.new(hp + Vector3.new(0, -3, 0)) * CFrame.Angles(0, 0, math.pi / 2),
+			glow, Enum.Material.Neon, Enum.PartType.Cylinder)
+
+		-- Three long nozzles — stored in data so the attack loop aims them
+		local barrels: { BasePart } = {}
+		for i, off in { -2.1, 0, 2.1 } do
+			local center = hp + Vector3.new(off, 0, 6)
+			local b = ap("ArtBarrel" .. i, Vector3.new(1.5, 1.5, 14),
+				CFrame.new(center, center + Vector3.new(0, 0, 1)), steel, Enum.Material.Metal)
+			barrels[i] = b
+		end
+		local data = buildingData[id]
+		if data then data.barrels = barrels end
+
 	elseif upgradeType == "Mutant" then
 		-- Larger, more horrifying mass — pulsing black growth with bone-white teeth ring
 		if head then
@@ -1107,12 +1166,14 @@ function BuildingManager.damage(id: string, amount: number)
 	end
 end
 
-function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwnerIdStr: string, range: number): (string?, Vector3?)
+-- `canTarget` (optional): predicate `(targetPos) -> boolean` to gate eligibility
+-- (Artillery uses it to require a spotter).
+function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwnerIdStr: string, range: number, canTarget: ((Vector3) -> boolean)?): (string?, Vector3?)
 	local bestId, bestPos, bestDist = nil :: string?, nil :: Vector3?, math.huge
 	for id, data in buildingData do
 		if tostring(data.owner.UserId) == attackerOwnerIdStr then continue end
 		local d = (data.base.Position - fromPos).Magnitude
-		if d < range and d < bestDist then
+		if d < range and d < bestDist and (not canTarget or canTarget(data.base.Position)) then
 			bestDist = d; bestId = id; bestPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
 		end
 	end
@@ -1237,6 +1298,39 @@ function BuildingManager.placeInstantForPlayer(player: any, position: Vector3, b
 	return ok, id
 end
 
+-- ── Artillery spotter check ───────────────────────────────────────────────────
+-- Artillery out-ranges everything but must never fire blindly into the fog: a
+-- target only counts if it lies within vision of one of the owner's own units or
+-- buildings. Sources are gathered once per shot, then each candidate is tested.
+
+type SightSource = { x: number, z: number, r2: number }
+
+local function gatherSightSources(ownerStr: string): { SightSource }
+	local sources: { SightSource } = {}
+	for _, bd in buildingData do
+		if bd.isConstructing then continue end
+		if tostring(bd.owner.UserId) ~= ownerStr then continue end
+		local vr = (Config.VISION_RADIUS :: any)[bd.buildingType] or Config.VISION_DEFAULT
+		sources[#sources + 1] = { x = bd.base.Position.X, z = bd.base.Position.Z, r2 = vr * vr }
+	end
+	if unitManagerRef and unitManagerRef.getOwnerUnitPositions then
+		local r2 = Config.VISION_UNIT * Config.VISION_UNIT
+		for _, p in unitManagerRef.getOwnerUnitPositions(ownerStr) do
+			sources[#sources + 1] = { x = p.X, z = p.Z, r2 = r2 }
+		end
+	end
+	return sources
+end
+
+local function isSpotted(sources: { SightSource }, pos: Vector3): boolean
+	for _, s in sources do
+		local dx = s.x - pos.X
+		local dz = s.z - pos.Z
+		if dx * dx + dz * dz <= s.r2 then return true end
+	end
+	return false
+end
+
 -- ── Init ──────────────────────────────────────────────────────────────────────
 
 function BuildingManager.init(resourceManager, mineralManager_)
@@ -1257,14 +1351,17 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local isCreepy = upg == "Creepy" or upg == "Mutant"
 			local tRate   = upg == "Flamethrower"  and Config.TURRET_FLAME.rate
 			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.rate
+			             or upg == "Artillery"      and Config.TURRET_ARTILLERY.rate
 			             or isCreepy                and Config.TURRET_CREEPY.rate
 			             or Config.TURRET_ATTACK_RATE
 			local tRange  = upg == "Flamethrower"  and Config.TURRET_FLAME.range
 			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.range
+			             or upg == "Artillery"      and Config.TURRET_ARTILLERY.range
 			             or isCreepy                and Config.TURRET_CREEPY.range
 			             or Config.TURRET_RANGE
 			local tDamage = upg == "Flamethrower"  and Config.TURRET_FLAME.damage
 			             or upg == "RocketLauncher" and Config.TURRET_ROCKET.damage
+			             or upg == "Artillery"      and Config.TURRET_ARTILLERY.damage
 			             or isCreepy                and Config.TURRET_CREEPY.damage
 			             or Config.TURRET_DAMAGE
 
@@ -1293,15 +1390,22 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				continue
 			end
 
+			-- Artillery only fires at targets that are spotted (out of the fog).
+			local canTarget: ((Vector3) -> boolean)? = nil
+			if upg == "Artillery" then
+				local sources = gatherSightSources(myOwnerStr)
+				canTarget = function(pos) return isSpotted(sources, pos) end
+			end
+
 			local targetPos: Vector3? = nil
 
 			-- Prefer hitting units → buildings → miners
 			if unitManagerRef then
-				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage)
+				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage, canTarget)
 				if hitUnit then targetPos = unitHitPos end
 			end
 			if not targetPos then
-				local bId, bPos = BuildingManager.getNearestEnemyBuilding(myPos, myOwnerStr, tRange)
+				local bId, bPos = BuildingManager.getNearestEnemyBuilding(myPos, myOwnerStr, tRange, canTarget)
 				if bId then
 					BuildingManager.damage(bId, tDamage)
 					targetPos = bPos
@@ -1315,9 +1419,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if targetPos then
 				local visualTarget = targetPos
 
-				-- Aim head + barrel at the visual target
 				local head    = data.head
-				local barrel  = data.barrel
 				local headPos = head and head.Position
 					or (myPos + Vector3.new(0, Config.BUILDING_SIZE.Y + 1.5, 0))
 
@@ -1326,17 +1428,31 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 				if aimDir.Magnitude > 0.1 then
 					local aimUnit = aimDir.Unit
-					barrelTip = headPos + aimUnit * 7
 
+					-- Yaw the head/mantlet toward the target
 					if head then
 						local flatDir = (visualTarget - headPos) * Vector3.new(1, 0, 1)
 						if flatDir.Magnitude > 0.1 then
 							head.CFrame = CFrame.new(headPos, headPos + flatDir.Unit)
 						end
 					end
-					if barrel then
+
+					if data.barrels then
+						-- Artillery: aim the three long nozzles, fire from their tips
+						barrelTip = headPos + aimUnit * 13
+						local rightV = aimUnit:Cross(Vector3.new(0, 1, 0))
+						rightV = rightV.Magnitude > 0.01 and rightV.Unit or Vector3.new(1, 0, 0)
+						local offs = { -2.1, 0, 2.1 }
+						for i, bp in data.barrels do
+							local center = headPos + rightV * (offs[i] or 0) + aimUnit * 6
+							bp.CFrame = CFrame.new(center, center + aimUnit)
+						end
+					elseif data.barrel then
+						barrelTip = headPos + aimUnit * 7
 						local barrelCenter = headPos + aimUnit * 3.5
-						barrel.CFrame = CFrame.new(barrelCenter, barrelCenter + aimUnit)
+						data.barrel.CFrame = CFrame.new(barrelCenter, barrelCenter + aimUnit)
+					else
+						barrelTip = headPos + aimUnit * 7
 					end
 				end
 
@@ -1570,7 +1686,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		function(player, turretIds, upgradeType)
 			if type(upgradeType) ~= "string" then return end
 
-			local VALID = { Flamethrower = true, RocketLauncher = true }
+			local VALID = { Flamethrower = true, RocketLauncher = true, Artillery = true }
 			if not VALID[upgradeType] then return end
 
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end

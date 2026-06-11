@@ -360,6 +360,37 @@ function UnitVisuals.buildBuildingPreview(
 			ring.BrickColor   = BrickColor.new("Black")
 			ring.Material     = Enum.Material.SmoothPlastic
 			ring.Size         = ring.Size + Vector3.new(3, 0, 3)
+		elseif upgradeType == "Artillery" then
+			-- Massive siege piece: huge mantlet + three long nozzles on a pedestal
+			local steel = BrickColor.new("Dark stone grey")
+			local black = BrickColor.new("Really black")
+			local glow  = BrickColor.new("Deep orange")
+			head.BrickColor   = steel
+			head.Material     = Enum.Material.Metal
+			head.Size         = Vector3.new(8, 6, 9)
+			barrel.Transparency = 1
+			ring.BrickColor   = black
+			ring.Material     = Enum.Material.Metal
+			ring.Size         = Vector3.new(7.5, 1.4, 7.5)
+
+			local hp = head.Position
+			local function ap(sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
+				local p      = makePart(parent)
+				if shape then (p :: any).Shape = shape end
+				p.Size       = sz
+				p.CFrame     = cf
+				p.BrickColor = bc
+				p.Material   = mat
+				return p
+			end
+			ap(Vector3.new(7, 3.5, 7), CFrame.new(hp + Vector3.new(0, -3, 0)), black, Enum.Material.Metal)
+			ap(Vector3.new(0.7, 7.6, 7.6),
+				CFrame.new(hp + Vector3.new(0, -3, 0)) * CFrame.Angles(0, 0, math.pi / 2),
+				glow, Enum.Material.Neon, Enum.PartType.Cylinder)
+			for _, off in { -2.1, 0, 2.1 } do
+				local center = hp + Vector3.new(off, 0, 6)
+				ap(Vector3.new(1.5, 1.5, 14), CFrame.new(center, center + Vector3.new(0, 0, 1)), steel, Enum.Material.Metal)
+			end
 		end
 
 	elseif buildingType == "Monument" then

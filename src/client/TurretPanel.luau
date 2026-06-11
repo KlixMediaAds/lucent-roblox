@@ -24,8 +24,10 @@ local C            = UILib.C
 
 local FLAME_COLOR   = Color3.fromRGB(230, 90,  15)
 local ROCKET_COLOR  = Color3.fromRGB(55,  115, 225)
+local ARTY_COLOR    = Color3.fromRGB(210, 165, 55)
 local FLAME_COST    = (Config.TURRET_UPGRADE_COST :: any)["Flamethrower"]   or 200
 local ROCKET_COST   = (Config.TURRET_UPGRADE_COST :: any)["RocketLauncher"] or 225
+local ARTY_COST     = (Config.TURRET_UPGRADE_COST :: any)["Artillery"]      or 400
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeTurretId: string?
@@ -189,10 +191,11 @@ function TurretPanel.init(network, getResourcesFn, hasResearchFn_, getMultiIds)
 		TurretPanel.hide()
 	end)
 
-	-- Flamethrower and RocketLauncher only — Creepy/Mutant now come from the Creepy Blob
+	-- Flamethrower / RocketLauncher / Artillery — Creepy/Mutant come from the Creepy Blob
 	local UPGRADES = {
-		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,  cost = FLAME_COST,  angle = -120, needsRes = true },
-		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR, cost = ROCKET_COST, angle = -60,  needsRes = true },
+		{ key = "Flamethrower",   icon = "◈", color = FLAME_COLOR,  cost = FLAME_COST,  angle = -135, needsRes = true },
+		{ key = "RocketLauncher", icon = "⊕", color = ROCKET_COLOR, cost = ROCKET_COST, angle = -90,  needsRes = true },
+		{ key = "Artillery",      icon = "⊚", color = ARTY_COLOR,   cost = ARTY_COST,   angle = -45,  needsRes = true },
 	}
 
 	for _, def in UPGRADES do
