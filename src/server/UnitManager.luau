@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+local UnitBlueprints    = require(Shared:WaitForChild("UnitBlueprints"))
 
 local UnitManager = {}
 
@@ -135,28 +136,67 @@ local function fillGridScratch(fromPos: Vector3, range: number)
 	end
 end
 
--- ── Health bar ────────────────────────────────────────────────────────────────
+-- ── Decorator construction ────────────────────────────────────────────────────
 
-local function addTankTreads(id: string, body: BasePart)
-	-- Treads are Anchored (no physics body, no WeldConstraint).
-	-- Their CFrame is updated manually in the Heartbeat via unitDecorators.
-	local halfX   = body.Size.X / 2 + 0.75
-	local offsetY = -(body.Size.Y / 2) + 1.1
-	local decs    = unitDecorators[id]
-	for _, side in { -1, 1 } do
-		local localCF      = CFrame.new(side * halfX, offsetY, 0)
-		local tread        = Instance.new("Part")
-		tread.Name         = "Tread"
-		tread.Size         = Vector3.new(1.5, 2.2, body.Size.Z + 1.5)
-		tread.BrickColor   = BrickColor.new("Dark stone grey")
-		tread.Material     = Enum.Material.SmoothPlastic
-		tread.Anchored     = true
-		tread.CanCollide   = false
-		tread.CastShadow   = false
-		tread.CanQuery     = false
-		tread.CFrame       = body.CFrame * localCF
-		tread.Parent       = body
-		decs[#decs + 1]    = { part = tread, localCF = localCF }
+-- Builds a unit's static decorator parts from its shared blueprint (see
+-- UnitBlueprints). Anchored parts are tracked in `unitDecorators` so the
+-- Heartbeat re-applies `bodyCF * localCF` each frame as the body moves.
+local function buildFromBlueprint(id: string, body: BasePart, bp: UnitBlueprints.Blueprint)
+	if bp.rootTransparent then body.Transparency = 1 end
+	local teamColor = body.Color
+	local decs      = unitDecorators[id]
+	for _, spec in bp.parts do
+		local p   = UnitBlueprints.instantiate(spec, body.CFrame, teamColor)
+		p.Parent  = body
+		decs[#decs + 1] = { part = p, localCF = spec.cf }
+	end
+	if bp.healthBarY then
+		local bb = body:FindFirstChild("HealthBar")
+		if bb and bb:IsA("BillboardGui") then
+			bb.StudsOffset = Vector3.new(0, bp.healthBarY, 0)
+		end
+	end
+end
+
+-- Howitzer-only: continuous black smoke from both smokestacks. Server-side only
+-- (previews omit particles). The stacks are named by the blueprint.
+local function attachHowitzerSmoke(body: BasePart)
+	for _, stackName in { "_HwStack1", "_HwStack2" } do
+		local stk = body:FindFirstChild(stackName) :: BasePart?
+		if not stk then continue end
+		-- The stack is an upright cylinder: its length runs along local X and the
+		-- blueprint rotates it Z+90° so that axis points up. Place the emitter at
+		-- the top face and cancel that rotation (Z−90°) so the emitter's Top (+Y,
+		-- the default EmissionDirection) points world-up and smoke rises.
+		local att      = Instance.new("Attachment")
+		att.CFrame     = CFrame.new(stk.Size.X / 2, 0, 0) * CFrame.Angles(0, 0, -math.pi / 2)
+		att.Parent     = stk
+		local pe                = Instance.new("ParticleEmitter")
+		pe.Color                = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,   Color3.fromRGB(90, 90, 90)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(55, 55, 55)),
+			ColorSequenceKeypoint.new(1,   Color3.fromRGB(28, 28, 28)),
+		})
+		pe.LightEmission        = 0
+		pe.LightInfluence       = 0.5
+		pe.Lifetime             = NumberRange.new(2.0, 3.5)
+		pe.Rate                 = if stackName == "_HwStack1" then 10 else 7
+		pe.Rotation             = NumberRange.new(0, 360)
+		pe.RotSpeed             = NumberRange.new(-25, 25)
+		pe.Size                 = NumberSequence.new({
+			NumberSequenceKeypoint.new(0,   0.5),
+			NumberSequenceKeypoint.new(0.5, 2.0),
+			NumberSequenceKeypoint.new(1,   3.2),
+		})
+		pe.Transparency         = NumberSequence.new({
+			NumberSequenceKeypoint.new(0,   0.10),
+			NumberSequenceKeypoint.new(0.5, 0.55),
+			NumberSequenceKeypoint.new(1,   1.00),
+		})
+		pe.Speed                = NumberRange.new(2.5, 5)
+		pe.SpreadAngle          = Vector2.new(12, 12)
+		pe.VelocityInheritance  = 0.2
+		pe.Parent               = att
 	end
 end
 
@@ -227,58 +267,6 @@ local function addCreepyEyes(id: string, body: BasePart, unitType: string)
 		makeEye(CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
 		makeEye(CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
 	end
-end
-
-local function addMedicCross(id: string, body: BasePart)
-	local topY    = body.Size.Y / 2 + 0.18
-	local localCF = CFrame.new(0, topY, 0)
-	local decs    = unitDecorators[id]
-	local function makeBar(sx: number, sz: number)
-		local bar         = Instance.new("Part")
-		bar.Size          = Vector3.new(sx, 0.3, sz)
-		bar.BrickColor    = BrickColor.new("White")
-		bar.Material      = Enum.Material.SmoothPlastic
-		bar.Anchored      = true
-		bar.CanCollide    = false
-		bar.CastShadow    = false
-		bar.CanQuery      = false
-		bar.CFrame        = body.CFrame * localCF
-		bar.Parent        = body
-		decs[#decs + 1]   = { part = bar, localCF = localCF }
-	end
-	makeBar(body.Size.X * 0.55, 0.7)
-	makeBar(0.7, body.Size.Z * 0.55)
-end
-
-local function buildSoldierVisuals(id: string, body: BasePart)
-	local color = body.BrickColor
-	body.Transparency = 1
-	local decs = unitDecorators[id]
-
-	-- All sub-parts are Anchored; their CFrames are maintained via unitDecorators.
-	local function child(shape: Enum.PartType?, sz: Vector3, localCF: CFrame, col: BrickColor, mat: Enum.Material)
-		local p         = Instance.new("Part")
-		if shape then (p :: any).Shape = shape end
-		p.Size          = sz
-		p.CFrame        = body.CFrame * localCF
-		p.BrickColor    = col
-		p.Material      = mat
-		p.Anchored      = true
-		p.CanCollide    = false
-		p.CastShadow    = false
-		p.CanQuery      = false
-		p.Parent        = body
-		decs[#decs + 1] = { part = p, localCF = localCF }
-	end
-
-	child(Enum.PartType.Cylinder, Vector3.new(1.5, 2.0, 2.0),
-		CFrame.Angles(0, 0, math.pi / 2),       color, Enum.Material.SmoothPlastic)
-	child(Enum.PartType.Ball,     Vector3.new(2.0, 2.0, 2.0),
-		CFrame.new(0,  0.75, 0),                 color, Enum.Material.SmoothPlastic)
-	child(Enum.PartType.Ball,     Vector3.new(2.0, 2.0, 2.0),
-		CFrame.new(0, -0.75, 0),                 color, Enum.Material.SmoothPlastic)
-	child(nil,                    Vector3.new(0.3, 0.25, 1.6),
-		CFrame.new(1.15, 0.15, -0.3), BrickColor.new("Dark stone grey"), Enum.Material.SmoothPlastic)
 end
 
 local function addHealthBar(part: BasePart)
@@ -389,120 +377,24 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
 	addHealthBar(part)
-	if unitType == "Soldier" then buildSoldierVisuals(id, part) end
-	if unitType == "Tank"  then
-		addTankTreads(id, part)
+
+	-- Static body geometry comes from the shared blueprint (single source of
+	-- truth, also used by the ViewportFrame previews in UnitVisuals).
+	local blueprint = UnitBlueprints.get(unitType, part.Size)
+	if blueprint then
+		buildFromBlueprint(id, part, blueprint)
+	end
+
+	-- Per-unit extras that aren't plain geometry:
+	if unitType == "Tank" then
 		local hv   = Instance.new("NumberValue")
 		hv.Name    = "HarpoonCount"
 		hv.Value   = 0
 		hv.Parent  = part
 	end
 	if unitType == "Howitzer" then
-		-- Root is the invisible hip pivot. All visuals are decorator parts.
-		-- Root center sits at Y=7 above ground; negative Z = unit's forward direction.
-		local col   = part.BrickColor  -- team color (save before making root invisible)
-		part.Transparency = 1
-		local grey  = BrickColor.new("Dark stone grey")
-		local black = BrickColor.new("Black")
-		local brass = BrickColor.new("Warm Yellow")
-		local decs  = unitDecorators[id]
-
-		local function anchored(sz: Vector3, localCF: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?)
-			local p          = Instance.new("Part")
-			p.Size           = sz
-			if shape then (p :: any).Shape = shape end
-			p.BrickColor     = bc
-			p.Material       = mat
-			p.Anchored       = true
-			p.CanCollide     = false
-			p.CastShadow     = false
-			p.CanQuery       = false
-			p.CFrame         = part.CFrame * localCF
-			p.Parent         = part
-			decs[#decs + 1]  = { part = p, localCF = localCF }
-			return p
-		end
-
-		-- Hip / pelvis plate (connects the mechanical legs)
-		anchored(Vector3.new(8.5, 2, 8.5),   CFrame.new(0, 0, 0),          grey, Enum.Material.Metal)
-
-		-- Engine housing (lower torso, below boiler)
-		anchored(Vector3.new(7.5, 4.5, 8),   CFrame.new(0, 3.5, 0),        grey, Enum.Material.SmoothPlastic)
-		-- Front housing flange
-		anchored(Vector3.new(5, 3.5, 1.5),   CFrame.new(0, 3.5, -5),       grey, Enum.Material.Metal)
-
-		-- Main boiler box (the locomotive drum)
-		anchored(Vector3.new(7, 5.5, 8.5),   CFrame.new(0, 8, 0),          grey, Enum.Material.SmoothPlastic)
-		-- Brass boiler bands (horizontal rings)
-		anchored(Vector3.new(7.5, 0.7, 0.5), CFrame.new(0, 9.5, 0),        brass, Enum.Material.SmoothPlastic)
-		anchored(Vector3.new(7.5, 0.7, 0.5), CFrame.new(0, 6.5, 0),        brass, Enum.Material.SmoothPlastic)
-
-		-- Cockpit armored box (front of boiler)
-		anchored(Vector3.new(4.5, 3.5, 2),   CFrame.new(0, 8, -5.3),       grey, Enum.Material.Metal)
-		-- Observation slit (narrow neon strip)
-		anchored(Vector3.new(4.5, 0.5, 0.2), CFrame.new(0, 8.3, -6.35),    col,  Enum.Material.Neon)
-
-		-- Smokestacks (rear of boiler, vertical cylinders)
-		local st1 = anchored(Vector3.new(1.6, 7, 1.6),   CFrame.new(-2, 13, 3),   black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
-		st1.Name = "_HwStack1"
-		local st2 = anchored(Vector3.new(1.3, 5.5, 1.3), CFrame.new(-0.3, 12.3, 2), black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
-		st2.Name = "_HwStack2"
-
-		-- Cannon mount bracket (front lower body, -Z = forward)
-		anchored(Vector3.new(3, 2.5, 3),     CFrame.new(0, 2, -4.5),       grey, Enum.Material.Metal)
-		-- Dual steam cannon barrels (extend forward along -Z)
-		anchored(Vector3.new(0.9, 0.9, 5.5), CFrame.new(-0.85, 2, -7.3),   grey, Enum.Material.Metal)
-		anchored(Vector3.new(0.9, 0.9, 5.5), CFrame.new( 0.85, 2, -7.3),   grey, Enum.Material.Metal)
-		-- Steam feed pipe (vertical, boiler to cannon)
-		anchored(Vector3.new(0.5, 3.5, 0.5), CFrame.new(0, 5, -4),         brass, Enum.Material.SmoothPlastic)
-		-- Horizontal pressure manifold across front
-		anchored(Vector3.new(6, 0.5, 0.5),   CFrame.new(0, 7.2, -5.5),     brass, Enum.Material.SmoothPlastic)
-
-		-- Vertical side structural braces
-		anchored(Vector3.new(0.8, 9, 0.8),   CFrame.new(-4.2, 4.5, 0),     grey, Enum.Material.Metal)
-		anchored(Vector3.new(0.8, 9, 0.8),   CFrame.new( 4.2, 4.5, 0),     grey, Enum.Material.Metal)
-
-		-- Rear exhaust vent
-		anchored(Vector3.new(3, 0.6, 0.5),   CFrame.new(0, 5.5, 4.5),      grey, Enum.Material.Metal)
-
-		-- Continuous smoke particles from both smokestacks
-		for _, stkPart in { st1, st2 } do
-			local att      = Instance.new("Attachment")
-			att.Position   = Vector3.new(0, stkPart.Size.Y / 2, 0)
-			att.Parent     = stkPart
-			local pe                  = Instance.new("ParticleEmitter")
-			pe.Color                  = ColorSequence.new({
-				ColorSequenceKeypoint.new(0,   Color3.fromRGB(90, 90, 90)),
-				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(55, 55, 55)),
-				ColorSequenceKeypoint.new(1,   Color3.fromRGB(28, 28, 28)),
-			})
-			pe.LightEmission          = 0
-			pe.LightInfluence         = 0.5
-			pe.Lifetime               = NumberRange.new(2.0, 3.5)
-			pe.Rate                   = if stkPart == st1 then 10 else 7
-			pe.Rotation               = NumberRange.new(0, 360)
-			pe.RotSpeed               = NumberRange.new(-25, 25)
-			pe.Size                   = NumberSequence.new({
-				NumberSequenceKeypoint.new(0,   0.5),
-				NumberSequenceKeypoint.new(0.5, 2.0),
-				NumberSequenceKeypoint.new(1,   3.2),
-			})
-			pe.Transparency           = NumberSequence.new({
-				NumberSequenceKeypoint.new(0,   0.10),
-				NumberSequenceKeypoint.new(0.5, 0.55),
-				NumberSequenceKeypoint.new(1,   1.00),
-			})
-			pe.Speed                  = NumberRange.new(2.5, 5)
-			pe.SpreadAngle            = Vector2.new(12, 12)
-			pe.VelocityInheritance    = 0.2
-			pe.Parent                 = att
-		end
-
-		-- Push the health bar above the smokestacks
-		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
-		if bb then bb.StudsOffset = Vector3.new(0, 17, 0) end
+		attachHowitzerSmoke(part)
 	end
-	if unitType == "Medic" then addMedicCross(id, part) end
 	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(id, part, unitType) end
 
 	units[id] = {

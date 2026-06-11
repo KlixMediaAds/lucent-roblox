@@ -9,30 +9,13 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
+local UnitBlueprints    = require(Shared:WaitForChild("UnitBlueprints"))
 
 local UnitVisuals = {}
 
 local DEFAULT_TEAM = BrickColor.new("Medium blue")
 
 -- ── Unit helpers ──────────────────────────────────────────────────────────────
-
-local function addTankTreads(body: BasePart)
-	local halfX   = body.Size.X / 2 + 0.75
-	local offsetY = -(body.Size.Y / 2) + 1.1
-	for _, side in { -1, 1 } do
-		local tread          = Instance.new("Part")
-		tread.Name           = "Tread"
-		tread.Size           = Vector3.new(1.5, 2.2, body.Size.Z + 1.5)
-		tread.BrickColor     = BrickColor.new("Dark stone grey")
-		tread.Material       = Enum.Material.SmoothPlastic
-		tread.Anchored       = true
-		tread.CanCollide     = false
-		tread.CastShadow     = false
-		tread.CanQuery       = false
-		tread.CFrame         = body.CFrame * CFrame.new(side * halfX, offsetY, 0)
-		tread.Parent         = body.Parent
-	end
-end
 
 local function makeEye(parent: Instance, cf: CFrame, name: string, eyeSize: number)
 	local sclera        = Instance.new("Part")
@@ -91,22 +74,44 @@ local function addCreepyEyes(parent: Instance, body: BasePart, unitType: string)
 	end
 end
 
-local function addMedicCross(parent: Instance, body: BasePart)
-	local topY = body.Size.Y / 2 + 0.18
-	local function makeBar(sx: number, sz: number)
-		local bar         = Instance.new("Part")
-		bar.Size          = Vector3.new(sx, 0.3, sz)
-		bar.BrickColor    = BrickColor.new("White")
-		bar.Material      = Enum.Material.SmoothPlastic
-		bar.Anchored      = true
-		bar.CanCollide    = false
-		bar.CastShadow    = false
-		bar.CanQuery      = false
-		bar.CFrame        = body.CFrame * CFrame.new(0, topY, 0)
-		bar.Parent        = parent
+local function makePart(parent: Instance): Part
+	local p          = Instance.new("Part")
+	p.Anchored       = true
+	p.CanCollide     = false
+	p.CastShadow     = false
+	p.CanQuery       = false
+	p.Parent         = parent
+	return p
+end
+
+-- Applies a shared unit blueprint to a static preview body at the origin.
+-- Mirrors UnitManager.buildFromBlueprint but without decorator tracking.
+local function applyBlueprint(parent: Instance, body: BasePart, bp: UnitBlueprints.Blueprint)
+	if bp.rootTransparent then body.Transparency = 1 end
+	local teamColor = body.Color
+	for _, spec in bp.parts do
+		local p  = UnitBlueprints.instantiate(spec, body.CFrame, teamColor)
+		p.Parent = parent
 	end
-	makeBar(body.Size.X * 0.55, 0.7)
-	makeBar(0.7, body.Size.Z * 0.55)
+end
+
+-- Preview-only static legs for the Howitzer walker. The live unit uses the
+-- animated WalkerLegs client module instead, so the legs are not part of the
+-- shared blueprint.
+local function addWalkerLegsPreview(parent: Instance, body: BasePart)
+	local grey = BrickColor.new("Dark stone grey").Color
+	local function ap(sz: Vector3, pos: Vector3)
+		local p      = makePart(parent)
+		p.Size       = sz
+		p.Position   = pos
+		p.Color      = grey
+		p.Material   = Enum.Material.Metal
+	end
+	for _, side in { -1, 1 } do
+		ap(Vector3.new(2.4, 4, 2.4),   Vector3.new(side * 4.4, -2.5, 0))    -- upper leg
+		ap(Vector3.new(2.0, 3.5, 2.0), Vector3.new(side * 4.8, -6.3, 0.2))  -- lower leg
+		ap(Vector3.new(3.5, 0.9, 4.5), Vector3.new(side * 4.8, -7.5, 0.3))  -- foot plate
+	end
 end
 
 -- ── Building helpers ──────────────────────────────────────────────────────────
@@ -118,16 +123,6 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"    then return Vector3.new(9, 6, 9) end
 	return Config.BUILDING_SIZE
-end
-
-local function makePart(parent: Instance): Part
-	local p          = Instance.new("Part")
-	p.Anchored       = true
-	p.CanCollide     = false
-	p.CastShadow     = false
-	p.CanQuery       = false
-	p.Parent         = parent
-	return p
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -146,42 +141,10 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		color = BrickColor.new("Black")
 	end
 
-	-- ── Soldier: upright pill + gun ───────────────────────────────────────────
-	if unitType == "Soldier" then
-		local function ap(shape: Enum.PartType?, sz: Vector3, cf: CFrame, col: BrickColor): BasePart
-			local p          = Instance.new("Part")
-			if shape then (p :: any).Shape = shape end
-			p.Size           = sz
-			p.CFrame         = cf
-			p.BrickColor     = col
-			p.Material       = Enum.Material.SmoothPlastic
-			p.Anchored       = true
-			p.CanCollide     = false
-			p.CastShadow     = false
-			p.CanQuery       = false
-			p.Parent         = parent
-			return p
-		end
-
-		-- Cylinder torso standing upright (long axis rotated to Y)
-		local cyl = ap(Enum.PartType.Cylinder,
-			Vector3.new(1.5, 2.0, 2.0),
-			CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.pi / 2),
-			color)
-		cyl.Name = "Soldier"
-
-		-- Rounded caps
-		ap(Enum.PartType.Ball, Vector3.new(2.0, 2.0, 2.0), CFrame.new(0,  0.75, 0), color)
-		ap(Enum.PartType.Ball, Vector3.new(2.0, 2.0, 2.0), CFrame.new(0, -0.75, 0), color)
-
-		-- Gun: dark rectangle, barrel pointing forward (-Z)
-		ap(nil, Vector3.new(0.3, 0.25, 1.6), CFrame.new(1.15, 0.15, -0.3),
-			BrickColor.new("Dark stone grey"))
-
-		return cyl
-	end
-
-	-- ── Other units: base block body ──────────────────────────────────────────
+	-- Base block body. For units whose blueprint marks the root transparent
+	-- (Soldier, Howitzer) this becomes an invisible anchor; the visible shape is
+	-- entirely decorator parts. Named after the unit type so callers can pick it
+	-- as the model's PrimaryPart.
 	local body          = Instance.new("Part")
 	body.Name           = unitType
 	body.Size           = typeDef.size
@@ -194,66 +157,15 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	body.CanQuery       = false
 	body.Parent         = parent
 
-	if unitType == "Tank" then
-		addTankTreads(body)
+	-- Shared geometry from the single-source-of-truth blueprint.
+	local blueprint = UnitBlueprints.get(unitType, body.Size)
+	if blueprint then
+		applyBlueprint(parent, body, blueprint)
 	end
+
+	-- Preview-only addons (diverge from the live unit, so not in the blueprint):
 	if unitType == "Howitzer" then
-		-- Static preview of the steam walker. Body is at (0,0,0); root is invisible.
-		-- All offsets mirror UnitManager (root center = Y=0 in preview space).
-		-- Negative Z = forward direction in the viewport.
-		local grey  = BrickColor.new("Dark stone grey")
-		local black = BrickColor.new("Black")
-		local brass = BrickColor.new("Warm Yellow")
-		local col   = body.BrickColor
-		body.Transparency = 1  -- root invisible; all visuals are explicit parts
-
-		local function ap(sz: Vector3, pos: Vector3, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
-			local p = makePart(parent)
-			if shape then (p :: any).Shape = shape end
-			p.Size      = sz
-			p.Position  = pos
-			p.BrickColor = bc
-			p.Material   = mat
-			return p
-		end
-
-		-- Hip plate
-		ap(Vector3.new(8.5, 2, 8.5),   Vector3.new(0, 0, 0),          grey,  Enum.Material.Metal)
-		-- Engine housing
-		ap(Vector3.new(7.5, 4.5, 8),   Vector3.new(0, 3.5, 0),        grey,  Enum.Material.SmoothPlastic)
-		ap(Vector3.new(5, 3.5, 1.5),   Vector3.new(0, 3.5, -5),       grey,  Enum.Material.Metal)
-		-- Boiler
-		ap(Vector3.new(7, 5.5, 8.5),   Vector3.new(0, 8, 0),          grey,  Enum.Material.SmoothPlastic)
-		ap(Vector3.new(7.5, 0.7, 0.5), Vector3.new(0, 9.5, 0),        brass, Enum.Material.SmoothPlastic)
-		ap(Vector3.new(7.5, 0.7, 0.5), Vector3.new(0, 6.5, 0),        brass, Enum.Material.SmoothPlastic)
-		-- Cockpit
-		ap(Vector3.new(4.5, 3.5, 2),   Vector3.new(0, 8, -5.3),       grey,  Enum.Material.Metal)
-		ap(Vector3.new(4.5, 0.5, 0.2), Vector3.new(0, 8.3, -6.35),    col,   Enum.Material.Neon)
-		-- Smokestacks (rear = +Z in preview)
-		ap(Vector3.new(1.6, 7, 1.6),   Vector3.new(-2, 13, 3),        black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
-		ap(Vector3.new(1.3, 5.5, 1.3), Vector3.new(-0.3, 12.3, 2),    black, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
-		-- Cannon
-		ap(Vector3.new(3, 2.5, 3),     Vector3.new(0, 2, -4.5),       grey,  Enum.Material.Metal)
-		ap(Vector3.new(0.9, 0.9, 5.5), Vector3.new(-0.85, 2, -7.3),   grey,  Enum.Material.Metal)
-		ap(Vector3.new(0.9, 0.9, 5.5), Vector3.new( 0.85, 2, -7.3),   grey,  Enum.Material.Metal)
-		-- Pipes
-		ap(Vector3.new(0.5, 3.5, 0.5), Vector3.new(0, 5, -4),         brass, Enum.Material.SmoothPlastic)
-		ap(Vector3.new(6, 0.5, 0.5),   Vector3.new(0, 7.2, -5.5),     brass, Enum.Material.SmoothPlastic)
-		-- Side braces
-		ap(Vector3.new(0.8, 9, 0.8),   Vector3.new(-4.2, 4.5, 0),     grey,  Enum.Material.Metal)
-		ap(Vector3.new(0.8, 9, 0.8),   Vector3.new( 4.2, 4.5, 0),     grey,  Enum.Material.Metal)
-		-- Static legs at rest position (simple blocks; animated version is client-side)
-		for _, side in { -1, 1 } do
-			-- Upper leg (hip to knee)
-			ap(Vector3.new(2.4, 4, 2.4), Vector3.new(side * 4.4, -2.5, 0),   grey,  Enum.Material.Metal)
-			-- Lower leg (knee to foot)
-			ap(Vector3.new(2.0, 3.5, 2.0), Vector3.new(side * 4.8, -6.3, 0.2), grey, Enum.Material.Metal)
-			-- Foot plate
-			ap(Vector3.new(3.5, 0.9, 4.5), Vector3.new(side * 4.8, -7.5, 0.3), grey, Enum.Material.Metal)
-		end
-	end
-	if unitType == "Medic" then
-		addMedicCross(parent, body)
+		addWalkerLegsPreview(parent, body)   -- live unit uses animated WalkerLegs
 	end
 	if unitType == "CreepySoldier" then
 		addCreepyEyes(parent, body, "Soldier")
