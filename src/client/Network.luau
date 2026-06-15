@@ -138,6 +138,11 @@ function Network.onBlobUpdate(fn: (string, number) -> ())
 	RemoteHandler.get(Config.REMOTES.BlobUpdate).OnClientEvent:Connect(fn)
 end
 
+-- nestIds array — requests one egg from each Lamprey Nest (server caps concurrency)
+function Network.lampreyEgg(nestIds: {string})
+	RemoteHandler.get(Config.REMOTES.LampreyEgg):FireServer(nestIds)
+end
+
 -- position: where the worm erupted
 function Network.onWormBurst(fn: (Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.WormBurst).OnClientEvent:Connect(fn)

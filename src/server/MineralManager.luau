@@ -24,6 +24,7 @@ local extractAccum      = 0
 
 local depositsFolder: Folder
 local resourceManager: any
+local forestManagerRef: any
 
 local function posKey(v: Vector3): string
 	return math.round(v.X) .. "," .. math.round(v.Z)
@@ -39,6 +40,9 @@ local function makeDepositPart(pos: Vector3)
 	cluster.Name  = posKey(pos)
 	cluster.Parent = depositsFolder
 	depositThresholdBand[posKey(pos)] = 4
+	-- Keep resources clear of trees (matters for ore-wave deposits that land
+	-- after the forest already exists; initial generation avoids deposits too).
+	if forestManagerRef then forestManagerRef.clearAround(pos, 16) end
 end
 
 local function depositBand(fullness: number): number
@@ -433,6 +437,7 @@ end
 
 function MineralManager.setBuildingManager(_bm: any) end
 function MineralManager.setResearchManager(_rm: any) end
+function MineralManager.setForestManager(fm: any) forestManagerRef = fm end
 
 -- Spawns `count` deposits clustered in the home direction of ccPos (away from map
 -- centre), snapped to BUILDING_GRID.  Call after init() so depositsFolder exists.

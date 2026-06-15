@@ -19,7 +19,6 @@
 	  - 3 Barracks built   → MedicUnit
 	  - 3 Turrets built    → TurretUpgrades + BetterMines
 	  - 5 Soldiers trained → EliteUnits
-	  - 8 structures built → EyeUpgrade
 	  - Hard AI only: ConcussionShells (early grant), RocketBarrage (after 3 tanks trained)
 
 	Building lookup:
@@ -338,7 +337,6 @@ local function countOwnedBuildings(ownerStr: string, buildType: string): number
 	return #getOwnedBuildingIds(ownerStr, buildType)
 end
 
--- Count all owned structures (any building type, for EyeUpgrade threshold).
 local function countAllOwnedBuildings(ownerStr: string): number
 	local n = 0
 	local folder = workspace:FindFirstChild("Buildings")
@@ -483,7 +481,6 @@ local function checkAndGrantResearch(ai: any)
 	local bMines    = ai.builtMines
 	local tSoldiers = ai.trainedSoldiers
 	local tTanks    = ai.trainedTanks
-	local bTotal    = countAllOwnedBuildings(ai.ownerStr)
 
 	-- Level 2+: basic economy and elite unlock
 	if bTurrets >= 2 then grantTech(ai.player, "BetterMines") end
@@ -496,9 +493,8 @@ local function checkAndGrantResearch(ai: any)
 		if bTurrets  >= 3 then grantTech(ai.player, "TurretUpgrades") end
 	end
 
-	-- Level 4+: vision upgrade and mobile CC
+	-- Level 4+: mobile CC
 	if lv >= 4 then
-		if bTotal >= 8 then grantTech(ai.player, "EyeUpgrade") end
 		if bMines >= 2  then grantTech(ai.player, "MobileCC") end
 	end
 

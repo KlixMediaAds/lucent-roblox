@@ -66,6 +66,7 @@ local ResearchManager  = require(script:WaitForChild("ResearchManager"))
 local AIManager        = require(script:WaitForChild("AIManager"))
 local LobbyManager     = require(script:WaitForChild("LobbyManager"))
 local TerrainManager   = require(script:WaitForChild("TerrainManager"))
+local ForestManager    = require(script:WaitForChild("ForestManager"))
 
 TeamManager.init()
 ResourceManager.init()
@@ -82,6 +83,11 @@ BuildingManager.setResearchManager(ResearchManager)
 MineralManager.setBuildingManager(BuildingManager)
 AIManager.init(UnitManager, BuildingManager, ResourceManager)
 AIManager.setResearchManager(ResearchManager)
+
+ForestManager.init(MineralManager)
+BuildingManager.setForestManager(ForestManager)
+UnitManager.setForestManager(ForestManager)
+MineralManager.setForestManager(ForestManager)
 
 -- ── Game end / reset ──────────────────────────────────────────────────────────
 local gameResetInProgress = false
@@ -135,6 +141,10 @@ local function triggerEndGame(winnerUserId: number, reason: string)
 			setupLanePlayerBase(player)
 		end
 	end
+
+	-- Regrow the forest for the new round (default-mode CCs carve their own
+	-- clearing when players re-place them).
+	ForestManager.generate()
 
 	gameResetInProgress = false
 end
@@ -334,6 +344,9 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 			setupPlayerBase(player)
 		end
 	end
+
+	-- Grow the forest now that bases/deposits exist (it avoids both).
+	ForestManager.generate()
 
 	-- Late joiners also get auto-placed bases
 	Players.PlayerAdded:Connect(function(player)

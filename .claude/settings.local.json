@@ -35,7 +35,11 @@
       "Bash(git diff *)",
       "Read(//tmp/**)",
       "Bash(git restore *)",
-      "Bash(rm -f bm_revert.diff)"
+      "Bash(rm -f bm_revert.diff)",
+      "Bash(cp src/server/BuildingManager.luau /tmp/BM.bak)",
+      "Bash(python apply_droppod.py)",
+      "Bash(/c/Users/ohkod/.rojo/bin/rojo build *)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }

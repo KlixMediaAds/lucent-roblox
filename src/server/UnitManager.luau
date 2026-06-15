@@ -59,6 +59,13 @@ local buildingManagerRef:  any
 local resourceManagerRef:  any
 local researchManagerRef:  any
 local mineralManagerRef:   any
+local forestManagerRef:    any
+
+-- Units big enough to bulldoze trees as they move (basic 4×4 infantry can't).
+local FELLS_TREES: { [string]: boolean } = {}
+for utype, info in Config.UNIT_TYPES do
+	if math.max(info.size.X, info.size.Z) >= 5 then FELLS_TREES[utype] = true end
+end
 
 local barrackQueues:     { [string]: { QueueItem } } = {}
 local barrackIsTraining: { [string]: boolean }       = {}
@@ -213,75 +220,6 @@ local function attachHowitzerSmoke(body: BasePart)
 	end
 end
 
--- Track which players have the Eye Upgrade so newly spawned units get eyes too
-local eyeUpgradePlayers: { [number]: boolean } = {}
-
-local function addCreepyEyes(id: string, body: BasePart, unitType: string)
-	if body:FindFirstChild("_EyeL") then return end
-	local decs = unitDecorators[id]
-
-	local function makeEye(localCF: CFrame, name: string, eyeSize: number)
-		local irisLocal  = localCF * CFrame.new(0, 0, -eyeSize * 0.3)
-		local pupilLocal = localCF * CFrame.new(0, 0, -eyeSize * 0.44)
-
-		local sclera        = Instance.new("Part")
-		sclera.Name         = name
-		sclera.Shape        = Enum.PartType.Ball
-		sclera.Size         = Vector3.new(eyeSize, eyeSize, eyeSize)
-		sclera.Color        = Color3.fromRGB(255, 255, 255)
-		sclera.Material     = Enum.Material.SmoothPlastic
-		sclera.Anchored     = true
-		sclera.CanCollide   = false
-		sclera.CastShadow   = false
-		sclera.CanQuery     = false
-		sclera.CFrame       = body.CFrame * localCF
-		sclera.Parent       = body
-		decs[#decs + 1]     = { part = sclera, localCF = localCF }
-
-		local iris          = Instance.new("Part")
-		iris.Name           = "_Iris"
-		iris.Shape          = Enum.PartType.Ball
-		iris.Size           = Vector3.new(eyeSize * 0.42, eyeSize * 0.42, eyeSize * 0.42)
-		iris.Color          = Color3.fromRGB(255, 30, 0)
-		iris.Material       = Enum.Material.Neon
-		iris.Anchored       = true
-		iris.CanCollide     = false
-		iris.CastShadow     = false
-		iris.CanQuery       = false
-		iris.CFrame         = body.CFrame * irisLocal
-		iris.Parent         = body
-		decs[#decs + 1]     = { part = iris, localCF = irisLocal }
-
-		local pupil         = Instance.new("Part")
-		pupil.Name          = "_Pupil"
-		pupil.Shape         = Enum.PartType.Ball
-		pupil.Size          = Vector3.new(eyeSize * 0.2, eyeSize * 0.2, eyeSize * 0.2)
-		pupil.Color         = Color3.fromRGB(0, 0, 0)
-		pupil.Material      = Enum.Material.SmoothPlastic
-		pupil.Anchored      = true
-		pupil.CanCollide    = false
-		pupil.CastShadow    = false
-		pupil.CanQuery      = false
-		pupil.CFrame        = body.CFrame * pupilLocal
-		pupil.Parent        = body
-		decs[#decs + 1]     = { part = pupil, localCF = pupilLocal }
-	end
-
-	if unitType == "Soldier" then
-		local halfX   = 1.0
-		local eyeSize = 1.4
-		makeEye(CFrame.new(-halfX + eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0,  math.pi / 2, 0), "_EyeL", eyeSize)
-		makeEye(CFrame.new( halfX - eyeSize * 0.1, 0.4, 0) * CFrame.Angles(0, -math.pi / 2, 0), "_EyeR", eyeSize)
-	else
-		local topY    = body.Size.Y / 2
-		local halfX   = body.Size.X * 0.22
-		local fwdZ    = -(body.Size.Z / 2) + 0.15
-		local eyeSize = 1.5
-		makeEye(CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
-		makeEye(CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
-	end
-end
-
 local function addHealthBar(part: BasePart)
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "HealthBar"
@@ -419,8 +357,6 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 2.5, 0) end  -- just above the reared head
 	end
-	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(id, part, unitType) end
-
 	units[id] = {
 		part        = part,
 		owner       = player,
@@ -578,6 +514,8 @@ end
 function UnitManager.trainFromBarracks(barrackId: string, unitType: string, player: any): boolean
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return false end
+	-- Lampreys are born at the Lamprey Nest, never trained at a Barracks.
+	if unitType == "Lamprey" then return false end
 
 	if typeDef.researchReq then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, typeDef.researchReq) then
@@ -721,7 +659,6 @@ function UnitManager.resetAll()
 	units            = {}
 	unitDecorators   = {}
 	playerUnitCount  = {}
-	eyeUpgradePlayers = {}
 end
 
 function UnitManager.setBuildingManager(bm: any)
@@ -730,27 +667,14 @@ end
 
 function UnitManager.setResearchManager(rm: any)
 	researchManagerRef = rm
-	rm.addCompletionHook(function(player: any, techName: string)
-		if techName == "EyeUpgrade" then
-			UnitManager.applyEyeUpgrade(player)
-		end
-	end)
-end
-
--- Called when a player completes EyeUpgrade: adds eyes to all their existing units
--- and marks them so future spawns also get eyes.
-function UnitManager.applyEyeUpgrade(player: any)
-	eyeUpgradePlayers[player.UserId] = true
-	for id, data in units do
-		if data.owner == player then
-			if not unitDecorators[id] then unitDecorators[id] = {} end
-			addCreepyEyes(id, data.part, data.unitType)
-		end
-	end
 end
 
 function UnitManager.setMineralManager(mm: any)
 	mineralManagerRef = mm
+end
+
+function UnitManager.setForestManager(fm: any)
+	forestManagerRef = fm
 end
 
 -- Returns world positions of all of `ownerStr`'s living units. Used by the
@@ -1117,6 +1041,11 @@ function UnitManager.init(resourceManager)
 						end
 					else
 						data.part.Position = newPos
+					end
+
+					-- Medium+ units bulldoze any trees they push into.
+					if forestManagerRef and FELLS_TREES[data.unitType] then
+						forestManagerRef.knockNear(newPos, math.max(data.part.Size.X, data.part.Size.Z) * 0.5)
 					end
 				end
 			end
@@ -1711,6 +1640,8 @@ function UnitManager.init(resourceManager)
 		if type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
+		-- Lampreys are born at the Lamprey Nest, never trained at a Barracks.
+		if unitType == "Lamprey" then return end
 
 		-- Research gate: if this unit type requires a tech, verify the player has it
 		if typeDef.researchReq then

@@ -48,63 +48,6 @@ end
 
 -- ── Unit helpers ──────────────────────────────────────────────────────────────
 
-local function makeEye(parent: Instance, cf: CFrame, name: string, eyeSize: number)
-	local sclera        = Instance.new("Part")
-	sclera.Name         = name
-	sclera.Shape        = Enum.PartType.Ball
-	sclera.Size         = Vector3.new(eyeSize, eyeSize, eyeSize)
-	sclera.Color        = Color3.fromRGB(255, 255, 255)
-	sclera.Material     = Enum.Material.SmoothPlastic
-	sclera.Anchored     = true
-	sclera.CanCollide   = false
-	sclera.CastShadow   = false
-	sclera.CanQuery     = false
-	sclera.CFrame       = cf
-	sclera.Parent       = parent
-
-	local iris          = Instance.new("Part")
-	iris.Name           = "_Iris"
-	iris.Shape          = Enum.PartType.Ball
-	iris.Size           = Vector3.new(eyeSize * 0.42, eyeSize * 0.42, eyeSize * 0.42)
-	iris.Color          = Color3.fromRGB(255, 30, 0)
-	iris.Material       = Enum.Material.Neon
-	iris.Anchored       = true
-	iris.CanCollide     = false
-	iris.CastShadow     = false
-	iris.CanQuery       = false
-	iris.CFrame         = cf * CFrame.new(0, 0, -eyeSize * 0.3)
-	iris.Parent         = parent
-
-	local pupil         = Instance.new("Part")
-	pupil.Name          = "_Pupil"
-	pupil.Shape         = Enum.PartType.Ball
-	pupil.Size          = Vector3.new(eyeSize * 0.2, eyeSize * 0.2, eyeSize * 0.2)
-	pupil.Color         = Color3.fromRGB(0, 0, 0)
-	pupil.Material      = Enum.Material.SmoothPlastic
-	pupil.Anchored      = true
-	pupil.CanCollide    = false
-	pupil.CastShadow    = false
-	pupil.CanQuery      = false
-	pupil.CFrame        = cf * CFrame.new(0, 0, -eyeSize * 0.44)
-	pupil.Parent        = parent
-end
-
-local function addCreepyEyes(parent: Instance, body: BasePart, unitType: string)
-	if unitType == "Soldier" then
-		local halfX   = body.Size.X / 2
-		local eyeSize = 2.4
-		makeEye(parent, body.CFrame * CFrame.new(-halfX + eyeSize * 0.1, 0, 0) * CFrame.Angles(0, math.pi / 2, 0), "_EyeL", eyeSize)
-		makeEye(parent, body.CFrame * CFrame.new(halfX - eyeSize * 0.1, 0, 0) * CFrame.Angles(0, -math.pi / 2, 0), "_EyeR", eyeSize)
-	else
-		local topY    = body.Size.Y / 2
-		local halfX   = body.Size.X * 0.22
-		local fwdZ    = -(body.Size.Z / 2) + 0.15
-		local eyeSize = 1.5
-		makeEye(parent, body.CFrame * CFrame.new(-halfX, topY * 0.28, fwdZ), "_EyeL", eyeSize)
-		makeEye(parent, body.CFrame * CFrame.new( halfX, topY * 0.28, fwdZ), "_EyeR", eyeSize)
-	end
-end
-
 local function makePart(parent: Instance): Part
 	local p          = Instance.new("Part")
 	p.Anchored       = true
@@ -230,6 +173,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"    then return Vector3.new(9, 6, 9) end
+	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -507,9 +451,6 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	-- Preview-only addons (diverge from the live unit, so not in the blueprint):
 	if unitType == "Howitzer" then
 		addWalkerLegsPreview(parent, body)   -- live unit uses animated WalkerLegs
-	end
-	if unitType == "CreepySoldier" then
-		addCreepyEyes(parent, body, "Soldier")
 	end
 	if unitType == "Lamprey" then
 		body.Transparency = 1   -- live unit + preview draw the eel, not the pivot block
@@ -834,6 +775,61 @@ function UnitVisuals.buildBuildingPreview(
 		local ap  = makePart(parent); ap.Size  = Vector3.new(0.3, 2.5, 0.3);  ap.Position  = Vector3.new(0, 6.5, -4.5);    ap.BrickColor  = grey;  ap.Material  = Enum.Material.Metal
 		local an  = makePart(parent); an.Size  = Vector3.new(0.15, 1.2, 1.8); an.Position  = Vector3.new(1.1, 7.35, -4.5); an.BrickColor  = color; an.Material  = Enum.Material.Neon
 		local _ = bw2; _ = lw2; _ = rw2; _ = rf2; _ = ob2; _ = rl; _ = rr; _ = dp; _ = ns2; _ = sl; _ = sr; _ = ap; _ = an
+
+	elseif buildingType == "LampreyNest" then
+		-- Lamprey Nest: organic mound + birth tubes around a green orifice (preview).
+		local FLESH = Color3.fromRGB(40, 44, 52)
+		local GREEN = Color3.fromRGB(120, 190, 60)
+
+		base.Color    = FLESH
+		base.Material = Enum.Material.SmoothPlastic
+
+		for i = 1, 6 do
+			local angle = (i / 6) * math.pi * 2
+			local r     = 3.4
+			local lump  = makePart(parent)
+			lump.Name   = "Lump_" .. i
+			lump.Shape  = Enum.PartType.Ball
+			lump.Size   = Vector3.new(rng:NextNumber(2.6, 3.8), rng:NextNumber(2.2, 3.2), rng:NextNumber(2.6, 3.8))
+			lump.Position = Vector3.new(math.cos(angle) * r, size.Y - 1.4, math.sin(angle) * r)
+			lump.Color  = FLESH; lump.Material = Enum.Material.SmoothPlastic
+		end
+
+		local core    = makePart(parent)
+		core.Name     = "Core"
+		core.Shape    = Enum.PartType.Ball
+		core.Size     = Vector3.new(3.4, 3.4, 3.4)
+		core.Position = Vector3.new(0, size.Y + 0.3, 0)
+		core.Color    = GREEN; core.Material = Enum.Material.Neon
+		core.Transparency = 0.15
+
+		local tubeCount = 5
+		for i = 1, tubeCount do
+			local angle  = (i / tubeCount) * math.pi * 2 + 0.3
+			local r      = 3.1
+			local lean   = 0.30
+			local cf     = CFrame.new(Vector3.new(math.cos(angle) * r, size.Y + 1.4, math.sin(angle) * r))
+				* CFrame.Angles(math.sin(angle) * lean, 0, -math.cos(angle) * lean)
+			local tube   = makePart(parent)
+			tube.Name    = "Tube_" .. i
+			tube.Size    = Vector3.new(1.3, 4.4, 1.3)
+			tube.CFrame  = cf
+			tube.Color   = FLESH; tube.Material = Enum.Material.SmoothPlastic
+			local tip    = makePart(parent)
+			tip.Name     = "TubeTip_" .. i
+			tip.Shape    = Enum.PartType.Ball
+			tip.Size     = Vector3.new(1.0, 1.0, 1.0)
+			tip.CFrame   = cf * CFrame.new(0, 2.4, 0)
+			tip.Color    = GREEN; tip.Material = Enum.Material.Neon
+			tip.Transparency = 0.2
+		end
+
+		local band   = makePart(parent)
+		band.Name    = "TeamBand"
+		band.Shape   = Enum.PartType.Cylinder
+		band.Size    = Vector3.new(0.5, 11.6, 11.6)
+		band.CFrame  = CFrame.new(Vector3.new(0, 0.9, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+		band.BrickColor = color; band.Material = Enum.Material.Neon
 
 	else
 		-- Barracks: open-top training facility (preview).

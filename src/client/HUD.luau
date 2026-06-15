@@ -88,7 +88,16 @@ local BUILDING_INFO: { [string]: BuildingInfo } = {
 	Turret     = { cost = Config.TURRET_COST,       requires = { Barracks = 1 }, researchReq = nil        },
 	Relay      = { cost = Config.RELAY_COST,        requires = {},             researchReq = "Relay"      },
 	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
+	LampreyNest = { cost = Config.LAMPREY_NEST_COST, requires = { Barracks = 1 }, researchReq = nil       },
 }
+
+-- Display labels that differ from the internal building-type id.
+local DISPLAY_NAME: { [string]: string } = {
+	LampreyNest = "Nest",
+}
+local function dispName(btype: string): string
+	return (DISPLAY_NAME[btype] or btype):upper()
+end
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
@@ -99,6 +108,7 @@ local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string }
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
 	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
+	{ btype = "LampreyNest", icon = "🥚", color = Color3.fromRGB(120, 190, 60), desc = "Births Lampreys from pulsing eggs"             },
 }
 local CHILD_SPACING = 95   -- px between child centres
 
@@ -239,7 +249,7 @@ local function applyNodeState(node: ChildNode)
 		node.btn.BackgroundTransparency = 0.1
 		node.stroke.Color             = C.ACCENT
 		node.stroke.Thickness         = 3
-		node.label.Text               = node.btype:upper() .. "\nPLACING…"
+		node.label.Text               = dispName(node.btype) .. "\nPLACING…"
 		node.label.TextColor3         = C.ACCENT
 	elseif locked then
 		local lockReason = "LOCKED"
@@ -254,7 +264,7 @@ local function applyNodeState(node: ChildNode)
 		node.btn.BackgroundTransparency = 0.4
 		node.stroke.Color             = C.BORDER_LO
 		node.stroke.Thickness         = 1.5
-		node.label.Text               = node.btype:upper() .. "\n" .. lockReason
+		node.label.Text               = dispName(node.btype) .. "\n" .. lockReason
 		node.label.TextColor3         = C.DIM
 	else
 		node.btn.BackgroundColor3     =
@@ -263,7 +273,7 @@ local function applyNodeState(node: ChildNode)
 		node.btn.BackgroundTransparency = 0.35
 		node.stroke.Color             = node.btn.BackgroundColor3
 		node.stroke.Thickness         = 2
-		node.label.Text               = node.btype:upper() .. "\n◆ " .. cost
+		node.label.Text               = dispName(node.btype) .. "\n◆ " .. cost
 		node.label.TextColor3         = C.TEXT
 	end
 end
@@ -654,7 +664,7 @@ function HUD.create(): (Frame, TextButton)
 		})
 
 		-- Hover: start typewriter (tooltip position is fixed, set once at create time)
-		local bname  = def.btype:upper()
+		local bname  = dispName(def.btype)
 		local bcolor = def.color
 		local bdesc  = def.desc
 		btn.MouseEnter:Connect(function()

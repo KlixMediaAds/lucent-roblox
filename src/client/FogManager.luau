@@ -47,9 +47,6 @@ local STATE_VISIBLE    = 2
 local FADE_INFO        = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
 local TILE_REVEAL_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Effective unit vision (may be boosted by EyeUpgrade)
-local effVIS_UNIT = VIS_UNIT
-
 -- Precomputed squared radii + cell-radii + inner squared radii (feather start)
 local UNIT_R2   = VIS_UNIT  * VIS_UNIT
 local UNIT_RC   = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
@@ -585,17 +582,6 @@ function FogManager.setXray(enabled: boolean)
 		-- Force a fresh fog update on the next tick so tiles/units snap back correctly
 		sourcesDirty = true
 	end
-end
-
--- Called client-side when EyeUpgrade research completes.
--- Recomputes UNIT_R2/RC/RI2 so the next fog tick uses the wider vision radius.
-function FogManager.setEyeUpgrade(active: boolean)
-	local Config = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Config"))
-	local mult   = if active then Config.EYE_VISION_MULT else 1.0
-	effVIS_UNIT  = VIS_UNIT * mult
-	UNIT_R2      = effVIS_UNIT * effVIS_UNIT
-	UNIT_RC      = math.ceil(effVIS_UNIT / CELL_SIZE) + 1
-	UNIT_RI2     = (effVIS_UNIT * (1 - FEATHER_FRAC)) ^ 2
 end
 
 -- Call when the local player is eliminated (CC destroyed). Wipes exploration

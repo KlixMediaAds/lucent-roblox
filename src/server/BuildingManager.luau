@@ -2,6 +2,7 @@ local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris            = game:GetService("Debris")
+local TweenService      = game:GetService("TweenService")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
@@ -17,6 +18,7 @@ local mineralManager: any
 local resourceManagerRef: any
 local unitManagerRef: any
 local researchManagerRef: any
+local forestManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
 type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
@@ -35,22 +37,26 @@ local monumentHeartbeatAccum = 0
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
+local nestEggs:         { [string]: number } = {}   -- LampreyNest id → count of in-flight + incubating eggs
+local nestEggCounter    = 0                          -- monotonic id for naming egg parts
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
--- ── Drop pod build queue ──────────────────────────────────────────────────────
-local DROP_POD_FLIGHT_TIME = 2.5   -- seconds from CC launch to ground impact
-local BUILD_RISE_TIME      = 1.3   -- seconds for building to rise after pod lands
-local DEPLOY_STAGGER_DELAY = 1.0   -- seconds between sequential pod launches from the same CC
+-- ── Drop pod delivery / on-site construction ──────────────────────────────
+-- Pods launch instantly when a building is placed — no queue, no cooldown. When a
+-- pod lands, its welding arms assemble the structure on-site through staged passes
+-- (foundation → support beams → roof outline) before the finished building rises
+-- from the ground and the scaffold sinks away.
+local DROP_POD_FLIGHT_TIME      = 2.5   -- seconds from CC launch to ground impact
+-- The on-site assembly fills the structure's Config.BUILD_TIME; these fractions
+-- weight how that time splits across the foundation → beams → roof stages (they
+-- sum to 1). The final building-rise is a fixed tail on top.
+local CONSTRUCT_FOUNDATION_FRAC = 0.30  -- foundation slab welds in
+local CONSTRUCT_BEAMS_FRAC      = 0.42  -- support beams + scaffold posts rise
+local CONSTRUCT_ROOF_FRAC       = 0.28  -- roof-outline frame welded across the top
+local CONSTRUCT_RISE_TIME       = 1.30  -- finished building rises as the scaffold sinks
 
 local nextBuildRiseTime: number? = nil  -- overrides BUILD_TIME for the next createBuilding call
-
-type PendingBuild = { buildingType: string, position: Vector3, timeLeft: number, totalTime: number, flare: Model, progressFill: Frame?, player: any, isMine: boolean }
-type ReadyBuild   = { buildingType: string, position: Vector3, flare: Model, player: any, isMine: boolean }
-
-local pendingBuilds: { [number]: { PendingBuild } } = {}
-local deployQueue:   { [number]: { ReadyBuild } }   = {}
-local deployDelay:   { [number]: number }            = {}
 
 -- ── Mobile CC state ───────────────────────────────────────────────────────────
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
@@ -66,12 +72,15 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"   then return Vector3.new(9, 6, 9) end
+	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	return Config.BUILDING_SIZE
 end
 
 -- Forward-declared so functions defined before their bodies can call them.
 local spawnDestructionVFX: (Vector3) -> ()
 local spawnWormBurstVFX:   (Vector3) -> ()
+local spawnEggHatchVFX:    (Vector3) -> ()
+local produceLampreyEgg:   (string, any) -> ()
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -571,6 +580,74 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		bp(Vector3.new(0.3, 2.5, 0.3),  Vector3.new(0, 6.5, -4.5),       grey, Enum.Material.Metal)
 		bp(Vector3.new(0.15, 1.2, 1.8), Vector3.new(1.1, 7.35, -4.5),    col,  Enum.Material.Neon)
 
+	elseif buildingType == "LampreyNest" then
+		-- Lamprey Nest: organic fleshy mound ringed with pulsing birth tubes around
+		-- a glowing green orifice. The Core/Tube_* parts are pulsed by the egg-eject
+		-- animation; eggs emerge from the Core and arc out to settle nearby.
+		local FLESH = Color3.fromRGB(40, 44, 52)
+		local GREEN = Color3.fromRGB(120, 190, 60)
+
+		base.Color    = FLESH
+		base.Material = Enum.Material.SmoothPlastic
+
+		local function np(nm: string, sz: Vector3, cf: CFrame, col: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
+			local p        = Instance.new("Part")
+			p.Name         = nm
+			if shape then (p :: any).Shape = shape end
+			p.Size         = sz
+			p.CFrame       = cf
+			p.Color        = col
+			p.Material     = mat
+			p.Anchored     = true
+			p.CanCollide   = false
+			p.CanQuery     = false
+			p.CastShadow   = false
+			p.Parent       = model
+			return p
+		end
+
+		-- Organic mound lumps clustered around the top rim
+		for i = 1, 6 do
+			local angle = (i / 6) * math.pi * 2
+			local r     = 3.4
+			np("Lump_" .. i,
+				Vector3.new(rng:NextNumber(2.6, 3.8), rng:NextNumber(2.2, 3.2), rng:NextNumber(2.6, 3.8)),
+				CFrame.new(position + Vector3.new(math.cos(angle) * r, size.Y - 1.4, math.sin(angle) * r)),
+				FLESH, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		end
+
+		-- Central green orifice — egg emergence point; pulses during production
+		local core = np("Core", Vector3.new(3.4, 3.4, 3.4),
+			CFrame.new(position + Vector3.new(0, size.Y + 0.3, 0)),
+			GREEN, Enum.Material.Neon, Enum.PartType.Ball)
+		core.Transparency = 0.15
+
+		-- Ring of fleshy birth tubes leaning outward, each capped with a neon tip
+		local tubeCount = 5
+		for i = 1, tubeCount do
+			local angle  = (i / tubeCount) * math.pi * 2 + 0.3
+			local r      = 3.1
+			local lean   = 0.30
+			local basePt = position + Vector3.new(math.cos(angle) * r, size.Y + 1.4, math.sin(angle) * r)
+			local cf     = CFrame.new(basePt)
+				* CFrame.Angles(math.sin(angle) * lean, 0, -math.cos(angle) * lean)
+			np("Tube_" .. i, Vector3.new(1.3, 4.4, 1.3), cf, FLESH, Enum.Material.SmoothPlastic)
+			local tip = np("TubeTip_" .. i, Vector3.new(1.0, 1.0, 1.0),
+				cf * CFrame.new(0, 2.4, 0), GREEN, Enum.Material.Neon, Enum.PartType.Ball)
+			tip.Transparency = 0.2
+		end
+
+		-- Team-colour neon band around the base for ownership readability
+		local band      = Instance.new("Part")
+		band.Name       = "TeamBand"
+		band.Shape      = Enum.PartType.Cylinder
+		band.Size       = Vector3.new(0.5, 11.6, 11.6)
+		band.CFrame     = CFrame.new(position + Vector3.new(0, 0.9, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+		band.BrickColor = player.TeamColor
+		band.Material   = Enum.Material.Neon
+		band.Anchored   = true; band.CanCollide = false; band.CanQuery = false; band.CastShadow = false
+		band.Parent     = model
+
 	else
 		-- Barracks: open-top training facility.
 		-- base stays as the invisible 10×8×10 logic box (health-bar anchor, raycast target).
@@ -630,6 +707,15 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 	model.PrimaryPart = base
 	model.Parent      = buildingsFolder
+
+	-- Fell any forest the structure lands on. CCs carve a wide clearing; every
+	-- other building just clears its own footprint plus a small margin.
+	if forestManagerRef then
+		local clearR = (buildingType == "CommandCenter")
+			and Config.FOREST_CC_CLEARING
+			or  (math.max(size.X, size.Z) / 2 + 6)
+		forestManagerRef.clearAround(position, clearR)
+	end
 
 	local maxHp    = (Config.BUILDING_HP :: any)[buildingType] or 400
 	local buildTime: number
@@ -981,80 +1067,6 @@ local function startMutantSoldierLoop(turretId: string, data: any, owner: Player
 	end)
 end
 
--- ── Signal flare (placed at target during queue countdown) ───────────────────
-
--- Returns (Model, Fill Frame) — fill frame is updated each Heartbeat to show progress.
-local function createSignalFlare(position: Vector3, buildingType: string): (Model, Frame?)
-	local model  = Instance.new("Model")
-	model.Name   = "_SignalFlare"
-	model:SetAttribute("BuildingType", buildingType)
-
-	local function sp(nm: string, sz: Vector3, cf: CFrame, bc: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
-		local p = Instance.new("Part")
-		p.Name = nm
-		if shape then (p :: any).Shape = shape end
-		p.Size = sz; p.CFrame = cf; p.BrickColor = bc; p.Material = mat
-		p.Anchored = true; p.CanCollide = false; p.CastShadow = false; p.CanQuery = false
-		p.Parent = model
-		return p
-	end
-
-	-- Minimal ground ring
-	local ring        = sp("Ring",
-		Vector3.new(0.1, 2.25, 2.25),
-		CFrame.new(position + Vector3.new(0, 0.08, 0)) * CFrame.Angles(0, 0, math.pi / 2),
-		BrickColor.new("Bright orange"), Enum.Material.Neon, Enum.PartType.Cylinder)
-	ring.Transparency = 0.45
-
-	-- Very thin, short beam that fades into the sky
-	local beam         = sp("Beam",
-		Vector3.new(0.1, 13, 0.1),
-		CFrame.new(position + Vector3.new(0, 6.5, 0)),
-		BrickColor.new("Bright orange"), Enum.Material.Neon)
-	beam.Transparency  = 0.86
-
-	-- Invisible anchor — hosts the BillboardGui
-	local anchor       = Instance.new("Part")
-	anchor.Name        = "Anchor"
-	anchor.Size        = Vector3.new(0.1, 0.1, 0.1)
-	anchor.Position    = position + Vector3.new(0, 1, 0)
-	anchor.Anchored    = true; anchor.CanCollide = false
-	anchor.CastShadow  = false; anchor.CanQuery  = false
-	anchor.Transparency = 1
-	anchor.Parent      = model
-	model.PrimaryPart  = anchor
-
-	-- ── BillboardGui: 3D building preview + progress bar ────────────────────
-	local bb          = Instance.new("BillboardGui")
-	bb.Name           = "FlareUI"
-	bb.Size           = UDim2.fromOffset(44, 52)
-	bb.StudsOffset    = Vector3.new(0, 5, 0)
-	bb.AlwaysOnTop    = false
-	bb.MaxDistance    = 350
-	bb.LightInfluence = 0
-	bb.Parent         = anchor
-
-	-- Slim progress bar beneath the icon
-	local pbTrack                  = Instance.new("Frame")
-	pbTrack.Size                   = UDim2.new(1, 0, 0, 5)
-	pbTrack.Position               = UDim2.fromOffset(0, 46)
-	pbTrack.BackgroundColor3       = Color3.fromRGB(20, 22, 28)
-	pbTrack.BackgroundTransparency = 0.3
-	pbTrack.BorderSizePixel        = 0
-	pbTrack.Parent                 = bb
-	local _pt = Instance.new("UICorner"); _pt.CornerRadius = UDim.new(1, 0); _pt.Parent = pbTrack
-
-	local fill                     = Instance.new("Frame")
-	fill.Name                      = "Fill"
-	fill.Size                      = UDim2.new(0, 0, 1, 0)
-	fill.BackgroundColor3          = Color3.fromRGB(255, 165, 35)
-	fill.BorderSizePixel           = 0
-	fill.Parent                    = pbTrack
-	local _pf = Instance.new("UICorner"); _pf.CornerRadius = UDim.new(1, 0); _pf.Parent = fill
-
-	model.Parent = workspace
-	return model, fill
-end
 
 -- ── Drop pod model ────────────────────────────────────────────────────────────
 
@@ -1160,25 +1172,6 @@ local function createDropPodModel(): Model
 	return model
 end
 
--- ── Pending-build cancellation ────────────────────────────────────────────────
-
-local function cancelPendingBuilds(userId: number)
-	local builds = pendingBuilds[userId]
-	if builds then
-		for _, b in builds do
-			if b.flare and b.flare.Parent then b.flare:Destroy() end
-		end
-		pendingBuilds[userId] = nil
-	end
-	local dq = deployQueue[userId]
-	if dq then
-		for _, b in dq do
-			if b.flare and b.flare.Parent then b.flare:Destroy() end
-		end
-		deployQueue[userId] = nil
-	end
-	deployDelay[userId] = nil
-end
 
 -- ── Relay chain helpers ───────────────────────────────────────────────────────
 
@@ -1244,6 +1237,275 @@ local function relayFlash(model: Model)
 		Debris:AddItem(flash, 0.8)
 	end
 end
+
+-- ── On-site construction (welding-arm assembly) ────────────────────────────
+
+local CONSTRUCT_SPARK_TEX = "rbxasset://textures/particles/sparkles_main.dds"
+
+-- Open the four landing fins outward; they stay attached so the grounded pod
+-- reads as the fabrication rig the welding arms extend from.
+local function openPodFins(pod: Model)
+	local OPEN_TIME  = 0.5
+	local OPEN_ANGLE = math.rad(108)
+	local CORE_R     = 1.75
+	local podCF      = pod:GetPivot()
+
+	local panels: { { part: BasePart, closedCF: CFrame, openCF: CFrame } } = {}
+	for _, d in pod:GetDescendants() do
+		if not d:IsA("BasePart") then continue end
+		local beta = d:GetAttribute("HingeAngle")
+		if beta == nil then continue end
+		local radial  = Vector3.new(math.cos(beta), 0, math.sin(beta))
+		local tangent = Vector3.new(-math.sin(beta), 0, math.cos(beta))
+		local hw    = podCF:PointToWorldSpace(radial * CORE_R + Vector3.new(0, -4, 0))
+		local ax    = podCF:VectorToWorldSpace(tangent)
+		local rotCF = CFrame.new(hw) * CFrame.fromAxisAngle(ax, -OPEN_ANGLE) * CFrame.new(hw):Inverse()
+		table.insert(panels, { part = d :: BasePart, closedCF = d.CFrame, openCF = rotCF * d.CFrame })
+	end
+
+	local elapsed = 0
+	while elapsed < OPEN_TIME do
+		local dt = task.wait()
+		elapsed += dt
+		local ease = 1 - (1 - math.min(elapsed / OPEN_TIME, 1)) ^ 3
+		for _, pi in panels do
+			if pi.part.Parent then pi.part.CFrame = pi.closedCF:Lerp(pi.openCF, ease) end
+		end
+	end
+end
+
+-- Assemble the structure on-site: welding arms emerge from the landed pod and
+-- build a scaffold + frame through staged passes, then the finished building
+-- rises from the ground while the scaffold sinks and the pod fades away. All
+-- scaffold / frame dimensions scale to the building footprint.
+local function runConstruction(player: any, targetPos: Vector3, buildingType: string, pod: Model, isMine: boolean)
+	local sz   = buildingSize(buildingType)
+	local hx   = sz.X / 2 + 1.1                 -- scaffold half-extent (just outside footprint)
+	local hz   = sz.Z / 2 + 1.1
+	local fx   = math.max(sz.X / 2 - 0.5, 0.6)  -- structural-frame half-extent
+	local fz   = math.max(sz.Z / 2 - 0.5, 0.6)
+	local topY = math.clamp(sz.Y + 1.5, 5, 14)  -- scaffold height
+
+	-- Clear the woods the moment the pod lands so the arms assemble in the open
+	-- (createBuilding clears again later, but the trees are already gone by then).
+	if forestManagerRef then
+		forestManagerRef.clearAround(targetPos, math.max(sz.X, sz.Z) / 2 + 6)
+	end
+
+	local STEEL = Color3.fromRGB(74, 78, 86)
+	local CAUTN = Color3.fromRGB(238, 188, 38)
+	local tc    = player.TeamColor.Color
+	local signs = { {1, 1}, {1, -1}, {-1, 1}, {-1, -1} }
+	local edges = { {1, 2}, {3, 4}, {1, 3}, {2, 4} }  -- adjacent-corner pairs (shared X or Z)
+
+	local rig  = Instance.new("Model")
+	rig.Name   = "_Construction"
+	rig.Parent = workspace
+
+	local function mk(nm: string, size: Vector3, cf: CFrame, color: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = nm
+		if shape then (p :: any).Shape = shape end
+		p.Size = size; p.CFrame = cf; p.Color = color; p.Material = mat
+		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CastShadow = false
+		p.Parent = rig
+		return p
+	end
+
+	-- Stretch a part (length along local Y) to span world points a → b.
+	local function orientBeam(p: BasePart, a: Vector3, b: Vector3, thick: number)
+		local mid = (a + b) * 0.5
+		local len = math.max((b - a).Magnitude, 0.05)
+		p.Size   = Vector3.new(thick, len, thick)
+		p.CFrame = CFrame.lookAt(mid, b) * CFrame.Angles(math.pi / 2, 0, 0)
+	end
+
+	-- Corner scaffold posts (grow from the ground during the beam stage).
+	local posts: { BasePart } = {}
+	for _, s in signs do
+		table.insert(posts, mk("Post", Vector3.new(0.4, 0.1, 0.4),
+			CFrame.new(targetPos + Vector3.new(s[1] * hx, 0.05, s[2] * hz)), CAUTN, Enum.Material.Metal))
+	end
+
+	-- Top rails connecting the post tops (welded on once the posts are up).
+	local rails: { BasePart } = {}
+	for _ = 1, 4 do
+		local r = mk("Rail", Vector3.new(0.3, 0.3, 0.3), CFrame.new(targetPos), CAUTN, Enum.Material.Metal)
+		r.Transparency = 1
+		table.insert(rails, r)
+	end
+
+	-- Foundation slab (stage 1).
+	local slab = mk("Slab", Vector3.new(sz.X, 0.6, sz.Z),
+		CFrame.new(targetPos + Vector3.new(0, 0.3, 0)), STEEL, Enum.Material.Metal)
+	slab.Transparency = 1
+
+	-- Support beams (stage 2): team-coloured verticals at the footprint corners.
+	local beams: { BasePart } = {}
+	for _, s in signs do
+		table.insert(beams, mk("Beam", Vector3.new(0.6, 0.1, 0.6),
+			CFrame.new(targetPos + Vector3.new(s[1] * fx, 0.05, s[2] * fz)), tc, Enum.Material.Metal))
+	end
+
+	-- Roof-outline frame (stage 3): edge beams across the support-beam tops.
+	local roof: { BasePart } = {}
+	for _ = 1, 4 do
+		local r = mk("RoofBeam", Vector3.new(0.4, 0.4, 0.4), CFrame.new(targetPos), tc, Enum.Material.Metal)
+		r.Transparency = 1
+		table.insert(roof, r)
+	end
+
+	-- Welding arms: one per corner, emerging from the pod down to the rising frame.
+	local podCenter = pod:GetPivot().Position
+	local arms: { any } = {}
+	for _, s in signs do
+		local dir      = Vector3.new(s[1], 0, s[2]).Unit
+		local shoulder = podCenter + dir * 1.7 + Vector3.new(0, -1.4, 0)
+		local upper = mk("ArmUpper", Vector3.new(0.34, 1, 0.34), CFrame.new(shoulder), STEEL, Enum.Material.Metal)
+		local fore  = mk("ArmFore",  Vector3.new(0.27, 1, 0.27), CFrame.new(shoulder), STEEL, Enum.Material.Metal)
+		local tip   = mk("ArmTip",   Vector3.new(0.4, 0.4, 0.4), CFrame.new(shoulder),
+			Color3.fromRGB(255, 170, 60), Enum.Material.Neon, Enum.PartType.Ball)
+		local pe         = Instance.new("ParticleEmitter")
+		pe.Texture       = CONSTRUCT_SPARK_TEX
+		pe.Color         = ColorSequence.new(Color3.fromRGB(255, 220, 150), Color3.fromRGB(255, 120, 30))
+		pe.LightEmission = 1
+		pe.Size          = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 0.05) })
+		pe.Lifetime      = NumberRange.new(0.15, 0.4)
+		pe.Speed         = NumberRange.new(4, 10)
+		pe.SpreadAngle   = Vector2.new(160, 160)
+		pe.Rate          = 22
+		pe.Enabled       = false
+		pe.Parent        = tip
+		table.insert(arms, { upper = upper, fore = fore, tip = tip, sparks = pe, shoulder = shoulder, sx = s[1], sz = s[2] })
+	end
+
+	-- Phase boundaries (cumulative seconds). The welding-assembly stages stretch to
+	-- fill the structure's configured Config.BUILD_TIME; the rise is a fixed tail.
+	local buildTime = (Config.BUILD_TIME :: any)[buildingType] or 8
+	local assembly  = math.max(buildTime, 2)
+	local F  = assembly * CONSTRUCT_FOUNDATION_FRAC
+	local B  = F + assembly * CONSTRUCT_BEAMS_FRAC
+	local R  = B + assembly * CONSTRUCT_ROOF_FRAC
+	local Ri = R + CONSTRUCT_RISE_TIME
+
+	local built    = false
+	local podParts: { BasePart } = {}
+	local sinkBase: { [BasePart]: CFrame } = {}
+	local elapsed  = 0
+	local conn: RBXScriptConnection
+	conn = RunService.Heartbeat:Connect(function(dt)
+		elapsed += dt
+		local t = elapsed
+
+		if t < R then
+			-- ── Assembly stages ────────────────────────────────────
+			-- Stage 1: foundation slab welds in.
+			slab.Transparency = 1 - math.clamp(t / F, 0, 1)
+
+			-- Stage 2: scaffold posts + support beams rise.
+			local bProg = math.clamp((t - F) / (B - F), 0, 1)
+			local postH = math.max(topY * bProg, 0.1)
+			for i, p in posts do
+				p.Size     = Vector3.new(0.4, postH, 0.4)
+				p.Position = targetPos + Vector3.new(signs[i][1] * hx, postH / 2, signs[i][2] * hz)
+			end
+			local beamH = math.max(sz.Y * bProg, 0.1)
+			for i, b in beams do
+				b.Size     = Vector3.new(0.6, beamH, 0.6)
+				b.Position = targetPos + Vector3.new(signs[i][1] * fx, beamH / 2, signs[i][2] * fz)
+			end
+			local railProg = math.clamp((bProg - 0.6) / 0.4, 0, 1)
+			for i, r in rails do
+				r.Transparency = 1 - railProg
+				local a = signs[edges[i][1]]; local c = signs[edges[i][2]]
+				orientBeam(r, targetPos + Vector3.new(a[1] * hx, topY, a[2] * hz),
+					targetPos + Vector3.new(c[1] * hx, topY, c[2] * hz), 0.3)
+			end
+
+			-- Stage 3: roof-outline frame welds across the support-beam tops.
+			local rProg = math.clamp((t - B) / (R - B), 0, 1)
+			for i, rb in roof do
+				rb.Transparency = 1 - rProg
+				local a = signs[edges[i][1]]; local c = signs[edges[i][2]]
+				orientBeam(rb, targetPos + Vector3.new(a[1] * fx, sz.Y, a[2] * fz),
+					targetPos + Vector3.new(c[1] * fx, sz.Y, c[2] * fz), 0.4)
+			end
+
+			-- Welding arms track the rising work height.
+			local weldY
+			if t < F then weldY = 0.7
+			elseif t < B then weldY = 0.7 + (sz.Y - 0.7) * bProg
+			else weldY = sz.Y end
+			for ai, arm in arms do
+				local osc    = math.sin(t * 9 + ai * 1.7) * 0.4
+				local tipPos = targetPos + Vector3.new(arm.sx * fx, weldY + osc, arm.sz * fz)
+				local elbow  = (arm.shoulder + tipPos) * 0.5 + Vector3.new(0, 1.6, 0)
+				orientBeam(arm.upper, arm.shoulder, elbow, 0.34)
+				orientBeam(arm.fore, elbow, tipPos, 0.27)
+				arm.tip.Position   = tipPos
+				arm.sparks.Enabled = t > F * 0.5
+			end
+
+		else
+			-- ── Final stage: building rises, scaffold sinks, pod fades ──────────
+			if not built then
+				built = true
+				nextBuildRiseTime = CONSTRUCT_RISE_TIME
+				local id = createBuilding(player, targetPos, buildingType)
+				if buildingType == "Mine" and isMine and mineralManager then
+					mineralManager.registerMine(id, targetPos, player)
+				end
+				if researchManagerRef and buildingType ~= "CommandCenter" then
+					researchManagerRef.recordBuildingPlaced(player, buildingType)
+				end
+				for _, p in rig:GetChildren() do
+					if p:IsA("BasePart") then sinkBase[p] = p.CFrame end
+				end
+				for _, p in pod:GetDescendants() do
+					if p:IsA("BasePart") then table.insert(podParts, p) end
+				end
+				local sp = Instance.new("Part")
+				sp.Size = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos + Vector3.new(0, 1, 0))
+				sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1; sp.Parent = workspace
+				local snd = Instance.new("Sound")
+				snd.SoundId = "rbxassetid://104085097305841"; snd.Volume = 0.85; snd.Parent = sp
+				snd:Play()
+				Debris:AddItem(sp, 6)
+			end
+
+			local riseProg = math.clamp((t - R) / (Ri - R), 0, 1)
+			local ease     = riseProg * riseProg
+			local sink     = ease * (topY + 5)
+			for _, p in rig:GetChildren() do
+				if p:IsA("BasePart") then
+					local base = sinkBase[p]
+					if base then p.CFrame = base - Vector3.new(0, sink, 0) end
+					if p.Name ~= "ArmTip" then p.Transparency = ease end
+				end
+			end
+			for _, arm in arms do
+				local tipPos = arm.tip.Position:Lerp(arm.shoulder, riseProg)
+				local elbow  = (arm.shoulder + tipPos) * 0.5 + Vector3.new(0, 1.6, 0)
+				orientBeam(arm.upper, arm.shoulder, elbow, 0.34)
+				orientBeam(arm.fore, elbow, tipPos, 0.27)
+				arm.tip.Position     = tipPos
+				arm.tip.Transparency = ease
+				arm.sparks.Enabled   = false
+			end
+			for _, p in podParts do
+				if p.Parent then p.Transparency = math.min(1, p.Transparency + (1 - p.Transparency) * ease) end
+			end
+
+			if t >= Ri then
+				conn:Disconnect()
+				rig:Destroy()
+				if pod.Parent then pod:Destroy() end
+			end
+		end
+	end)
+end
+
+
 
 -- ── Drop pod flight & building deployment ─────────────────────────────────────
 
@@ -1412,151 +1674,10 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 				Debris:AddItem(d, 1.2)
 			end
 
-			-- ── Door-open → pop-off → core fade ──────────────────────────────────
+			-- ── Fins open → welding arms assemble the structure on-site ──────────
 			task.spawn(function()
-				local OPEN_TIME  = 0.50
-				local FADE_TIME  = 0.40
-				local OPEN_ANGLE = math.rad(100)
-				local CORE_R     = 1.75
-
-				local panelParts = {}
-				local coreParts  = {}
-				for _, d in pod:GetDescendants() do
-					if not d:IsA("BasePart") then continue end
-					if d:GetAttribute("HingeAngle") ~= nil then
-						table.insert(panelParts, d)
-					else
-						table.insert(coreParts, d)
-					end
-				end
-
-				local podCF  = pod:GetPivot()
-				local panels = {}
-				for _, part in panelParts do
-					local beta    = part:GetAttribute("HingeAngle")
-					local radial  = Vector3.new(math.cos(beta), 0, math.sin(beta))
-					local tangent = Vector3.new(-math.sin(beta), 0, math.cos(beta))
-					local hw  = podCF:PointToWorldSpace(radial * CORE_R + Vector3.new(0, -4, 0))
-					local ax  = podCF:VectorToWorldSpace(tangent)
-					local rotCF = CFrame.new(hw) * CFrame.fromAxisAngle(ax, -OPEN_ANGLE) * CFrame.new(hw):Inverse()
-					table.insert(panels, { part = part, closedCF = part.CFrame, openCF = rotCF * part.CFrame })
-				end
-
-				local openElapsed = 0
-				local openConn: RBXScriptConnection
-				openConn = RunService.Heartbeat:Connect(function(dt)
-					openElapsed = openElapsed + dt
-					local ot   = math.min(openElapsed / OPEN_TIME, 1)
-					local ease = 1 - (1 - ot) ^ 3
-					for _, pi in panels do
-						if pi.part.Parent then pi.part.CFrame = pi.closedCF:Lerp(pi.openCF, ease) end
-					end
-					if ot >= 1 then openConn:Disconnect() end
-				end)
-
-				task.wait(OPEN_TIME)
-				nextBuildRiseTime = BUILD_RISE_TIME
-				local id = createBuilding(player, targetPos, buildingType)
-				if buildingType == "Mine" and isMine and mineralManager then
-					mineralManager.registerMine(id, targetPos, player)
-				end
-				if researchManagerRef and buildingType ~= "CommandCenter" then
-					researchManagerRef.recordBuildingPlaced(player, buildingType)
-				end
-
-				do
-					local sp  = Instance.new("Part")
-					sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos + Vector3.new(0, 1, 0))
-					sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
-					sp.Parent = workspace
-					local snd = Instance.new("Sound")
-					snd.SoundId = "rbxassetid://104085097305841"
-					snd.Volume  = 0.85
-					snd.Parent  = sp
-					snd:Play()
-					Debris:AddItem(sp, 6)
-				end
-
-				local rng3 = Random.new()
-				local doorPairs: { [number]: { outer: BasePart?, glow: BasePart? } } = {}
-				for _, pi in panels do
-					local nm  = pi.part.Name
-					local idx = tonumber(nm:match("_(%d+)$"))
-					if idx == nil then continue end
-					if not doorPairs[idx] then doorPairs[idx] = { outer = nil, glow = nil } end
-					if nm:find("DoorGlow") then
-						doorPairs[idx].glow  = pi.part
-					else
-						doorPairs[idx].outer = pi.part
-					end
-				end
-
-				for _, pair in doorPairs do
-					local outer = pair.outer
-					local glow  = pair.glow
-					if not outer or not outer.Parent then continue end
-
-					local flatDir = Vector3.new(
-						outer.Position.X - targetPos.X, 0,
-						outer.Position.Z - targetPos.Z
-					)
-					if flatDir.Magnitude < 0.3 then
-						flatDir = Vector3.new(rng3:NextNumber(-1, 1), 0, rng3:NextNumber(-1, 1))
-					end
-					flatDir = flatDir.Unit
-
-					outer.Parent     = workspace
-					outer.Anchored   = false
-					outer.CanCollide = true
-
-					local bv      = Instance.new("BodyVelocity")
-					bv.Velocity   = flatDir * rng3:NextNumber(4, 8) + Vector3.new(0, rng3:NextNumber(2, 4), 0)
-					bv.MaxForce   = Vector3.new(1e5, 1e5, 1e5)
-					bv.Parent     = outer
-					Debris:AddItem(bv, 0.12)
-
-					local bav     = Instance.new("BodyAngularVelocity")
-					bav.AngularVelocity = Vector3.new(
-						rng3:NextNumber(-3, 3), rng3:NextNumber(-3, 3), rng3:NextNumber(-3, 3)
-					)
-					bav.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
-					bav.Parent    = outer
-					Debris:AddItem(bav, 0.6)
-
-					if glow and glow.Parent then
-						glow.Parent    = workspace
-						glow.Anchored  = false
-						glow.CanCollide = false
-						local weld     = Instance.new("WeldConstraint")
-						weld.Part0     = outer
-						weld.Part1     = glow
-						weld.Parent    = outer
-						Debris:AddItem(glow, 4.0)
-					end
-
-					Debris:AddItem(outer, 4.0)
-				end
-
-				task.wait(1.5)
-				local startTrans = {}
-				for _, p in coreParts do
-					if p.Parent then startTrans[p] = p.Transparency end
-				end
-				local fadeElapsed = 0
-				local fadeConn: RBXScriptConnection
-				fadeConn = RunService.Heartbeat:Connect(function(dt)
-					fadeElapsed = fadeElapsed + dt
-					local ft = math.min(fadeElapsed / FADE_TIME, 1)
-					for _, p in coreParts do
-						if p.Parent then
-							p.Transparency = startTrans[p] + (1 - startTrans[p]) * ft
-						end
-					end
-					if ft >= 1 then
-						fadeConn:Disconnect()
-						if pod.Parent then pod:Destroy() end
-					end
-				end)
+				openPodFins(pod)
+				runConstruction(player, targetPos, buildingType, pod, isMine)
 			end)
 		end
 	end)
@@ -1584,20 +1705,6 @@ function BuildingManager.resetAll()
 	ccMobile                 = {}
 	ccMoveTargets            = {}
 	playerCCId               = {}
-	-- Cancel all pending builds and destroy signal flares
-	for userId, builds in pendingBuilds do
-		for _, b in builds do
-			if b.flare and b.flare.Parent then b.flare:Destroy() end
-		end
-	end
-	for userId, queue in deployQueue do
-		for _, b in queue do
-			if b.flare and b.flare.Parent then b.flare:Destroy() end
-		end
-	end
-	pendingBuilds = {}
-	deployQueue   = {}
-	deployDelay   = {}
 end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
@@ -1614,6 +1721,10 @@ end
 
 function BuildingManager.setResearchManager(rm: any)
 	researchManagerRef = rm
+end
+
+function BuildingManager.setForestManager(fm: any)
+	forestManagerRef = fm
 end
 
 -- ── Destruction VFX (server-side) ────────────────────────────────────────────
@@ -1784,6 +1895,171 @@ spawnWormBurstVFX = function(pos: Vector3)
 	end
 end
 
+-- ── Lamprey egg hatch VFX (server-side) ──────────────────────────────────────
+spawnEggHatchVFX = function(pos: Vector3)
+	-- Expanding green flash that fades out
+	local flash            = Instance.new("Part")
+	flash.Shape            = Enum.PartType.Ball
+	flash.Size             = Vector3.new(2, 2, 2)
+	flash.Position         = pos
+	flash.Color            = Color3.fromRGB(150, 230, 90)
+	flash.Material         = Enum.Material.Neon
+	flash.Anchored         = true
+	flash.CanCollide       = false
+	flash.CanQuery         = false
+	flash.CastShadow       = false
+	flash.Transparency     = 0.1
+	flash.Parent           = workspace
+	TweenService:Create(flash, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size         = Vector3.new(9, 9, 9),
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(flash, 0.6)
+
+	-- Eggshell shards + slime flung outward
+	local shardColors = {
+		Color3.fromRGB(150, 210, 90),
+		Color3.fromRGB(110, 170, 60),
+		Color3.fromRGB(90, 120, 50),
+	}
+	for _ = 1, 12 do
+		local s            = Instance.new("Part")
+		s.Anchored         = false
+		s.CanCollide       = false
+		s.CanTouch         = false
+		s.CastShadow       = false
+		s.Size             = Vector3.new(
+			rng:NextNumber(0.3, 0.9),
+			rng:NextNumber(0.3, 0.9),
+			rng:NextNumber(0.3, 0.9)
+		)
+		s.Color            = shardColors[rng:NextInteger(1, #shardColors)]
+		s.Material         = Enum.Material.SmoothPlastic
+		s.Position         = pos + Vector3.new(
+			rng:NextNumber(-1.5, 1.5),
+			rng:NextNumber(0.5, 2.5),
+			rng:NextNumber(-1.5, 1.5)
+		)
+		s.Parent           = workspace
+		s.AssemblyLinearVelocity = Vector3.new(
+			rng:NextNumber(-16, 16),
+			rng:NextNumber(10, 22),
+			rng:NextNumber(-16, 16)
+		)
+		s.AssemblyAngularVelocity = Vector3.new(
+			rng:NextNumber(-8, 8), rng:NextNumber(-8, 8), rng:NextNumber(-8, 8)
+		)
+		Debris:AddItem(s, rng:NextNumber(1.2, 2.5))
+	end
+end
+
+-- ── Lamprey egg production (server-side, one task per egg) ───────────────────
+-- Pulses the nest's tubes, ejects a green egg to a random spot nearby, lets it
+-- incubate on its own timer, then hatches it into a Lamprey. The caller must
+-- already have reserved a slot (incremented nestEggs[nestId]).
+produceLampreyEgg = function(nestId: string, player: any)
+	local data = buildingData[nestId]
+	if not data then
+		if nestEggs[nestId] then nestEggs[nestId] = math.max(0, nestEggs[nestId] - 1) end
+		return
+	end
+	local model = buildingsFolder:FindFirstChild(nestId)
+	if not model then
+		nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
+		return
+	end
+
+	local basePos  = data.base.Position
+	local core     = model:FindFirstChild("Core") :: BasePart?
+	local startPos = core and core.Position or (basePos + Vector3.new(0, data.base.Size.Y, 0))
+
+	-- Random settle spot around the nest footprint
+	local halfX    = buildingSize("LampreyNest").X / 2
+	local angle    = rng:NextNumber(0, math.pi * 2)
+	local radius   = halfX + rng:NextNumber(2, 6)
+	local EGG_FULL = Vector3.new(3, 3.8, 3)
+	local settleY  = EGG_FULL.Y / 2
+	local target   = Vector3.new(basePos.X + math.cos(angle) * radius, settleY, basePos.Z + math.sin(angle) * radius)
+
+	-- Egg (parented to the nest model so it replicates and the panel can count it)
+	nestEggCounter += 1
+	local egg           = Instance.new("Part")
+	egg.Name            = "Egg_" .. nestEggCounter
+	egg.Shape           = Enum.PartType.Ball
+	egg.Size            = EGG_FULL * 0.4
+	egg.Position        = startPos
+	egg.Color           = Color3.fromRGB(150, 230, 90)
+	egg.Material        = Enum.Material.Neon
+	egg.Anchored        = true
+	egg.CanCollide      = false
+	egg.CanQuery        = false
+	egg.CastShadow      = false
+	egg.Transparency    = 0.1
+	egg.Parent          = model
+	local eggLight      = Instance.new("PointLight")
+	eggLight.Color      = Color3.fromRGB(120, 230, 70)
+	eggLight.Brightness = 2
+	eggLight.Range      = 10
+	eggLight.Parent     = egg
+
+	-- ── Eject: pulse the nest tubes/core and arc the egg out to its spot ──────
+	local halfEject = math.max(0.05, Config.LAMPREY_NEST_EJECT_TIME / 2)
+	local pulseInfo = TweenInfo.new(halfEject, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, 0, true)
+	if core then
+		TweenService:Create(core, pulseInfo, { Size = core.Size * 1.3, Transparency = 0 }):Play()
+	end
+	for _, child in model:GetChildren() do
+		if child:IsA("BasePart") and child.Name:match("^Tube_") then
+			TweenService:Create(child, pulseInfo, { Size = child.Size + Vector3.new(0, 1.6, 0) }):Play()
+		elseif child:IsA("BasePart") and child.Name:match("^TubeTip_") then
+			TweenService:Create(child, pulseInfo, { Size = child.Size * 1.6, Transparency = 0 }):Play()
+		end
+	end
+
+	-- Arc the egg up out of the core, then down onto its settle spot
+	local apex = Vector3.new(
+		(startPos.X + target.X) / 2,
+		math.max(startPos.Y, target.Y) + 3,
+		(startPos.Z + target.Z) / 2
+	)
+	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Position = apex, Size = EGG_FULL,
+	}):Play()
+	task.wait(halfEject)
+	if egg.Parent == nil then return end
+	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+		Position = target,
+	}):Play()
+	task.wait(halfEject)
+	if egg.Parent == nil then return end
+
+	-- ── Incubate: the egg breathes green until it hatches ─────────────────────
+	TweenService:Create(egg,
+		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+			Size = EGG_FULL * 1.12, Transparency = 0,
+		}):Play()
+	TweenService:Create(eggLight,
+		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+			Brightness = 5,
+		}):Play()
+
+	task.wait(Config.LAMPREY_EGG_INCUBATION)
+
+	-- ── Hatch ─────────────────────────────────────────────────────────────────
+	if egg.Parent == nil then return end          -- nest destroyed mid-incubation
+	if not buildingData[nestId] then               -- nest gone but egg lingered
+		egg:Destroy()
+		return
+	end
+	local hatchPos = egg.Position
+	egg:Destroy()
+	spawnEggHatchVFX(hatchPos)
+	if unitManagerRef then
+		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), "Lamprey")
+	end
+	nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
+end
+
 function BuildingManager.damage(id: string, amount: number)
 	local data = buildingData[id]
 	if not data then return end
@@ -1815,6 +2091,7 @@ function BuildingManager.damage(id: string, amount: number)
 	deployerTimers[id]    = nil
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
+	nestEggs[id]          = nil
 
 	if data.buildingType == "Mine" and mineralManager then
 		mineralManager.removeMine(id)
@@ -1831,7 +2108,6 @@ function BuildingManager.damage(id: string, amount: number)
 
 	if wasCC then
 		playerHasCC[owner.UserId] = nil
-		cancelPendingBuilds(owner.UserId)
 		if onCCDestroyedCb then onCCDestroyedCb(owner) end
 	end
 
@@ -1857,7 +2133,6 @@ function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwner
 end
 
 function BuildingManager.removeAllBuildingsFor(player: any)
-	cancelPendingBuilds(player.UserId)
 	local toRemove = {}
 	for id, data in buildingData do
 		if data.owner == player then table.insert(toRemove, id) end
@@ -1933,6 +2208,7 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	if buildingType == "Barracks" and player.UserId > 0 and getPlayerBuildingCount(player, "Mine") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
@@ -1945,6 +2221,7 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		or buildingType == "Deployer"   and Config.DEPLOYER_COST
 		or buildingType == "Relay"      and Config.RELAY_COST
 		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
+		or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
@@ -2223,73 +2500,6 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
-		-- ── Pending build countdown (parallel timers per player) ──────────────
-		for userId, builds in pendingBuilds do
-			local toPromote: { PendingBuild } = {}
-			local toKeep:    { PendingBuild } = {}
-			for _, b in builds do
-				b.timeLeft -= dt
-				-- Update progress bar fill width
-				if b.progressFill and b.progressFill.Parent then
-					local pct = 1 - math.clamp(b.timeLeft / math.max(b.totalTime, 0.001), 0, 1)
-					b.progressFill.Size = UDim2.new(pct, 0, 1, 0)
-				end
-				if b.timeLeft <= 0 then
-					table.insert(toPromote, b)
-				else
-					table.insert(toKeep, b)
-				end
-			end
-			pendingBuilds[userId] = toKeep
-			if #toKeep == 0 then pendingBuilds[userId] = nil end
-			-- Move finished builds to the deploy queue
-			for _, b in toPromote do
-				if not deployQueue[userId] then deployQueue[userId] = {} end
-				table.insert(deployQueue[userId], {
-					buildingType = b.buildingType,
-					position     = b.position,
-					flare        = b.flare,
-					player       = b.player,
-					isMine       = b.isMine,
-				})
-			end
-		end
-
-		-- ── Deploy queue: launch pods with 1 s stagger ────────────────────────
-		for userId, queue in deployQueue do
-			-- Tick stagger delay down
-			if (deployDelay[userId] or 0) > 0 then
-				deployDelay[userId] -= dt
-				continue
-			end
-			if #queue == 0 then
-				deployQueue[userId] = nil
-				deployDelay[userId] = nil
-				continue
-			end
-
-			local item = table.remove(queue, 1)
-			-- Destroy the signal flare
-			if item.flare and item.flare.Parent then item.flare:Destroy() end
-
-			-- Find CC ground position for this player
-			local ccPos: Vector3? = nil
-			for _, bd in buildingData do
-				if bd.owner == item.player and bd.buildingType == "CommandCenter" then
-					ccPos = Vector3.new(bd.base.Position.X, 0, bd.base.Position.Z)
-					break
-				end
-			end
-
-			if ccPos and item.player.Parent then
-				local ccTopY     = Config.COMMAND_CENTER_SIZE.Y + 2
-				local launchPos  = ccPos + Vector3.new(0, ccTopY, 0)
-				local relayChain = findRelayChain(item.player, ccPos, item.position)
-				launchDropPod(item.player, launchPos, relayChain, item.position, item.buildingType, item.isMine)
-			end
-
-			deployDelay[userId] = DEPLOY_STAGGER_DELAY
-		end
 	end)
 
 	-- ── MobilizeCC remote ────────────────────────────────────────────────
@@ -2400,13 +2610,14 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true }
+		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Barracks needs a Mine; Turret/Deployer need a Barracks; Relay/Blob need research
+		-- Requirement check: Barracks needs a Mine; Turret/Deployer/Nest need a Barracks; Relay/Blob need research
 		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
+		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
@@ -2419,6 +2630,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			or buildingType == "Deployer"  and Config.DEPLOYER_COST
 			or buildingType == "Relay"     and Config.RELAY_COST
 			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
+			or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
 
@@ -2428,21 +2640,21 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		resourceManager.spend(player, cost)
 
-		-- Place a signal flare and queue the build; a drop pod will launch from
-		-- the CC when the countdown finishes (or immediately if BUILD_TIME = 0).
-		local flare, fill = createSignalFlare(snapped, buildingType)
-		local queueTime   = (Config.BUILD_TIME :: any)[buildingType] or 0
-		if not pendingBuilds[player.UserId] then pendingBuilds[player.UserId] = {} end
-		table.insert(pendingBuilds[player.UserId], {
-			buildingType = buildingType,
-			position     = snapped,
-			timeLeft     = queueTime,
-			totalTime    = queueTime,
-			flare        = flare,
-			progressFill = fill,
-			player       = player,
-			isMine       = buildingType == "Mine",
-		})
+		-- Launch a drop pod immediately — no queue, no cooldown. The structure is
+		-- assembled on-site by the pod's welding arms when it lands.
+		local ccPos: Vector3? = nil
+		for _, bd in buildingData do
+			if bd.owner == player and bd.buildingType == "CommandCenter" then
+				ccPos = Vector3.new(bd.base.Position.X, 0, bd.base.Position.Z)
+				break
+			end
+		end
+		if ccPos then
+			local ccTopY     = Config.COMMAND_CENTER_SIZE.Y + 2
+			local launchPos  = ccPos + Vector3.new(0, ccTopY, 0)
+			local relayChain = findRelayChain(player, ccPos, snapped)
+			launchDropPod(player, launchPos, relayChain, snapped, buildingType, buildingType == "Mine")
+		end
 	end)
 
 	-- ── BuildMonument remote ──────────────────────────────────────────────
@@ -2564,6 +2776,30 @@ function BuildingManager.init(resourceManager, mineralManager_)
 						applyTurretUpgradeVisuals(tId, "Creepy")
 					end
 				end
+			end
+		end
+	)
+
+	-- ── LampreyEgg remote: births one egg per request from a Lamprey Nest
+	-- (up to LAMPREY_NEST_MAX_EGGS concurrent). Sequence + hatch in produceLampreyEgg.
+	RemoteHandler.get(Config.REMOTES.LampreyEgg).OnServerEvent:Connect(
+		function(player: any, nestIds: any)
+			local ids = type(nestIds) == "string" and {nestIds} or nestIds
+			if type(ids) ~= "table" then return end
+
+			for _, nestId in ids do
+				if type(nestId) ~= "string" then continue end
+
+				local data = buildingData[nestId]
+				if not data or data.buildingType ~= "LampreyNest" then continue end
+				if data.owner ~= player then continue end
+				if data.isConstructing then continue end
+				if (nestEggs[nestId] or 0) >= Config.LAMPREY_NEST_MAX_EGGS then continue end
+				if not resourceManagerRef or resourceManagerRef.get(player) < Config.LAMPREY_EGG_COST then continue end
+
+				resourceManagerRef.spend(player, Config.LAMPREY_EGG_COST)
+				nestEggs[nestId] = (nestEggs[nestId] or 0) + 1
+				task.spawn(produceLampreyEgg, nestId, player)
 			end
 		end
 	)

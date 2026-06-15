@@ -20,8 +20,6 @@
 
 	NOT covered here (deliberately bespoke — they diverge between runtime and
 	preview, or depend on runtime state):
-	  • Creepy eyes — different eye sizes in preview vs runtime, gated on the
-	    Eye Upgrade research. See addCreepyEyes in UnitManager / UnitVisuals.
 ]]
 
 local UnitBlueprints = {}

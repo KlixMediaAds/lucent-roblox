@@ -178,7 +178,7 @@ local UNIT_DEFS: { UnitDef } = {
 	{ key = "Elite",    label = "Elite\n◆ 100",     icon = "★",  color = PURPLE,       cost = 100, angle = 0    },
 	{ key = "Medic",    label = "Medic\n◆ 60",      icon = "✚",  color = MEDIC_TEAL,   cost = 60,  angle = 45   },
 	{ key = "Foamer",   label = "Foamer\n◆ 80",     icon = "🫧", color = FOAM_BLUE,    cost = 80,  angle = 90   },
-	{ key = "Lamprey",  label = "Lamprey\n◆ 110",   icon = "🪱", color = LAMPREY_GRN,  cost = 110, angle = 135  },
+	-- Lamprey is now born at the Lamprey Nest, not trained here.
 }
 
 local RADIUS   = 155  -- px from root centre to child centre

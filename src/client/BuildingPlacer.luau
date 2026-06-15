@@ -239,6 +239,7 @@ end
 local function ghostSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
+	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -286,6 +287,7 @@ local function buildingCost(btype: string): number
 	if btype == "Turret"     then return Config.TURRET_COST end
 	if btype == "Relay"      then return Config.RELAY_COST end
 	if btype == "CreepyBlob" then return Config.CREEPY_BLOB_COST end
+	if btype == "LampreyNest" then return Config.LAMPREY_NEST_COST end
 	return Config.BUILDING_COST
 end
 
@@ -392,11 +394,15 @@ function BuildingPlacer.init(network, cameraModule)
 			if currentType == "Mine" then
 				if outOfBuildZone or onTerrain then return end
 				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
-				if pos then
-					network.placeBuilding(snap(pos), "Mine")
-					playPlaceSound()
-					task.defer(BuildingPlacer.exitPlacementMode)
+				if not pos then return end
+				if lineShiftHeld then
+					isLineDragging = true
+					lineDragStart  = snap(pos)
+					return
 				end
+				network.placeBuilding(snap(pos), "Mine")
+				playPlaceSound()
+				task.defer(BuildingPlacer.exitPlacementMode)
 
 			elseif currentType == "CommandCenter" then
 				if not ccTooClose and not onTerrain then

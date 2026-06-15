@@ -24,6 +24,7 @@ local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
+local LampreyNestPanel = require(script:WaitForChild("LampreyNestPanel"))
 local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
@@ -264,6 +265,9 @@ BlobPanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return UnitController.getSelectedBuildingIds() end)
+LampreyNestPanel.init(Network,
+	function() return currentResources end,
+	function() return UnitController.getSelectedBuildingIds() end)
 CCMobilePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
@@ -384,6 +388,7 @@ local function hideBuildingPanels()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 	BlobPanel.hide()
+	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
 end
 
@@ -398,6 +403,7 @@ HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
 		MinePanel.hide()
 		TurretPanel.hide()
 		BlobPanel.hide()
+		LampreyNestPanel.hide()
 		CCMobilePanel.hide()
 		WorkshopPanel.show(ownCCId)
 	end
@@ -424,6 +430,7 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 		MinePanel.hide()
 		TurretPanel.hide()
 		BlobPanel.hide()
+		LampreyNestPanel.hide()
 		CCMobilePanel.hide()
 		WorkshopPanel.show(ownCCId)
 	end
@@ -452,6 +459,7 @@ local function enterCCMode()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
 	BlobPanel.hide()
+	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
@@ -608,6 +616,22 @@ UnitController.onBlobSelected(function(blobId: string?)
 		BlobPanel.show(blobId)
 	else
 		BlobPanel.hide()
+	end
+end)
+
+-- ── Lamprey Nest panel ─────────────────────────────────────────────────────────
+UnitController.onLampreyNestSelected(function(nestId: string?)
+	if nestId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.hide()
+		DeployerPanel.hide()
+		CCMobilePanel.hide()
+		LampreyNestPanel.show(nestId)
+	else
+		LampreyNestPanel.hide()
 	end
 end)
 

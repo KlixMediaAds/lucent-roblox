@@ -82,6 +82,7 @@ Config.MINER_OFFSETS = {
 Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
 Config.COMMAND_CENTER_MIN_DIST = 100   -- minimum studs between any two command centers
 Config.BUILD_RADIUS            = 85    -- studs; non-CC buildings must be within this distance of the player's CC
+Config.FOREST_CC_CLEARING      = 60    -- studs; trees are felled within this radius around a Command Center
 
 -- Relay (build-zone extender, unlocked via Relay research)
 Config.RELAY_COST            = 175
@@ -96,6 +97,17 @@ Config.RELAY_HP         = 250
 Config.RELAY_BUILD_TIME = 12
 Config.RELAY_RADIUS     = 65    -- studs; extends the build zone around this structure
 Config.RELAY_SIZE       = Vector3.new(6, 12, 6)
+
+-- Lamprey Nest — organic structure that births Lampreys from pulsing eggs.
+-- Replaces the Barracks as the sole source of Lampreys. Each purchase makes the
+-- nest pulse its tubes, then ejects a green egg to a random spot nearby; each
+-- egg incubates on its own timer and hatches into a Lamprey. Eggs ARE the queue.
+Config.LAMPREY_NEST_COST       = 150  -- cost to place the nest building
+Config.LAMPREY_EGG_COST        = 110  -- cost per egg / Lamprey (matches the Lamprey unit cost)
+Config.LAMPREY_NEST_MAX_EGGS   = 8    -- max concurrent eggs (in-flight + incubating) per nest
+Config.LAMPREY_NEST_SIZE       = Vector3.new(11, 7, 11)
+Config.LAMPREY_NEST_EJECT_TIME = 1.5  -- seconds the tubes pulse + the egg arcs out of the nest
+Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10s total per egg)
 
 -- Monument (win condition — upgrade from Command Center)
 Config.MONUMENT_COST         = 1500
@@ -124,8 +136,6 @@ Config.UNLOCKS = {
 		condText = "Build 3 Turrets",  cond = { type = "building", name = "Turret",   count = 3 } },
 	Relay            = { icon = "📡", desc = "Unlocks the Relay building. Extends your build zone by 65 studs.",
 		condText = "Build 2 Barracks", cond = { type = "building", name = "Barracks", count = 2 } },
-	EyeUpgrade       = { icon = "👁", desc = "All units gain enhanced vision, increasing fog-of-war sight radius by 20%.",
-		condText = "Build 8 structures", cond = { type = "building", name = "any",    count = 8 } },
 	ConcussionShells = { icon = "💥", desc = "Tank shells slow enemy units on impact.",
 		condText = "Kill 5 enemies",   cond = { type = "kill", count = 5 } },
 	HardenedArmor    = { icon = "🛡", desc = "Soldiers absorb a flat amount of damage per hit.",
@@ -181,9 +191,6 @@ Config.SOLDIER_STIM_RATE      = 0.55 -- attack-rate period multiplier while stim
 -- Soldier: Hardened Armor
 Config.SOLDIER_ARMOR          = 6    -- flat damage absorbed per incoming hit
 
--- Eye Upgrade
-Config.EYE_VISION_MULT = 1.2   -- 20% broader unit vision radius in fog of war
-
 -- Soldier: Rollers upgrade
 Config.ROLLER_ATTACK_RANGE  = 14   -- studs; approach/engage range (wider for tracking)
 Config.ROLLER_CHARGE_DIST   = 22   -- studs; fixed dash distance per attack (zips past target)
@@ -208,6 +215,7 @@ Config.VISION_DEFAULT = 40
 Config.VISION_RADIUS  = {
 	CommandCenter = 75, Barracks = 50, Mine = 45, Turret = 40,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
+	LampreyNest = 50,
 }
 
 -- Mutant turret → creepy soldier spawning
@@ -221,12 +229,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12 }
+Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, CreepySoldier = 0 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, CreepySoldier = 55  }
-Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350 }
+Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  CreepySoldier = 14  }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  CreepySoldier = 13  }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, CreepySoldier = 0.7 }
@@ -299,6 +307,7 @@ Config.REMOTES = {
 	SpawnLaneUnit           = "SpawnLaneUnit",
 	SetDeployerType         = "SetDeployerType",
 	DeployerUpdate          = "DeployerUpdate",
+	LampreyEgg              = "LampreyEgg",
 }
 
 return Config
