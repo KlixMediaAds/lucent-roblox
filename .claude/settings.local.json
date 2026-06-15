@@ -22,7 +22,20 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(rojo build *)",
-      "Bash(rm -f /tmp/lucent_check.rbxl /tmp/lucent_check2.rbxl)"
+      "Bash(rm -f /tmp/lucent_check.rbxl /tmp/lucent_check2.rbxl)",
+      "PowerShell(cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; git diff --stat; $bytes = [System.IO.File]::ReadAllBytes\\(\"src\\\\server\\\\BuildingManager.luau\"\\); $crlf = 0; $lf = 0; for \\($i = 1; $i -lt [Math]::Min\\($bytes.Count, 20000\\); $i++\\) { if \\($bytes[$i] -eq 10\\) { if \\($bytes[$i-1] -eq 13\\) { $crlf++ } else { $lf++ } } }; \"CRLF: $crlf  LF: $lf \\(first 20KB\\)\")",
+      "PowerShell($tools = \"rojo\", \"luau-lsp\", \"luau\", \"selene\", \"stylua\"; foreach \\($t in $tools\\) { $cmd = Get-Command $t -ErrorAction SilentlyContinue; if \\($cmd\\) { \"$t : \" + $cmd.Source } else { \"$t : not found\" } })",
+      "PowerShell($a = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\luau-analyze.exe\"; cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; & $a src\\\\shared\\\\UnitVisuals.luau src\\\\server\\\\BuildingManager.luau src\\\\client\\\\FabricatorArms.luau src\\\\client\\\\init.client.luau src\\\\server\\\\init.server.luau)",
+      "PowerShell($c = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\luau-compile.exe\"; cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; foreach \\($f in @\\(\"src\\\\shared\\\\UnitVisuals.luau\", \"src\\\\server\\\\BuildingManager.luau\", \"src\\\\client\\\\FabricatorArms.luau\", \"src\\\\client\\\\init.client.luau\", \"src\\\\server\\\\init.server.luau\"\\)\\) { $out = & $c --binary $f 2>$null; if \\($LASTEXITCODE -eq 0\\) { \"$f : syntax OK\" } else { \"$f : COMPILE ERROR\"; & $c --binary $f | Out-Null } })",
+      "PowerShell($dir = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\"; try { Invoke-WebRequest \"https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/main/scripts/globalTypes.d.luau\" -OutFile \"$dir\\\\globalTypes.d.luau\"; \"downloaded: \" + \\(Get-Item \"$dir\\\\globalTypes.d.luau\"\\).Length + \" bytes\" } catch { \"failed: \" + $_.Exception.Message })",
+      "PowerShell($a = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\luau-analyze.exe\"; $defs = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\globalTypes.d.luau\"; cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; & $a --definitions:$defs src\\\\shared\\\\UnitVisuals.luau src\\\\client\\\\FabricatorArms.luau 2>&1 | Select-Object -First 60)",
+      "PowerShell($a = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\luau-analyze.exe\"; $defs = \"C:\\\\Users\\\\ohkod\\\\AppData\\\\Local\\\\Temp\\\\luau-tools\\\\globalTypes.d.luau\"; cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; $out = & $a \"--definitions=$defs\" src\\\\shared\\\\UnitVisuals.luau src\\\\client\\\\FabricatorArms.luau 2>&1 | Out-String; $lines = $out -split \"`r?`n\" | Where-Object { $_ -match \"\\\\.luau\\\\\\(\" -and $_ -notmatch \"Unknown \\(global|type\\) 'task'\" -and $_ -notmatch \"require\" }; \"total findings: \" + $lines.Count; $lines | Select-Object -First 50)",
+      "PowerShell(cd C:\\\\Users\\\\ohkod\\\\OneDrive\\\\Desktop\\\\lucent-roblox; rojo build default.project.json -o \"$env:TEMP\\\\lucent-test.rbxl\"; if \\($?\\) { \"build OK: \" + \\(Get-Item \"$env:TEMP\\\\lucent-test.rbxl\"\\).Length + \" bytes\" })",
+      "PowerShell(Out-Null *)",
+      "Bash(git diff *)",
+      "Read(//tmp/**)",
+      "Bash(git restore *)",
+      "Bash(rm -f bm_revert.diff)"
     ]
   }
 }

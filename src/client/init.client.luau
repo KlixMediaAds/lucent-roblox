@@ -5,6 +5,7 @@ local SoundService      = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
+local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 
 local Network        = require(script:WaitForChild("Network"))
 local CameraModule   = require(script:WaitForChild("Camera"))
@@ -19,8 +20,11 @@ local FogManager     = require(script:WaitForChild("FogManager"))
 local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local WalkerLegs     = require(script:WaitForChild("WalkerLegs"))
+local LampreyBody    = require(script:WaitForChild("LampreyBody"))
+local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
+local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
@@ -139,8 +143,6 @@ local function buildCCMoveGhost()
 	destroyCCMoveGhost()
 	local color = Players.LocalPlayer.TeamColor
 	local ccSz  = Config.COMMAND_CENTER_SIZE
-	local hw    = ccSz.X / 2
-	local hd    = ccSz.Z / 2
 	local halfH = ccSz.Y / 2
 
 	local m    = Instance.new("Model")
@@ -161,27 +163,12 @@ local function buildCCMoveGhost()
 	base.Parent         = m
 	m.PrimaryPart       = base
 
-	-- Neon collar strips (same layout as UnitVisuals.buildBuildingPreview "CommandCenter")
-	for _, cY in { ccSz.Y - 0.45, 0.45 } do
-		local collarStrips = {
-			{ sz = Vector3.new(ccSz.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,         cY,  hd + 0.15) },
-			{ sz = Vector3.new(ccSz.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,         cY, -hd - 0.15) },
-			{ sz = Vector3.new(0.3, 0.9, ccSz.Z + 0.4), pos = Vector3.new( hw + 0.15, cY,  0        ) },
-			{ sz = Vector3.new(0.3, 0.9, ccSz.Z + 0.4), pos = Vector3.new(-hw - 0.15, cY,  0        ) },
-		}
-		for _, s in collarStrips do
-			local strip         = Instance.new("Part")
-			strip.Name          = "Collar"
-			strip.Size          = s.sz
-			strip.Position      = s.pos
-			strip.BrickColor    = color
-			strip.Material      = Enum.Material.Neon
-			strip.Transparency  = 0.4
-			strip.Anchored      = true
-			strip.CanCollide    = false
-			strip.CanQuery      = false
-			strip.CastShadow    = false
-			strip.Parent        = m
+	-- Fabricator Core decor (shared with the live CC), made ghostly
+	UnitVisuals.buildCommandCenterDecor(m, CFrame.new(0, 0, 0), color, false)
+	for _, d in m:GetDescendants() do
+		if d:IsA("BasePart") and d ~= base then
+			d.Transparency = math.max(d.Transparency, 0.5)
+			d.CanQuery     = false
 		end
 	end
 
@@ -227,6 +214,8 @@ DepositFX.start()
 SpiderLegs.init(workspace.CurrentCamera)
 CreepyLegs.init(workspace.CurrentCamera)
 WalkerLegs.init(workspace.CurrentCamera)
+LampreyBody.init(workspace.CurrentCamera)
+FabricatorArms.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
 
@@ -277,6 +266,8 @@ BlobPanel.init(Network,
 	function() return UnitController.getSelectedBuildingIds() end)
 CCMobilePanel.init(Network,
 	function() return currentResources end,
+	function(techName) return researchedTechs[techName] == true end)
+DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
@@ -545,9 +536,25 @@ UnitController.onBarracksSelected(function(barrackId: string?)
 	if barrackId then
 		MinePanel.hide()
 		WorkshopPanel.hide()
+		DeployerPanel.hide()
 		BarracksPanel.show(barrackId)
 	else
 		BarracksPanel.hide()
+	end
+end)
+
+-- ── Deployer panel ────────────────────────────────────────────────────────────
+UnitController.onDeployerSelected(function(deployerId: string?)
+	if deployerId then
+		BarracksPanel.hide()
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.hide()
+		CCMobilePanel.hide()
+		DeployerPanel.show(deployerId)
+	else
+		DeployerPanel.hide()
 	end
 end)
 
@@ -555,6 +562,7 @@ end)
 UnitController.onMineSelected(function(mineId: string?)
 	if mineId then
 		BarracksPanel.hide()
+		DeployerPanel.hide()
 		WorkshopPanel.hide()
 		MinePanel.show(mineId)
 	else
@@ -940,6 +948,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			CreepyLegs.attach(unitId, part)
 		elseif tv and tv.Value == "Howitzer" then
 			WalkerLegs.attach(unitId, part)
+		elseif tv and tv.Value == "Lamprey" then
+			LampreyBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -2754,6 +2764,83 @@ local function spawnHowitzerImpact(pos: Vector3)
 			end
 		end
 	end)
+
+	-- ── Fire zone: 5 s burn then 3 s fade ────────────────────────────────────
+	-- Outer base + inner core, each carrying a Fire and Smoke instance.
+	local fireCfgs = {
+		{ sz = 8,  heat = 10, fsz = 10, c1 = Color3.fromRGB(255, 90, 10),  c2 = Color3.fromRGB(255, 200, 0) },
+		{ sz = 4,  heat = 18, fsz = 6,  c1 = Color3.fromRGB(255, 35, 0),   c2 = Color3.fromRGB(255, 140, 0) },
+	}
+	local fireParts: { Part } = {}
+	local fireObjs:  { Fire } = {}
+	local smokeObj: Smoke? = nil
+
+	for i, cfg in fireCfgs do
+		local fp         = Instance.new("Part")
+		fp.Size          = Vector3.new(cfg.sz, 0.5, cfg.sz)
+		fp.Anchored      = true
+		fp.CanCollide    = false
+		fp.CanQuery      = false
+		fp.CastShadow    = false
+		fp.Transparency  = 1
+		fp.Position      = Vector3.new(groundPos.X, 0.25, groundPos.Z)
+		fp.Parent        = workspace
+
+		local f              = Instance.new("Fire")
+		f.Heat               = cfg.heat
+		f.Size               = cfg.fsz
+		f.Color              = cfg.c1
+		f.SecondaryColor     = cfg.c2
+		f.Parent             = fp
+
+		fireParts[i] = fp
+		fireObjs[i]  = f
+
+		if i == 1 then
+			local sm             = Instance.new("Smoke")
+			sm.Color             = Color3.fromRGB(50, 42, 36)
+			sm.Opacity           = 0.30
+			sm.RiseVelocity      = 7
+			sm.Size              = 2
+			sm.Parent            = fp
+			smokeObj             = sm
+		end
+	end
+
+	-- Store initial values for lerping during the fade
+	local initSizes: { number } = {}
+	local initHeats: { number } = {}
+	for i, f in fireObjs do
+		initSizes[i] = f.Size
+		initHeats[i] = f.Heat
+	end
+	local initSmokeOpacity = smokeObj and smokeObj.Opacity or 0
+
+	task.spawn(function()
+		local FIRE_FULL = 5
+		local FIRE_FADE = 3
+		-- Wait out the full-burn phase
+		task.wait(FIRE_FULL)
+		-- Fade phase
+		local e = 0
+		while e < FIRE_FADE do
+			local idt = task.wait(0.05)
+			e = math.min(e + idt, FIRE_FADE)
+			local t = e / FIRE_FADE
+			for i, f in fireObjs do
+				if f.Parent then
+					f.Size = math.max(0.05, initSizes[i] * (1 - t))
+					f.Heat = initHeats[i] * (1 - t)
+				end
+			end
+			if smokeObj and smokeObj.Parent then
+				smokeObj.Opacity = math.max(0, initSmokeOpacity * (1 - t))
+			end
+		end
+		for _, fp in fireParts do
+			if fp.Parent then fp:Destroy() end
+		end
+	end)
 end
 
 -- Howitzer shell: large oriented tracer streak lobbed on a high arc.
@@ -2903,6 +2990,105 @@ local function playSound3D(pos: Vector3, soundId: string, volume: number)
 	snd.Ended:Once(function() p:Destroy() end)
 end
 
+-- Lamprey bile: a glowing green acid glob lobbed from the reared head in a low arc;
+-- on impact it splatters and leaves a corrosive pool that fizzles away.
+local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
+	local TRAVEL = 0.5
+	local ARC    = 9.0
+
+	local flat = Vector3.new(toPos.X - fromPos.X, 0, toPos.Z - fromPos.Z)
+	local dir  = if flat.Magnitude > 0.01 then flat.Unit else Vector3.new(0, 0, -1)
+	-- Origin ≈ the lamprey's reared head/maw (forward + a little up from the pivot)
+	local origin = fromPos + dir * 4.5 + Vector3.new(0, 1.4, 0)
+	local dest   = toPos + Vector3.new(0, 0.5, 0)
+
+	local C_BILE = Color3.fromRGB(132, 214, 46)
+
+	local glob          = Instance.new("Part")
+	glob.Name           = "_LampreyBile"
+	glob.Shape          = Enum.PartType.Ball
+	glob.Size           = Vector3.new(1.5, 1.5, 1.5)
+	glob.Color          = C_BILE
+	glob.Material       = Enum.Material.Neon
+	glob.Transparency   = 0.1
+	glob.Anchored       = true; glob.CanCollide = false; glob.CanQuery = false; glob.CastShadow = false
+	glob.Position       = origin
+	glob.Parent         = workspace
+
+	-- Dripping acid trail
+	local drip                = Instance.new("ParticleEmitter")
+	drip.Texture              = "rbxasset://textures/particles/smoke_main.dds"
+	drip.Color                = ColorSequence.new(C_BILE, Color3.fromRGB(70, 130, 24))
+	drip.LightEmission        = 0.6
+	drip.Size                 = NumberSequence.new(0.8, 0.1)
+	drip.Transparency         = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.3),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	drip.Lifetime             = NumberRange.new(0.25, 0.5)
+	drip.Speed                = NumberRange.new(0.5, 1.5)
+	drip.Acceleration         = Vector3.new(0, -30, 0)
+	drip.Rate                 = 60
+	drip.Parent               = glob
+
+	local origElapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.RenderStepped:Connect(function(bdt)
+		origElapsed += bdt
+		local t   = math.min(origElapsed / TRAVEL, 1)
+		local arcH = math.sin(t * math.pi) * ARC
+		local wob  = 1.5 + math.sin(origElapsed * 26) * 0.12
+		glob.Size     = Vector3.new(wob, wob, wob)
+		glob.Position = origin:Lerp(dest, t) + Vector3.new(0, arcH, 0)
+		if t >= 1 then
+			conn:Disconnect()
+			drip.Enabled = false
+			glob.Transparency = 1
+			game:GetService("Debris"):AddItem(glob, 0.6)
+
+			-- Impact splatter — green blobs flung outward, fading fast
+			for _ = 1, 6 do
+				local splat        = Instance.new("Part")
+				splat.Shape        = Enum.PartType.Ball
+				local sz           = 0.5 + math.random() * 0.9
+				splat.Size         = Vector3.new(sz, sz, sz)
+				splat.Color        = C_BILE
+				splat.Material     = Enum.Material.Neon
+				splat.Anchored     = true; splat.CanCollide = false; splat.CanQuery = false; splat.CastShadow = false
+				splat.Position     = dest + Vector3.new((math.random() - 0.5) * 4, 0.2, (math.random() - 0.5) * 4)
+				splat.Parent       = workspace
+				local se = 0
+				local sc: RBXScriptConnection
+				sc = RunService.RenderStepped:Connect(function(sdt)
+					se += sdt
+					local sp = math.min(se / 0.5, 1)
+					splat.Transparency = sp
+					if sp >= 1 then sc:Disconnect(); splat:Destroy() end
+				end)
+			end
+
+			-- Lingering corrosive pool that fizzles away
+			local pool          = Instance.new("Part")
+			pool.Shape          = Enum.PartType.Cylinder
+			pool.Size           = Vector3.new(0.2, 5, 5)
+			pool.CFrame         = CFrame.new(dest - Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+			pool.Color          = C_BILE
+			pool.Material       = Enum.Material.Neon
+			pool.Transparency   = 0.3
+			pool.Anchored       = true; pool.CanCollide = false; pool.CanQuery = false; pool.CastShadow = false
+			pool.Parent         = workspace
+			local pe = 0
+			local pc: RBXScriptConnection
+			pc = RunService.RenderStepped:Connect(function(pdt)
+				pe += pdt
+				local pp = math.min(pe / 1.3, 1)
+				pool.Transparency = 0.3 + pp * 0.7
+				if pp >= 1 then pc:Disconnect(); pool:Destroy() end
+			end)
+		end
+	end)
+end
+
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then
 		spawnEliteProjectile(fromPos, toPos)
@@ -2930,6 +3116,74 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Howitzer" then
 		spawnHowitzerShell(fromPos, toPos)
 		playSound3D(fromPos, SND_TANK, 0.85)
+		return
+	end
+
+	if unitType == "Lamprey" then
+		spawnLampreyBile(fromPos, toPos)
+		return
+	end
+
+	if unitType == "Foam" then
+		-- White bubbly foam blob lobbed in an arc; impacts leave a foam splatter.
+		local TRAVEL = 0.38
+		local origin = fromPos + Vector3.new(0, 0.5, 0)
+		local dest   = toPos   + Vector3.new(0, 0.8, 0)
+
+		local blob          = Instance.new("Part")
+		blob.Shape          = Enum.PartType.Ball
+		blob.Size           = Vector3.new(1.3, 1.3, 1.3)
+		blob.Color          = Color3.fromRGB(230, 248, 255)
+		blob.Material       = Enum.Material.SmoothPlastic
+		blob.Transparency   = 0.1
+		blob.Anchored       = true
+		blob.CanCollide     = false
+		blob.CanQuery       = false
+		blob.CastShadow     = false
+		blob.Position       = origin
+		blob.Parent         = workspace
+
+		local bElapsed = 0
+		local bConn: RBXScriptConnection
+		bConn = RunService.RenderStepped:Connect(function(bdt)
+			bElapsed += bdt
+			local bt  = math.min(bElapsed / TRAVEL, 1)
+			-- Arc trajectory: foam is lobbed upward
+			local arcH = math.sin(bt * math.pi) * 5
+			local wobble = 1.3 + math.sin(bElapsed * 22) * 0.08
+			blob.Size     = Vector3.new(wobble, wobble, wobble)
+			blob.Position = origin:Lerp(dest, bt) + Vector3.new(0, arcH, 0)
+			if bt >= 1 then
+				bConn:Disconnect()
+				blob:Destroy()
+				-- Impact splatter: several white spheres that fade out
+				for i = 1, 5 do
+					local splat          = Instance.new("Part")
+					splat.Shape          = Enum.PartType.Ball
+					local sz             = 0.6 + math.random() * 0.8
+					splat.Size           = Vector3.new(sz, sz, sz)
+					splat.Color          = Color3.fromRGB(240, 252, 255)
+					splat.Material       = Enum.Material.SmoothPlastic
+					splat.Transparency   = 0.0
+					splat.Anchored       = true
+					splat.CanCollide     = false
+					splat.CanQuery       = false
+					splat.CastShadow     = false
+					local ox = (math.random() - 0.5) * 3.5
+					local oz = (math.random() - 0.5) * 3.5
+					splat.Position       = dest + Vector3.new(ox, 0, oz)
+					splat.Parent         = workspace
+					local sElapsed = 0
+					local sConn: RBXScriptConnection
+					sConn = RunService.RenderStepped:Connect(function(sdt)
+						sElapsed += sdt
+						local sp = math.min(sElapsed / 0.55, 1)
+						splat.Transparency = sp
+						if sp >= 1 then sConn:Disconnect(); splat:Destroy() end
+					end)
+				end
+			end
+		end)
 		return
 	end
 

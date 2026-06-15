@@ -133,14 +133,18 @@ local UNIT_ICON: { [string]: string } = {
 	Howitzer      = "💣",
 	Elite         = "★",
 	Medic         = "✚",
+	Foamer        = "🫧",
+	Lamprey       = "🪱",
 	CreepySoldier = "🪲",
 }
 local UNIT_COLOR: { [string]: Color3 } = {
 	Soldier       = C.GREEN,
 	Tank          = C.BARRACKS,
-	Howitzer      = Color3.fromRGB(138, 168, 52),   -- military olive
+	Howitzer      = Color3.fromRGB(138, 168,  52),
 	Elite         = Color3.fromRGB(160,  80, 230),
 	Medic         = Color3.fromRGB( 50, 200, 160),
+	Foamer        = Color3.fromRGB(160, 220, 255),
+	Lamprey       = Color3.fromRGB(120, 190,  60),
 	CreepySoldier = Color3.fromRGB( 50, 170,  80),
 }
 
@@ -155,6 +159,8 @@ local rootNode: TextButton?
 local PURPLE       = Color3.fromRGB(160,  80, 230)
 local MEDIC_TEAL   = Color3.fromRGB( 50, 200, 160)
 local HOWITZER_OLV = Color3.fromRGB(138, 168,  52)
+local FOAM_BLUE    = Color3.fromRGB(160, 220, 255)
+local LAMPREY_GRN  = Color3.fromRGB(120, 190,  60)
 
 type UnitDef = {
 	key:   string,
@@ -171,6 +177,8 @@ local UNIT_DEFS: { UnitDef } = {
 	{ key = "Howitzer", label = "Howitzer\n◆ 90",   icon = "💣", color = HOWITZER_OLV, cost = 90,  angle = -45  },
 	{ key = "Elite",    label = "Elite\n◆ 100",     icon = "★",  color = PURPLE,       cost = 100, angle = 0    },
 	{ key = "Medic",    label = "Medic\n◆ 60",      icon = "✚",  color = MEDIC_TEAL,   cost = 60,  angle = 45   },
+	{ key = "Foamer",   label = "Foamer\n◆ 80",     icon = "🫧", color = FOAM_BLUE,    cost = 80,  angle = 90   },
+	{ key = "Lamprey",  label = "Lamprey\n◆ 110",   icon = "🪱", color = LAMPREY_GRN,  cost = 110, angle = 135  },
 }
 
 local RADIUS   = 155  -- px from root centre to child centre

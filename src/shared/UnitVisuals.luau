@@ -15,6 +15,37 @@ local UnitVisuals = {}
 
 local DEFAULT_TEAM = BrickColor.new("Medium blue")
 
+-- ── Fabricator Core (Command Center) shared constants ─────────────────────────
+-- Used by buildCommandCenterDecor (server + preview) and the client
+-- FabricatorArms animator. All Y values are studs above ground level.
+UnitVisuals.FAB = {
+	ARM_ANGLES  = { 0, math.pi * 2 / 3, math.pi * 4 / 3 },  -- yaw of each arm mount
+	MOUNT_R     = 6.9,    -- radial distance of arm pylon centres
+	SHOULDER_Y  = 14.35,  -- height of the arm shoulder pivot
+	UPPER_LEN   = 4.9,    -- upper-arm segment length
+	FORE_MIN    = 3.4,    -- forearm telescoping range
+	FORE_MAX    = 6.4,
+	STAND_ELBOW = Vector2.new(4.6, 18.7),  -- standby elbow (radial dist, Y)
+	STAND_TIP   = Vector2.new(2.2, 16.3),  -- standby tool tip (radial dist, Y)
+	HOVER_Y     = 19,     -- dropship hover height above ground while fabricating
+}
+
+-- Orients a part so its local Y axis runs from world point a to world point b,
+-- sizing Y to the span and X/Z to `thickness`.
+function UnitVisuals.orientYBetween(part: BasePart, a: Vector3, b: Vector3, thickness: number)
+	local delta = b - a
+	local len   = math.max(delta.Magnitude, 0.05)
+	local dir   = delta / len
+	local right = dir:Cross(Vector3.yAxis)
+	if right.Magnitude < 0.01 then
+		right = dir:Cross(Vector3.xAxis)
+	end
+	right = right.Unit
+	local back = right:Cross(dir)
+	part.CFrame = CFrame.fromMatrix((a + b) * 0.5, right, dir, -back)
+	part.Size   = Vector3.new(thickness, len, thickness)
+end
+
 -- ── Unit helpers ──────────────────────────────────────────────────────────────
 
 local function makeEye(parent: Instance, cf: CFrame, name: string, eyeSize: number)
@@ -114,6 +145,83 @@ local function addWalkerLegsPreview(parent: Instance, body: BasePart)
 	end
 end
 
+-- Preview-only static lamprey: a massive eel reared up out of a dirt mound, mouth
+-- agape. The live unit's whole body is drawn (and animated diving in/out of the
+-- ground) by the client LampreyBody module, so none of this lives in the blueprint.
+-- Built around a transparent body pivot at the origin; teamColor tints the
+-- bioluminescent belly stripe.
+local function addLampreyPreview(parent: Instance, body: BasePart)
+	local teamColor = body.Color
+	local C_BODY  = Color3.fromRGB(40, 44, 52)
+	local C_TOOTH = Color3.fromRGB(228, 226, 210)
+	local C_MAW   = Color3.fromRGB(150, 24, 28)
+	local C_EYE   = Color3.fromRGB(255, 230, 40)
+	local C_DIRT  = Color3.fromRGB(74, 56, 38)
+
+	local function ap(sz: Vector3, cf: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p      = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Size       = sz
+		p.CFrame     = cf
+		p.Color      = color
+		p.Material   = material
+		return p
+	end
+
+	-- Arched spine from a buried tail (back, +Z, low) up to a reared head (−Z, high)
+	local pts = {
+		Vector3.new(0, -2.6, 4.6),
+		Vector3.new(0, -0.4, 3.2),
+		Vector3.new(0,  1.8, 1.6),
+		Vector3.new(0,  3.8, 0.1),
+		Vector3.new(0,  5.4, -1.5),
+		Vector3.new(0,  6.3, -3.0),  -- head centre
+	}
+	local thick = { 1.6, 2.8, 3.2, 3.3, 3.2, 3.0 }
+
+	-- Body segments (tapered tubes) + a bioluminescent team stripe down the belly
+	for i = 1, #pts - 1 do
+		local t = (thick[i] + thick[i + 1]) * 0.5
+		local seg = ap(Vector3.new(1, 1, 1), CFrame.new(), C_BODY, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(seg, pts[i], pts[i + 1], t)
+		-- knuckle ball to smooth the joints
+		ap(Vector3.new(thick[i + 1], thick[i + 1], thick[i + 1]), CFrame.new(pts[i + 1]), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		-- glowing team-colour vent on the belly side (−Z front face of each segment)
+		local mid  = (pts[i] + pts[i + 1]) * 0.5
+		ap(Vector3.new(0.35, 0.35, 0.35), CFrame.new(mid + Vector3.new(0, 0, -t * 0.5)), teamColor, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- Dirt mound the tail erupts from
+	ap(Vector3.new(7, 2.2, 7), CFrame.new(0, -0.4, 4.4), C_DIRT, Enum.Material.Ground, Enum.PartType.Ball)
+
+	-- Head bulb
+	local headPos = pts[#pts]
+	ap(Vector3.new(3.8, 3.6, 4.0), CFrame.new(headPos), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+
+	-- Mouth: a round red maw ringed with converging fangs, facing the head's forward
+	local fwd = (pts[#pts] - pts[#pts - 1])
+	fwd = if fwd.Magnitude > 0.01 then fwd.Unit else Vector3.new(0, 0, -1)
+	local right = fwd:Cross(Vector3.yAxis)
+	right = if right.Magnitude > 0.01 then right.Unit else Vector3.xAxis
+	local up = right:Cross(fwd).Unit
+	local mawCentre = headPos + fwd * 1.7
+
+	ap(Vector3.new(2.6, 2.6, 1.2), CFrame.lookAt(mawCentre, mawCentre + fwd), C_MAW, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	for k = 0, 9 do
+		local ang = (k / 10) * math.pi * 2
+		local radial = right * math.cos(ang) + up * math.sin(ang)
+		local base = mawCentre + radial * 1.5
+		local tip  = mawCentre + fwd * 1.3 + radial * 0.5
+		local tooth = ap(Vector3.new(1, 1, 1), CFrame.new(), C_TOOTH, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(tooth, base, tip, 0.42)
+	end
+
+	-- Two sunken glowing eyes on top of the head
+	for _, s in { -1, 1 } do
+		ap(Vector3.new(0.9, 0.9, 0.9), CFrame.new(headPos + right * (s * 1.1) + up * 1.0 + fwd * 0.4), C_EYE, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+end
+
 -- ── Building helpers ──────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
@@ -123,6 +231,239 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"    then return Vector3.new(9, 6, 9) end
 	return Config.BUILDING_SIZE
+end
+
+-- ── Fabricator Core decor ─────────────────────────────────────────────────────
+
+--[[
+	Builds the full Industrial Fabricator Core decoration set under `parent`:
+	layered platform rings, reactor pit, pipes, vents, warning lights, operator
+	pulpit and three fabrication arms in standby pose.
+
+	Shared by BuildingManager (live building), buildBuildingPreview (thumbnails)
+	and the client CC move ghost — keep all three in sync through this function.
+
+	groundCF:  CFrame at the ground-level centre of the CC footprint (Y = 0).
+	teamColor: accent colour for identity bands / pulpit screen.
+	withFX:    true to add lights + particle emitters (live building only).
+
+	All parts are Anchored, CanCollide false, CanQuery false. Arm segments are
+	named "Fab<Seg><i>" so FabricatorArms (client) can animate them.
+]]
+function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local FAB = UnitVisuals.FAB
+
+	local cDarkSteel = Color3.fromRGB(52, 54, 58)
+	local cGunmetal  = Color3.fromRGB(35, 37, 41)
+	local cPlate     = Color3.fromRGB(70, 73, 78)
+	local cCorrode   = Color3.fromRGB(92, 76, 60)
+	local cEmber     = Color3.fromRGB(255, 96, 24)
+	local cWarn      = Color3.fromRGB(255, 40, 30)
+	local cCable     = Color3.fromRGB(24, 24, 28)
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+
+	-- Vertical cylinder (cylinder axis is X; roll 90° to stand it up)
+	local function vcyl(name: string, height: number, diameter: number, x: number, y: number, z: number, color: Color3, material: Enum.Material): Part
+		return dp(name, Vector3.new(height, diameter, diameter),
+			CFrame.new(x, y, z) * CFrame.Angles(0, 0, math.pi / 2),
+			color, material, Enum.PartType.Cylinder)
+	end
+
+	-- ── Layered platform rings ────────────────────────────────────────────────
+	vcyl("SkirtRing", 2.4, 16.8, 0, 1.2, 0, cPlate,    Enum.Material.DiamondPlate)
+	vcyl("MidRing",   5.0, 15.2, 0, 5.4, 0, cGunmetal, Enum.Material.Metal)
+	vcyl("DeckRing",  1.2, 16.0, 0, 9.4, 0, cPlate,    Enum.Material.DiamondPlate)
+
+	-- Team identity bands
+	local band1 = vcyl("TeamBand",  0.5,  17.0, 0, 2.55, 0, teamColor.Color, Enum.Material.Neon)
+	local band2 = vcyl("TeamBand2", 0.35, 16.2, 0, 8.6,  0, teamColor.Color, Enum.Material.Neon)
+	local _ = band1; _ = band2
+
+	-- ── Reactor pit ───────────────────────────────────────────────────────────
+	vcyl("PitWall", 1.8, 9.0, 0, 10.1, 0, cGunmetal,  Enum.Material.Metal)
+	vcyl("PitRim",  0.3, 9.6, 0, 11.1, 0, cDarkSteel, Enum.Material.Metal)
+	local core = vcyl("ReactorCore", 0.6, 7.0, 0, 10.5, 0, cEmber, Enum.Material.Neon)
+
+	if withFX then
+		local glow      = Instance.new("PointLight")
+		glow.Color      = Color3.fromRGB(255, 120, 30)
+		glow.Brightness = 6
+		glow.Range      = 30
+		glow.Parent     = core
+
+		local embers              = Instance.new("ParticleEmitter")
+		embers.Texture            = "rbxasset://textures/particles/fire_main.dds"
+		embers.Color              = ColorSequence.new(Color3.fromRGB(255, 140, 40), Color3.fromRGB(180, 40, 10))
+		embers.LightEmission      = 1
+		embers.Size               = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.7),
+			NumberSequenceKeypoint.new(1, 0.15),
+		})
+		embers.Transparency       = NumberSequence.new({
+			NumberSequenceKeypoint.new(0,   0.25),
+			NumberSequenceKeypoint.new(0.7, 0.55),
+			NumberSequenceKeypoint.new(1,   1),
+		})
+		embers.Rate               = 7
+		embers.Lifetime           = NumberRange.new(1.0, 1.9)
+		embers.Speed              = NumberRange.new(2, 4.5)
+		embers.SpreadAngle        = Vector2.new(14, 14)
+		embers.EmissionDirection  = Enum.NormalId.Right  -- cylinder local X = world up
+		embers.Parent             = core
+	end
+
+	-- ── Pipes (4 verticals with elbow caps) ───────────────────────────────────
+	for _, deg in { 45, 135, 225, 315 } do
+		local a = math.rad(deg)
+		local x = math.cos(a) * 6.6
+		local z = math.sin(a) * 6.6
+		vcyl("Pipe" .. deg, 7.0, 0.7, x, 5.9, z, cCorrode, Enum.Material.CorrodedMetal)
+		dp("PipeElbow" .. deg, Vector3.new(0.95, 0.95, 0.95), CFrame.new(x, 9.55, z), cDarkSteel, Enum.Material.Metal)
+	end
+
+	-- ── Vents + conduit boxes on the mid ring ─────────────────────────────────
+	for _, deg in { 60, 300 } do
+		local a   = math.rad(deg)
+		local pos = Vector3.new(math.cos(a) * 7.5, 6.5, math.sin(a) * 7.5)
+		dp("Vent" .. deg, Vector3.new(2.6, 1.8, 1.0),
+			CFrame.lookAt(pos, Vector3.new(pos.X * 2, pos.Y, pos.Z * 2)),
+			cDarkSteel, Enum.Material.Metal)
+	end
+	for _, deg in { 100, 260 } do
+		local a   = math.rad(deg)
+		local pos = Vector3.new(math.cos(a) * 7.7, 4.6, math.sin(a) * 7.7)
+		dp("Conduit" .. deg, Vector3.new(1.8, 1.2, 0.8),
+			CFrame.lookAt(pos, Vector3.new(pos.X * 2, pos.Y, pos.Z * 2)),
+			cGunmetal, Enum.Material.Metal)
+	end
+
+	-- ── Warning lights on deck-edge posts (client blinks "WarnLight" parts) ──
+	for _, deg in { 60, 210, 300 } do
+		local a = math.rad(deg)
+		local x = math.cos(a) * 7.5
+		local z = math.sin(a) * 7.5
+		dp("WarnPost" .. deg, Vector3.new(0.25, 1.4, 0.25), CFrame.new(x, 10.7, z), cDarkSteel, Enum.Material.Metal)
+		dp("WarnLight", Vector3.new(0.5, 0.5, 0.5), CFrame.new(x, 11.55, z), cWarn, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- ── Heat exhaust stacks ───────────────────────────────────────────────────
+	for _, deg in { 90, 270 } do
+		local a = math.rad(deg)
+		local x = math.cos(a) * 5.4
+		local z = math.sin(a) * 5.4
+		vcyl("Stack" .. deg,    2.8,  1.7, x, 11.4,  z, cGunmetal,  Enum.Material.Metal)
+		vcyl("StackTop" .. deg, 0.25, 1.9, x, 12.85, z, cDarkSteel, Enum.Material.Metal)
+		local vent = vcyl("StackGlow" .. deg, 0.1, 1.1, x, 12.78, z, cEmber, Enum.Material.Neon)
+		if withFX then
+			local smoke             = Instance.new("ParticleEmitter")
+			smoke.Texture           = "rbxasset://textures/particles/smoke_main.dds"
+			smoke.Color             = ColorSequence.new(Color3.fromRGB(70, 68, 66), Color3.fromRGB(30, 30, 32))
+			smoke.Size              = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.8),
+				NumberSequenceKeypoint.new(1, 2.4),
+			})
+			smoke.Transparency      = NumberSequence.new({
+				NumberSequenceKeypoint.new(0,   0.55),
+				NumberSequenceKeypoint.new(1,   1),
+			})
+			smoke.Rate              = 1.6
+			smoke.Lifetime          = NumberRange.new(2.2, 3.4)
+			smoke.Speed             = NumberRange.new(1.4, 2.6)
+			smoke.SpreadAngle       = Vector2.new(8, 8)
+			smoke.EmissionDirection = Enum.NormalId.Right
+			smoke.Parent            = vent
+		end
+	end
+
+	-- ── Operator pulpit (avatar seat perch, at 180° between arms 2 and 3) ────
+	dp("PulpitDeck",    Vector3.new(3.4, 0.6, 3.4),  CFrame.new(-5.6, 10.3, 0),  cGunmetal,  Enum.Material.Metal)
+	dp("PulpitConsole", Vector3.new(0.5, 1.1, 2.0),  CFrame.new(-7.0, 11.15, 0), cDarkSteel, Enum.Material.Metal)
+	dp("PulpitScreen",  Vector3.new(0.15, 0.7, 1.5), CFrame.new(-7.3, 11.2, 0),  teamColor.Color, Enum.Material.Neon)
+
+	-- ── Fabrication arms ──────────────────────────────────────────────────────
+	for i, theta in FAB.ARM_ANGLES do
+		local dir   = Vector3.new(math.cos(theta), 0, math.sin(theta))
+		local mount = dir * FAB.MOUNT_R
+		local yawCF = CFrame.Angles(0, -theta, 0)
+
+		-- Support strut from the skirt up under the pylon
+		local strut = dp("FabStrut" .. i, Vector3.new(1, 1, 1), CFrame.new(), cCorrode, Enum.Material.CorrodedMetal)
+		UnitVisuals.orientYBetween(strut,
+			groundCF:PointToWorldSpace(dir * 8.2 + Vector3.new(0, 2.5, 0)),
+			groundCF:PointToWorldSpace(dir * FAB.MOUNT_R + Vector3.new(0, 9.6, 0)), 0.8)
+
+		dp("FabPylonFoot" .. i, Vector3.new(2.6, 0.4, 2.6), CFrame.new(mount + Vector3.new(0, 10.2, 0)) * yawCF, cPlate, Enum.Material.DiamondPlate)
+		dp("FabPylon" .. i,     Vector3.new(1.9, 3.2, 1.9), CFrame.new(mount + Vector3.new(0, 11.6, 0)) * yawCF, cGunmetal, Enum.Material.Metal)
+		vcyl("FabTurn" .. i, 0.8, 2.4, mount.X, 13.6, mount.Z, cDarkSteel, Enum.Material.Metal)
+
+		-- Standby joint positions (local space)
+		local P0 = mount + Vector3.new(0, FAB.SHOULDER_Y, 0)
+		local P1 = dir * FAB.STAND_ELBOW.X + Vector3.new(0, FAB.STAND_ELBOW.Y, 0)
+		local P2 = dir * FAB.STAND_TIP.X + Vector3.new(0, FAB.STAND_TIP.Y, 0)
+		local w0 = groundCF:PointToWorldSpace(P0)
+		local w1 = groundCF:PointToWorldSpace(P1)
+		local w2 = groundCF:PointToWorldSpace(P2)
+
+		local shoulder = dp("FabShoulder" .. i, Vector3.new(1.7, 1.7, 1.7), CFrame.new(P0) * yawCF, cGunmetal, Enum.Material.Metal)
+
+		local upper = dp("FabUpper" .. i, Vector3.new(1, 1, 1), CFrame.new(), cDarkSteel, Enum.Material.Metal)
+		UnitVisuals.orientYBetween(upper, w0, w1, 1.1)
+
+		dp("FabElbow" .. i, Vector3.new(1.4, 1.4, 1.4), CFrame.new(P1), cGunmetal, Enum.Material.Metal, Enum.PartType.Ball)
+
+		local fore = dp("FabFore" .. i, Vector3.new(1, 1, 1), CFrame.new(), cDarkSteel, Enum.Material.Metal)
+		UnitVisuals.orientYBetween(fore, w1, w2, 0.85)
+
+		local foreDirW = (w2 - w1).Unit
+		local tool = dp("FabTool" .. i, Vector3.new(1.3, 1.3, 1.9), CFrame.lookAt(w2, w2 + foreDirW), cGunmetal, Enum.Material.Metal)
+		-- Tool CFrame is world-space already; undo the groundCF transform applied by dp
+		tool.CFrame = CFrame.lookAt(w2, w2 + foreDirW)
+
+		local tip = dp("FabTip" .. i, Vector3.new(0.45, 0.45, 0.45), CFrame.new(), cEmber, Enum.Material.Neon, Enum.PartType.Ball)
+		tip.CFrame = CFrame.new(w2 + foreDirW * 1.25)
+
+		-- Hydraulic piston: pylon top rear → upper-arm midpoint
+		local piston = dp("FabPiston" .. i, Vector3.new(1, 1, 1), CFrame.new(), cDarkSteel, Enum.Material.Metal)
+		UnitVisuals.orientYBetween(piston,
+			groundCF:PointToWorldSpace(dir * 6.0 + Vector3.new(0, 13.2, 0)),
+			(w0 + w1) * 0.5, 0.38)
+
+		-- Drooping power cable: shoulder → tool head (follows parts when animated)
+		local a0    = Instance.new("Attachment")
+		a0.Position = Vector3.new(0, 0.9, 0)
+		a0.Axis     = Vector3.new(0, -1, 0)
+		a0.Parent   = shoulder
+		local a1    = Instance.new("Attachment")
+		a1.Position = Vector3.new(0, 0.4, 0.8)
+		a1.Axis     = Vector3.new(0, -1, 0)
+		a1.Parent   = tool
+		local cable        = Instance.new("Beam")
+		cable.Attachment0  = a0
+		cable.Attachment1  = a1
+		cable.Color        = ColorSequence.new(cCable)
+		cable.Width0       = 0.22
+		cable.Width1       = 0.22
+		cable.CurveSize0   = 2
+		cable.CurveSize1   = 1.5
+		cable.Transparency = NumberSequence.new(0.25)
+		cable.FaceCamera   = true
+		cable.Parent       = shoulder
+	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -170,6 +511,10 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	if unitType == "CreepySoldier" then
 		addCreepyEyes(parent, body, "Soldier")
 	end
+	if unitType == "Lamprey" then
+		body.Transparency = 1   -- live unit + preview draw the eel, not the pivot block
+		addLampreyPreview(parent, body)
+	end
 
 	return body
 end
@@ -202,29 +547,10 @@ function UnitVisuals.buildBuildingPreview(
 	-- ── Type-specific accessories ─────────────────────────────────────────────
 
 	if buildingType == "CommandCenter" then
-		-- Neon collar rings on top and bottom edges
-		local hw = size.X / 2
-		local hd = size.Z / 2
-		local collars = {
-			position.Y + size.Y - 0.45,
-			position.Y          + 0.45,
-		}
-		for _, cY in collars do
-			local strips = {
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,       cY,  hd + 0.15) },
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(0,       cY, -hd - 0.15) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new( hw+0.15, cY,  0        ) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(-hw-0.15, cY,  0        ) },
-			}
-			for _, s in strips do
-				local strip       = makePart(parent)
-				strip.Name        = "Collar"
-				strip.Size        = s.sz
-				strip.Position    = s.pos
-				strip.BrickColor  = color
-				strip.Material    = Enum.Material.Neon
-			end
-		end
+		-- Industrial Fabricator Core — base block is the team-coloured housing
+		-- visible between the platform rings; everything else is shared decor.
+		base.Material = Enum.Material.Metal
+		UnitVisuals.buildCommandCenterDecor(parent, CFrame.new(position), color, false)
 
 	elseif buildingType == "Mine" then
 		base.Size     = Vector3.new(10, 2, 10)
@@ -552,6 +878,9 @@ end
 function UnitVisuals.getUnitPreviewBottomOffset(unitType: string): number
 	if unitType == "Soldier" then
 		return 1.75  -- pill half-height (total height 3.5)
+	end
+	if unitType == "Lamprey" then
+		return 3.7   -- distance from origin pivot down to the dirt mound's base
 	end
 	local typeDef = (Config.UNIT_TYPES :: any)[unitType]
 	if typeDef then

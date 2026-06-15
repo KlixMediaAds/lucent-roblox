@@ -5,6 +5,7 @@ local Debris            = game:GetService("Debris")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
 
 local rng = Random.new()
@@ -21,8 +22,10 @@ local onCCDestroyedCb: ((any) -> ())?
 type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
-local turretTimers:   { [string]: number } = {}   -- attackTimer per turret id
-local deployerTimers: { [string]: number } = {}   -- auto-spawn cooldown per deployer id
+local turretTimers:      { [string]: number } = {}   -- attackTimer per turret id
+local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per deployer id
+local deployerUnitType:  { [string]: string } = {}   -- deployerId → unit type to spawn
+local deployerUpdateAcc: { [string]: number } = {}   -- accumulator for periodic client updates
 local onPlayerWonCb: ((number) -> ())?
 
 local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
@@ -202,37 +205,13 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		model.PrimaryPart = base   -- needed for PivotTo during mobile movement
 		playerCCId[player.UserId] = id
 
-		local cx = position.X
-		local cz = position.Z
-		local hw = size.X / 2   -- 7
-		local hd = size.Z / 2   -- 7
-
-		-- Two thin neon collar rings on the sides (nothing rises above the base top).
-		-- The avatar sits on the open centre of the roof completely unobstructed.
-		local collars = {
-			position.Y + size.Y - 0.45,  -- top collar
-			position.Y          + 0.45,  -- bottom collar
-		}
-		for _, cY in collars do
-			local strips = {
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,           cY, cz + hd + 0.15) },
-				{ sz = Vector3.new(size.X + 0.4, 0.9, 0.3), pos = Vector3.new(cx,           cY, cz - hd - 0.15) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(cx + hw+0.15, cY, cz            ) },
-				{ sz = Vector3.new(0.3, 0.9, size.Z + 0.4), pos = Vector3.new(cx - hw-0.15, cY, cz            ) },
-			}
-			for _, s in strips do
-				local strip       = Instance.new("Part")
-				strip.Name        = "Collar"
-				strip.Size        = s.sz
-				strip.Position    = s.pos
-				strip.BrickColor  = player.TeamColor
-				strip.Material    = Enum.Material.Neon
-				strip.Anchored    = true
-				strip.CanCollide  = false
-				strip.CastShadow  = false
-				strip.Parent      = model
-			end
-		end
+		-- Industrial Fabricator Core. The team-coloured base block stays as the
+		-- collision/HP part, visible between the platform rings; all decoration
+		-- (reactor pit, rings, pipes, fabrication arms) comes from the shared
+		-- builder so the thumbnail preview stays in sync. The avatar sits on the
+		-- operator pulpit at the platform edge (see init.server seatAvatarOnCC).
+		base.Material = Enum.Material.Metal
+		UnitVisuals.buildCommandCenterDecor(model, CFrame.new(position), player.TeamColor, true)
 
 	elseif buildingType == "Mine" then
 		-- Dark-metal base platform
@@ -664,6 +643,11 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	end
 
 	addHealthBar(base)
+	if buildingType == "CommandCenter" then
+		-- Lift the bar clear of the fabrication arms (~19 studs tall)
+		local bb = base:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, size.Y / 2 + 16, 0) end
+	end
 
 	local startHp = (buildTime > 0) and 1 or maxHp
 	buildingData[id] = {
@@ -686,7 +670,9 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		turretTimers[id] = 0
 	end
 	if buildingType == "Deployer" then
-		deployerTimers[id] = 0
+		deployerTimers[id]    = 0
+		deployerUnitType[id]  = "Soldier"
+		deployerUpdateAcc[id] = 0
 	end
 
 	RemoteHandler.get(Config.REMOTES.BuildingPlaced):FireAllClients(
@@ -1588,6 +1574,8 @@ function BuildingManager.resetAll()
 	playerHasCC              = {}
 	turretTimers             = {}
 	deployerTimers           = {}
+	deployerUnitType         = {}
+	deployerUpdateAcc        = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -1822,9 +1810,11 @@ function BuildingManager.damage(id: string, amount: number)
 	local wasCC       = data.buildingType == "CommandCenter"
 	local wasMonument = data.buildingType == "Monument"
 	local owner       = data.owner
-	buildingData[id]  = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
-	turretTimers[id]  = nil
-	deployerTimers[id] = nil
+	buildingData[id]      = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
+	turretTimers[id]      = nil
+	deployerTimers[id]    = nil
+	deployerUnitType[id]  = nil
+	deployerUpdateAcc[id] = nil
 
 	if data.buildingType == "Mine" and mineralManager then
 		mineralManager.removeMine(id)
@@ -1875,11 +1865,13 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 	for _, id in toRemove do
 		local data = buildingData[id]
 		if not data then continue end
-		buildingData[id]    = nil
-		turretTimers[id]    = nil
-		deployerTimers[id]  = nil
-		monumentWinTimer[id] = nil
-		blobCooldowns[id]   = nil
+		buildingData[id]      = nil
+		turretTimers[id]      = nil
+		deployerTimers[id]    = nil
+		deployerUnitType[id]  = nil
+		deployerUpdateAcc[id] = nil
+		monumentWinTimer[id]  = nil
+		blobCooldowns[id]     = nil
 		if data.buildingType == "Mine" and mineralManager then
 			mineralManager.removeMine(id)
 		end
@@ -2149,17 +2141,31 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- ── Deployer auto-spawn ───────────────────────────────────────────────
+		local deployerUpdateRemote = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
 		for id, data in buildingData do
 			if data.buildingType ~= "Deployer" then continue end
 			if data.isConstructing then continue end
 			deployerTimers[id] = (deployerTimers[id] or 0) + dt
-			if deployerTimers[id] < Config.DEPLOYER_SPAWN_INTERVAL then continue end
-			deployerTimers[id] -= Config.DEPLOYER_SPAWN_INTERVAL
-			if unitManagerRef then
-				local aliveCount = unitManagerRef.getDeployerAliveCount(id)
-				if aliveCount < Config.DEPLOYER_MAX_UNITS then
-					local spawnPos = data.base.Position + Vector3.new(Config.BUILDING_SIZE.X + 2, 0, 0)
-					unitManagerRef.spawnForDeployer(id, data.owner, spawnPos)
+			local progress = math.clamp(deployerTimers[id] / Config.DEPLOYER_SPAWN_INTERVAL, 0, 1)
+			if deployerTimers[id] >= Config.DEPLOYER_SPAWN_INTERVAL then
+				deployerTimers[id] -= Config.DEPLOYER_SPAWN_INTERVAL
+				progress = 0
+				if unitManagerRef then
+					local aliveCount = unitManagerRef.getDeployerAliveCount(id)
+					if aliveCount < Config.DEPLOYER_MAX_UNITS then
+						local unitType = deployerUnitType[id] or "Soldier"
+						local spawnPos = data.base.Position + Vector3.new(Config.BUILDING_SIZE.X + 2, 0, 0)
+						unitManagerRef.spawnForDeployer(id, data.owner, spawnPos, unitType)
+					end
+				end
+			end
+			-- Periodic client update (~3× per second) — skip AI owners
+			if data.owner.UserId > 0 then
+				deployerUpdateAcc[id] = (deployerUpdateAcc[id] or 0) + dt
+				if deployerUpdateAcc[id] >= 0.35 then
+					deployerUpdateAcc[id] = 0
+					local unitType = deployerUnitType[id] or "Soldier"
+					deployerUpdateRemote:FireClient(data.owner, id, unitType, progress)
 				end
 			end
 		end
@@ -2442,6 +2448,24 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	-- ── BuildMonument remote ──────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.BuildMonument).OnServerEvent:Connect(function(player)
 		BuildingManager.buildMonument(player)
+	end)
+
+	-- ── SetDeployerType remote ─────────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.SetDeployerType).OnServerEvent:Connect(function(player, deployerId, unitType)
+		if type(deployerId) ~= "string" or type(unitType) ~= "string" then return end
+		local VALID = { Soldier = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
+		if not VALID[unitType] then return end
+		local data = buildingData[deployerId]
+		if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return end
+		-- Research gate for locked unit types
+		if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
+			local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
+			if not researchManagerRef.hasResearch(player, req) then return end
+		end
+		deployerUnitType[deployerId] = unitType
+		-- Immediately send an update so the client reflects the change without waiting for next poll
+		local progress = math.clamp((deployerTimers[deployerId] or 0) / Config.DEPLOYER_SPAWN_INTERVAL, 0, 1)
+		RemoteHandler.get(Config.REMOTES.DeployerUpdate):FireClient(player, deployerId, unitType, progress)
 	end)
 
 	-- ── UpgradeTurret remote ──────────────────────────────────────────────

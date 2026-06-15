@@ -40,6 +40,14 @@ type UnitData = {
 	rollerChargingOut  : boolean?,  -- bouncing back from charge
 	rollerChargeTarget : Vector3?,  -- charge destination
 	rollerChargeHome   : Vector3?,  -- position to return to after charge
+	-- Foamer deploy state machine
+	foamState       : string?,    -- nil = not a foamer; "mobile"|"deploying"|"deployed"|"undeploying"
+	foamDeployStart : number?,    -- tick() when current transition began
+	foamSinkBaseY   : number?,    -- body Y when deploy/undeploy transition started
+	foamBarrelDec   : Decorator?, -- cached ref to the FoamBarrel decorator for barrel animation
+	-- Foam debuff received by any unit (including non-foamers)
+	foamedUntil     : number?,    -- tick() when foam expires on this unit; nil = not foamed
+	foamDotAccum    : number?,    -- accumulated dt for 1-s DoT tick
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -84,6 +92,10 @@ local gridOccupiedCount                      = 0
 -- Reusable scratch buffer for grid-range queries — avoids a table alloc per lookup.
 local gridScratch: { string } = {}
 local gridScratchN             = 0
+
+-- Active Howitzer fire zones: persist for FULL+FADE seconds, deal DoT to all units.
+type FireZone = { pos: Vector3, elapsed: number, dotAccum: number }
+local fireZones: { FireZone } = {}
 
 -- Per-unit anchored decorator parts (treads, pill body, eyes, etc.).
 -- Replaced unanchored+WeldConstraint parts to cut physics body count.
@@ -400,6 +412,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	if unitType == "Howitzer" then
 		attachHowitzerSmoke(part)
 	end
+	if unitType == "Lamprey" then
+		-- The entire creature is drawn by the client LampreyBody animator; the body
+		-- part is just an invisible, ground-snapped pivot used for movement/targeting.
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 2.5, 0) end  -- just above the reared head
+	end
 	if eyeUpgradePlayers[player.UserId] then addCreepyEyes(id, part, unitType) end
 
 	units[id] = {
@@ -425,6 +444,18 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 
 	playerUnitCount[player.UserId] = (playerUnitCount[player.UserId] or 0) + 1
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
+
+	-- Foamer: initialise deploy state and cache the barrel decorator reference
+	if unitType == "Foamer" then
+		units[id].foamState = "mobile"
+		for _, dec in unitDecorators[id] do
+			if dec.part.Name == "FoamBarrel" then
+				units[id].foamBarrelDec = dec
+				break
+			end
+		end
+	end
+
 	return id
 end
 
@@ -599,13 +630,27 @@ function UnitManager.spawnUnitNow(player: Player, position: Vector3, unitType: s
 	return spawnUnit(player, position, unitType)
 end
 
--- Spawns a Soldier for a Deployer and records it in the tracking tables.
-function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3)
-	local uid = spawnUnit(player, spawnPos, "Soldier")
+-- Spawns a unit for a Deployer and records it in the tracking tables.
+-- Deployed units automatically attack-march toward enemy territory at no resource cost.
+function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3, unitType: string?)
+	local spawnType = unitType or "Soldier"
+	local uid = spawnUnit(player, spawnPos, spawnType)
 	if uid then
 		if not deployerUnits[deployerId] then deployerUnits[deployerId] = {} end
 		deployerUnits[deployerId][uid] = true
 		unitToDeployer[uid] = deployerId
+		local data = units[uid]
+		if data then
+			-- March toward the opposite corner of the map from the spawn point.
+			-- atkMoveDest keeps the aggro scan active so the unit fights enemies it
+			-- passes; when a kill clears aggroId the unit resumes the march.
+			local marchX    = math.clamp(-spawnPos.X * 3, -MOVE_BOUND, MOVE_BOUND)
+			local marchZ    = math.clamp(-spawnPos.Z * 3, -MOVE_BOUND, MOVE_BOUND)
+			local marchDest = Vector3.new(marchX, 0, marchZ)
+			data.target      = marchDest
+			data.home        = marchDest
+			data.atkMoveDest = marchDest
+		end
 	end
 end
 
@@ -807,9 +852,12 @@ function UnitManager.init(resourceManager)
 		local doAggro  = aggroScanFrame == 0
 
 		for id, data in units do
-			local isRoller = data.unitType == "Soldier" and researchManagerRef ~= nil
+			local isRoller  = data.unitType == "Soldier" and researchManagerRef ~= nil
 				and researchManagerRef.hasResearch(data.owner, "Rollers")
 			if isRoller then data.attackRange = Config.ROLLER_ATTACK_RANGE end
+
+			local isFoamer  = data.foamState ~= nil
+			local foamState = data.foamState or ""
 
 			-- ── 1. Aggro: update chase target or resolve ───────────────────────
 			if data.aggroId then
@@ -865,6 +913,86 @@ function UnitManager.init(resourceManager)
 				end
 			end
 
+			-- ── Foamer: deploy / undeploy state machine ───────────────────────
+			if isFoamer then
+				local ft = tick()
+				if foamState == "mobile" then
+					-- Deploy when aggro target enters attack range
+					if data.aggroId then
+						local aggroTarget = units[data.aggroId]
+						if aggroTarget and aggroTarget.hp > 0 then
+							local dist = (aggroTarget.part.Position - data.part.Position).Magnitude
+							if dist <= data.attackRange then
+								foamState            = "deploying"
+								data.foamState       = "deploying"
+								data.foamDeployStart = ft
+								data.foamSinkBaseY   = data.part.Position.Y
+								data.target          = nil
+								data.velocity        = Vector3.zero
+							end
+						end
+					end
+				else
+					-- Freeze movement in all non-mobile states
+					data.target   = nil
+					data.velocity = Vector3.zero
+					if foamState == "deploying" then
+						local elapsed  = ft - (data.foamDeployStart :: number)
+						local progress = math.min(elapsed / Config.FOAMER_DEPLOY_TIME, 1)
+						-- Sink body
+						local sinkY = (data.foamSinkBaseY :: number) - Config.FOAMER_SINK_DEPTH * progress
+						data.part.CFrame = CFrame.new(data.part.Position.X, sinkY, data.part.Position.Z) * data.part.CFrame.Rotation
+						-- Raise barrel (localCF.Y interpolates from 0.3 → 3.5)
+						if data.foamBarrelDec then
+							(data.foamBarrelDec :: Decorator).localCF = CFrame.new(0, 0.3 + 3.2 * progress, 0)
+						end
+						if progress >= 1 then
+							foamState      = "deployed"
+							data.foamState = "deployed"
+						end
+					elseif foamState == "deployed" then
+						-- Undeploy if no enemies remain in range
+						local hasEnemy = false
+						local fmPos    = data.part.Position
+						local fmStr    = tostring(data.owner.UserId)
+						fillGridScratch(fmPos, data.attackRange)
+						for fgi = 1, gridScratchN do
+							local fmOther = units[gridScratch[fgi]]
+							if fmOther and fmOther.hp > 0 and tostring(fmOther.owner.UserId) ~= fmStr then
+								hasEnemy = true; break
+							end
+						end
+						if not hasEnemy then
+							foamState            = "undeploying"
+							data.foamState       = "undeploying"
+							data.foamDeployStart = ft
+							data.foamSinkBaseY   = data.part.Position.Y
+							data.aggroId         = nil
+							data.aggroHome       = nil
+						end
+					elseif foamState == "undeploying" then
+						local elapsed  = ft - (data.foamDeployStart :: number)
+						local progress = math.min(elapsed / Config.FOAMER_UNDEPLOY_TIME, 1)
+						-- Rise body back
+						local riseY = (data.foamSinkBaseY :: number) + Config.FOAMER_SINK_DEPTH * progress
+						data.part.CFrame = CFrame.new(data.part.Position.X, riseY, data.part.Position.Z) * data.part.CFrame.Rotation
+						-- Retract barrel (localCF.Y interpolates from 3.5 → 0.3)
+						if data.foamBarrelDec then
+							(data.foamBarrelDec :: Decorator).localCF = CFrame.new(0, 3.5 - 3.2 * progress, 0)
+						end
+						if progress >= 1 then
+							foamState      = "mobile"
+							data.foamState = "mobile"
+							-- Re-snap to ground after undeploy
+							local fpos3   = data.part.Position
+							local groundY = getGroundY(fpos3.X, fpos3.Z, data.part.Size.Y / 2)
+							data.part.CFrame = CFrame.new(fpos3.X, groundY, fpos3.Z) * data.part.CFrame.Rotation
+						end
+					end
+				end
+			end
+			-- ────────────────────────────────────────────────────────────────────
+
 			-- ── 2. Velocity-based movement ────────────────────────────────────
 			local pos = data.part.Position
 
@@ -914,6 +1042,9 @@ function UnitManager.init(resourceManager)
 						end
 						if data.incomingHarpoons and (data.incomingHarpoons :: number) > 0 then
 							effSpeed = effSpeed * (Config.TRAPPER_SLOW_MULT ^ (data.incomingHarpoons :: number))
+						end
+						if data.foamedUntil and t < (data.foamedUntil :: number) then
+							effSpeed = effSpeed * Config.FOAMER_FOAM_SLOW_MULT
 						end
 						if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
 							effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
@@ -990,8 +1121,9 @@ function UnitManager.init(resourceManager)
 				end
 			end
 
-			-- ── 3. Aggro scan (idle + A-moving units only; Medics never chase enemies) ──
-			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic" then
+			-- ── 3. Aggro scan (idle + A-moving units only; Medics/frozen Foamers skip) ──
+			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
+				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
 					local myPos = data.part.Position
@@ -1035,6 +1167,55 @@ function UnitManager.init(resourceManager)
 
 			-- ── 4. Combat ─────────────────────────────────────────────────────
 			if data.hp <= 0 then continue end
+
+			-- Foamer: foam attack when deployed; skip normal combat in all states
+			if isFoamer then
+				if foamState == "deployed" then
+					data.attackTimer += dt
+					if data.attackTimer >= data.attackRate then
+						data.attackTimer -= data.attackRate
+						local fmPos  = data.part.Position
+						local fmStr  = tostring(data.owner.UserId)
+						local fmBest: string?  = nil
+						local fmDist           = math.huge
+						fillGridScratch(fmPos, data.attackRange)
+						for fgi = 1, gridScratchN do
+							local otherId = gridScratch[fgi]
+							local other   = units[otherId]
+							if not other or other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == fmStr then continue end
+							local d = (other.part.Position - fmPos).Magnitude
+							if d <= data.attackRange and d < fmDist then
+								fmDist = d; fmBest = otherId
+							end
+						end
+						if fmBest then
+							local other   = units[fmBest]
+							local hitPos  = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+							-- Apply foam debuff only if the target is not already foamed
+							local now = tick()
+							if not other.foamedUntil or now >= (other.foamedUntil :: number) then
+								other.foamedUntil  = now + Config.FOAMER_FOAM_DURATION
+								other.foamDotAccum = 0
+							end
+							-- Small direct-hit damage
+							other.hp -= calcDamage(other, data.attackDmg)
+							applyHP(other, true)
+							if other.hp <= 0 then table.insert(toRemove, fmBest) end
+							-- Face the target
+							local flatDir = Vector3.new(hitPos.X - fmPos.X, 0, hitPos.Z - fmPos.Z)
+							if flatDir.Magnitude > 0.1 then
+								data.part.CFrame = CFrame.lookAt(fmPos, fmPos + flatDir)
+							end
+							-- Fire foam VFX from barrel tip
+							local barrelTip = fmPos + Vector3.new(0, data.part.Size.Y / 2 + 2, 0)
+							unitHitRemote:FireAllClients(barrelTip, hitPos, "Foam")
+						end
+					end
+				end
+				continue  -- Foamers skip all standard combat paths
+			end
+
 			data.attackTimer += dt
 			local effectiveRate = data.attackRate
 			if data.unitType == "Soldier" and data.stimUntil and tick() < (data.stimUntil :: number) then
@@ -1371,6 +1552,72 @@ function UnitManager.init(resourceManager)
 					end
 				end
 				unitHitRemote:FireAllClients(myPos, hitPos, vfxType)
+				-- Howitzer: leave a fire zone at the impact site
+				if data.unitType == "Howitzer" then
+					fireZones[#fireZones + 1] = {
+						pos      = Vector3.new(hitPos.X, 0, hitPos.Z),
+						elapsed  = 0,
+						dotAccum = 0,
+					}
+				end
+			end
+		end
+
+		-- ── Foam DoT tick ──────────────────────────────────────────────────────
+		do
+			local now = tick()
+			for dotId, dotData in units do
+				if not dotData.foamedUntil then continue end
+				if now >= (dotData.foamedUntil :: number) then
+					dotData.foamedUntil  = nil
+					dotData.foamDotAccum = nil
+					continue
+				end
+				dotData.foamDotAccum = (dotData.foamDotAccum or 0) + dt
+				if (dotData.foamDotAccum :: number) >= 1.0 then
+					dotData.foamDotAccum = (dotData.foamDotAccum :: number) - 1.0
+					dotData.hp -= Config.FOAMER_FOAM_DOT
+					applyHP(dotData, true)
+					if dotData.hp <= 0 then table.insert(toRemove, dotId) end
+				end
+			end
+		end
+
+		-- ── Howitzer fire zone DoT (damages ALL units, both teams) ─────────────
+		do
+			local FIRE_FULL  = Config.HOWITZER_FIRE_FULL_DURATION
+			local FIRE_FADE  = Config.HOWITZER_FIRE_FADE_DURATION
+			local FIRE_TOTAL = FIRE_FULL + FIRE_FADE
+			local FIRE_R     = Config.HOWITZER_FIRE_RADIUS
+			local FIRE_DPS   = Config.HOWITZER_FIRE_DMG_PER_SEC
+			local fzi = #fireZones
+			while fzi > 0 do
+				local fz    = fireZones[fzi]
+				fz.elapsed += dt
+				if fz.elapsed >= FIRE_TOTAL then
+					table.remove(fireZones, fzi)
+				else
+					local dps = FIRE_DPS
+					if fz.elapsed > FIRE_FULL then
+						dps = FIRE_DPS * (1 - (fz.elapsed - FIRE_FULL) / FIRE_FADE)
+					end
+					fz.dotAccum += dt
+					if fz.dotAccum >= 1.0 then
+						fz.dotAccum -= 1.0
+						local dmgTick = math.max(1, math.floor(dps))
+						fillGridScratch(fz.pos, FIRE_R)
+						for gi = 1, gridScratchN do
+							local uid   = gridScratch[gi]
+							local udata = units[uid]
+							if not udata or udata.hp <= 0 then continue end
+							if (udata.part.Position - fz.pos).Magnitude > FIRE_R then continue end
+							udata.hp -= dmgTick
+							applyHP(udata, true)
+							if udata.hp <= 0 then table.insert(toRemove, uid) end
+						end
+					end
+				end
+				fzi -= 1
 			end
 		end
 
@@ -1407,7 +1654,8 @@ function UnitManager.init(resourceManager)
 				end
 			end
 
-			if count > 0 then
+			-- Deployed Foamers are frozen in place; separation would fight the sink animation
+			if count > 0 and not (data.foamState and data.foamState ~= "mobile") then
 				local mag = math.sqrt(pushX * pushX + pushZ * pushZ)
 				if mag > 0.01 then
 					local nx = myPos.X + (pushX / mag) * SEP_PUSH

@@ -198,4 +198,13 @@ function Network.spawnLaneUnit(unitType: string)
 	RemoteHandler.get(Config.REMOTES.SpawnLaneUnit):FireServer(unitType)
 end
 
+function Network.setDeployerType(deployerId: string, unitType: string)
+	RemoteHandler.get(Config.REMOTES.SetDeployerType):FireServer(deployerId, unitType)
+end
+
+-- deployerId, unitType, progress (0–1)
+function Network.onDeployerUpdate(fn: (string, string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.DeployerUpdate).OnClientEvent:Connect(fn)
+end
+
 return Network

@@ -18,12 +18,14 @@ Config.UNIT_TYPES = {
 	Howitzer      = { cost = 90,  size = Vector3.new(8, 14, 8) },
 	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
 	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
+	Foamer        = { cost = 80,  size = Vector3.new(6, 5, 7)  },
+	Lamprey       = { cost = 110, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, CreepySoldier = 24 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, CreepySoldier = 14 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -145,6 +147,20 @@ Config.UNLOCKS = {
 		condText = "Build 2 Mines",    cond = { type = "building", name = "Mine",  count = 2 } },
 }
 
+-- Foamer unit: deploy/undeploy animation + foam debuff
+Config.FOAMER_DEPLOY_TIME     = 1.4   -- seconds to fully deploy (sink + barrel rise)
+Config.FOAMER_UNDEPLOY_TIME   = 1.0   -- seconds to fully undeploy
+Config.FOAMER_SINK_DEPTH      = 0.8   -- studs the body sinks during deploy
+Config.FOAMER_FOAM_SLOW_MULT  = 0.30  -- speed multiplier while foamed (70% slow)
+Config.FOAMER_FOAM_DURATION   = 3     -- seconds a foam hit lasts
+Config.FOAMER_FOAM_DOT        = 8     -- damage per second while foamed
+
+-- Howitzer: fire zone left at impact site (damages ALL units, both teams)
+Config.HOWITZER_FIRE_RADIUS        = 10   -- studs radius of fire damage
+Config.HOWITZER_FIRE_DMG_PER_SEC   = 15   -- damage per second at full intensity
+Config.HOWITZER_FIRE_FULL_DURATION = 5    -- seconds of full-damage fire
+Config.HOWITZER_FIRE_FADE_DURATION = 3    -- seconds of tapering fire after that
+
 -- Tank: Rocket Barrage (requires ConcussionShells)
 Config.ROCKET_BARRAGE_COUNT    = 3     -- rockets fired per attack cycle
 Config.ROCKET_BARRAGE_DMG_MULT = 0.65  -- each rocket deals this fraction of base attack damage
@@ -206,14 +222,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, CreepySoldier = 0 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   CreepySoldier = 55  }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, CreepySoldier = 55  }
 Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   CreepySoldier = 14  }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   CreepySoldier = 13  }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  CreepySoldier = 0.7 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  CreepySoldier = 14  }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  CreepySoldier = 13  }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, CreepySoldier = 0.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -281,6 +297,8 @@ Config.REMOTES = {
 	CCMobileSync            = "CCMobileSync",
 	LobbySetGamemode        = "LobbySetGamemode",
 	SpawnLaneUnit           = "SpawnLaneUnit",
+	SetDeployerType         = "SetDeployerType",
+	DeployerUpdate          = "DeployerUpdate",
 }
 
 return Config

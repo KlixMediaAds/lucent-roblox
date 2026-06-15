@@ -347,7 +347,7 @@ local function applyXray()
 	showAll(workspace:FindFirstChild("Buildings") :: Folder?)
 	showAll(workspace:FindFirstChild("Miners") :: Folder?)
 
-	for _, folderName in { "_EliteLegs", "_CreepyLegs" } do
+	for _, folderName in { "_EliteLegs", "_CreepyLegs", "_LampreyBody" } do
 		local lf = workspace:FindFirstChild(folderName)
 		if lf then
 			for _, legPart in lf:GetChildren() do
@@ -572,6 +572,7 @@ local function updateFog()
 
 	syncLegFolder("_EliteLegs")
 	syncLegFolder("_CreepyLegs")
+	syncLegFolder("_LampreyBody")
 
 end
 

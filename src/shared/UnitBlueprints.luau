@@ -126,6 +126,36 @@ local function medicBlueprint(bodySize: Vector3): Blueprint
 	}
 end
 
+-- ── Foamer: chunky armored foam-cannon crawler ────────────────────────────────
+-- Body root (6×5×7) is an invisible pivot.  The FoamBarrel part is named so that
+-- UnitManager can animate its localCF.Y between retracted (0.3) and extended (3.5)
+-- during deploy/undeploy.  All other parts are static.
+local FOAMER: Blueprint = {
+	rootTransparent = true,
+	healthBarY      = 6,
+	parts = {
+		-- Main armored hull (team colour)
+		{ size = Vector3.new(6, 2.8, 7),     cf = CFrame.new(0, -0.6, 0),     color = nil,  material = SMOOTH },
+		-- Treads (grey)
+		{ size = Vector3.new(1.3, 1.8, 7.5), cf = CFrame.new(-3.65, -1.5, 0), color = GREY, material = SMOOTH },
+		{ size = Vector3.new(1.3, 1.8, 7.5), cf = CFrame.new( 3.65, -1.5, 0), color = GREY, material = SMOOTH },
+		-- Front slope armour plate
+		{ size = Vector3.new(5.5, 2.5, 0.5), cf = CFrame.new(0, -0.3, -3.7),  color = GREY, material = METAL  },
+		-- Top deck
+		{ size = Vector3.new(4, 0.35, 5.5),  cf = CFrame.new(0, 0.85, 0),     color = GREY, material = METAL  },
+		-- Central barrel housing (dome the cannon rises from)
+		{ size = Vector3.new(3, 1.5, 3),     cf = CFrame.new(0, 1.55, 0),     color = GREY, material = METAL  },
+		-- Dome ring (team colour neon — glows when deployed)
+		{ size = Vector3.new(3.5, 0.4, 3.5), cf = CFrame.new(0, 2.35, 0),     color = nil,  material = NEON   },
+		-- Side neon accent strips (team colour)
+		{ size = Vector3.new(0.2, 1.5, 5.5), cf = CFrame.new(-2.9, 0.2, 0),   color = nil,  material = NEON   },
+		{ size = Vector3.new(0.2, 1.5, 5.5), cf = CFrame.new( 2.9, 0.2, 0),   color = nil,  material = NEON   },
+		-- Foam cannon barrel — retracted (Y centre = 0.3, flush inside housing).
+		-- UnitManager animates localCF.Y between 0.3 (retracted) and 3.5 (deployed).
+		{ size = Vector3.new(1.0, 2.5, 1.0), cf = CFrame.new(0, 0.3, 0),      color = GREY, material = METAL, name = "FoamBarrel" },
+	},
+}
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 --[[
@@ -138,6 +168,7 @@ function UnitBlueprints.get(unitType: string, bodySize: Vector3): Blueprint?
 	if unitType == "Soldier"  then return SOLDIER  end
 	if unitType == "Tank"     then return tankBlueprint(bodySize)  end
 	if unitType == "Medic"    then return medicBlueprint(bodySize) end
+	if unitType == "Foamer"   then return FOAMER   end
 	return nil
 end
 
