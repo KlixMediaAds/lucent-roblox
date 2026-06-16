@@ -166,9 +166,18 @@ end
 
 -- ── Stalk builder ─────────────────────────────────────────────────────────────
 
+-- Per-mushroom geometry scale. Enlarges each stalk + bulb uniformly WITHOUT
+-- touching the colony footprint (radius / hotspot / clump spread stay in
+-- populate()), so the models look bigger but cover the same ground area.
+local MODEL_SCALE = 1.5
+
 local function makeStalk(r, stalksF, bulbsF, basePos, height, dia, withLight, withParticle)
+	-- Bracket logic (segment count + bulb size class below) keeps the original
+	-- proportions; only the rendered sizes/positions are enlarged by MODEL_SCALE,
+	-- so each mushroom grows uniformly without disturbing the colony's RNG layout.
 	local segCount = height < 1.2 and 1 or (height > 2.8 and 3 or 2)
-	local segLen   = height / segCount
+	local segLen   = height * MODEL_SCALE / segCount
+	dia            = dia * MODEL_SCALE
 	local stemCol  = Color3.fromRGB(
 		r:NextInteger(148, 198),
 		r:NextInteger(130, 172),
@@ -198,6 +207,7 @@ local function makeStalk(r, stalksF, bulbsF, basePos, height, dia, withLight, wi
 	         or height > 3.5  and r:NextNumber(0.38, 0.60)
 	         or height > 2.0  and r:NextNumber(0.24, 0.40)
 	         or                   r:NextNumber(0.16, 0.28)
+	bSz = bSz * MODEL_SCALE
 	local bCol = BULB_COLORS[r:NextInteger(1, #BULB_COLORS)]
 
 	local bulb        = decoPart(bulbsF, "Bulb")

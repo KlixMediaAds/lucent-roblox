@@ -86,6 +86,10 @@ local driftPlane2: Part?
 -- AND we've had line-of-sight on it at least once.
 local seenEnemyBuildings: { [string]: true } = {}
 
+-- Fired the first time an enemy building is revealed through the fog. Used by the
+-- scouting system to announce "Enemy discovered!" and mark the minimap.
+local enemyBuildingDiscoveredCb: ((buildingId: string, worldPos: Vector3) -> ())? = nil
+
 -- ── Unit fade tracking ────────────────────────────────────────────────────────
 local unitLastVis:  { [string]: boolean } = {}  -- part.Name → last vis state
 local activeTweens: { [string]: Tween }  = {}  -- part.Name → in-progress tween
@@ -499,6 +503,11 @@ local function updateFog()
 				(base :: BasePart).Destroying:Connect(function()
 					seenEnemyBuildings[bid] = nil
 				end)
+				-- Notify the scouting system of the discovery (run detached so a
+				-- long-running handler can't stall the fog tick).
+				if enemyBuildingDiscoveredCb then
+					task.spawn(enemyBuildingDiscoveredCb, bid, bpos)
+				end
 			end
 
 			local modifier: number
@@ -677,6 +686,42 @@ end
 function FogManager.forceRefresh()
 	sourcesDirty = true
 	updateFog()
+end
+
+-- Register a handler fired once per enemy building the moment it is first revealed
+-- through the fog. Receives (buildingId, worldPos).
+function FogManager.onEnemyBuildingDiscovered(fn: (buildingId: string, worldPos: Vector3) -> ())
+	enemyBuildingDiscoveredCb = fn
+end
+
+-- Returns true if the cell under `pos` has been explored (had vision) at least once.
+function FogManager.isExplored(pos: Vector3): boolean
+	return posIsExplored(pos)
+end
+
+-- Picks a world position inside an unexplored fog region to scout toward, biased
+-- toward the nearest fog but randomised among the nearest candidates so multiple
+-- scouts spread out instead of all funnelling to the same cell. Returns nil when
+-- the whole map has been explored.
+local SCOUT_SAMPLE_STEP = 3   -- sample every Nth cell to keep the scan cheap
+local SCOUT_POOL_MAX    = 24  -- random pool size among nearest unexplored cells
+function FogManager.pickScoutTarget(fromPos: Vector3): Vector3?
+	local candidates: { { wx: number, wz: number, d2: number } } = {}
+	for row = 1, GRID_CELLS, SCOUT_SAMPLE_STEP do
+		local expRow = exploredMap[row]
+		for col = 1, GRID_CELLS, SCOUT_SAMPLE_STEP do
+			if expRow and expRow[col] then continue end  -- already explored
+			local wx, wz = cellCentre(row, col)
+			local dx = wx - fromPos.X
+			local dz = wz - fromPos.Z
+			candidates[#candidates + 1] = { wx = wx, wz = wz, d2 = dx * dx + dz * dz }
+		end
+	end
+	if #candidates == 0 then return nil end
+	table.sort(candidates, function(a, b) return a.d2 < b.d2 end)
+	local poolN = math.min(#candidates, SCOUT_POOL_MAX)
+	local pick  = candidates[math.random(1, poolN)]
+	return Vector3.new(pick.wx, 0, pick.wz)
 end
 
 return FogManager

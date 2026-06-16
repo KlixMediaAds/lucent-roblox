@@ -29,6 +29,7 @@ local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
+local ScoutManager   = require(script:WaitForChild("ScoutManager"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager    = require(script:WaitForChild("CometManager"))
 local DepositFX       = require(script:WaitForChild("DepositFX"))
@@ -276,6 +277,7 @@ DeployerPanel.init(Network,
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
+ScoutManager.init(Network, CameraModule, FogManager, MiniMap)
 
 -- ── /xray chat command ────────────────────────────────────────────────────────
 do
@@ -443,6 +445,7 @@ local function enterCCMode()
 	BuildingPlacer.clearRelayPositions()
 	clearMineData()
 	destroyCCMoveGhost()
+	ScoutManager.reset()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ccIsMobile          = false
@@ -2989,8 +2992,12 @@ local function spawnHowitzerShell(fromPos: Vector3, toPos: Vector3)
 end
 
 -- Plays a short 3D-positional sound at `pos` and auto-destroys when finished.
-local SND_SOLDIER = "rbxassetid://138651783706047"
-local SND_TANK    = "rbxassetid://122500594085328"
+local SND_SOLDIER          = "rbxassetid://138651783706047"
+local SND_TANK             = "rbxassetid://122500594085328"
+local SND_LAMPREY_ATTACK   = "rbxassetid://106129163863465"
+local SND_LAMPREY_IMPACT   = "rbxassetid://99851197639856"
+local SND_LAMPREY_EGG_LAND = "rbxassetid://133222321566847"
+local SND_LAMPREY_HATCH    = "rbxassetid://106129163863465"
 
 local function playSound3D(pos: Vector3, soundId: string, volume: number)
 	local p            = Instance.new("Part")
@@ -3014,11 +3021,14 @@ local function playSound3D(pos: Vector3, soundId: string, volume: number)
 	snd.Ended:Once(function() p:Destroy() end)
 end
 
--- Lamprey bile: a glowing green acid glob lobbed from the reared head in a low arc;
--- on impact it splatters and leaves a corrosive pool that fizzles away.
+-- Lamprey bile: a glowing acid bolt hurled from the reared head. A bright neon
+-- core wrapped in a translucent slime aura streaks along a ribbon trail, spinning
+-- and wobbling; on impact it flashes, throws a ground shockwave ring and a spray
+-- of physics-driven globs, and leaves a bubbling corrosive pool that fizzles away.
 local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
-	local TRAVEL = 0.5
-	local ARC    = 9.0
+	local Debris = game:GetService("Debris")
+	local TRAVEL = 0.46
+	local ARC    = 10.0
 
 	local flat = Vector3.new(toPos.X - fromPos.X, 0, toPos.Z - fromPos.Z)
 	local dir  = if flat.Magnitude > 0.01 then flat.Unit else Vector3.new(0, 0, -1)
@@ -3026,87 +3036,205 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	local origin = fromPos + dir * 4.5 + Vector3.new(0, 1.4, 0)
 	local dest   = toPos + Vector3.new(0, 0.5, 0)
 
-	local C_BILE = Color3.fromRGB(132, 214, 46)
+	playSound3D(origin, SND_LAMPREY_ATTACK, 0.85)
 
+	local C_HOT  = Color3.fromRGB(190, 255, 100)   -- bright core / sparks
+	local C_BILE = Color3.fromRGB(132, 214, 46)    -- mid acid
+	local C_DK   = Color3.fromRGB(70, 130, 24)     -- dark drip
+
+	-- ── Glowing core ──────────────────────────────────────────────────────────
 	local glob          = Instance.new("Part")
 	glob.Name           = "_LampreyBile"
 	glob.Shape          = Enum.PartType.Ball
-	glob.Size           = Vector3.new(1.5, 1.5, 1.5)
-	glob.Color          = C_BILE
+	glob.Size           = Vector3.new(1.6, 1.6, 1.6)
+	glob.Color          = C_HOT
 	glob.Material       = Enum.Material.Neon
-	glob.Transparency   = 0.1
+	glob.Transparency   = 0
 	glob.Anchored       = true; glob.CanCollide = false; glob.CanQuery = false; glob.CastShadow = false
 	glob.Position       = origin
 	glob.Parent         = workspace
 
-	-- Dripping acid trail
-	local drip                = Instance.new("ParticleEmitter")
-	drip.Texture              = "rbxasset://textures/particles/smoke_main.dds"
-	drip.Color                = ColorSequence.new(C_BILE, Color3.fromRGB(70, 130, 24))
-	drip.LightEmission        = 0.6
-	drip.Size                 = NumberSequence.new(0.8, 0.1)
-	drip.Transparency         = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.3),
+	local light         = Instance.new("PointLight")
+	light.Color         = C_BILE
+	light.Brightness    = 4
+	light.Range         = 14
+	light.Parent        = glob
+
+	-- ── Translucent slime aura that lags + breathes around the core ────────────
+	local shell         = Instance.new("Part")
+	shell.Name          = "_LampreyBileShell"
+	shell.Shape         = Enum.PartType.Ball
+	shell.Size          = Vector3.new(2.5, 2.5, 2.5)
+	shell.Color         = C_BILE
+	shell.Material      = Enum.Material.Neon
+	shell.Transparency  = 0.55
+	shell.Anchored      = true; shell.CanCollide = false; shell.CanQuery = false; shell.CastShadow = false
+	shell.Position      = origin
+	shell.Parent        = workspace
+
+	-- ── Ribbon trail streaking behind the bolt ─────────────────────────────────
+	local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(0,  0.6, 0); a0.Parent = glob
+	local a1 = Instance.new("Attachment"); a1.Position = Vector3.new(0, -0.6, 0); a1.Parent = glob
+	local trail            = Instance.new("Trail")
+	trail.Attachment0      = a0
+	trail.Attachment1      = a1
+	trail.Color            = ColorSequence.new(C_HOT, C_DK)
+	trail.Transparency     = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.1),
 		NumberSequenceKeypoint.new(1, 1),
 	})
-	drip.Lifetime             = NumberRange.new(0.25, 0.5)
-	drip.Speed                = NumberRange.new(0.5, 1.5)
-	drip.Acceleration         = Vector3.new(0, -30, 0)
-	drip.Rate                 = 60
+	trail.WidthScale       = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	trail.Lifetime         = 0.32
+	trail.LightEmission    = 0.7
+	trail.Parent           = glob
+
+	-- ── Dribbling acid droplets shed in flight ─────────────────────────────────
+	local drip                = Instance.new("ParticleEmitter")
+	drip.Texture              = "rbxasset://textures/particles/sparkles_main.dds"
+	drip.Color                = ColorSequence.new(C_HOT, C_DK)
+	drip.LightEmission        = 0.8
+	drip.Size                 = NumberSequence.new(0.7, 0.05)
+	drip.Transparency         = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.2),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	drip.Lifetime             = NumberRange.new(0.3, 0.55)
+	drip.Speed                = NumberRange.new(1, 3)
+	drip.Acceleration         = Vector3.new(0, -36, 0)
+	drip.SpreadAngle          = Vector2.new(40, 40)
+	drip.Rate                 = 90
 	drip.Parent               = glob
 
+	local spin = 0
 	local origElapsed = 0
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function(bdt)
 		origElapsed += bdt
-		local t   = math.min(origElapsed / TRAVEL, 1)
+		spin += bdt * 16
+		local t    = math.min(origElapsed / TRAVEL, 1)
 		local arcH = math.sin(t * math.pi) * ARC
-		local wob  = 1.5 + math.sin(origElapsed * 26) * 0.12
-		glob.Size     = Vector3.new(wob, wob, wob)
-		glob.Position = origin:Lerp(dest, t) + Vector3.new(0, arcH, 0)
+		local pos  = origin:Lerp(dest, t) + Vector3.new(0, arcH, 0)
+		local wob  = 1.6 + math.sin(origElapsed * 30) * 0.16
+		glob.Size   = Vector3.new(wob, wob, wob)
+		glob.CFrame = CFrame.new(pos) * CFrame.Angles(spin, spin * 0.7, 0)
+		-- Aura lags slightly behind and pulses out of phase for a gooey feel
+		local swob = 2.5 + math.sin(origElapsed * 22 + 1) * 0.24
+		shell.Size     = Vector3.new(swob, swob, swob)
+		shell.Position = shell.Position:Lerp(pos, 0.5)
 		if t >= 1 then
 			conn:Disconnect()
-			drip.Enabled = false
-			glob.Transparency = 1
-			game:GetService("Debris"):AddItem(glob, 0.6)
+			drip.Enabled  = false
+			trail.Enabled = false
+			glob.Transparency  = 1
+			shell.Transparency = 1
+			Debris:AddItem(glob, 0.5)
+			Debris:AddItem(shell, 0.1)
 
-			-- Impact splatter — green blobs flung outward, fading fast
-			for _ = 1, 6 do
-				local splat        = Instance.new("Part")
-				splat.Shape        = Enum.PartType.Ball
-				local sz           = 0.5 + math.random() * 0.9
-				splat.Size         = Vector3.new(sz, sz, sz)
-				splat.Color        = C_BILE
-				splat.Material     = Enum.Material.Neon
-				splat.Anchored     = true; splat.CanCollide = false; splat.CanQuery = false; splat.CastShadow = false
-				splat.Position     = dest + Vector3.new((math.random() - 0.5) * 4, 0.2, (math.random() - 0.5) * 4)
-				splat.Parent       = workspace
-				local se = 0
-				local sc: RBXScriptConnection
-				sc = RunService.RenderStepped:Connect(function(sdt)
-					se += sdt
-					local sp = math.min(se / 0.5, 1)
-					splat.Transparency = sp
-					if sp >= 1 then sc:Disconnect(); splat:Destroy() end
-				end)
+			playSound3D(dest, SND_LAMPREY_IMPACT, 0.9)
+
+			-- ── Impact flash ──
+			local flash          = Instance.new("Part")
+			flash.Shape          = Enum.PartType.Ball
+			flash.Size           = Vector3.new(2, 2, 2)
+			flash.Position       = dest
+			flash.Color          = C_HOT
+			flash.Material       = Enum.Material.Neon
+			flash.Transparency   = 0.05
+			flash.Anchored       = true; flash.CanCollide = false; flash.CanQuery = false; flash.CastShadow = false
+			flash.Parent         = workspace
+			local fLight         = Instance.new("PointLight")
+			fLight.Color = C_BILE; fLight.Brightness = 6; fLight.Range = 18; fLight.Parent = flash
+			local fe = 0
+			local fc: RBXScriptConnection
+			fc = RunService.RenderStepped:Connect(function(fdt)
+				fe += fdt
+				local fp = math.min(fe / 0.3, 1)
+				local s  = 2 + fp * 7
+				flash.Size         = Vector3.new(s, s, s)
+				flash.Transparency = 0.05 + fp * 0.95
+				fLight.Brightness  = 6 * (1 - fp)
+				if fp >= 1 then fc:Disconnect(); flash:Destroy() end
+			end)
+
+			-- ── Ground shockwave ring ──
+			local ring          = Instance.new("Part")
+			ring.Shape          = Enum.PartType.Cylinder
+			ring.Size           = Vector3.new(0.4, 3, 3)
+			ring.CFrame         = CFrame.new(dest - Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+			ring.Color          = C_HOT
+			ring.Material       = Enum.Material.Neon
+			ring.Transparency   = 0.2
+			ring.Anchored       = true; ring.CanCollide = false; ring.CanQuery = false; ring.CastShadow = false
+			ring.Parent         = workspace
+			local re = 0
+			local rc: RBXScriptConnection
+			rc = RunService.RenderStepped:Connect(function(rdt)
+				re += rdt
+				local rp = math.min(re / 0.4, 1)
+				local s  = 3 + rp * 16
+				ring.Size         = Vector3.new(0.4, s, s)
+				ring.Transparency = 0.2 + rp * 0.8
+				if rp >= 1 then rc:Disconnect(); ring:Destroy() end
+			end)
+
+			-- ── Viscous globs flung outward with real physics ──
+			for _ = 1, 8 do
+				local g            = Instance.new("Part")
+				g.Shape            = Enum.PartType.Ball
+				local sz           = 0.4 + math.random() * 0.7
+				g.Size             = Vector3.new(sz, sz, sz)
+				g.Color            = C_BILE
+				g.Material         = Enum.Material.Neon
+				g.Anchored         = false; g.CanCollide = false; g.CanTouch = false; g.CastShadow = false
+				g.Position         = dest + Vector3.new(0, 0.4, 0)
+				g.AssemblyLinearVelocity = Vector3.new(
+					(math.random() - 0.5) * 26,
+					math.random() * 16 + 8,
+					(math.random() - 0.5) * 26)
+				g.Parent           = workspace
+				Debris:AddItem(g, 0.8)
 			end
 
-			-- Lingering corrosive pool that fizzles away
+			-- ── Lingering corrosive pool: bubbling + glowing, fizzles away ──
 			local pool          = Instance.new("Part")
 			pool.Shape          = Enum.PartType.Cylinder
-			pool.Size           = Vector3.new(0.2, 5, 5)
-			pool.CFrame         = CFrame.new(dest - Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+			pool.Size           = Vector3.new(0.2, 5.5, 5.5)
+			pool.CFrame         = CFrame.new(dest - Vector3.new(0, 0.35, 0)) * CFrame.Angles(0, 0, math.pi / 2)
 			pool.Color          = C_BILE
 			pool.Material       = Enum.Material.Neon
-			pool.Transparency   = 0.3
+			pool.Transparency   = 0.25
 			pool.Anchored       = true; pool.CanCollide = false; pool.CanQuery = false; pool.CastShadow = false
 			pool.Parent         = workspace
+			local pLight        = Instance.new("PointLight")
+			pLight.Color = C_BILE; pLight.Brightness = 3; pLight.Range = 12; pLight.Parent = pool
+
+			local bubbles                = Instance.new("ParticleEmitter")
+			bubbles.Texture              = "rbxasset://textures/particles/smoke_main.dds"
+			bubbles.Color                = ColorSequence.new(C_HOT, C_DK)
+			bubbles.LightEmission        = 0.5
+			bubbles.Size                 = NumberSequence.new(0.4, 0.9)
+			bubbles.Transparency         = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.4),
+				NumberSequenceKeypoint.new(1, 1),
+			})
+			bubbles.Lifetime             = NumberRange.new(0.4, 0.8)
+			bubbles.Speed                = NumberRange.new(2, 4)
+			bubbles.Acceleration         = Vector3.new(0, 6, 0)
+			bubbles.SpreadAngle          = Vector2.new(180, 180)
+			bubbles.Rate                 = 40
+			bubbles.Parent               = pool
+
 			local pe = 0
 			local pc: RBXScriptConnection
 			pc = RunService.RenderStepped:Connect(function(pdt)
 				pe += pdt
-				local pp = math.min(pe / 1.3, 1)
-				pool.Transparency = 0.3 + pp * 0.7
+				local pp = math.min(pe / 1.5, 1)
+				pool.Transparency = 0.25 + pp * 0.75
+				pLight.Brightness = 3 * (1 - pp)
+				if pp >= 0.5 then bubbles.Rate = 40 * (1 - (pp - 0.5) / 0.5) end
 				if pp >= 1 then pc:Disconnect(); pool:Destroy() end
 			end)
 		end
@@ -3144,7 +3272,18 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	end
 
 	if unitType == "Lamprey" then
+		LampreyBody.triggerAttackNear(fromPos)   -- mouth snaps open + head lunges
 		spawnLampreyBile(fromPos, toPos)
+		return
+	end
+
+	if unitType == "LampreyEggLand" then
+		playSound3D(fromPos, SND_LAMPREY_EGG_LAND, 0.8)
+		return
+	end
+
+	if unitType == "LampreyEggHatch" then
+		playSound3D(fromPos, SND_LAMPREY_HATCH, 1.0)
 		return
 	end
 

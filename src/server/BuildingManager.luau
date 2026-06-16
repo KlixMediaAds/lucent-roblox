@@ -2032,6 +2032,7 @@ produceLampreyEgg = function(nestId: string, player: any)
 	}):Play()
 	task.wait(halfEject)
 	if egg.Parent == nil then return end
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(target, target, "LampreyEggLand")
 
 	-- ── Incubate: the egg breathes green until it hatches ─────────────────────
 	TweenService:Create(egg,
@@ -2054,6 +2055,7 @@ produceLampreyEgg = function(nestId: string, player: any)
 	local hatchPos = egg.Position
 	egg:Destroy()
 	spawnEggHatchVFX(hatchPos)
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
 	if unitManagerRef then
 		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), "Lamprey")
 	end

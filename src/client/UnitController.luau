@@ -1,4 +1,5 @@
 local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService       = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -69,10 +70,12 @@ local atkMoveHeld = false  -- true while A key is held
 local MIN_DRAG   = 8   -- pixels
 
 -- ── Unit voice lines ─────────────────────────────────────────────────────────
-local SOLDIER_VOICE_IDS = {88664954760340,  70872333577296,  135999718666781}
-local TANK_VOICE_IDS    = {128274629467753, 139954121143852, 75168311027870}
-local SOLDIER_DEATH_ID  = 97350089441789
-local TANK_DEATH_ID     = 137547229383680
+local SOLDIER_VOICE_IDS     = {88664954760340,  70872333577296,  135999718666781}
+local TANK_VOICE_IDS        = {128274629467753, 139954121143852, 75168311027870}
+local SOLDIER_DEATH_ID      = 97350089441789
+local TANK_DEATH_ID         = 137547229383680
+local LAMPREY_DEATH_ID      = 135417409504018
+local LAMPREY_DEATH_RARE_ID = 168208965
 
 local function playSound(id: number, pitchRange: number, volume: number)
 	local s = Instance.new("Sound")
@@ -89,6 +92,13 @@ local function playSoldierVoice() playSound(SOLDIER_VOICE_IDS[math.random(#SOLDI
 local function playSoldierDeath() playSound(SOLDIER_DEATH_ID, 0.12, 1) end
 local function playTankVoice()    playSound(TANK_VOICE_IDS[math.random(#TANK_VOICE_IDS)],       0.1, 7) end
 local function playTankDeath()    playSound(TANK_DEATH_ID, 0.06, 7) end
+local function playLampreyDeath()
+	if math.random(1000) == 1 then
+		playSound(LAMPREY_DEATH_RARE_ID, 0, 1.5)
+	else
+		playSound(LAMPREY_DEATH_ID, 0.25, 1)
+	end
+end
 
 -- ── Move-order ping ───────────────────────────────────────────────────────────
 local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
@@ -124,6 +134,184 @@ local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
 		end
 		if ring.Parent then ring:Destroy() end
 	end)
+end
+
+-- ── Drag-formation (BAR / SupCom style) ───────────────────────────────────────
+-- Minimum spacing between adjacent slots. If the dragged line is too short to fit
+-- every unit at this spacing, the line is widened about the same midpoint so units
+-- never overlap.
+local FORMATION_MIN_SPACING = Config.UNIT_FORMATION_SPACING
+local FORMATION_DRAG_MIN    = 8   -- studs the cursor must travel to start a formation
+
+-- ── Freehand path helpers ──────────────────────────────────────────────────────
+-- `path` is the polyline of ground points the cursor traced (flat, Y = 0).
+
+-- Cumulative arc length at each path vertex, plus the total length.
+local function pathLengths(path: { Vector3 }): ({ number }, number)
+	local cum: { number } = { 0 }
+	local total = 0
+	for i = 2, #path do
+		total += (path[i] - path[i - 1]).Magnitude
+		cum[i] = total
+	end
+	return cum, total
+end
+
+-- World position at arc-length `dist` along the path. `dist` may be negative or
+-- exceed the total length — the ends are extrapolated along their tangents so a
+-- cramped formation can spill past the drawn path instead of overlapping.
+local function sampleAlongPath(path: { Vector3 }, cum: { number }, total: number, dist: number): Vector3
+	local m = #path
+	if m == 1 then return path[1] end
+	if dist <= 0 then
+		local d = path[2] - path[1]
+		local dir = d.Magnitude > 1e-4 and d.Unit or Vector3.new(1, 0, 0)
+		return path[1] + dir * dist
+	end
+	if dist >= total then
+		local d = path[m] - path[m - 1]
+		local dir = d.Magnitude > 1e-4 and d.Unit or Vector3.new(1, 0, 0)
+		return path[m] + dir * (dist - total)
+	end
+	for i = 2, m do
+		if cum[i] >= dist then
+			local segLen = cum[i] - cum[i - 1]
+			local t = segLen > 1e-6 and (dist - cum[i - 1]) / segLen or 0
+			return path[i - 1]:Lerp(path[i], t)
+		end
+	end
+	return path[m]
+end
+
+-- Even-spaced slot positions along the path, centred on the path's arc midpoint.
+-- Spacing clamps up to FORMATION_MIN_SPACING so units never overlap; when clamped
+-- the formation extends symmetrically past both ends via tangent extrapolation.
+local function computeFormationSlots(path: { Vector3 }, n: number): { Vector3 }
+	local slots: { Vector3 } = {}
+	if n <= 0 or #path == 0 then return slots end
+	local cum, total = pathLengths(path)
+	if n == 1 then slots[1] = sampleAlongPath(path, cum, total, total / 2); return slots end
+	local spacing = math.max(total / (n - 1), FORMATION_MIN_SPACING)
+	local mid     = total / 2
+	for i = 1, n do
+		local arc = mid + (i - 1 - (n - 1) / 2) * spacing
+		slots[i] = sampleAlongPath(path, cum, total, arc)
+	end
+	return slots
+end
+
+-- Greedy nearest-slot assignment so units don't cross paths. Returns parallel
+-- arrays (ids[i] is the unit assigned to slot positions[i]).
+local function buildFormationOrders(unitIds: { string }, path: { Vector3 }): ({ string }, { Vector3 })
+	local n     = #unitIds
+	local slots = computeFormationSlots(path, n)
+	local remaining = table.clone(unitIds)
+	local ids:       { string }  = {}
+	local positions: { Vector3 } = {}
+	for i = 1, n do
+		local s = slots[i]
+		local bestIdx, bestD = 1, math.huge
+		for k, id in remaining do
+			local info = knownUnits[id]
+			local pos  = info and info.part.Position or Vector3.zero
+			local dx, dz = pos.X - s.X, pos.Z - s.Z
+			local d = dx * dx + dz * dz
+			if d < bestD then bestD = d; bestIdx = k end
+		end
+		ids[i]       = remaining[bestIdx]
+		positions[i] = s
+		table.remove(remaining, bestIdx)
+	end
+	return ids, positions
+end
+
+-- ── Formation preview rendering ────────────────────────────────────────────────
+local segMarkers:  { Part } = {}   -- polyline segments tracing the drawn path
+local slotMarkers: { Part } = {}   -- discs at each unit's destination slot
+
+local function makeNeonPart(name: string, shape: Enum.PartType?): Part
+	local p        = Instance.new("Part")
+	p.Name         = name
+	if shape then p.Shape = shape end
+	p.Material     = Enum.Material.Neon
+	p.Anchored     = true
+	p.CanCollide   = false
+	p.CanQuery     = false
+	p.CastShadow   = false
+	p.Parent       = workspace
+	return p
+end
+
+local function clearFormationPreview()
+	for _, m in segMarkers  do if m.Parent then m:Destroy() end end
+	for _, m in slotMarkers do if m.Parent then m:Destroy() end end
+	table.clear(segMarkers)
+	table.clear(slotMarkers)
+end
+
+-- Draws the polyline that follows the cursor's path plus the slot discs.
+local function updateFormationPreview(path: { Vector3 }, atkMove: boolean)
+	local color = atkMove and Color3.fromRGB(255, 140, 0) or Color3.fromRGB(0, 230, 80)
+	local n     = #selected
+
+	-- Polyline segments (one part per drawn segment) — follows the curve exactly.
+	local segIdx = 0
+	for i = 2, #path do
+		local a = Vector3.new(path[i - 1].X, 0.3, path[i - 1].Z)
+		local b = Vector3.new(path[i].X,     0.3, path[i].Z)
+		local len = (b - a).Magnitude
+		if len < 1e-3 then continue end
+		segIdx += 1
+		local m = segMarkers[segIdx]
+		if not (m and m.Parent) then
+			m = makeNeonPart("_FormationLine")
+			m.Transparency = 0.25
+			segMarkers[segIdx] = m
+		end
+		m.Color  = color
+		m.Size   = Vector3.new(0.4, 0.1, len)
+		m.CFrame = CFrame.lookAt((a + b) * 0.5, b)
+	end
+	for i = #segMarkers, segIdx + 1, -1 do
+		local m = segMarkers[i]
+		if m then m:Destroy() end
+		segMarkers[i] = nil
+	end
+
+	-- Slot discs at each unit's destination.
+	local slots = computeFormationSlots(path, n)
+	for i = 1, n do
+		local s = slots[i]
+		local m = slotMarkers[i]
+		if not (m and m.Parent) then
+			m = makeNeonPart("_FormationSlot", Enum.PartType.Cylinder)
+			m.Size = Vector3.new(0.12, 1.6, 1.6)
+			m.Transparency = 0.1
+			slotMarkers[i] = m
+		end
+		m.Color  = color
+		m.CFrame = CFrame.new(s.X, 0.3, s.Z) * CFrame.Angles(0, 0, math.pi / 2)
+	end
+	for i = #slotMarkers, n + 1, -1 do
+		local m = slotMarkers[i]
+		if m then m:Destroy() end
+		slotMarkers[i] = nil
+	end
+end
+
+-- Voice bark when issuing an order (one per order; prefer tank, then soldier).
+local function maybeUnitVoice()
+	for _, id in selected do
+		local info = knownUnits[id]
+		if info and info.ownerId == localPlayer.UserId then
+			local ut = info.part:FindFirstChild("UnitType")
+			if ut then
+				if      ut.Value == "Tank"    then playTankVoice();    return
+				elseif  ut.Value == "Soldier" then playSoldierVoice(); return
+				end
+			end
+		end
+	end
 end
 
 local function syncSelectionBoxes()
@@ -401,6 +589,108 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	dragFrame    = frame
 	isBlockedFn  = isBlocked
 
+	-- ── Right-mouse drag-formation state ───────────────────────────────────────
+	local rmbActive      = false
+	local rmbStartGround: Vector3? = nil
+	local rmbAtkMove     = false
+	local rmbDragging    = false
+	local rmbPath: { Vector3 } = {}   -- freehand polyline the cursor traced (flat)
+	local PATH_SAMPLE_MIN = 4         -- studs between recorded path points
+
+	-- Returns the traced path with the live cursor appended as the final point so
+	-- the polyline always reaches the cursor between samples.
+	local function renderPath(cur: Vector3): { Vector3 }
+		local rp = table.clone(rmbPath)
+		local last = rp[#rp]
+		if not last or (cur - last).Magnitude > 0.5 then table.insert(rp, cur) end
+		return rp
+	end
+
+	-- A plain right-click order (no drag): focus-attack an enemy under the cursor,
+	-- otherwise a single move / attack-move. Mirrors the classic behaviour.
+	local function issueClickOrder(ground: Vector3?)
+		if not rmbAtkMove then
+			local enemyUnitId = hitEnemyUnit()
+			if enemyUnitId then
+				maybeUnitVoice()
+				network.focusAttack(selected, enemyUnitId, "unit")
+				if ground then spawnMovePing(ground, true) end
+				return
+			end
+			local enemyBldId = hitEnemyBuilding()
+			if enemyBldId then
+				maybeUnitVoice()
+				network.focusAttack(selected, enemyBldId, "building")
+				if ground then spawnMovePing(ground, true) end
+				return
+			end
+		end
+		if ground then
+			maybeUnitVoice()
+			if rmbAtkMove then
+				network.attackMoveUnits(selected, ground)
+			else
+				network.moveUnits(selected, ground)
+			end
+			spawnMovePing(ground, rmbAtkMove)
+			if onMoveIssuedCb then onMoveIssuedCb() end
+		end
+	end
+
+	-- While the right button is held, grow the formation preview once the cursor
+	-- has travelled past the drag threshold (needs 2+ units to form a line).
+	RunService.RenderStepped:Connect(function()
+		if not rmbActive or not rmbStartGround then return end
+		local cur = cameraModule.getGroundPosition()
+		if not cur then return end
+		cur = Vector3.new(cur.X, 0, cur.Z)
+		rmbAtkMove = atkMoveHeld  -- allow toggling A mid-drag
+		if not rmbDragging then
+			if #selected >= 2 and (cur - rmbStartGround).Magnitude >= FORMATION_DRAG_MIN then
+				rmbDragging = true
+				rmbPath = { rmbStartGround }
+			end
+		end
+		if rmbDragging then
+			-- Record points as the cursor travels so the formation follows the curve.
+			local last = rmbPath[#rmbPath]
+			if not last or (cur - last).Magnitude >= PATH_SAMPLE_MIN then
+				table.insert(rmbPath, cur)
+			end
+			updateFormationPreview(renderPath(cur), rmbAtkMove)
+		end
+	end)
+
+	-- Right button released: a drag issues a line formation; a click falls back to
+	-- the standard single-point order.
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
+		if not rmbActive then return end
+		rmbActive = false
+		clearFormationPreview()
+		local dragging = rmbDragging
+		local path     = rmbPath
+		rmbStartGround = nil
+		rmbDragging    = false
+		rmbPath        = {}
+
+		if #selected == 0 then return end
+		local endG = cameraModule.getGroundPosition()
+
+		if dragging and endG and #selected >= 2 then
+			endG = Vector3.new(endG.X, 0, endG.Z)
+			local last = path[#path]
+			if not last or (endG - last).Magnitude > 0.5 then table.insert(path, endG) end
+			local ids, positions = buildFormationOrders(selected, path)
+			maybeUnitVoice()
+			network.formationMove(ids, positions, rmbAtkMove)
+			spawnMovePing(endG, rmbAtkMove)
+			if onMoveIssuedCb then onMoveIssuedCb() end
+		else
+			issueClickOrder(endG)
+		end
+	end)
+
 	-- Track all replicated units; auto-clean when a unit is destroyed
 	network.onUnitSpawned(function(id: string, ownerId: number, _pos: Vector3)
 		task.spawn(function()
@@ -437,6 +727,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	network.onUnitDied(function(unitType: string, _pos: Vector3)
 		if      unitType == "Tank"    then playTankDeath()
 		elseif  unitType == "Soldier" then playSoldierDeath()
+		elseif  unitType == "Lamprey" then playLampreyDeath()
 		end
 	end)
 
@@ -516,51 +807,15 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			isDragging = true
 
 		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+			-- Begin a right-mouse drag. The order is issued on release:
+			-- a quick click = single move / focus-attack; a drag = line formation.
 			if #selected == 0 then return end
 			local ground = cameraModule.getGroundPosition()
-
-			local function maybeUnitVoice()
-				for _, id in selected do
-					local info = knownUnits[id]
-					if info and info.ownerId == localPlayer.UserId then
-						local ut = info.part:FindFirstChild("UnitType")
-						if ut then
-							if      ut.Value == "Tank"    then playTankVoice();    return
-							elseif  ut.Value == "Soldier" then playSoldierVoice(); return
-							end
-						end
-					end
-				end
-			end
-
-			-- Without A held: detect enemy under cursor for focus attack
-			if not atkMoveHeld then
-				local enemyUnitId = hitEnemyUnit()
-				if enemyUnitId then
-					maybeUnitVoice()
-					network.focusAttack(selected, enemyUnitId, "unit")
-					if ground then spawnMovePing(ground, true) end
-					return
-				end
-				local enemyBldId = hitEnemyBuilding()
-				if enemyBldId then
-					maybeUnitVoice()
-					network.focusAttack(selected, enemyBldId, "building")
-					if ground then spawnMovePing(ground, true) end
-					return
-				end
-			end
-
-			if ground then
-				maybeUnitVoice()
-				if atkMoveHeld then
-					network.attackMoveUnits(selected, ground)
-				else
-					network.moveUnits(selected, ground)
-				end
-				spawnMovePing(ground, atkMoveHeld)
-				if onMoveIssuedCb then onMoveIssuedCb() end
-			end
+			if not ground then return end
+			rmbActive      = true
+			rmbStartGround = Vector3.new(ground.X, 0, ground.Z)
+			rmbAtkMove     = atkMoveHeld
+			rmbDragging    = false
 
 		elseif input.KeyCode == Enum.KeyCode.Escape then
 			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end

@@ -58,6 +58,7 @@ local vpLines:     { Frame }           = {}  -- 4 viewport rectangle edges
 -- CC avatar icons (one per Command Center building)
 local ccIcons:      { [string]: Frame }  = {}
 local ccIconOwners: { [string]: number } = {}  -- building id → userId
+local enemyMarks:   { Frame }            = {}  -- persistent enemy-structure crosshairs
 local thumbCache:   { [number]: string } = {}  -- userId → thumbnail URL
 local thumbLoading: { [number]: boolean } = {}
 
@@ -637,6 +638,74 @@ function MiniMap.ping(worldPos: Vector3, category: string)
 		out:Play()
 		out.Completed:Once(function() dot:Destroy() end)
 	end)
+end
+
+-- ── Enemy-structure crosshair ─────────────────────────────────────────────────
+
+-- Draws a persistent squared crosshair at a world position to flag a discovered
+-- enemy structure. The square "forms" with a brief scale-in + fade animation.
+local C_CROSSHAIR = Color3.fromRGB(255, 60, 50)
+function MiniMap.markEnemyStructure(worldPos: Vector3)
+	if not canvas then return end
+	local u, v = w2m(worldPos.X, worldPos.Z)
+
+	local SQ = 20  -- final square side (px)
+
+	local box              = Instance.new("Frame")
+	box.Name               = "EnemyMark"
+	box.Size               = UDim2.fromOffset(SQ, SQ)
+	box.AnchorPoint        = Vector2.new(0.5, 0.5)
+	box.Position           = UDim2.fromOffset(u, v)
+	box.BackgroundTransparency = 1
+	box.ZIndex             = 9
+	box.Parent             = canvas
+	local stroke           = Instance.new("UIStroke")
+	stroke.Color           = C_CROSSHAIR
+	stroke.Thickness       = 1.5
+	stroke.Parent          = box
+
+	-- Crosshair tick lines extending past each side of the square
+	local function tick(horizontal: boolean)
+		local ln              = Instance.new("Frame")
+		ln.AnchorPoint        = Vector2.new(0.5, 0.5)
+		ln.Position           = UDim2.fromScale(0.5, 0.5)
+		ln.Size               = horizontal and UDim2.new(1, 8, 0, 1) or UDim2.new(0, 1, 1, 8)
+		ln.BackgroundColor3   = C_CROSSHAIR
+		ln.BorderSizePixel    = 0
+		ln.ZIndex             = 9
+		ln.Parent             = box
+	end
+	tick(true)
+	tick(false)
+
+	table.insert(enemyMarks, box)
+
+	-- "Form" animation: start large + invisible, snap inward to final size.
+	box.Size = UDim2.fromOffset(SQ * 2.4, SQ * 2.4)
+	stroke.Transparency = 1
+	TweenService:Create(box,
+		TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Size = UDim2.fromOffset(SQ, SQ) }):Play()
+	TweenService:Create(stroke, TweenInfo.new(0.25), { Transparency = 0 }):Play()
+
+	-- Gentle ongoing pulse so the marker keeps drawing the eye.
+	task.spawn(function()
+		while box.Parent do
+			TweenService:Create(stroke, TweenInfo.new(0.7, Enum.EasingStyle.Sine), { Thickness = 3 }):Play()
+			task.wait(0.75)
+			if not box.Parent then break end
+			TweenService:Create(stroke, TweenInfo.new(0.7, Enum.EasingStyle.Sine), { Thickness = 1.5 }):Play()
+			task.wait(0.75)
+		end
+	end)
+end
+
+-- Removes all enemy-structure crosshairs (called on game reset).
+function MiniMap.clearEnemyStructures()
+	for _, m in enemyMarks do
+		if m.Parent then m:Destroy() end
+	end
+	enemyMarks = {}
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

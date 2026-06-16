@@ -17,6 +17,11 @@ function Network.attackMoveUnits(ids: {string}, target: Vector3)
 	RemoteHandler.get(Config.REMOTES.AttackMoveUnits):FireServer(ids, target)
 end
 
+-- Drag-formation move: parallel arrays — positions[i] is the slot for ids[i].
+function Network.formationMove(ids: {string}, positions: {Vector3}, attackMove: boolean)
+	RemoteHandler.get(Config.REMOTES.FormationMove):FireServer(ids, positions, attackMove)
+end
+
 function Network.focusAttack(ids: {string}, targetId: string, targetType: string)
 	RemoteHandler.get(Config.REMOTES.FocusAttack):FireServer(ids, targetId, targetType)
 end

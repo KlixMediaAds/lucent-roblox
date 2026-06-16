@@ -275,6 +275,28 @@ local function applyHP(data: UnitData, tookDamage: boolean?)
 	end
 end
 
+-- A Lamprey that fells trees grows: every felled tree scales its body size and
+-- max HP by LAMPREY_GROWTH_PER_TREE, compounding up to LAMPREY_GROWTH_MAX_SCALE.
+-- The client LampreyBody animator derives its render scale from part.Size.Y, so
+-- simply resizing the (invisible) pivot part grows the whole visible creature.
+local LAMPREY_BASE_Y = Config.UNIT_TYPES.Lamprey.size.Y
+local function growLamprey(data: UnitData, treeCount: number)
+	local g        = 1 + Config.LAMPREY_GROWTH_PER_TREE
+	local maxScale = Config.LAMPREY_GROWTH_MAX_SCALE
+	for _ = 1, treeCount do
+		if data.part.Size.Y / LAMPREY_BASE_Y >= maxScale then break end
+		local oldY  = data.part.Size.Y
+		data.part.Size = data.part.Size * g
+		-- Keep ground-snapped: the pivot centre rises by half the height gained.
+		data.part.CFrame = data.part.CFrame + Vector3.new(0, (data.part.Size.Y - oldY) / 2, 0)
+		-- Toughen alongside size (current HP scales too, so a healthy Lamprey
+		-- stays healthy rather than suddenly looking wounded).
+		data.maxHp = data.maxHp * g
+		data.hp    = data.hp * g
+	end
+	applyHP(data)
+end
+
 -- Returns the effective damage dealt to a unit after applying Hardened Armor.
 local function calcDamage(targetData: UnitData, rawDmg: number): number
 	if targetData.unitType == "Soldier" and researchManagerRef
@@ -425,6 +447,33 @@ local function moveUnits(player: Player, ids: { string }, targetPos: Vector3)
 	applyFormation(valid, targetPos)
 	for _, id in valid do units[id].atkMoveDest = nil end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
+end
+
+-- Drag-formation move: each unit gets its own destination slot (parallel arrays).
+-- `positions[i]` is the world slot for `ids[i]`. When `attackMove` is true the
+-- units attack-march to their slots (aggro scan stays live); otherwise it's a
+-- plain move. Replicates one UnitsOrderedMove so clients can play move VFX.
+local FORMATION_MAX = 64
+local function formationMove(player: Player, ids: { string }, positions: { Vector3 }, attackMove: boolean)
+	local n = math.min(#ids, #positions, FORMATION_MAX)
+	local valid: { string } = {}
+	for i = 1, n do
+		local id  = ids[i]
+		local pos = positions[i]
+		if type(id) ~= "string" or typeof(pos) ~= "Vector3" then continue end
+		local data = units[id]
+		if not data or data.owner ~= player then continue end
+		local slot       = Vector3.new(pos.X, 0, pos.Z)
+		data.target      = slot
+		data.aggroId     = nil
+		data.aggroHome   = nil
+		data.focusBldId  = nil
+		data.atkMoveDest = attackMove and slot or nil
+		table.insert(valid, id)
+	end
+	if #valid > 0 then
+		RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, positions[1])
+	end
 end
 
 local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vector3)
@@ -720,7 +769,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 				end
 			end
 		end
-		if (data.unitType == "Tank" or data.unitType == "Soldier")
+		if (data.unitType == "Tank" or data.unitType == "Soldier" or data.unitType == "Lamprey")
 			and data.owner.UserId > 0 and data.owner.Parent then
 			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
 		end
@@ -1045,7 +1094,11 @@ function UnitManager.init(resourceManager)
 
 					-- Medium+ units bulldoze any trees they push into.
 					if forestManagerRef and FELLS_TREES[data.unitType] then
-						forestManagerRef.knockNear(newPos, math.max(data.part.Size.X, data.part.Size.Z) * 0.5)
+						local felled = forestManagerRef.knockNear(newPos, math.max(data.part.Size.X, data.part.Size.Z) * 0.5)
+						-- Lampreys feed on the forest: each felled tree grows them.
+						if felled > 0 and data.unitType == "Lamprey" then
+							growLamprey(data, felled)
+						end
 					end
 				end
 			end
@@ -1694,6 +1747,11 @@ function UnitManager.init(resourceManager)
 	RemoteHandler.get(Config.REMOTES.MoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)
 		if type(ids) ~= "table" or typeof(targetPos) ~= "Vector3" then return end
 		moveUnits(player, ids, targetPos)
+	end)
+
+	RemoteHandler.get(Config.REMOTES.FormationMove).OnServerEvent:Connect(function(player, ids, positions, attackMove)
+		if type(ids) ~= "table" or type(positions) ~= "table" then return end
+		formationMove(player, ids, positions, attackMove == true)
 	end)
 
 	RemoteHandler.get(Config.REMOTES.AttackMoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)

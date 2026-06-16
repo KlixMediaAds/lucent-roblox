@@ -183,8 +183,8 @@ end
 
 -- Fell every standing tree within `radius` of `pos`. Cheap: only scans the few
 -- spatial-hash cells the radius overlaps.
-function ForestManager.clearAround(pos: Vector3, radius: number)
-	if not forestFolder then return end
+function ForestManager.clearAround(pos: Vector3, radius: number): number
+	if not forestFolder then return 0 end
 	local cminX = math.floor((pos.X - radius) / CELL)
 	local cmaxX = math.floor((pos.X + radius) / CELL)
 	local cminZ = math.floor((pos.Z - radius) / CELL)
@@ -208,11 +208,13 @@ function ForestManager.clearAround(pos: Vector3, radius: number)
 		end
 	end
 	for _, t in hits do topple(t, pos) end
+	return #hits
 end
 
 -- A medium+ unit shoulders through nearby trees as it moves.
-function ForestManager.knockNear(unitPos: Vector3, unitRadius: number)
-	ForestManager.clearAround(unitPos, unitRadius + TRUNK_R)
+-- Returns the number of trees actually felled this call.
+function ForestManager.knockNear(unitPos: Vector3, unitRadius: number): number
+	return ForestManager.clearAround(unitPos, unitRadius + TRUNK_R)
 end
 
 -- ── Generation ──────────────────────────────────────────────────────────────

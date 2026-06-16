@@ -23,6 +23,18 @@ local TOTAL_LEN  = 16.0    -- head-to-tail spine length in studs
 -- Tube thickness at each of the 9 spine points (head → tail taper)
 local THICK = { 3.4, 3.2, 3.0, 2.6, 2.2, 1.8, 1.4, 1.0, 0.6 }
 
+-- Base sizes for the parts whose dimensions are fixed at attach but rescaled
+-- each frame by the growth factor (see BASE_HEIGHT below).
+local HEAD_SIZE  = Vector3.new(3.8, 3.6, 4.0)
+local MAW_SIZE   = Vector3.new(2.4, 2.4, 1.4)
+local EYE_SIZE   = Vector3.new(0.9, 0.9, 0.9)
+
+-- Growth: the server grows a tree-felling Lamprey by scaling its (invisible)
+-- pivot part. We derive a render scale from the part's current height versus the
+-- spawn height so the whole creature swells to match. Must equal the Y of
+-- Config.UNIT_TYPES.Lamprey.size.
+local BASE_HEIGHT = 12.0
+
 -- ── Burrow / undulation ───────────────────────────────────────────────────────
 local FULL_SPEED      = 13.0   -- matches Config.UNIT_MOVE_SPEED.Lamprey
 local WAVE_FREQ       = 1.4    -- porpoise cycles/sec at full speed
@@ -35,7 +47,9 @@ local LAT_AMP         = 1.7    -- side-to-side slither amplitude
 local LAT_K           = math.pi * 2 * 0.7
 local LAT_FREQ        = 1.1
 
-local CULL_SQ = 300 * 300
+local CULL_SQ    = 300 * 300
+local HOP_SND_ID = "rbxassetid://117742365588721"
+local HOP_COOLDOWN = 0.18   -- min seconds between hop sounds per unit
 
 -- ── Colours ───────────────────────────────────────────────────────────────────
 local C_BODY  = Color3.fromRGB(40, 44, 52)
@@ -66,7 +80,6 @@ end
 -- ── Types ─────────────────────────────────────────────────────────────────────
 type Entry = {
 	body:        BasePart,
-	groundOff:   number,        -- body.Size.Y / 2 (pivot height above terrain)
 	segs:        { BasePart },  -- N_SEG tubes
 	knuckles:    { BasePart },  -- interior joint balls
 	fins:        { BasePart },  -- dorsal spikes on the front segments
@@ -83,8 +96,21 @@ type Entry = {
 	latClock:    number,
 	idleClock:   number,
 	smoothSpeed: number,
+	lastHopSound: number,
+	-- ── Idle / attack animation state ──
+	nextIdleAt:   number,    -- tick() when the next idle animation may start
+	idleKind:     string?,   -- "yawn" | "shake" while playing, else nil
+	idleT:        number,    -- elapsed seconds into the current idle animation
+	idleDur:      number,    -- total duration of the current idle animation
+	attackActive: boolean,   -- true while an attack (mouth-open lunge) plays
+	attackT:      number,    -- elapsed seconds into the current attack
 	conn:        RBXScriptConnection,
 }
+
+-- Animation durations (seconds)
+local YAWN_DUR   = 2.2
+local SHAKE_DUR  = 1.4
+local ATTACK_DUR = 0.5
 
 local active: { [string]: Entry } = {}
 local folder: Folder
@@ -151,10 +177,10 @@ function LampreyBody.attach(unitId: string, body: BasePart)
 	for _ = 1, 3 do table.insert(fins, makePart(unitId, Color3.fromRGB(26, 28, 34), Enum.Material.SmoothPlastic)) end
 
 	local head = makePart(unitId, C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	head.Size  = Vector3.new(3.8, 3.6, 4.0)
+	head.Size  = HEAD_SIZE
 
 	local maw  = makePart(unitId, C_MAW, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	maw.Size   = Vector3.new(2.4, 2.4, 1.4)
+	maw.Size   = MAW_SIZE
 
 	local teeth: { BasePart } = {}
 	for _ = 1, 8 do table.insert(teeth, makePart(unitId, C_TOOTH, Enum.Material.SmoothPlastic)) end
@@ -162,7 +188,7 @@ function LampreyBody.attach(unitId: string, body: BasePart)
 	local eyes: { BasePart } = {}
 	for _ = 1, 2 do
 		local e = makePart(unitId, C_EYE, Enum.Material.Neon, Enum.PartType.Ball)
-		e.Size  = Vector3.new(0.9, 0.9, 0.9)
+		e.Size  = EYE_SIZE
 		table.insert(eyes, e)
 	end
 
@@ -188,25 +214,115 @@ function LampreyBody.attach(unitId: string, body: BasePart)
 	end)
 
 	active[unitId] = {
-		body        = body,
-		groundOff   = body.Size.Y / 2,
-		segs        = segs,
-		knuckles    = knuckles,
-		fins        = fins,
-		teeth       = teeth,
-		eyes        = eyes,
-		head        = head,
-		maw         = maw,
-		dirt        = dirt,
-		dirtHost    = dirtHost,
-		dirtIdx     = 1,
-		prevY       = prevY,
-		animClock   = phase,
-		latClock    = phase * 1.7,
-		idleClock   = phase,
-		smoothSpeed = 0,
-		conn        = conn,
+		body         = body,
+		segs         = segs,
+		knuckles     = knuckles,
+		fins         = fins,
+		teeth        = teeth,
+		eyes         = eyes,
+		head         = head,
+		maw          = maw,
+		dirt         = dirt,
+		dirtHost     = dirtHost,
+		dirtIdx      = 1,
+		prevY        = prevY,
+		animClock    = phase,
+		latClock     = phase * 1.7,
+		idleClock    = phase,
+		smoothSpeed  = 0,
+		lastHopSound = 0,
+		-- Stagger first idle so a cluster of lampreys doesn't yawn in unison
+		nextIdleAt   = tick() + 3 + (n % 7),
+		idleKind     = nil,
+		idleT        = 0,
+		idleDur      = 0,
+		attackActive = false,
+		attackT      = 0,
+		conn         = conn,
 	}
+end
+
+-- Triggered when a Lamprey spits bile: snap the mouth open and lunge the head.
+-- The attack VFX (init.client) only knows the firing position, so match the
+-- nearest active Lamprey to it.
+function LampreyBody.triggerAttackNear(pos: Vector3)
+	local bestId: string?  = nil
+	local bestD            = math.huge
+	for unitId, e in active do
+		local d = (e.body.Position - pos).Magnitude
+		if d < bestD then bestD = d; bestId = unitId end
+	end
+	if bestId and bestD < 30 then
+		local e = active[bestId]
+		e.attackActive = true
+		e.attackT      = 0
+		e.idleKind     = nil   -- cancel any idle in progress
+	end
+end
+
+-- ── Animation driver: advances idle/attack state, returns the head pose ────────
+-- Returns (mouthOpen 0..1, yaw, pitch, lunge) applied to the head each frame.
+local function updatePose(e: Entry, dt: number, speedF: number): (number, number, number, number)
+	local mouthOpen, yaw, pitch, lunge = 0.0, 0.0, 0.0, 0.0
+	local now    = tick()
+	local moving = speedF > 0.18
+
+	-- ── Attack: fast snap-open + forward lunge, takes priority over idles ──
+	if e.attackActive then
+		e.attackT += dt
+		local p = e.attackT / ATTACK_DUR
+		if p >= 1 then
+			e.attackActive = false
+		else
+			local o
+			if p < 0.22 then o = p / 0.22            -- snap open
+			elseif p < 0.5 then o = 1                 -- hold (the spit)
+			else o = 1 - (p - 0.5) / 0.5 end          -- close
+			mouthOpen = o
+			lunge     = math.sin(math.min(p / 0.5, 1) * math.pi) * 1.6  -- thrust then recoil
+		end
+	end
+
+	-- ── Idle animations: only while essentially stationary ──
+	if not e.attackActive then
+		if e.idleKind == nil and not moving and now >= e.nextIdleAt then
+			e.idleKind = if math.random() < 0.5 then "yawn" else "shake"
+			e.idleT    = 0
+			e.idleDur  = if e.idleKind == "yawn" then YAWN_DUR else SHAKE_DUR
+		end
+
+		if e.idleKind ~= nil then
+			if moving then
+				-- Interrupted by movement: abandon and reschedule
+				e.idleKind   = nil
+				e.nextIdleAt = now + 4 + math.random() * 5
+			else
+				e.idleT += dt
+				local p = e.idleT / e.idleDur
+				if p >= 1 then
+					e.idleKind   = nil
+					e.nextIdleAt = now + 5 + math.random() * 6
+				elseif e.idleKind == "yawn" then
+					-- Slow, languid wide stretch with the head rearing upward
+					local o
+					if p < 0.30 then o = p / 0.30
+					elseif p < 0.62 then o = 1
+					else o = 1 - (p - 0.62) / 0.38 end
+					o         = o * o * (3 - 2 * o)        -- smoothstep
+					mouthOpen = o
+					pitch     = o * 0.45                   -- nose up
+				else
+					-- "shake": three quick agitated chomps + a rapid head shake
+					local env   = math.sin(p * math.pi)            -- fade in/out
+					local chomp = math.abs(math.sin(p * math.pi * 3))
+					mouthOpen   = chomp * env * 0.85
+					yaw         = math.sin(p * math.pi * 8) * 0.25 * env
+				end
+			end
+		end
+	end
+
+	return mouthOpen, yaw, pitch, lunge
 end
 
 function LampreyBody.detach(unitId: string)
@@ -224,11 +340,14 @@ function LampreyBody.detach(unitId: string)
 end
 
 -- ── Layout: positions every part for one frame ─────────────────────────────────
-local function layout(e: Entry, speedF: number)
+-- mouthOpen/yaw/pitch/lunge come from updatePose (idle yawn/shake + attack snap).
+local function layout(e: Entry, speedF: number, mouthOpen: number, yaw: number, pitch: number, lunge: number)
 	local body   = e.body
 	local cf     = body.CFrame
 	local bpos   = body.Position
-	local groundY = bpos.Y - e.groundOff
+	-- Growth scale derived from the (server-grown) pivot height. 1.0 at spawn.
+	local sc      = body.Size.Y / BASE_HEIGHT
+	local groundY = bpos.Y - body.Size.Y * 0.5
 
 	-- Flat forward / right basis from the body's facing
 	local lv     = cf.LookVector
@@ -240,30 +359,30 @@ local function layout(e: Entry, speedF: number)
 
 	local headBob = math.sin(e.idleClock) * 0.4
 
-	-- ── Build spine points in world space ─────────────────────────────────────
+	-- ── Build spine points in world space (all offsets scale with growth) ──────
 	local pts: { Vector3 } = {}
 	for i = 0, N_SEG do
 		local s     = i / N_SEG
-		local along = HEAD_FWD - s * TOTAL_LEN
+		local along = (HEAD_FWD - s * TOTAL_LEN) * sc
 
 		-- Vertical: blend idle (head out, body buried) with moving (porpoise wave)
-		local idleOff = (IDLE_HEAD_RISE - s * IDLE_SINK_RATE) + headBob * (1 - s)
-		local moveOff = WAVE_AMP * math.sin(e.animClock - s * WAVE_K)
+		local idleOff = ((IDLE_HEAD_RISE - s * IDLE_SINK_RATE) + headBob * (1 - s)) * sc
+		local moveOff = WAVE_AMP * sc * math.sin(e.animClock - s * WAVE_K)
 		local off     = lerp(idleOff, moveOff, speedF)
 
 		-- Lateral slither: subtle when idle, fuller when moving
-		local lat = math.sin(e.latClock - s * LAT_K) * LAT_AMP * (0.35 + 0.65 * speedF)
+		local lat = math.sin(e.latClock - s * LAT_K) * LAT_AMP * sc * (0.35 + 0.65 * speedF)
 
 		pts[i + 1] = centre + fwd * along + right * lat + Vector3.new(0, off, 0)
 	end
 
 	-- ── Segments + knuckle joints ─────────────────────────────────────────────
 	for i = 1, N_SEG do
-		local t = (THICK[i] + THICK[i + 1]) * 0.5
+		local t = (THICK[i] + THICK[i + 1]) * 0.5 * sc
 		orientYBetween(e.segs[i], pts[i], pts[i + 1], t)
 	end
 	for i = 1, N_SEG - 1 do
-		local d = THICK[i + 1]
+		local d = THICK[i + 1] * sc
 		e.knuckles[i].Size   = Vector3.new(d, d, d)
 		e.knuckles[i].CFrame = CFrame.new(pts[i + 1])
 	end
@@ -271,36 +390,50 @@ local function layout(e: Entry, speedF: number)
 	-- ── Dorsal fins on the front three joints (rake backward) ─────────────────
 	for f = 1, 3 do
 		local base = pts[f + 1]
-		local tip  = base + Vector3.new(0, THICK[f + 1] * 0.5 + 1.6, 0) - fwd * 0.8
-		orientYBetween(e.fins[f], base, tip, 0.4)
+		local tip  = base + Vector3.new(0, (THICK[f + 1] * 0.5 + 1.6) * sc, 0) - fwd * (0.8 * sc)
+		orientYBetween(e.fins[f], base, tip, 0.4 * sc)
 	end
 
 	-- ── Head + maw + teeth + eyes ─────────────────────────────────────────────
 	local headPos = pts[1]
 	local headDir = (pts[1] - pts[2])
 	headDir = if headDir.Magnitude > 0.01 then headDir.Unit else fwd
-	local headCF  = CFrame.lookAt(headPos, headPos + headDir)  -- LookVector = headDir
+	-- Base head frame from the spine, then layer the animation pose on top:
+	-- pitch (rear up), yaw (look-around / shake), lunge (thrust forward, -Z).
+	local headCF  = CFrame.lookAt(headPos, headPos + headDir)  -- LookVector = -Z = headDir
+		* CFrame.Angles(pitch, yaw, 0)
+		* CFrame.new(0, 0, -lunge * sc)
+	e.head.Size   = HEAD_SIZE * sc
 	e.head.CFrame = headCF
 
-	-- Maw sits just ahead of the head along its look direction
-	e.maw.CFrame  = headCF * CFrame.new(0, -0.2, -1.7)
+	-- Maw (throat) bulges forward and grows as the mouth opens, revealing the gullet
+	e.maw.Size    = MAW_SIZE * sc * (1 + mouthOpen * 0.6)
+	e.maw.CFrame  = headCF * CFrame.new(0, -0.2 * sc, -(1.3 + mouthOpen * 0.9) * sc)
 
-	-- Fang ring converging toward the mouth's centre
-	local MOUTH_R   = 1.45
-	local MOUTH_FWD = 1.6
+	-- Fang ring: each tooth hinges from a FIXED base ring on the mouth rim — only
+	-- the tip swings. Closed, tips converge inward to a point; open, tips splay
+	-- outward + forward like a lamprey's sucker-mouth flaring its teeth. (Growing
+	-- the base radius with mouthOpen made the whole tooth float off the head.)
+	local BASE_R    = 1.45 * sc                  -- anchored mouth-rim radius (fixed)
+	local MOUTH_FWD = 1.6 * sc
+	local tipOut    = 0.35 + mouthOpen * 1.45    -- tip radius factor (splays open)
+	local tipFwd    = (1.3 + mouthOpen * 0.9) * sc
 	for k = 1, 8 do
 		local ang   = (k / 8) * math.pi * 2
 		local c, sn = math.cos(ang), math.sin(ang)
-		local base  = (headCF * CFrame.new(c * MOUTH_R, sn * MOUTH_R - 0.2, -MOUTH_FWD)).Position
-		local tip   = (headCF * CFrame.new(c * MOUTH_R * 0.35, sn * MOUTH_R * 0.35 - 0.2, -MOUTH_FWD - 1.3)).Position
-		orientYBetween(e.teeth[k], base, tip, 0.42)
+		local base  = (headCF * CFrame.new(c * BASE_R, sn * BASE_R - 0.2 * sc, -MOUTH_FWD)).Position
+		local tip   = (headCF * CFrame.new(c * BASE_R * tipOut, sn * BASE_R * tipOut - 0.2 * sc, -MOUTH_FWD - tipFwd)).Position
+		orientYBetween(e.teeth[k], base, tip, 0.42 * sc)
 	end
 
-	e.eyes[1].CFrame = headCF * CFrame.new(-1.15, 0.95, -0.7)
-	e.eyes[2].CFrame = headCF * CFrame.new( 1.15, 0.95, -0.7)
+	e.eyes[1].Size   = EYE_SIZE * sc
+	e.eyes[2].Size   = EYE_SIZE * sc
+	e.eyes[1].CFrame = headCF * CFrame.new(-1.15 * sc, 0.95 * sc, -0.7 * sc)
+	e.eyes[2].CFrame = headCF * CFrame.new( 1.15 * sc, 0.95 * sc, -0.7 * sc)
 
 	-- ── Dirt: burst whenever a spine point breaches the surface while moving ──
 	if speedF > 0.18 then
+		local now = tick()
 		for i = 1, N_SEG + 1 do
 			local y      = pts[i].Y
 			local was    = e.prevY[i]
@@ -309,6 +442,24 @@ local function layout(e: Entry, speedF: number)
 				host.CFrame = CFrame.new(pts[i].X, groundY + 0.2, pts[i].Z)
 				e.dirt[e.dirtIdx]:Emit(math.random(6, 11))
 				e.dirtIdx = (e.dirtIdx % #e.dirt) + 1
+				if now - e.lastHopSound >= HOP_COOLDOWN then
+					e.lastHopSound = now
+					local p            = Instance.new("Part")
+					p.Anchored         = true; p.CanCollide = false; p.Transparency = 1
+					p.Size             = Vector3.new(1, 1, 1)
+					p.Position         = host.CFrame.Position
+					p.Parent           = workspace
+					local s            = Instance.new("Sound")
+					s.SoundId          = HOP_SND_ID
+					s.PlaybackSpeed    = 0.82 + math.random() * 0.36
+					s.Volume           = 0.65
+					s.RollOffMaxDistance = 80
+					s.RollOffMinDistance = 8
+					s.RollOffMode      = Enum.RollOffMode.Linear
+					s.Parent           = p
+					s:Play()
+					s.Ended:Once(function() p:Destroy() end)
+				end
 			end
 			e.prevY[i] = y
 		end
@@ -358,7 +509,8 @@ function LampreyBody.init(cam: Camera)
 			e.latClock  += dt * LAT_FREQ * math.pi * 2
 			e.idleClock += dt * IDLE_BOB_FREQ * math.pi * 2
 
-			layout(e, speedF)
+			local mouthOpen, yaw, pitch, lunge = updatePose(e, dt, speedF)
+			layout(e, speedF, mouthOpen, yaw, pitch, lunge)
 		end
 	end)
 end

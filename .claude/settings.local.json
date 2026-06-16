@@ -39,7 +39,10 @@
       "Bash(cp src/server/BuildingManager.luau /tmp/BM.bak)",
       "Bash(python apply_droppod.py)",
       "Bash(/c/Users/ohkod/.rojo/bin/rojo build *)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(python -)",
+      "Bash(ls *.toml *.json)",
+      "Bash(which selene *)"
     ]
   }
 }

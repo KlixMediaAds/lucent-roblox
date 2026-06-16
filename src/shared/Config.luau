@@ -109,6 +109,12 @@ Config.LAMPREY_NEST_SIZE       = Vector3.new(11, 7, 11)
 Config.LAMPREY_NEST_EJECT_TIME = 1.5  -- seconds the tubes pulse + the egg arcs out of the nest
 Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10s total per egg)
 
+-- Lamprey growth: each tree a Lamprey fells makes it 15% larger and tougher
+-- (size + max HP scale together), compounding up to a hard cap so a forest-fed
+-- Lamprey becomes a genuine threat without growing without bound.
+Config.LAMPREY_GROWTH_PER_TREE  = 0.15  -- size & HP multiplier gained per tree felled
+Config.LAMPREY_GROWTH_MAX_SCALE = 2.5   -- cap on cumulative size/HP scale (vs. base)
+
 -- Monument (win condition — upgrade from Command Center)
 Config.MONUMENT_COST         = 1500
 Config.MONUMENT_WIN_DURATION = 300    -- seconds to hold monument for victory (5 minutes)
@@ -255,6 +261,7 @@ Config.CAMERA_EDGE_THRESHOLD = 30   -- pixels from screen edge
 Config.REMOTES = {
 	TrainUnit        = "TrainUnit",
 	MoveUnits        = "MoveUnits",
+	FormationMove    = "FormationMove",
 	PlaceBuilding    = "PlaceBuilding",
 	SyncResources    = "SyncResources",
 	UnitSpawned      = "UnitSpawned",
