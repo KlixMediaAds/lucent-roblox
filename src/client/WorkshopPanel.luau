@@ -1,718 +1,533 @@
 --!strict
 --[[
-    WorkshopPanel — progressive reveal tech tree with dynamic ring layout.
+    WorkshopPanel — research / upgrade browser (opens on R).
 
-    Progressive reveal:
-      • Below REVEAL_SHOW (10%): node hidden, ring closes the gap
-      • 10% → 30%: very faint (trans ~0.90 → ~0.75)
-      • 30% → 50%: semi-transparent (trans ~0.75 → ~0.50)
-      • 50% → REVEAL_FULL (70%): fading in (trans ~0.50 → 0)
-      • 70%+: fully opaque
-    Sub-nodes always visible once their parent is unlocked (at minimum faint).
-    Press Y while open to preview all upgrades as gray ghosts.
+    Layout:
+      • Top-left: two category tabs — Infra and Army.
+      • Below the tabs: a scrollable, grocery-style list of that category's upgrades.
+        Each row = [3D thumbnail of the unit/structure] + [upgrade name].
+        In-progress researches jump to the top with a progress bar; completed
+        ("Upgraded") ones sit just below them.
+      • Right: a tooltip pane for the selected upgrade —
+          name → large rotating 3D viewport (drag to spin) → UPGRADE button →
+          one-line description → colour-coded requirement list.
+
+    Research is manual: requirements only gate the UPGRADE button (no cost). Clicking
+    it starts a Config.UPGRADE_TIME research; max Config.MAX_CONCURRENT_RESEARCH per
+    category run at once. The server grants the tech when the timer finishes.
 ]]
 
 local TweenService      = game:GetService("TweenService")
 local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
-local Fusion            = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Fusion"))
 
 local WorkshopPanel = {}
 local C             = UILib.C
 
 -- ── Palette ───────────────────────────────────────────────────────────────────
-local COL_PANEL_BG      = Color3.fromRGB( 7,   9,  18)
-local COL_NODE_LOCKED   = Color3.fromRGB(14,  16,  30)
-local COL_NODE_AVAIL    = Color3.fromRGB(32,  24,   6)
-local COL_NODE_UNLOCKED = Color3.fromRGB( 6,  28,  12)
-local COL_NODE_EXCL     = Color3.fromRGB(12,  12,  18)
-local COL_NODE_GHOST    = Color3.fromRGB(18,  18,  28)
-local COL_BDR_LOCKED    = Color3.fromRGB(40,  50,  85)
-local COL_BDR_AVAIL     = Color3.fromRGB(210,160,  30)
-local COL_BDR_UNLOCKED  = Color3.fromRGB(45, 200,  80)
-local COL_BDR_EXCL      = Color3.fromRGB(25,  25,  35)
-local COL_BDR_GHOST     = Color3.fromRGB(38,  38,  55)
-local COL_CONN_DARK     = Color3.fromRGB(30,  36,  58)
-local COL_CONN_LIT      = Color3.fromRGB(40, 170,  65)
+local COL_PANEL_BG   = Color3.fromRGB( 7,   9,  18)
+local COL_HEADER     = Color3.fromRGB(10,  12,  24)
+local COL_LIST_BG    = Color3.fromRGB( 9,  11,  22)
+local COL_ROW        = Color3.fromRGB(15,  19,  36)
+local COL_ROW_SEL    = Color3.fromRGB(26,  34,  62)
+local COL_TAB_ON     = Color3.fromRGB(30,  42,  78)
+local COL_TAB_OFF    = Color3.fromRGB(13,  16,  30)
+local COL_RED        = Color3.fromRGB(208,  62,  58)
+local COL_YELLOW     = Color3.fromRGB(225, 180,  45)
+local COL_GREEN      = Color3.fromRGB( 52, 200,  92)
 
--- ── Layout constants ──────────────────────────────────────────────────────────
-local NODE_R     = 34
-local ROOT_DIST  = 148
-local CHILD_DIST = 135
-local SPREAD_1   = 0.0
-local SPREAD_2   = math.rad(30)
-local SPREAD_N   = math.rad(38)
+-- ── Geometry ──────────────────────────────────────────────────────────────────
+local PANEL_W   = 880
+local PANEL_H   = 600
+local TITLE_H   = 40
+local CONTENT_Y = TITLE_H + 8
+local CONTENT_H = PANEL_H - CONTENT_Y - 12
 
--- ── Progressive reveal thresholds ────────────────────────────────────────────
-local REVEAL_SHOW = 0.10
-local REVEAL_FULL = 0.70
+local LEFT_X    = 12
+local LEFT_W    = 360
+local TAB_H     = 32
+local LIST_Y    = CONTENT_Y + TAB_H + 8
 
--- ── Panel geometry ────────────────────────────────────────────────────────────
-local PANEL_W   = 820
-local PANEL_H   = 620
-local TITLE_H   = 44
-local MON_H     = 34
-local MON_PAD_B = 10
+local RIGHT_X   = LEFT_X + LEFT_W + 14
+local RIGHT_W   = PANEL_W - RIGHT_X - 12
 
--- ── Module state ──────────────────────────────────────────────────────────────
-local overlay:        Frame?
-local monBtn:         TextButton?
-local monLabel:       TextLabel?
-local tooltipFrame:   Frame?
-local tooltipName:    TextLabel?
-local tooltipDesc:    TextLabel?
-local tooltipCond:    TextLabel?
-local tooltipBarBg:   Frame?
-local tooltipBarFill: Frame?
-local nodeCanvas:     Frame?
+local ROW_H     = 58
+local VP_BOX    = 290   -- large tooltip viewport square
 
+-- ── External hooks ──────────────────────────────────────────────────────────────
+local networkRef:        any
 local hasResearchFn:     ((string) -> boolean)?
 local resourcesFn:       (() -> number)?
-local getCondProgressFn: ((string) -> number)?
-local networkRef:        any
+-- getCondInfo(techName) -> { current:number, needed:number, label:string }
+local getCondInfoFn:     ((string) -> { current: number, needed: number, label: string })?
 local localMonumentTime: number?
-local previewMode:       boolean = false
 
-local scope = Fusion.scoped(Fusion) :: any
+-- ── Module state ──────────────────────────────────────────────────────────────
+local overlay:     Frame?
+local listScroll:  ScrollingFrame?
+local tabButtons:  { [string]: TextButton } = {}
+local autoBtn:     TextButton?
 
-type NodeState = string  -- "locked" | "available" | "unlocked" | "excluded"
-local techStateVals: { [string]: any } = {}
+local currentTab:    string  = "Infra"
+local selectedTech:  string? = nil
+local autoUpgrade:   boolean = true   -- auto-research whenever an upgrade is available
 
-type NodeRef = {
-    circle:  Frame,
-    stroke:  UIStroke,
-    icon:    TextLabel,
-    nameLbl: TextLabel,
-    condLbl: TextLabel,
-    barBg:   Frame,
-    barFill: Frame,
+-- techName → server-clock end time of its in-progress research
+local upgradingEnd: { [string]: number } = {}
+
+-- Per-tech row widgets in the list
+type RowRef = {
+    frame:    TextButton,
+    nameLbl:  TextLabel,
+    tagLbl:   TextLabel,
+    barBg:    Frame,
+    barFill:  Frame,
+    stroke:   UIStroke,
 }
-local nodeRefs: { [string]: NodeRef } = {}
+local rowRefs:    { [string]: RowRef } = {}
+local alphaIndex: { [string]: number } = {}
 
-type ConnRef = { line: Frame }
-local connRefs: { [string]: ConnRef } = {}
+-- Tooltip widgets
+local ttName:     TextLabel?
+local vpHolder:   Frame?
+local ttBtn:      TextButton?
+local ttBtnFill:  Frame?
+local ttBtnLbl:   TextLabel?
+local ttDesc:     TextLabel?
+local ttReqHolder: Frame?
 
-local lastLayoutPositions: { [string]: { x: number, y: number } } = {}
+-- Rotating viewport state
+local currentOrbit: ViewportPreview.Orbit? = nil
+local currentYaw:   number  = math.rad(35)
+local dragging:     boolean = false
+local dragLastX:    number  = 0
 
-type NodeData = {
-    name:     string,
-    parent:   string?,
-    group:    string?,
-    children: { string },
-}
-local fullGraph: { [string]: NodeData } = {}
+-- ── Helpers ─────────────────────────────────────────────────────────────────────
 
--- ── Graph construction ────────────────────────────────────────────────────────
-
-local function buildGraph(): { [string]: NodeData }
-    local nodes: { [string]: NodeData } = {}
-    for name, unlock in (Config.UNLOCKS :: any) do
-        nodes[name] = {
-            name     = name,
-            parent   = (unlock.requires :: string?),
-            group    = (unlock.group    :: string?),
-            children = {},
-        }
-    end
-    for name, node in nodes do
-        if node.parent then
-            local p = nodes[node.parent]
-            if p then table.insert(p.children, name) end
-        end
-    end
-    for _, node in nodes do table.sort(node.children) end
-    return nodes
+local function techTitle(techName: string): string
+    local u = (Config.UNLOCKS :: any)[techName]
+    return (u and (u.title :: string?)) or techName
 end
 
-local function buildFilteredGraph(
-    nodes:   { [string]: NodeData },
-    visible: { [string]: boolean }
-): { [string]: NodeData }
-    local filtered: { [string]: NodeData } = {}
-    for name, node in nodes do
-        if not visible[name] then continue end
-        local filteredParent: string? = nil
-        if node.parent ~= nil and visible[node.parent] == true then
-            filteredParent = node.parent
-        end
-        filtered[name] = {
-            name     = name,
-            parent   = filteredParent,
-            group    = node.group,
-            children = {},
-        }
-    end
-    for name, fnode in filtered do
-        local p = fnode.parent
-        if p and filtered[p] then
-            table.insert(filtered[p].children, name)
-        end
-    end
-    for _, fnode in filtered do table.sort(fnode.children) end
-    return filtered
-end
+type TechState = "done" | "upgrading" | "available" | "locked" | "excluded"
 
--- ── Layout engine ─────────────────────────────────────────────────────────────
-
-type Vec2 = { x: number, y: number }
-
-local function computeLayout(nodes: { [string]: NodeData }): { [string]: Vec2 }
-    local pos: { [string]: Vec2 } = {}
-
-    local roots: { string } = {}
-    for name, node in nodes do
-        if not node.parent then table.insert(roots, name) end
-    end
-    table.sort(roots)
-
-    local n = #roots
-    for i, name in ipairs(roots) do
-        local angle = math.rad(-90) + (i - 1) * (2 * math.pi / n)
-        pos[name] = { x = math.cos(angle) * ROOT_DIST, y = math.sin(angle) * ROOT_DIST }
-    end
-
-    local queue: { string } = {}
-    for _, name in ipairs(roots) do table.insert(queue, name) end
-    local visited: { [string]: boolean } = {}
-    local head = 1
-
-    while head <= #queue do
-        local name = queue[head]; head += 1
-        if visited[name] then continue end
-        visited[name] = true
-
-        local node  = nodes[name]
-        local pPos  = pos[name]
-        if not pPos then continue end
-
-        local kids  = node.children
-        local count = #kids
-        if count == 0 then continue end
-
-        local parentAngle = math.atan2(pPos.y, pPos.x)
-        local halfSpread  = count == 1 and SPREAD_1 or count == 2 and SPREAD_2 or SPREAD_N
-
-        for j, childName in ipairs(kids) do
-            local t     = count == 1 and 0.0 or (j - 1) / (count - 1) - 0.5
-            local angle = parentAngle + t * 2 * halfSpread
-            pos[childName] = {
-                x = pPos.x + math.cos(angle) * CHILD_DIST,
-                y = pPos.y + math.sin(angle) * CHILD_DIST,
-            }
-            table.insert(queue, childName)
-        end
-    end
-
-    return pos
-end
-
--- ── Progress helpers ──────────────────────────────────────────────────────────
-
-local function computeNodeProgress(techName: string): number
+local function groupSiblingDone(techName: string): boolean
+    local u     = (Config.UNLOCKS :: any)[techName]
+    local group = u and (u.group :: string?)
+    if not group then return false end
     local hr = hasResearchFn
-    if not hr then return 1.0 end
-    if hr(techName) then return 1.0 end
-
-    local unlock = (Config.UNLOCKS :: any)[techName]
-
-    -- Excluded: a sibling in the same group was chosen
-    local group = (unlock.group :: string?)
-    if group then
-        for otherName, otherU in (Config.UNLOCKS :: any) do
-            if otherName ~= techName and (otherU.group :: string?) == group and hr(otherName) then
-                return 0
-            end
+    if not hr then return false end
+    for other, otherU in (Config.UNLOCKS :: any) do
+        if other ~= techName and (otherU.group :: string?) == group and hr(other) then
+            return true
         end
     end
-
-    -- Child node: hidden until parent is done, then always at least barely visible
-    local parent = (unlock.requires :: string?)
-    if parent then
-        if not hr(parent) then return 0 end
-        local fn = getCondProgressFn
-        local p  = fn and fn(techName) or 1.0
-        -- Ensure sub-nodes are always visible once the parent is unlocked
-        return math.max(p, REVEAL_SHOW + 0.01)
-    end
-
-    -- Root node: condition progress drives reveal
-    local fn = getCondProgressFn
-    return fn and fn(techName) or 1.0
+    return false
 end
 
--- Piecewise: [REVEAL_SHOW, REVEAL_FULL] → transparency [0.90, 0]
-local function progressToTransparency(p: number): number
-    if p >= REVEAL_FULL then return 0 end
-    if p >= 0.50 then
-        return 0.50 * (1 - (p - 0.50) / (REVEAL_FULL - 0.50))
-    elseif p >= 0.30 then
-        return 0.75 + (0.50 - 0.75) * (p - 0.30) / (0.50 - 0.30)
-    else
-        return 0.90 + (0.75 - 0.90) * (p - REVEAL_SHOW) / (0.30 - REVEAL_SHOW)
+-- Returns the requirement list for a tech: { {label, met, inProgress, detail}, ... }
+local function requirementsFor(techName: string): { { label: string, met: boolean, inProgress: boolean, detail: string } }
+    local u    = (Config.UNLOCKS :: any)[techName]
+    local hr   = hasResearchFn
+    local reqs = {}
+
+    local requires = u and (u.requires :: string?)
+    if requires then
+        local done = hr and hr(requires) or false
+        local prog = upgradingEnd[requires] ~= nil and not done
+        table.insert(reqs, {
+            label      = "Research " .. techTitle(requires),
+            met        = done,
+            inProgress = prog,
+            detail     = done and "Researched" or (prog and "Researching…" or "Not yet researched"),
+        })
     end
+
+    local info = getCondInfoFn and getCondInfoFn(techName)
+    if info then
+        local met = info.current >= info.needed
+        table.insert(reqs, {
+            label      = info.label,
+            met        = met,
+            inProgress = (not met) and info.current > 0,
+            detail     = string.format("%d / %d", math.min(info.current, info.needed), info.needed),
+        })
+    end
+
+    return reqs
 end
 
--- ── State computation ─────────────────────────────────────────────────────────
+local function requirementsMet(techName: string): boolean
+    for _, r in requirementsFor(techName) do
+        if not r.met then return false end
+    end
+    return true
+end
 
-local function computeNodeState(techName: string): NodeState
+local function techStateOf(techName: string): TechState
     local hr = hasResearchFn
-    if not hr then return "locked" end
-    if hr(techName) then return "unlocked" end
+    if hr and hr(techName)        then return "done" end
+    if upgradingEnd[techName]     then return "upgrading" end
+    if groupSiblingDone(techName) then return "excluded" end
+    if requirementsMet(techName)  then return "available" end
+    return "locked"
+end
 
-    local unlock = (Config.UNLOCKS :: any)[techName]
-    local group  = (unlock.group    :: string?)
-    if group then
-        for other, otherU in (Config.UNLOCKS :: any) do
-            if other ~= techName and (otherU.group :: string?) == group and hr(other) then
-                return "excluded"
+-- How many researches are currently running in a category (excludes finished ones).
+local function activeInCategory(cat: string): number
+    local n  = 0
+    local hr = hasResearchFn
+    for tech in upgradingEnd do
+        local u = (Config.UNLOCKS :: any)[tech]
+        if u and (u.category :: string?) == cat and not (hr and hr(tech)) then
+            n += 1
+        end
+    end
+    return n
+end
+
+-- When auto-upgrade is on, start any available research that has a free slot in
+-- its category. Runs regardless of whether the panel is open. Server re-validates
+-- every request, so duplicate/over-cap requests are harmless.
+local function runAutoUpgrade()
+    if not autoUpgrade or not networkRef or not hasResearchFn then return end
+    for _, cat in { "Infra", "Army" } do
+        local slots = Config.MAX_CONCURRENT_RESEARCH - activeInCategory(cat)
+        if slots <= 0 then continue end
+        for tech in (Config.UNLOCKS :: any) do
+            if slots <= 0 then break end
+            local u = (Config.UNLOCKS :: any)[tech]
+            if (u.category :: string) == cat and techStateOf(tech) == "available" then
+                networkRef.requestUpgrade(tech)
+                slots -= 1
             end
         end
     end
-
-    local req = (unlock.requires :: string?)
-    if req and not hr(req) then return "locked" end
-
-    return "available"
 end
 
--- ── Visual helpers ────────────────────────────────────────────────────────────
+-- ── List ─────────────────────────────────────────────────────────────────────
 
-local function colorsForState(st: NodeState): (Color3, Color3)
-    if st == "unlocked" then      return COL_NODE_UNLOCKED, COL_BDR_UNLOCKED
-    elseif st == "available" then return COL_NODE_AVAIL,    COL_BDR_AVAIL
-    elseif st == "excluded"  then return COL_NODE_EXCL,     COL_BDR_EXCL
-    else                          return COL_NODE_LOCKED,   COL_BDR_LOCKED
-    end
-end
-
-local function applyRef(techName: string, st: NodeState)
-    local ref = nodeRefs[techName]
-    if not ref then return end
-    local bg, bdr = colorsForState(st)
-    TweenService:Create(ref.circle, TweenInfo.new(0.22), { BackgroundColor3 = bg  }):Play()
-    TweenService:Create(ref.stroke, TweenInfo.new(0.22), { Color             = bdr }):Play()
-    ref.icon.TextColor3 = bdr
-end
-
-local function applyTransparency(ref: NodeRef, trans: number)
-    local t = TweenInfo.new(0.35)
-    TweenService:Create(ref.circle,  t, { BackgroundTransparency = trans }):Play()
-    TweenService:Create(ref.stroke,  t, { Transparency           = trans }):Play()
-    TweenService:Create(ref.icon,    t, { TextTransparency       = trans }):Play()
-    TweenService:Create(ref.nameLbl, t, { TextTransparency       = trans }):Play()
-    TweenService:Create(ref.condLbl, t, { TextTransparency       = trans }):Play()
-    TweenService:Create(ref.barBg,   t, { BackgroundTransparency = math.min(trans + 0.15, 1) }):Play()
-    TweenService:Create(ref.barFill, t, { BackgroundTransparency = trans }):Play()
-end
-
--- ── Refresh ───────────────────────────────────────────────────────────────────
-
-local function refreshAllNodes()
-    local progressMap: { [string]: number }  = {}
-    local visibleSet:  { [string]: boolean } = {}
-    for techName in fullGraph do
-        local p = computeNodeProgress(techName)
-        progressMap[techName] = p
-        if p >= REVEAL_SHOW then
-            visibleSet[techName] = true
-        end
-    end
-
-    -- In preview mode use the full graph so ghost nodes get proper ring positions
-    local layoutGraph = previewMode and fullGraph or buildFilteredGraph(fullGraph, visibleSet)
-    local positions   = computeLayout(layoutGraph)
-
-    local TI_POS = TweenInfo.new(0.4)
-
-    for techName, ref in nodeRefs do
-        local p       = progressMap[techName] or 0
-        local isReal  = p >= REVEAL_SHOW
-        local isGhost = previewMode and not isReal
-
-        if not isReal and not isGhost then
-            ref.circle.Visible = false
-            ref.barBg.Visible  = false
-            continue
-        end
-
-        ref.circle.Visible = true
-
-        local newPos = positions[techName]
-        if newPos then
-            local nx    = math.floor(newPos.x)
-            local ny    = math.floor(newPos.y)
-            local barNy = ny + NODE_R + 1   -- 1 px below circle bottom edge
-            if isGhost then
-                ref.circle.Position = UDim2.new(0.5, nx, 0.5, ny)
-                ref.barBg.Position  = UDim2.new(0.5, nx, 0.5, barNy)
+local function selectTech(techName: string)
+    selectedTech = techName
+    WorkshopPanel.refreshIfVisible()
+    -- Rebuild the rotating viewport for the new selection.
+    local holder = vpHolder
+    if holder then
+        if currentOrbit then currentOrbit.vpf:Destroy() end
+        local u = (Config.UNLOCKS :: any)[techName]
+        local vp = u and (u.vp :: any)
+        if vp then
+            local teamColor = Players.LocalPlayer.TeamColor
+            local size      = Vector2.new(VP_BOX, VP_BOX)
+            local orbit: ViewportPreview.Orbit
+            if vp.kind == "building" then
+                orbit = ViewportPreview.forBuildingOrbit(vp.name, size, teamColor)
             else
-                local last = lastLayoutPositions[techName]
-                if not last then
-                    ref.circle.Position = UDim2.new(0.5, nx, 0.5, ny)
-                    ref.barBg.Position  = UDim2.new(0.5, nx, 0.5, barNy)
-                elseif last.x ~= nx or last.y ~= ny then
-                    TweenService:Create(ref.circle, TI_POS,
-                        { Position = UDim2.new(0.5, nx, 0.5, ny) }):Play()
-                    TweenService:Create(ref.barBg, TI_POS,
-                        { Position = UDim2.new(0.5, nx, 0.5, barNy) }):Play()
-                end
-                lastLayoutPositions[techName] = { x = nx, y = ny }
+                orbit = ViewportPreview.forUnitOrbit(vp.name, size, teamColor)
             end
-        end
-
-        if isGhost then
-            ref.circle.BackgroundColor3       = COL_NODE_GHOST
-            ref.circle.BackgroundTransparency = 0.55
-            ref.stroke.Color                  = COL_BDR_GHOST
-            ref.stroke.Transparency           = 0.55
-            ref.icon.TextColor3               = COL_BDR_GHOST
-            ref.icon.TextTransparency         = 0.6
-            ref.nameLbl.TextTransparency      = 0.6
-            ref.condLbl.TextTransparency      = 0.75
-            ref.barBg.Visible                 = true
-            ref.barBg.BackgroundTransparency  = 0.6
-            ref.barFill.BackgroundColor3      = COL_BDR_GHOST
-            ref.barFill.BackgroundTransparency = 0.5
-            local fn = getCondProgressFn
-            ref.barFill.Size = UDim2.new(math.clamp(fn and fn(techName) or 0, 0, 1), 0, 1, 0)
-        else
-            local st = computeNodeState(techName)
-
-            local stateVal = techStateVals[techName]
-            if stateVal then
-                if Fusion.peek(stateVal) ~= st then
-                    stateVal:set(st)
-                end
-            end
-            applyTransparency(ref, progressToTransparency(p))
-
-            -- Mini progress bar
-            if st == "excluded" then
-                ref.barBg.Visible = false
-            else
-                ref.barBg.Visible = true
-                local hr = hasResearchFn
-                local fraction: number
-                if hr and hr(techName) then
-                    fraction = 1.0
-                else
-                    local fn = getCondProgressFn
-                    fraction = fn and fn(techName) or 0
-                end
-                ref.barFill.Size = UDim2.new(math.clamp(fraction, 0, 1), 0, 1, 0)
-                ref.barFill.BackgroundColor3 =
-                    st == "unlocked"  and COL_BDR_UNLOCKED or
-                    st == "available" and COL_BDR_AVAIL     or
-                    COL_BDR_LOCKED
-            end
-        end
-    end
-
-    -- Connectors
-    for key, connRef in connRefs do
-        local sep = string.find(key, "|", 1, true)
-        if not sep then continue end
-        local parentName = string.sub(key, 1, sep - 1)
-        local childName  = string.sub(key, sep + 1)
-
-        local pPos = positions[parentName]
-        local cPos = positions[childName]
-
-        if not pPos or not cPos then
-            connRef.line.Visible = false
-            continue
-        end
-
-        connRef.line.Visible = true
-
-        local dx   = cPos.x - pPos.x
-        local dy   = cPos.y - pPos.y
-        local dist = math.sqrt(dx * dx + dy * dy)
-        local len  = math.max(1, dist - NODE_R * 2)
-        local mx   = (pPos.x + cPos.x) * 0.5
-        local my   = (pPos.y + cPos.y) * 0.5
-
-        connRef.line.Size     = UDim2.fromOffset(math.floor(len), 2)
-        connRef.line.Position = UDim2.new(0.5, math.floor(mx), 0.5, math.floor(my))
-        connRef.line.Rotation = math.deg(math.atan2(dy, dx))
-
-        local pIsGhost = previewMode and (progressMap[parentName] or 0) < REVEAL_SHOW
-        local cIsGhost = previewMode and (progressMap[childName]  or 0) < REVEAL_SHOW
-
-        if pIsGhost or cIsGhost then
-            connRef.line.BackgroundColor3       = COL_BDR_GHOST
-            connRef.line.BackgroundTransparency = 0.65
-        else
-            local hr  = hasResearchFn
-            local lit = hr and hr(parentName) and (hr(childName) or computeNodeState(childName) == "available")
-            TweenService:Create(connRef.line, TweenInfo.new(0.22),
-                { BackgroundColor3 = lit and COL_CONN_LIT or COL_CONN_DARK }):Play()
-            local pTrans = progressToTransparency(progressMap[parentName] or 0)
-            local cTrans = progressToTransparency(progressMap[childName]  or 0)
-            connRef.line.BackgroundTransparency = math.max(pTrans, cTrans)
+            orbit.vpf.Position = UDim2.fromScale(0.5, 0.5)
+            orbit.vpf.AnchorPoint = Vector2.new(0.5, 0.5)
+            orbit.vpf.ZIndex   = 54
+            orbit.vpf.Parent   = holder
+            currentOrbit = orbit
+            orbit.setYaw(currentYaw)
         end
     end
 end
 
--- ── Connector placeholder builder ────────────────────────────────────────────
+local function buildRow(techName: string)
+    local scroll = listScroll
+    if not scroll then return end
+    local u = (Config.UNLOCKS :: any)[techName]
 
-local function createConnectorPlaceholder(canvas: Frame, key: string)
-    local line                      = Instance.new("Frame")
-    line.Name                       = "Conn_" .. key
-    line.AnchorPoint                = Vector2.new(0.5, 0.5)
-    line.Size                       = UDim2.fromOffset(0, 2)
-    line.Position                   = UDim2.new(0.5, 0, 0.5, 0)
-    line.BackgroundColor3           = COL_CONN_DARK
-    line.BackgroundTransparency     = 0
-    line.BorderSizePixel            = 0
-    line.ZIndex                     = 50
-    line.Visible                    = false
-    line.Parent                     = canvas
-    connRefs[key] = { line = line }
-end
+    local row                     = Instance.new("TextButton")
+    row.Name                      = "Row_" .. techName
+    row.Size                      = UDim2.new(1, -8, 0, ROW_H)
+    row.BackgroundColor3          = COL_ROW
+    row.BackgroundTransparency    = 0.05
+    row.BorderSizePixel           = 0
+    row.AutoButtonColor           = false
+    row.Text                      = ""
+    row.ZIndex                    = 52
+    row.Parent                    = scroll
+    UILib.corner(row, 8)
+    local stroke = UILib.stroke(row, Color3.fromRGB(28, 36, 64), 1)
 
--- ── Node builder ──────────────────────────────────────────────────────────────
+    -- 3D thumbnail
+    local vp = u and (u.vp :: any)
+    if vp then
+        local thumbSize = Vector2.new(ROW_H - 12, ROW_H - 12)
+        local thumb: ViewportFrame
+        local teamColor = Players.LocalPlayer.TeamColor
+        if vp.kind == "building" then
+            thumb = ViewportPreview.forBuilding(vp.name, thumbSize, teamColor)
+        else
+            thumb = ViewportPreview.forUnit(vp.name, thumbSize, teamColor)
+        end
+        thumb.Position = UDim2.fromOffset(6, 6)
+        thumb.ZIndex   = 53
+        thumb.Parent   = row
+    end
 
-local function buildNode(canvas: Frame, techName: string)
-    local unlock   = (Config.UNLOCKS :: any)[techName]
-    local icon     = (unlock.icon     :: string?) or "◆"
-    local condText = (unlock.condText :: string?) or ""
-    local D        = NODE_R * 2
+    local nameLbl                 = Instance.new("TextLabel")
+    nameLbl.Size                  = UDim2.new(1, -(ROW_H + 86), 1, 0)
+    nameLbl.Position              = UDim2.fromOffset(ROW_H + 2, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.Font                  = Enum.Font.GothamBold
+    nameLbl.TextSize              = 14
+    nameLbl.TextColor3            = C.TEXT
+    nameLbl.TextXAlignment        = Enum.TextXAlignment.Left
+    nameLbl.TextYAlignment        = Enum.TextYAlignment.Center
+    nameLbl.TextTruncate          = Enum.TextTruncate.AtEnd
+    nameLbl.Text                  = techTitle(techName)
+    nameLbl.ZIndex                = 53
+    nameLbl.Parent                = row
 
-    local circle                     = Instance.new("Frame")
-    circle.Name                      = "Node_" .. techName
-    circle.AnchorPoint               = Vector2.new(0.5, 0.5)
-    circle.Size                      = UDim2.fromOffset(D, D)
-    circle.Position                  = UDim2.new(0.5, 0, 0.5, 0)
-    circle.BackgroundColor3          = COL_NODE_LOCKED
-    circle.BackgroundTransparency    = 1
-    circle.BorderSizePixel           = 0
-    circle.ZIndex                    = 52
-    circle.Visible                   = false
-    circle.Parent                    = canvas
-    UILib.corner(circle, NODE_R)
+    local tagLbl                  = Instance.new("TextLabel")
+    tagLbl.Size                   = UDim2.fromOffset(78, ROW_H)
+    tagLbl.AnchorPoint            = Vector2.new(1, 0)
+    tagLbl.Position               = UDim2.new(1, -8, 0, 0)
+    tagLbl.BackgroundTransparency = 1
+    tagLbl.Font                   = Enum.Font.GothamBold
+    tagLbl.TextSize               = 10
+    tagLbl.TextXAlignment         = Enum.TextXAlignment.Right
+    tagLbl.TextYAlignment         = Enum.TextYAlignment.Center
+    tagLbl.Text                   = ""
+    tagLbl.ZIndex                 = 53
+    tagLbl.Parent                 = row
 
-    local stroke          = Instance.new("UIStroke")
-    stroke.Color          = COL_BDR_LOCKED
-    stroke.Thickness      = 2
-    stroke.Transparency   = 1
-    stroke.Parent         = circle
-
-    local iconLbl                    = Instance.new("TextLabel")
-    iconLbl.Size                     = UDim2.new(1, 0, 0.6, 0)
-    iconLbl.Position                 = UDim2.fromOffset(0, 4)
-    iconLbl.BackgroundTransparency   = 1
-    iconLbl.Font                     = Enum.Font.GothamBold
-    iconLbl.TextSize                 = 22
-    iconLbl.TextColor3               = COL_BDR_LOCKED
-    iconLbl.TextTransparency         = 1
-    iconLbl.TextXAlignment           = Enum.TextXAlignment.Center
-    iconLbl.TextYAlignment           = Enum.TextYAlignment.Center
-    iconLbl.Text                     = icon
-    iconLbl.ZIndex                   = 53
-    iconLbl.Parent                   = circle
-
-    local nameLbl                    = Instance.new("TextLabel")
-    nameLbl.Size                     = UDim2.fromOffset(D + 24, 16)
-    nameLbl.AnchorPoint              = Vector2.new(0.5, 0)
-    nameLbl.Position                 = UDim2.new(0.5, 0, 1, 4)
-    nameLbl.BackgroundTransparency   = 1
-    nameLbl.Font                     = Enum.Font.GothamBold
-    nameLbl.TextSize                 = 11
-    nameLbl.TextColor3               = C.TEXT
-    nameLbl.TextTransparency         = 1
-    nameLbl.TextXAlignment           = Enum.TextXAlignment.Center
-    nameLbl.TextTruncate             = Enum.TextTruncate.AtEnd
-    nameLbl.Text                     = techName
-    nameLbl.ZIndex                   = 53
-    nameLbl.Parent                   = circle
-
-    local condLbl                    = Instance.new("TextLabel")
-    condLbl.Size                     = UDim2.fromOffset(D + 32, 13)
-    condLbl.AnchorPoint              = Vector2.new(0.5, 0)
-    condLbl.Position                 = UDim2.new(0.5, 0, 1, 22)
-    condLbl.BackgroundTransparency   = 1
-    condLbl.Font                     = Enum.Font.Gotham
-    condLbl.TextSize                 = 9
-    condLbl.TextColor3               = C.DIM
-    condLbl.TextTransparency         = 1
-    condLbl.TextXAlignment           = Enum.TextXAlignment.Center
-    condLbl.Text                     = condText
-    condLbl.ZIndex                   = 53
-    condLbl.Parent                   = circle
-
-    -- Mini progress bar — sibling on canvas so it isn't affected by the circle's UICorner.
-    -- Sits in the 4 px gap between the circle bottom edge and the name label.
-    local barBg                      = Instance.new("Frame")
-    barBg.Name                       = "ProgBg_" .. techName
-    barBg.Size                       = UDim2.fromOffset(D - 16, 4)
-    barBg.AnchorPoint                = Vector2.new(0.5, 0)
-    barBg.Position                   = UDim2.new(0.5, 0, 0.5, NODE_R + 1)  -- updated in refresh
-    barBg.BackgroundColor3           = Color3.fromRGB(12, 12, 22)
-    barBg.BackgroundTransparency     = 1
-    barBg.BorderSizePixel            = 0
-    barBg.ZIndex                     = 53
-    barBg.ClipsDescendants           = true
-    barBg.Visible                    = false
-    barBg.Parent                     = canvas
+    -- Progress bar (visible only while upgrading)
+    local barBg                   = Instance.new("Frame")
+    barBg.Size                    = UDim2.new(1, -(ROW_H + 16), 0, 4)
+    barBg.AnchorPoint             = Vector2.new(0, 1)
+    barBg.Position                = UDim2.new(0, ROW_H + 2, 1, -7)
+    barBg.BackgroundColor3        = Color3.fromRGB(12, 14, 26)
+    barBg.BorderSizePixel         = 0
+    barBg.ClipsDescendants        = true
+    barBg.Visible                 = false
+    barBg.ZIndex                  = 53
+    barBg.Parent                  = row
     UILib.corner(barBg, 2)
 
-    local barFill                    = Instance.new("Frame")
-    barFill.Name                     = "ProgFill"
-    barFill.Size                     = UDim2.new(0, 0, 1, 0)
-    barFill.BackgroundColor3         = COL_BDR_LOCKED
-    barFill.BackgroundTransparency   = 0
-    barFill.BorderSizePixel          = 0
-    barFill.ZIndex                   = 54
-    barFill.Parent                   = barBg
+    local barFill                 = Instance.new("Frame")
+    barFill.Size                  = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3      = COL_YELLOW
+    barFill.BorderSizePixel       = 0
+    barFill.ZIndex                = 54
+    barFill.Parent                = barBg
     UILib.corner(barFill, 2)
 
-    -- Inject a 3D viewport for techs that unlock a specific unit or building.
-    -- Techs representing passive stat upgrades keep their emoji icon.
-    local TECH_UNIT_MAP:     { [string]: string } = {
-        EliteUnits = "Elite",
-        MedicUnit  = "Medic",
+    row.MouseButton1Click:Connect(function() selectTech(techName) end)
+
+    rowRefs[techName] = {
+        frame = row, nameLbl = nameLbl, tagLbl = tagLbl,
+        barBg = barBg, barFill = barFill, stroke = stroke,
     }
-    local TECH_BUILDING_MAP: { [string]: string } = {
-        TurretUpgrades = "Turret",
-        Relay          = "Relay",
-        CreepyBlob     = "CreepyBlob",
-    }
-
-    local vpfUnit     = TECH_UNIT_MAP[techName]
-    local vpfBuilding = TECH_BUILDING_MAP[techName]
-    if vpfUnit or vpfBuilding then
-        local vpSize = Vector2.new(D - 8, D - 8)
-        local vpf: ViewportFrame
-        if vpfUnit then
-            vpf = ViewportPreview.forUnit(vpfUnit, vpSize)
-        else
-            vpf = ViewportPreview.forBuilding(vpfBuilding :: string, vpSize)
-        end
-        vpf.Position         = UDim2.fromOffset(4, 4)
-        vpf.BackgroundTransparency = 1
-        vpf.ZIndex           = iconLbl.ZIndex
-        vpf.Parent           = circle
-        iconLbl.TextTransparency = 1  -- hide emoji, keep it for state-driven color
-    end
-
-    nodeRefs[techName] = {
-        circle  = circle,
-        stroke  = stroke,
-        icon    = iconLbl,
-        nameLbl = nameLbl,
-        condLbl = condLbl,
-        barBg   = barBg,
-        barFill = barFill,
-    }
-
-    local stateVal = scope:Value("locked" :: NodeState)
-    techStateVals[techName] = stateVal
-    scope:Observer(stateVal):onChange(function()
-        applyRef(techName, Fusion.peek(stateVal) :: NodeState)
-    end)
-
-    circle.MouseEnter:Connect(function()
-        local tf  = tooltipFrame
-        local tn  = tooltipName
-        local td  = tooltipDesc
-        local tc  = tooltipCond
-        local tbg = tooltipBarBg
-        local tfl = tooltipBarFill
-        local c   = nodeCanvas
-        if not tf or not tn or not td or not tc or not c then return end
-
-        tn.Text = techName
-        td.Text = (unlock.desc :: string?) or ""
-
-        local st = Fusion.peek(stateVal) :: NodeState
-        if st == "unlocked" then
-            tc.Text       = "✓  " .. condText
-            tc.TextColor3 = COL_BDR_UNLOCKED
-        elseif st == "available" then
-            tc.Text       = "◎  " .. condText
-            tc.TextColor3 = COL_BDR_AVAIL
-        elseif st == "excluded" then
-            tc.Text       = "✗  Excluded (chose another)"
-            tc.TextColor3 = C.DIM
-        else
-            local req = (unlock.requires :: string?)
-            tc.Text = req and ("⚠ Requires " .. req .. " • " .. condText) or ("◎  " .. condText)
-            tc.TextColor3 = C.SUBTEXT
-        end
-
-        -- Progress bar
-        if tbg and tfl then
-            local hr = hasResearchFn
-            local fraction: number
-            if st == "excluded" then
-                tbg.Visible = false
-                fraction = 0
-            else
-                tbg.Visible = true
-                if hr and hr(techName) then
-                    fraction = 1.0
-                else
-                    local fn = getCondProgressFn
-                    fraction = fn and fn(techName) or 0
-                end
-                local fillColor =
-                    st == "unlocked"  and COL_BDR_UNLOCKED or
-                    st == "available" and COL_BDR_AVAIL     or
-                    COL_BDR_LOCKED
-                tfl.BackgroundColor3 = fillColor
-                tfl.Size = UDim2.new(math.clamp(fraction, 0, 1), 0, 1, 0)
-            end
-        end
-
-        -- Live tooltip position based on where the circle actually is after tweens
-        local canvasAbs  = c.AbsolutePosition
-        local canvasSize = c.AbsoluteSize
-        local circleAbs  = circle.AbsolutePosition
-        local cx  = circleAbs.X - canvasAbs.X + NODE_R
-        local cy  = circleAbs.Y - canvasAbs.Y + NODE_R
-        local tw  = tf.AbsoluteSize.X
-        local xOff = cx + NODE_R + 4
-        if xOff + tw > canvasSize.X then xOff = cx - NODE_R - 4 - tw end
-        tf.Position = UDim2.fromOffset(
-            math.clamp(math.floor(xOff), 0, canvasSize.X - tw),
-            math.clamp(math.floor(cy - 30), 0, canvasSize.Y - 100)
-        )
-        tf.Visible = true
-    end)
-    circle.MouseLeave:Connect(function()
-        if tooltipFrame then tooltipFrame.Visible = false end
-    end)
 end
 
--- ── Monument button helpers ───────────────────────────────────────────────────
+-- ── Tooltip refresh ─────────────────────────────────────────────────────────────
 
-local function refreshMonumentBtn()
-    if not monBtn or not monLabel then return end
-    local t   = localMonumentTime
-    local res = resourcesFn and resourcesFn() or 0
-
-    if t == nil then
-        local canAfford = res >= Config.MONUMENT_COST
-        monBtn.BackgroundColor3 = canAfford and Color3.fromRGB(60, 44, 0) or Color3.fromRGB(22, 22, 22)
-        monLabel.Text       = "★  BUILD MONUMENT  —  ◆ " .. Config.MONUMENT_COST
-        monLabel.TextColor3 = canAfford and C.GOLD or C.DIM
-    elseif t == -1 then
-        monBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 10)
-        monLabel.Text           = "★  MONUMENT  —  Rising…"
-        monLabel.TextColor3     = C.GOLD
-    else
-        local mins = math.floor(t / 60)
-        local secs = t % 60
-        monBtn.BackgroundColor3 = Color3.fromRGB(8, 36, 8)
-        monLabel.Text           = string.format("★  MONUMENT  —  %d:%02d remaining", mins, secs)
-        monLabel.TextColor3     = C.GREEN
+local function clearChildren(holder: Frame)
+    for _, ch in holder:GetChildren() do
+        if ch:IsA("GuiObject") then ch:Destroy() end
     end
+end
+
+local function refreshTooltip()
+    local tech = selectedTech
+    if not (ttName and ttBtn and ttBtnLbl and ttDesc and ttReqHolder) then return end
+    local nameL   = ttName :: TextLabel
+    local btn     = ttBtn :: TextButton
+    local btnLbl  = ttBtnLbl :: TextLabel
+    local btnFill = ttBtnFill :: Frame
+    local descL   = ttDesc :: TextLabel
+    local reqH    = ttReqHolder :: Frame
+
+    if not tech then
+        nameL.Text = "Select an upgrade"
+        descL.Text = ""
+        btn.Visible = false
+        if vpHolder then (vpHolder :: Frame).Visible = false end
+        clearChildren(reqH)
+        return
+    end
+    if vpHolder then (vpHolder :: Frame).Visible = true end
+
+    local u  = (Config.UNLOCKS :: any)[tech]
+    local st = techStateOf(tech)
+
+    nameL.Text = techTitle(tech)
+    descL.Text = (u.desc :: string?) or ""
+
+    -- Upgrade button
+    btn.Visible = true
+    btnFill.Size = UDim2.new(0, 0, 1, 0)
+    if st == "done" then
+        btn.AutoButtonColor   = false
+        btn.BackgroundColor3   = Color3.fromRGB(14, 46, 24)
+        btnLbl.Text            = "✓  UPGRADED"
+        btnLbl.TextColor3      = COL_GREEN
+    elseif st == "upgrading" then
+        btn.AutoButtonColor   = false
+        btn.BackgroundColor3   = Color3.fromRGB(40, 38, 12)
+        btnLbl.Text            = "UPGRADING…"
+        btnLbl.TextColor3      = COL_YELLOW
+    elseif st == "excluded" then
+        btn.AutoButtonColor   = false
+        btn.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
+        btnLbl.Text            = "UNAVAILABLE"
+        btnLbl.TextColor3      = C.DIM
+    elseif st == "available" then
+        local atLimit = activeInCategory(u.category :: string) >= Config.MAX_CONCURRENT_RESEARCH
+        if atLimit then
+            btn.AutoButtonColor = false
+            btn.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+            btnLbl.Text          = "UPGRADE — slots full"
+            btnLbl.TextColor3    = C.DIM
+        else
+            btn.AutoButtonColor  = true
+            btn.BackgroundColor3 = Color3.fromRGB(58, 44, 0)
+            btnLbl.Text          = "▲  UPGRADE"
+            btnLbl.TextColor3    = C.GOLD
+        end
+    else -- locked
+        btn.AutoButtonColor   = false
+        btn.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
+        btnLbl.Text            = "UPGRADE"
+        btnLbl.TextColor3      = C.DIM
+    end
+
+    -- Requirements list
+    clearChildren(reqH)
+    local y = 0
+    for _, r in requirementsFor(tech) do
+        local col = r.met and COL_GREEN or (r.inProgress and COL_YELLOW or COL_RED)
+        local mark = r.met and "●" or (r.inProgress and "◐" or "○")
+
+        local rl                     = Instance.new("TextLabel")
+        rl.Size                      = UDim2.new(1, 0, 0, 18)
+        rl.Position                  = UDim2.fromOffset(0, y)
+        rl.BackgroundTransparency    = 1
+        rl.Font                      = Enum.Font.GothamMedium
+        rl.TextSize                  = 12
+        rl.TextColor3                = col
+        rl.TextXAlignment            = Enum.TextXAlignment.Left
+        rl.TextYAlignment            = Enum.TextYAlignment.Center
+        rl.Text                      = mark .. "  " .. r.label
+        rl.ZIndex                    = 53
+        rl.Parent                    = reqH
+
+        -- Hover reveals the progress detail in place of the label.
+        local baseText = rl.Text
+        local detail   = r.detail
+        rl.MouseEnter:Connect(function() rl.Text = mark .. "  " .. detail end)
+        rl.MouseLeave:Connect(function() rl.Text = baseText end)
+
+        y += 20
+    end
+end
+
+-- ── Full refresh ─────────────────────────────────────────────────────────────
+
+local function rankOf(st: TechState): number
+    if st == "upgrading"  then return 0 end
+    if st == "done"       then return 1 end
+    if st == "available"  then return 2 end
+    if st == "locked"     then return 3 end
+    return 4  -- excluded
+end
+
+local function refreshList()
+    local hr = hasResearchFn
+    for tech, ref in rowRefs do
+        local u   = (Config.UNLOCKS :: any)[tech]
+        local cat = u.category :: string
+        if cat ~= currentTab then
+            ref.frame.Visible = false
+            continue
+        end
+        ref.frame.Visible = true
+
+        -- Drop finished researches from the in-progress set.
+        if upgradingEnd[tech] and hr and hr(tech) then upgradingEnd[tech] = nil end
+
+        local st = techStateOf(tech)
+        ref.frame.LayoutOrder = rankOf(st) * 1000 + (alphaIndex[tech] or 0)
+
+        -- Tag + colours
+        if st == "upgrading" then
+            ref.tagLbl.Text       = "UPGRADING"
+            ref.tagLbl.TextColor3 = COL_YELLOW
+            ref.barBg.Visible     = true
+        elseif st == "done" then
+            ref.tagLbl.Text       = "✓ UPGRADED"
+            ref.tagLbl.TextColor3 = COL_GREEN
+            ref.barBg.Visible     = false
+        elseif st == "available" then
+            ref.tagLbl.Text       = "READY"
+            ref.tagLbl.TextColor3 = C.GOLD
+            ref.barBg.Visible     = false
+        elseif st == "excluded" then
+            ref.tagLbl.Text       = "LOCKED"
+            ref.tagLbl.TextColor3 = C.DIM
+            ref.barBg.Visible     = false
+        else
+            ref.tagLbl.Text       = ""
+            ref.barBg.Visible     = false
+        end
+
+        local isSel = selectedTech == tech
+        ref.frame.BackgroundColor3 = isSel and COL_ROW_SEL or COL_ROW
+        ref.stroke.Color           = isSel and C.GOLD or Color3.fromRGB(28, 36, 64)
+        ref.stroke.Thickness       = isSel and 1.5 or 1
+        ref.nameLbl.TextColor3     = (st == "locked" or st == "excluded") and C.SUBTEXT or C.TEXT
+    end
+end
+
+local function refreshAutoBtn()
+    local b = autoBtn
+    if not b then return end
+    if autoUpgrade then
+        b.BackgroundColor3 = Color3.fromRGB(14, 46, 24)
+        b.TextColor3       = COL_GREEN
+        b.Text             = "AUTO-UPGRADE: ON"
+    else
+        b.BackgroundColor3 = Color3.fromRGB(26, 26, 34)
+        b.TextColor3       = C.DIM
+        b.Text             = "AUTO-UPGRADE: OFF"
+    end
+end
+
+local function setTab(tab: string)
+    currentTab = tab
+    for name, btn in tabButtons do
+        local on = name == tab
+        btn.BackgroundColor3 = on and COL_TAB_ON or COL_TAB_OFF
+        btn.TextColor3       = on and C.TEXT or C.SUBTEXT
+    end
+    -- Auto-select the first visible tech in this tab if nothing selected here.
+    local sel = selectedTech
+    local selCat = sel and (((Config.UNLOCKS :: any)[sel] or {}).category)
+    if selCat ~= tab then
+        local best: string? = nil
+        local bestRank = math.huge
+        for tech in rowRefs do
+            local u = (Config.UNLOCKS :: any)[tech]
+            if (u.category :: string) == tab then
+                local r = rankOf(techStateOf(tech)) * 1000 + (alphaIndex[tech] or 0)
+                if r < bestRank then bestRank = r; best = tech end
+            end
+        end
+        if best then selectTech(best) end
+    end
+    refreshList()
+    refreshTooltip()
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -720,64 +535,72 @@ end
 function WorkshopPanel.show(_ccId: string?)
     local ov = overlay
     if not ov then return end
-    previewMode = false
-    refreshAllNodes()
-    refreshMonumentBtn()
+    setTab(currentTab)   -- refreshes list/tooltip and auto-selects if needed
     ov.Visible = true
 end
 
 function WorkshopPanel.hide()
     if overlay then overlay.Visible = false end
-    if tooltipFrame then tooltipFrame.Visible = false end
-    previewMode = false
 end
 
 function WorkshopPanel.refreshIfVisible()
     if overlay and overlay.Visible then
-        refreshAllNodes()
-        refreshMonumentBtn()
+        refreshList()
+        refreshTooltip()
     end
 end
 
+-- Called by init.client on cond-progress / unlock events so auto-upgrade works
+-- even when the panel is closed.
+function WorkshopPanel.runAutoUpgrade()
+    runAutoUpgrade()
+end
+
+function WorkshopPanel.onUpgradeStarted(techName: string, endTime: number)
+    upgradingEnd[techName] = endTime
+    WorkshopPanel.refreshIfVisible()
+end
+
+-- Monument was removed from this panel; kept as no-ops for existing callers.
 function WorkshopPanel.resetMonument()
     localMonumentTime = nil
-    refreshMonumentBtn()
 end
 
 function WorkshopPanel.onMonumentProgress(timeRemaining: number?)
     localMonumentTime = timeRemaining
-    if overlay and overlay.Visible then refreshMonumentBtn() end
 end
 
 function WorkshopPanel.resetPlayer()
-    lastLayoutPositions = {}
-    previewMode = false
+    upgradingEnd = {}
+    selectedTech = nil
+    autoUpgrade  = true   -- defaults back on each new game
+    refreshAutoBtn()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
 
 function WorkshopPanel.init(
-    network:         any,
-    hasResearch:     (string) -> boolean,
-    resourcesGet:    () -> number,
-    getCondProgress: ((string) -> number)?
+    network:     any,
+    hasResearch: (string) -> boolean,
+    resourcesGet: () -> number,
+    getCondInfo: ((string) -> { current: number, needed: number, label: string })?
 )
-    networkRef          = network
-    hasResearchFn       = hasResearch
-    resourcesFn         = resourcesGet
-    getCondProgressFn   = getCondProgress
+    networkRef      = network
+    hasResearchFn   = hasResearch
+    resourcesFn     = resourcesGet
+    getCondInfoFn   = getCondInfo
 
     local sg = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
 
-    local ov                          = Instance.new("Frame")
-    ov.Name                           = "TechGallery"
-    ov.Size                           = UDim2.new(1, 0, 1, 0)
-    ov.BackgroundColor3               = Color3.fromRGB(0, 0, 0)
-    ov.BackgroundTransparency         = 0.45
-    ov.BorderSizePixel                = 0
-    ov.ZIndex                         = 48
-    ov.Visible                        = false
-    ov.Parent                         = sg
+    local ov                     = Instance.new("Frame")
+    ov.Name                      = "TechGallery"
+    ov.Size                      = UDim2.new(1, 0, 1, 0)
+    ov.BackgroundColor3          = Color3.fromRGB(0, 0, 0)
+    ov.BackgroundTransparency    = 0.45
+    ov.BorderSizePixel           = 0
+    ov.ZIndex                    = 48
+    ov.Visible                   = false
+    ov.Parent                    = sg
     overlay = ov
 
     local dimBlocker                  = Instance.new("TextButton")
@@ -788,241 +611,288 @@ function WorkshopPanel.init(
     dimBlocker.Parent                 = ov
     dimBlocker.MouseButton1Click:Connect(WorkshopPanel.hide)
 
-    local panel                       = Instance.new("Frame")
-    panel.Name                        = "Panel"
-    panel.Size                        = UDim2.fromOffset(PANEL_W, PANEL_H)
-    panel.AnchorPoint                 = Vector2.new(0.5, 0.5)
-    panel.Position                    = UDim2.new(0.5, 0, 0.5, 0)
-    panel.BackgroundColor3            = COL_PANEL_BG
-    panel.BackgroundTransparency      = 0
-    panel.BorderSizePixel             = 0
-    panel.ZIndex                      = 50
-    panel.ClipsDescendants            = true
-    panel.Parent                      = ov
+    local panel                  = Instance.new("Frame")
+    panel.Name                   = "Panel"
+    panel.Size                   = UDim2.fromOffset(PANEL_W, PANEL_H)
+    panel.AnchorPoint            = Vector2.new(0.5, 0.5)
+    panel.Position               = UDim2.new(0.5, 0, 0.5, 0)
+    panel.BackgroundColor3       = COL_PANEL_BG
+    panel.BorderSizePixel        = 0
+    panel.ZIndex                 = 50
+    panel.ClipsDescendants       = true
+    panel.Parent                 = ov
     UILib.corner(panel, 14)
     UILib.stroke(panel, Color3.fromRGB(38, 48, 90), 1.5)
 
-    local titleBar                    = Instance.new("Frame")
-    titleBar.Size                     = UDim2.new(1, 0, 0, TITLE_H)
-    titleBar.BackgroundColor3         = Color3.fromRGB(10, 12, 24)
-    titleBar.BackgroundTransparency   = 0
-    titleBar.BorderSizePixel          = 0
-    titleBar.ZIndex                   = 51
-    titleBar.Parent                   = panel
-    UILib.corner(titleBar, 14)
-
-    local sq             = Instance.new("Frame")
-    sq.Size              = UDim2.new(1, 0, 0, 14)
-    sq.Position          = UDim2.new(0, 0, 1, -14)
-    sq.BackgroundColor3  = Color3.fromRGB(10, 12, 24)
-    sq.BorderSizePixel   = 0
-    sq.ZIndex            = 51
-    sq.Parent            = titleBar
-
-    UILib.lbl(titleBar, "⚗  TECH TREE",
+    -- Title bar
+    local titleBar               = Instance.new("Frame")
+    titleBar.Size                = UDim2.new(1, 0, 0, TITLE_H)
+    titleBar.BackgroundColor3    = COL_HEADER
+    titleBar.BorderSizePixel     = 0
+    titleBar.ZIndex              = 51
+    titleBar.Parent              = panel
+    UILib.lbl(titleBar, "⚗  RESEARCH",
         UDim2.new(1, -50, 1, 0), UDim2.fromOffset(14, 0),
         { bold = true, size = 16, color = C.TEXT, zIndex = 52 })
 
-
-    local closeBtn                    = Instance.new("TextButton")
-    closeBtn.Size                     = UDim2.fromOffset(28, 28)
-    closeBtn.Position                 = UDim2.new(1, -36, 0.5, -14)
-    closeBtn.BackgroundColor3         = Color3.fromRGB(130, 30, 30)
-    closeBtn.BackgroundTransparency   = 0.1
-    closeBtn.BorderSizePixel          = 0
-    closeBtn.Font                     = Enum.Font.GothamBold
-    closeBtn.TextSize                 = 13
-    closeBtn.TextColor3               = C.TEXT
-    closeBtn.Text                     = "✕"
-    closeBtn.ZIndex                   = 53
-    closeBtn.Parent                   = titleBar
+    local closeBtn               = Instance.new("TextButton")
+    closeBtn.Size                = UDim2.fromOffset(28, 28)
+    closeBtn.Position            = UDim2.new(1, -36, 0.5, -14)
+    closeBtn.BackgroundColor3    = Color3.fromRGB(130, 30, 30)
+    closeBtn.BorderSizePixel     = 0
+    closeBtn.Font                = Enum.Font.GothamBold
+    closeBtn.TextSize            = 13
+    closeBtn.TextColor3          = C.TEXT
+    closeBtn.Text                = "✕"
+    closeBtn.ZIndex              = 53
+    closeBtn.Parent              = titleBar
     UILib.corner(closeBtn, 6)
     closeBtn.MouseButton1Click:Connect(WorkshopPanel.hide)
 
-    local mb                          = Instance.new("TextButton")
-    mb.Size                           = UDim2.fromOffset(PANEL_W - 20, MON_H)
-    mb.AnchorPoint                    = Vector2.new(0, 1)
-    mb.Position                       = UDim2.new(0, 10, 1, -MON_PAD_B)
-    mb.BackgroundColor3               = Color3.fromRGB(60, 44, 0)
-    mb.BackgroundTransparency         = 0
-    mb.BorderSizePixel                = 0
-    mb.Text                           = ""
-    mb.AutoButtonColor                = false
-    mb.ZIndex                         = 51
-    mb.Parent                         = panel
-    UILib.corner(mb, 6)
-    UILib.stroke(mb, C.GOLD, 1)
-    monBtn = mb
-
-    local mLbl                        = Instance.new("TextLabel")
-    mLbl.Size                         = UDim2.new(1, 0, 1, 0)
-    mLbl.BackgroundTransparency       = 1
-    mLbl.Font                         = Enum.Font.GothamBold
-    mLbl.TextSize                     = 13
-    mLbl.TextColor3                   = C.GOLD
-    mLbl.TextXAlignment               = Enum.TextXAlignment.Center
-    mLbl.Text                         = "★  BUILD MONUMENT  —  ◆ " .. Config.MONUMENT_COST
-    mLbl.ZIndex                       = 52
-    mLbl.Parent                       = mb
-    monLabel = mLbl
-
-    mb.MouseEnter:Connect(function()
-        if localMonumentTime ~= nil then return end
-        TweenService:Create(mb, TweenInfo.new(0.1), { BackgroundColor3 = Color3.fromRGB(80, 60, 0) }):Play()
-    end)
-    mb.MouseLeave:Connect(function()
-        if localMonumentTime ~= nil then return end
-        TweenService:Create(mb, TweenInfo.new(0.1), { BackgroundColor3 = Color3.fromRGB(60, 44, 0) }):Play()
-    end)
-    mb.MouseButton1Click:Connect(function()
-        if localMonumentTime ~= nil then return end
-        if (resourcesFn and resourcesFn() or 0) < Config.MONUMENT_COST then return end
-        networkRef.buildMonument()
+    -- Auto-upgrade toggle (on by default)
+    local ab                     = Instance.new("TextButton")
+    ab.Size                      = UDim2.fromOffset(168, 26)
+    ab.Position                  = UDim2.new(1, -214, 0.5, -13)
+    ab.BackgroundColor3          = Color3.fromRGB(14, 46, 24)
+    ab.BorderSizePixel           = 0
+    ab.AutoButtonColor           = false
+    ab.Font                      = Enum.Font.GothamBold
+    ab.TextSize                  = 12
+    ab.TextColor3                = COL_GREEN
+    ab.Text                      = "AUTO-UPGRADE: ON"
+    ab.ZIndex                    = 53
+    ab.Parent                    = titleBar
+    UILib.corner(ab, 6)
+    UILib.stroke(ab, Color3.fromRGB(40, 70, 50), 1)
+    autoBtn = ab
+    ab.MouseButton1Click:Connect(function()
+        autoUpgrade = not autoUpgrade
+        refreshAutoBtn()
+        if autoUpgrade then runAutoUpgrade() end
+        WorkshopPanel.refreshIfVisible()
     end)
 
-    local CANVAS_H = PANEL_H - TITLE_H - (MON_PAD_B + MON_H + MON_PAD_B)
-    local canvas                      = Instance.new("Frame")
-    canvas.Name                       = "NodeCanvas"
-    canvas.Size                       = UDim2.fromOffset(PANEL_W, CANVAS_H)
-    canvas.Position                   = UDim2.fromOffset(0, TITLE_H)
-    canvas.BackgroundTransparency     = 1
-    canvas.BorderSizePixel            = 0
-    canvas.ZIndex                     = 50
-    canvas.ClipsDescendants           = false
-    canvas.Parent                     = panel
-    nodeCanvas = canvas
-
-    -- "Press Y to reveal all paths" hint pill at the bottom of the canvas
-    do
-        local tipPill                       = Instance.new("Frame")
-        tipPill.Size                        = UDim2.fromOffset(248, 22)
-        tipPill.AnchorPoint                 = Vector2.new(0.5, 1)
-        tipPill.Position                    = UDim2.new(0.5, 0, 1, -8)
-        tipPill.BackgroundColor3            = Color3.fromRGB(12, 13, 26)
-        tipPill.BackgroundTransparency      = 0.15
-        tipPill.BorderSizePixel             = 0
-        tipPill.ZIndex                      = 51
-        tipPill.Parent                      = canvas
-        UILib.corner(tipPill, 8)
-        UILib.stroke(tipPill, Color3.fromRGB(38, 44, 80), 1)
-
-        local tipLbl                        = Instance.new("TextLabel")
-        tipLbl.Size                         = UDim2.new(1, 0, 1, 0)
-        tipLbl.BackgroundTransparency       = 1
-        tipLbl.Font                         = Enum.Font.Gotham
-        tipLbl.TextSize                     = 10
-        tipLbl.TextColor3                   = Color3.fromRGB(130, 138, 180)
-        tipLbl.TextXAlignment               = Enum.TextXAlignment.Center
-        tipLbl.Text                         = "⌨  Press Y to reveal all upgrade paths"
-        tipLbl.ZIndex                       = 52
-        tipLbl.Parent                       = tipPill
+    -- Category tabs
+    local TAB_W = (LEFT_W - 8) / 2
+    local function makeTab(name: string, label: string, xi: number)
+        local b                  = Instance.new("TextButton")
+        b.Size                   = UDim2.fromOffset(TAB_W, TAB_H)
+        b.Position               = UDim2.fromOffset(LEFT_X + xi * (TAB_W + 8), CONTENT_Y)
+        b.BackgroundColor3       = COL_TAB_OFF
+        b.BorderSizePixel        = 0
+        b.AutoButtonColor        = false
+        b.Font                   = Enum.Font.GothamBold
+        b.TextSize               = 14
+        b.TextColor3             = C.SUBTEXT
+        b.Text                   = label
+        b.ZIndex                 = 52
+        b.Parent                 = panel
+        UILib.corner(b, 8)
+        b.MouseButton1Click:Connect(function() setTab(name) end)
+        tabButtons[name] = b
     end
+    makeTab("Infra", "🏭  INFRA", 0)
+    makeTab("Army",  "⚔  ARMY",  1)
 
-    -- Tooltip (height 100px to fit the progress bar)
-    local tf                          = Instance.new("Frame")
-    tf.Name                           = "Tooltip"
-    tf.Size                           = UDim2.fromOffset(196, 100)
-    tf.BackgroundColor3               = Color3.fromRGB(10, 12, 26)
-    tf.BackgroundTransparency         = 0.05
-    tf.BorderSizePixel                = 0
-    tf.ZIndex                         = 60
-    tf.Visible                        = false
-    tf.Parent                         = canvas
-    UILib.corner(tf, 6)
-    UILib.stroke(tf, Color3.fromRGB(50, 60, 100), 1)
-    tooltipFrame = tf
+    -- Scrollable list
+    local scroll                  = Instance.new("ScrollingFrame")
+    scroll.Name                   = "List"
+    scroll.Size                   = UDim2.fromOffset(LEFT_W, CONTENT_Y + CONTENT_H - LIST_Y)
+    scroll.Position               = UDim2.fromOffset(LEFT_X, LIST_Y)
+    scroll.BackgroundColor3       = COL_LIST_BG
+    scroll.BackgroundTransparency = 0.25
+    scroll.BorderSizePixel        = 0
+    scroll.ScrollBarThickness     = 6
+    scroll.ScrollBarImageColor3   = Color3.fromRGB(50, 62, 100)
+    scroll.CanvasSize             = UDim2.new()
+    scroll.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+    scroll.ZIndex                 = 51
+    scroll.Parent                 = panel
+    UILib.corner(scroll, 8)
+    listScroll = scroll
 
-    local ttName                      = Instance.new("TextLabel")
-    ttName.Size                       = UDim2.new(1, -8, 0, 18)
-    ttName.Position                   = UDim2.fromOffset(6, 5)
-    ttName.BackgroundTransparency     = 1
-    ttName.Font                       = Enum.Font.GothamBold
-    ttName.TextSize                   = 13
-    ttName.TextColor3                 = C.TEXT
-    ttName.TextXAlignment             = Enum.TextXAlignment.Left
-    ttName.Text                       = ""
-    ttName.ZIndex                     = 61
-    ttName.Parent                     = tf
-    tooltipName = ttName
+    local listLayout              = Instance.new("UIListLayout")
+    listLayout.FillDirection      = Enum.FillDirection.Vertical
+    listLayout.SortOrder          = Enum.SortOrder.LayoutOrder
+    listLayout.Padding            = UDim.new(0, 6)
+    listLayout.Parent             = scroll
+    local listPad                 = Instance.new("UIPadding")
+    listPad.PaddingTop            = UDim.new(0, 6)
+    listPad.PaddingBottom         = UDim.new(0, 6)
+    listPad.PaddingLeft           = UDim.new(0, 4)
+    listPad.Parent                = scroll
 
-    local ttDesc                      = Instance.new("TextLabel")
-    ttDesc.Size                       = UDim2.new(1, -8, 0, 30)
-    ttDesc.Position                   = UDim2.fromOffset(6, 24)
-    ttDesc.BackgroundTransparency     = 1
-    ttDesc.Font                       = Enum.Font.Gotham
-    ttDesc.TextSize                   = 10
-    ttDesc.TextColor3                 = C.SUBTEXT
-    ttDesc.TextXAlignment             = Enum.TextXAlignment.Left
-    ttDesc.TextWrapped                = true
-    ttDesc.Text                       = ""
-    ttDesc.ZIndex                     = 61
-    ttDesc.Parent                     = tf
-    tooltipDesc = ttDesc
+    -- ── Tooltip pane ──────────────────────────────────────────────────────────
+    local nameL                   = Instance.new("TextLabel")
+    nameL.Size                    = UDim2.fromOffset(RIGHT_W, 30)
+    nameL.Position                = UDim2.fromOffset(RIGHT_X, CONTENT_Y)
+    nameL.BackgroundTransparency  = 1
+    nameL.Font                    = Enum.Font.GothamBold
+    nameL.TextSize                = 20
+    nameL.TextColor3              = C.TEXT
+    nameL.TextXAlignment          = Enum.TextXAlignment.Center
+    nameL.TextTruncate            = Enum.TextTruncate.AtEnd
+    nameL.Text                    = "Select an upgrade"
+    nameL.ZIndex                  = 52
+    nameL.Parent                  = panel
+    ttName = nameL
 
-    local ttCond                      = Instance.new("TextLabel")
-    ttCond.Size                       = UDim2.new(1, -8, 0, 14)
-    ttCond.Position                   = UDim2.fromOffset(6, 56)
-    ttCond.BackgroundTransparency     = 1
-    ttCond.Font                       = Enum.Font.GothamBold
-    ttCond.TextSize                   = 10
-    ttCond.TextColor3                 = C.DIM
-    ttCond.TextXAlignment             = Enum.TextXAlignment.Left
-    ttCond.Text                       = ""
-    ttCond.ZIndex                     = 61
-    ttCond.Parent                     = tf
-    tooltipCond = ttCond
+    -- Viewport holder (square, centred in the right column)
+    local holder                  = Instance.new("Frame")
+    holder.Size                   = UDim2.fromOffset(VP_BOX, VP_BOX)
+    holder.Position               = UDim2.fromOffset(RIGHT_X + (RIGHT_W - VP_BOX) / 2, CONTENT_Y + 36)
+    holder.BackgroundColor3       = Color3.fromRGB(6, 8, 16)
+    holder.BackgroundTransparency = 0.2
+    holder.BorderSizePixel        = 0
+    holder.ClipsDescendants       = true
+    holder.ZIndex                 = 52
+    holder.Parent                 = panel
+    UILib.corner(holder, 10)
+    UILib.stroke(holder, Color3.fromRGB(34, 44, 80), 1)
+    vpHolder = holder
 
-    -- Progress bar background
-    local barBg                       = Instance.new("Frame")
-    barBg.Name                        = "BarBg"
-    barBg.Size                        = UDim2.new(1, -12, 0, 10)
-    barBg.Position                    = UDim2.fromOffset(6, 76)
-    barBg.BackgroundColor3            = Color3.fromRGB(14, 14, 24)
-    barBg.BackgroundTransparency      = 0
-    barBg.BorderSizePixel             = 0
-    barBg.ZIndex                      = 61
-    barBg.ClipsDescendants            = true
-    barBg.Parent                      = tf
-    UILib.corner(barBg, 4)
-    UILib.stroke(barBg, Color3.fromRGB(30, 30, 50), 1)
-    tooltipBarBg = barBg
+    -- drag-to-spin
+    holder.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragLastX = input.Position.X
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            currentYaw -= (input.Position.X - dragLastX) * 0.01
+            dragLastX   = input.Position.X
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
 
-    -- Progress bar fill
-    local barFill                     = Instance.new("Frame")
-    barFill.Name                      = "BarFill"
-    barFill.Size                      = UDim2.new(0, 0, 1, 0)
-    barFill.BackgroundColor3          = COL_BDR_LOCKED
-    barFill.BackgroundTransparency    = 0
-    barFill.BorderSizePixel           = 0
-    barFill.ZIndex                    = 62
-    barFill.Parent                    = barBg
-    UILib.corner(barFill, 4)
-    tooltipBarFill = barFill
+    -- Upgrade button
+    local UPG_Y = CONTENT_Y + 36 + VP_BOX + 12
+    local btn                     = Instance.new("TextButton")
+    btn.Size                      = UDim2.fromOffset(RIGHT_W, 40)
+    btn.Position                  = UDim2.fromOffset(RIGHT_X, UPG_Y)
+    btn.BackgroundColor3          = Color3.fromRGB(58, 44, 0)
+    btn.BorderSizePixel           = 0
+    btn.AutoButtonColor           = false
+    btn.Text                      = ""
+    btn.ZIndex                    = 52
+    btn.Visible                   = false
+    btn.Parent                    = panel
+    UILib.corner(btn, 8)
+    UILib.stroke(btn, Color3.fromRGB(60, 60, 30), 1)
+    ttBtn = btn
 
-    -- Build graph, create connector placeholders, then node instances
-    fullGraph = buildGraph()
+    local btnFill                 = Instance.new("Frame")
+    btnFill.Size                  = UDim2.new(0, 0, 1, 0)
+    btnFill.BackgroundColor3      = Color3.fromRGB(120, 95, 0)
+    btnFill.BackgroundTransparency = 0.4
+    btnFill.BorderSizePixel       = 0
+    btnFill.ZIndex                = 52
+    btnFill.Parent                = btn
+    UILib.corner(btnFill, 8)
+    ttBtnFill = btnFill
 
-    for techName, node in fullGraph do
-        local parentName = node.parent
-        if parentName then
-            createConnectorPlaceholder(canvas, parentName .. "|" .. techName)
+    local btnLbl                  = Instance.new("TextLabel")
+    btnLbl.Size                   = UDim2.new(1, 0, 1, 0)
+    btnLbl.BackgroundTransparency = 1
+    btnLbl.Font                   = Enum.Font.GothamBold
+    btnLbl.TextSize               = 15
+    btnLbl.TextColor3             = C.GOLD
+    btnLbl.Text                   = "UPGRADE"
+    btnLbl.ZIndex                 = 53
+    btnLbl.Parent                 = btn
+    ttBtnLbl = btnLbl
+
+    btn.MouseButton1Click:Connect(function()
+        local tech = selectedTech
+        if not tech then return end
+        if techStateOf(tech) ~= "available" then return end
+        local u = (Config.UNLOCKS :: any)[tech]
+        if activeInCategory(u.category :: string) >= Config.MAX_CONCURRENT_RESEARCH then return end
+        networkRef.requestUpgrade(tech)
+    end)
+
+    -- Description
+    local descL                   = Instance.new("TextLabel")
+    descL.Size                    = UDim2.fromOffset(RIGHT_W, 38)
+    descL.Position                = UDim2.fromOffset(RIGHT_X, UPG_Y + 48)
+    descL.BackgroundTransparency  = 1
+    descL.Font                    = Enum.Font.Gotham
+    descL.TextSize                = 13
+    descL.TextColor3              = C.SUBTEXT
+    descL.TextXAlignment          = Enum.TextXAlignment.Left
+    descL.TextYAlignment          = Enum.TextYAlignment.Top
+    descL.TextWrapped             = true
+    descL.Text                    = ""
+    descL.ZIndex                  = 52
+    descL.Parent                  = panel
+    ttDesc = descL
+
+    -- Requirements header + list
+    local reqTitle                = Instance.new("TextLabel")
+    reqTitle.Size                 = UDim2.fromOffset(RIGHT_W, 16)
+    reqTitle.Position             = UDim2.fromOffset(RIGHT_X, UPG_Y + 90)
+    reqTitle.BackgroundTransparency = 1
+    reqTitle.Font                 = Enum.Font.GothamBold
+    reqTitle.TextSize             = 11
+    reqTitle.TextColor3           = C.DIM
+    reqTitle.TextXAlignment       = Enum.TextXAlignment.Left
+    reqTitle.Text                 = "REQUIREMENTS"
+    reqTitle.ZIndex               = 52
+    reqTitle.Parent               = panel
+
+    local reqHolder               = Instance.new("Frame")
+    reqHolder.Size                = UDim2.fromOffset(RIGHT_W, CONTENT_Y + CONTENT_H - (UPG_Y + 110))
+    reqHolder.Position            = UDim2.fromOffset(RIGHT_X, UPG_Y + 110)
+    reqHolder.BackgroundTransparency = 1
+    reqHolder.ZIndex              = 52
+    reqHolder.Parent              = panel
+    ttReqHolder = reqHolder
+
+    -- Build rows once for every tech, alpha-indexed within category.
+    do
+        local names: { string } = {}
+        for tech in (Config.UNLOCKS :: any) do table.insert(names, tech) end
+        table.sort(names, function(a, b) return techTitle(a) < techTitle(b) end)
+        for i, tech in ipairs(names) do
+            alphaIndex[tech] = i
+            buildRow(tech)
         end
     end
 
-    for techName in fullGraph do
-        buildNode(canvas, techName)
-    end
+    setTab("Infra")
 
-    -- Y key: toggle preview mode while panel is open
-    UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-        if processed then return end
-        if input.KeyCode ~= Enum.KeyCode.Y then return end
+    -- Per-frame: auto-spin the viewport and advance progress bars while open.
+    RunService.Heartbeat:Connect(function(dt)
         if not (overlay and overlay.Visible) then return end
-        previewMode = not previewMode
-        refreshAllNodes()
-    end)
 
-    refreshMonumentBtn()
+        -- Rotating viewport
+        if currentOrbit then
+            if not dragging then currentYaw += dt * 0.6 end
+            currentOrbit.setYaw(currentYaw)
+        end
+
+        -- Progress bars
+        local now = workspace:GetServerTimeNow()
+        for tech, endT in upgradingEnd do
+            local frac = math.clamp(1 - (endT - now) / Config.UPGRADE_TIME, 0, 1)
+            local ref  = rowRefs[tech]
+            if ref and ref.barBg.Visible then
+                ref.barFill.Size = UDim2.new(frac, 0, 1, 0)
+            end
+            if selectedTech == tech and ttBtnFill then
+                (ttBtnFill :: Frame).Size = UDim2.new(frac, 0, 1, 0)
+            end
+        end
+    end)
 end
 
 return WorkshopPanel

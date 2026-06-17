@@ -1,16 +1,22 @@
 --!strict
 --[[
-	TerrainManager v3 — Roblox Terrain grass platforms with smooth ramps.
+	TerrainManager v4 — StarCraft 2-style tiered Roblox Terrain.
 
-	Symmetry: Z reflection.  Platforms defined for z > 0 are mirrored to z < 0.
+	Three elevation levels built entirely from real Terrain voxels (rock cliffs
+	with a grass cap, grass ramps) — no parts on the ground:
+	  • Level 0 — the flat base ground (grass floor, top at GROUND_TOP).
+	  • Level 1 — a wide "natural" plateau raised one STEP, reached from L0 by
+	    1–2 grass ramps cut into its front cliff.
+	  • Level 2 — a smaller "main" plateau sitting on the back of L1, raised a
+	    further STEP, reached from L1 by 1–2 ramps.
 
-	Layout (one half, z > 0):
-	  • West + East flank platforms — 1 ramp each, elevated corridor blockers
-	  • Center-left + Center-right choke plateaux — 2 ramps each, with a
-	    ~160-stud ground-level gap between them for units to pass through
+	Symmetry: the whole layout is generated for one half and mirrored across a
+	single axis (randomly the world X or Z axis), so both players get identical
+	terrain. Plateau extents, positions and ramp count/placement are randomised
+	each generation.
 
-	Invisible BaseParts in TerrainObstacles preserve the isPositionBlocked API
-	used by BuildingManager / BuildingPlacer.
+	An (empty) TerrainObstacles folder is kept so isPositionBlocked still works
+	for the lane-mode walls; the tiered plateaus are intentionally buildable.
 ]]
 
 local TerrainManager = {}
@@ -18,9 +24,20 @@ local TerrainManager = {}
 local Terrain         = workspace.Terrain
 local obstaclesFolder: Folder? = nil
 
-local HALF   = 432  -- map half-extent (studs)
-local PLAT_H = 10   -- platform height above Y=0
-local RAMP_D = 20   -- horizontal depth of each ramp
+-- Stored layout of the current tiered map, used by heightAt() so structures and
+-- trees can snap to whichever level they sit on. nil = flat / lane (everything
+-- on the logical ground plane).
+local terrainPlan: any = nil
+
+local HALF        = 432   -- map half-extent (studs)
+local GROUND_TOP  = -4    -- top surface of the base ground fill (matches init.server)
+local BODY_BOTTOM = -12   -- bottom of every terrain column
+local STEP        = 12    -- height gained per elevation level
+local CAP         = 4     -- thickness of the grass cap on each plateau top
+local RAMP_D      = 28    -- horizontal depth (run) of each ramp
+
+local L1_TOP = GROUND_TOP + STEP          -- natural plateau top
+local L2_TOP = GROUND_TOP + STEP * 2      -- main plateau top
 
 -- ── Base ground ───────────────────────────────────────────────────────────────
 -- Mirrors the fill in init.server.luau.  Called after Terrain:Clear() to restore
@@ -34,15 +51,14 @@ local function fillBaseGround()
 	)
 end
 
--- ── Helpers ───────────────────────────────────────────────────────────────────
-
+-- ── Lane obstacle helper ────────────────────────────────────────────────────────
 -- Invisible Part added to TerrainObstacles so code-level placement/movement
--- checks (isPositionBlocked) still see elevated terrain as blocked.
-local function addObstacle(cx: number, cz: number, hw: number, hd: number)
+-- checks (isPositionBlocked) still see the lane-mode rock walls as blocked.
+local function addObstacle(cx: number, cz: number, hw: number, hd: number, h: number)
 	local p           = Instance.new("Part")
 	p.Name            = "TerrainObstacle"
-	p.Size            = Vector3.new(hw * 2, PLAT_H, hd * 2)
-	p.CFrame          = CFrame.new(cx, PLAT_H / 2, cz)
+	p.Size            = Vector3.new(hw * 2, h, hd * 2)
+	p.CFrame          = CFrame.new(cx, h / 2, cz)
 	p.Anchored        = true
 	p.CanCollide      = false
 	p.CanQuery        = false
@@ -51,40 +67,9 @@ local function addObstacle(cx: number, cz: number, hw: number, hd: number)
 	p.Parent          = obstaclesFolder
 end
 
--- Raised grass column that fills from terrain base (Y=-12) up to Y=PLAT_H.
-local function fillPlatform(cx: number, cz: number, pw: number, pd: number)
-	local totalH  = PLAT_H + 12
-	local centerY = (PLAT_H - 12) / 2   -- centres the fill so top = PLAT_H, bottom = -12
-	Terrain:FillBlock(
-		CFrame.new(cx, centerY, cz),
-		Vector3.new(pw, totalH, pd),
-		Enum.Material.Grass
-	)
-end
-
--- Wedge ramp from ground (Y=0) up to the platform face at highFaceZ.
---   southward = true  → ramp is on the south face of a z>0 platform:
---     high end at highFaceZ (+Z), low end at highFaceZ − RAMP_D (−Z).
---     FillWedge default orientation has full height at local +Z → no rotation needed.
---   southward = false → ramp is on the north face of a mirrored z<0 platform:
---     high end at highFaceZ (−Z), low end at highFaceZ + RAMP_D (+Z).
---     Rotate 180° around Y so the full-height end faces −Z.
-local function fillRamp(cx: number, highFaceZ: number, rampW: number, southward: boolean)
-	local size = Vector3.new(rampW, PLAT_H, RAMP_D)
-	local cf: CFrame
-	if southward then
-		cf = CFrame.new(cx, PLAT_H / 2, highFaceZ - RAMP_D / 2)
-	else
-		cf = CFrame.new(cx, PLAT_H / 2, highFaceZ + RAMP_D / 2)
-		     * CFrame.Angles(0, math.pi, 0)
-	end
-	Terrain:FillWedge(cf, size, Enum.Material.Grass)
-end
-
 -- ── Generation ────────────────────────────────────────────────────────────────
 
 function TerrainManager.generate(seed: number?)
-	-- Clear existing platforms and obstacle markers
 	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
 	Terrain:Clear()
 	fillBaseGround()
@@ -98,75 +83,97 @@ function TerrainManager.generate(seed: number?)
 		return base + rng:NextNumber(-spread, spread)
 	end
 
-	type RampSpec = { xOff: number, w: number }
-	type PlatSpec = { cx: number, cz: number, pw: number, pd: number, ramps: { RampSpec } }
+	-- Mirror across either the world X axis (reflect Z) or the world Z axis
+	-- (reflect X). We author the layout in plan coords (a = cross axis,
+	-- b = symmetry axis) and map them to world depending on the chosen axis.
+	local mirrorZ = rng:NextInteger(1, 2) == 1
 
-	-- All platforms defined for the z > 0 half; each is mirrored to z < 0 below.
-	local platforms: { PlatSpec } = {
+	local function worldPos(a: number, b: number, y: number): Vector3
+		if mirrorZ then return Vector3.new(a, y, b) else return Vector3.new(b, y, a) end
+	end
+	local function planSize(sa: number, sb: number, sy: number): Vector3
+		if mirrorZ then return Vector3.new(sa, sy, sb) else return Vector3.new(sb, sy, sa) end
+	end
+	-- Uphill world direction (toward the plateau) for the given half (+1 / -1).
+	local function uphill(half: number): Vector3
+		local u = mirrorZ and Vector3.new(0, 0, 1) or Vector3.new(1, 0, 0)
+		return u * half
+	end
 
-		-- ── West flank ─────────────────────────────────────────────────────
-		-- Elevated ledge that narrows the west side corridor without fully sealing it.
-		{
-			cx    = r(-340, 12),
-			cz    = r(220, 15),
-			pw    = r(75, 8),
-			pd    = r(100, 10),
-			ramps = { { xOff = 0, w = r(44, 5) } },
-		},
+	-- A raised plateau: rock column with a thin grass cap on top.
+	local function fillTier(a: number, b: number, sa: number, sb: number, topY: number)
+		local bodyTop = topY - CAP
+		Terrain:FillBlock(
+			CFrame.new(worldPos(a, b, (BODY_BOTTOM + bodyTop) / 2)),
+			planSize(sa, sb, bodyTop - BODY_BOTTOM),
+			Enum.Material.Rock
+		)
+		Terrain:FillBlock(
+			CFrame.new(worldPos(a, b, topY - CAP / 2)),
+			planSize(sa, sb, CAP),
+			Enum.Material.Grass
+		)
+	end
 
-		-- ── East flank (X-mirror of west) ───────────────────────────────────
-		{
-			cx    = r(340, 12),
-			cz    = r(220, 15),
-			pw    = r(75, 8),
-			pd    = r(100, 10),
-			ramps = { { xOff = 0, w = r(44, 5) } },
-		},
+	-- A grass ramp leaning on a plateau's front cliff, descending RAMP_D studs
+	-- toward map centre from the cliff edge (faceB) to the lower level.
+	local function fillRamp(a: number, faceB: number, w: number, half: number, lowTopY: number, highTopY: number)
+		local bCenter = (faceB - RAMP_D / 2) * half
+		local yCenter = (lowTopY + highTopY) / 2
+		local pos     = worldPos(a, bCenter, yCenter)
+		local vY      = Vector3.new(0, 1, 0)
+		local vZ      = uphill(half)            -- wedge full-height face points uphill
+		local vX      = vY:Cross(vZ)
+		Terrain:FillWedge(
+			CFrame.fromMatrix(pos, vX, vY, vZ),
+			Vector3.new(w, highTopY - lowTopY, RAMP_D),
+			Enum.Material.Grass
+		)
+	end
 
-		-- ── Center-left choke plateau ───────────────────────────────────────
-		-- Spans most of the left half; leaves a ~160-stud gap to the right plateau.
-		{
-			cx    = r(-195, 12),
-			cz    = r(135, 12),
-			pw    = r(210, 15),
-			pd    = r(60, 6),
-			ramps = {
-				{ xOff = r(-55, 12), w = r(40, 5) },
-				{ xOff = r( 55, 12), w = r(40, 5) },
-			},
-		},
+	-- Randomised ramp offsets along a plateau's width (1 or 2 ramps, centred).
+	local function rampOffsets(sa: number): { number }
+		if rng:NextInteger(1, 2) == 1 then
+			return { r(0, sa * 0.16) }
+		else
+			local d = r(sa * 0.28, sa * 0.05)
+			return { -d, d }
+		end
+	end
 
-		-- ── Center-right choke plateau (X-mirror) ──────────────────────────
-		{
-			cx    = r(195, 12),
-			cz    = r(135, 12),
-			pw    = r(210, 15),
-			pd    = r(60, 6),
-			ramps = {
-				{ xOff = r(-55, 12), w = r(40, 5) },
-				{ xOff = r( 55, 12), w = r(40, 5) },
-			},
-		},
+	-- ── Layout (authored for the +b half, mirrored to −b) ──────────────────────
+	-- Level 1: wide natural plateau spanning most of the map width. Made deep
+	-- enough that its back edge clears the L2 plateau so L2 sits fully on it.
+	local l1b, l1sa, l1sb = r(235, 12), r(560, 25), r(330, 18)
+	-- Level 2: smaller main plateau on the back of L1.
+	local l2b, l2sa, l2sb = r(305, 12), r(360, 25), r(150, 15)
+
+	local l1RampW, l2RampW = r(42, 4), r(40, 4)
+	local l1Ramps = rampOffsets(l1sa)
+	local l2Ramps = rampOffsets(l2sa)
+
+	local l1Face = l1b - l1sb / 2   -- L1 front cliff (faces centre)
+	local l2Face = l2b - l2sb / 2   -- L2 front cliff (sits on the L1 surface)
+
+	-- Remember the layout so heightAt() can place things on the right level.
+	terrainPlan = {
+		mirrorZ = mirrorZ,
+		l1b = l1b, l1sa = l1sa, l1sb = l1sb,
+		l2b = l2b, l2sa = l2sa, l2sb = l2sb,
+		l1Ramps = l1Ramps, l2Ramps = l2Ramps,
+		l1RampW = l1RampW, l2RampW = l2RampW,
+		l1Face = l1Face, l2Face = l2Face,
 	}
 
-	for _, pl in platforms do
-		local southFaceZ = pl.cz - pl.pd / 2  -- z > 0 platform's face toward map centre
-		local northFaceZ = -(pl.cz - pl.pd / 2)  -- mirrored platform's face toward map centre
+	for _, half in { 1, -1 } do
+		fillTier(0, l1b * half, l1sa, l1sb, L1_TOP)
+		fillTier(0, l2b * half, l2sa, l2sb, L2_TOP)
 
-		-- z > 0 half
-		fillPlatform(pl.cx,  pl.cz, pl.pw, pl.pd)
-		addObstacle(pl.cx,   pl.cz, pl.pw / 2, pl.pd / 2)
-
-		-- z < 0 half
-		fillPlatform(pl.cx, -pl.cz, pl.pw, pl.pd)
-		addObstacle(pl.cx,  -pl.cz, pl.pw / 2, pl.pd / 2)
-
-		for _, rp in pl.ramps do
-			local rx = pl.cx + rp.xOff
-			-- Ramps intentionally have NO obstacle Part — units must be free to walk
-			-- up them without being repelled by the avoidance system.
-			fillRamp(rx,  southFaceZ, rp.w, true)
-			fillRamp(rx, -southFaceZ, rp.w, false)
+		for _, off in l1Ramps do
+			fillRamp(off, l1Face, l1RampW, half, GROUND_TOP, L1_TOP)
+		end
+		for _, off in l2Ramps do
+			fillRamp(off, l2Face, l2RampW, half, L1_TOP, L2_TOP)
 		end
 	end
 end
@@ -177,6 +184,7 @@ end
 -- the north end (Z≈+290).
 
 function TerrainManager.generateLane()
+	terrainPlan = nil
 	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
 	Terrain:Clear()
 	fillBaseGround()
@@ -198,7 +206,7 @@ function TerrainManager.generateLane()
 		Vector3.new(WALL_FILL, totalH, HALF * 2 + 40),
 		Enum.Material.Rock
 	)
-	addObstacle(WALL_CX, 0, WALL_FILL / 2, HALF + 20)
+	addObstacle(WALL_CX, 0, WALL_FILL / 2, HALF + 20, WALL_H)
 
 	-- West rocky wall
 	Terrain:FillBlock(
@@ -206,15 +214,59 @@ function TerrainManager.generateLane()
 		Vector3.new(WALL_FILL, totalH, HALF * 2 + 40),
 		Enum.Material.Rock
 	)
-	addObstacle(-WALL_CX, 0, WALL_FILL / 2, HALF + 20)
+	addObstacle(-WALL_CX, 0, WALL_FILL / 2, HALF + 20, WALL_H)
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function TerrainManager.clear()
+	terrainPlan = nil
 	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
 	Terrain:Clear()
 	fillBaseGround()
+end
+
+-- Surface height (world Y) at an XZ position — the actual terrain top a structure,
+-- tree or unit rests on. GROUND_TOP = ground, L1_TOP = natural plateau, L2_TOP =
+-- main plateau; ramps interpolate. Matches the generated voxels (and downward
+-- raycasts) so analytic placement and ray-based ground-snapping stay in lockstep.
+function TerrainManager.heightAt(x: number, z: number): number
+	local plan = terrainPlan
+	if not plan then return GROUND_TOP end
+
+	-- Convert to plan coords (a = cross axis, b = symmetry axis); the layout is
+	-- symmetric in b, so test against |b|.
+	local a, b
+	if plan.mirrorZ then a, b = x, z else a, b = z, x end
+	local bb = math.abs(b)
+
+	-- Main plateau (highest) — checked first since it sits inside L1.
+	if math.abs(a) <= plan.l2sa / 2
+		and bb >= plan.l2b - plan.l2sb / 2 and bb <= plan.l2b + plan.l2sb / 2 then
+		return L2_TOP
+	end
+	-- L1 → L2 ramps (in front of the main plateau, on the L1 surface).
+	for _, off in plan.l2Ramps do
+		if math.abs(a - off) <= plan.l2RampW / 2
+			and bb >= plan.l2Face - RAMP_D and bb <= plan.l2Face then
+			local t = (bb - (plan.l2Face - RAMP_D)) / RAMP_D
+			return L1_TOP + t * STEP
+		end
+	end
+	-- Natural plateau.
+	if math.abs(a) <= plan.l1sa / 2
+		and bb >= plan.l1b - plan.l1sb / 2 and bb <= plan.l1b + plan.l1sb / 2 then
+		return L1_TOP
+	end
+	-- L0 → L1 ramps.
+	for _, off in plan.l1Ramps do
+		if math.abs(a - off) <= plan.l1RampW / 2
+			and bb >= plan.l1Face - RAMP_D and bb <= plan.l1Face then
+			local t = (bb - (plan.l1Face - RAMP_D)) / RAMP_D
+			return GROUND_TOP + t * STEP
+		end
+	end
+	return GROUND_TOP
 end
 
 -- Returns true if a box centred at pos.X/pos.Z with the given half-extents

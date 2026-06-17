@@ -26,6 +26,7 @@ local HALF         = GRID_CELLS / 2  -- 54
 local FEATHER_FRAC = 0.22   -- outer feather band as fraction of each vision radius
 
 local FOG_Y        = 0.15
+local GROUND_TOP   = -4    -- flat-ground terrain surface (fallback when a ray misses)
 local SHROUD_TRANS = 0.45  -- explored-but-not-visible overlay opacity (0 = fully opaque)
 local GHOST_MOD    = 0.55  -- LocalTransparencyModifier for last-known-position buildings
 local UNIT_FADE    = 0.15  -- seconds for enemy-unit fade in/out
@@ -111,6 +112,20 @@ local function inBounds(row: number, col: number): boolean
 	return row >= 1 and row <= GRID_CELLS and col >= 1 and col <= GRID_CELLS
 end
 
+-- ── Terrain height sampling ─────────────────────────────────────────────────────
+-- Fog tiles are laid on the actual terrain so they step up/down with each tier.
+local terrainRayParams = RaycastParams.new()
+terrainRayParams.FilterType               = Enum.RaycastFilterType.Include
+terrainRayParams.FilterDescendantsInstances = { workspace.Terrain }
+terrainRayParams.IgnoreWater              = true
+
+-- Returns the terrain surface Y for a world XZ so fog tiles rest on each tier.
+-- Falls back to the flat ground level if the ray misses (terrain absent).
+local function tileHeightAt(wx: number, wz: number): number
+	local res = workspace:Raycast(Vector3.new(wx, 320, wz), Vector3.new(0, -640, 0), terrainRayParams)
+	return res and res.Position.Y or GROUND_TOP
+end
+
 -- ── Tile layer ────────────────────────────────────────────────────────────────
 
 local function makeTile(trans: number): Part
@@ -154,14 +169,15 @@ local function buildFogGrid()
 		tileState[row]   = {}
 		for col = 1, GRID_CELLS do
 			local wx, wz = cellCentre(row, col)
+			local ty     = tileHeightAt(wx, wz)  -- terrain-following base height
 
 			local black        = makeTile(0)  -- opaque
-			black.Position     = Vector3.new(wx, FOG_Y, wz)
+			black.Position     = Vector3.new(wx, ty + FOG_Y, wz)
 			black.Parent       = blackF
 			blackLayer[row][col] = black
 
 			local shroud       = makeTile(1)  -- invisible initially
-			shroud.Position    = Vector3.new(wx, FOG_Y + 0.05, wz)
+			shroud.Position    = Vector3.new(wx, ty + FOG_Y + 0.05, wz)
 			shroud.Parent      = shroudF
 			shroudLayer[row][col] = shroud
 

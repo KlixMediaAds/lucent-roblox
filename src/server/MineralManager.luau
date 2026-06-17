@@ -25,6 +25,7 @@ local extractAccum      = 0
 local depositsFolder: Folder
 local resourceManager: any
 local forestManagerRef: any
+local terrainManagerRef: any
 
 local function posKey(v: Vector3): string
 	return math.round(v.X) .. "," .. math.round(v.Z)
@@ -36,7 +37,9 @@ local function makeDepositPart(pos: Vector3)
 	-- Derive a stable seed from grid position so every deposit looks unique but
 	-- regenerates identically on round reset.
 	local seed    = math.abs(math.round(pos.X) * 1000 + math.round(pos.Z) * 7919) % 999983 + 1
-	local cluster = FungiCluster.create(pos, seed, 1.0)
+	-- Sit the cluster on whatever terrain level it landed on (key stays XZ-only).
+	local groundY = terrainManagerRef and terrainManagerRef.heightAt(pos.X, pos.Z) or 0
+	local cluster = FungiCluster.create(Vector3.new(pos.X, groundY, pos.Z), seed, 1.0)
 	cluster.Name  = posKey(pos)
 	cluster.Parent = depositsFolder
 	depositThresholdBand[posKey(pos)] = 4
@@ -438,6 +441,7 @@ end
 function MineralManager.setBuildingManager(_bm: any) end
 function MineralManager.setResearchManager(_rm: any) end
 function MineralManager.setForestManager(fm: any) forestManagerRef = fm end
+function MineralManager.setTerrainManager(tm: any) terrainManagerRef = tm end
 
 -- Spawns `count` deposits clustered in the home direction of ccPos (away from map
 -- centre), snapped to BUILDING_GRID.  Call after init() so depositsFolder exists.

@@ -19,6 +19,7 @@ local resourceManagerRef: any
 local unitManagerRef: any
 local researchManagerRef: any
 local forestManagerRef: any
+local terrainManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
 type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number?, rallyUpgrade: boolean?, rallyPoint: Vector3? }
@@ -195,6 +196,12 @@ end
 -- ── Building creation ─────────────────────────────────────────────────────────
 
 local function createBuilding(player: any, position: Vector3, buildingType: string): string
+	-- Snap to the terrain level under the placement point so structures sit on
+	-- whichever tier they're built on (ground / natural / main plateau).
+	if terrainManagerRef then
+		position = Vector3.new(position.X, terrainManagerRef.heightAt(position.X, position.Z), position.Z)
+	end
+
 	counter += 1
 	local id   = "b" .. counter
 	local size = buildingSize(buildingType)
@@ -1667,6 +1674,10 @@ end
 
 function BuildingManager.setForestManager(fm: any)
 	forestManagerRef = fm
+end
+
+function BuildingManager.setTerrainManager(tm: any)
+	terrainManagerRef = tm
 end
 
 -- ── Destruction VFX (server-side) ────────────────────────────────────────────

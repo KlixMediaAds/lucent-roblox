@@ -238,27 +238,27 @@ MinePanel.init(Network,
 WorkshopPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
-	function(techName: string): number
+	function(techName: string): { current: number, needed: number, label: string }
 		local unlock = (Config.UNLOCKS :: any)[techName]
-		if not unlock then return 0 end
-		local cond  = (unlock.cond :: any)
-		local t     = cond.type :: string
+		if not unlock then return { current = 0, needed = 1, label = "" } end
+		local cond    = (unlock.cond :: any)
+		local label   = (unlock.condText :: string?) or ""
+		local needed  = (cond.count :: number)
+		local t       = cond.type :: string
+		local current = 0
 		if t == "building" then
-			local name  = cond.name  :: string
-			local count = cond.count :: number
+			local name = cond.name :: string
 			if name == "any" then
-				local total = 0
-				for _, v in localBuildCounts do total += v end
-				return math.clamp(total / count, 0, 1)
+				for _, v in localBuildCounts do current += v end
 			else
-				return math.clamp((localBuildCounts[name] or 0) / count, 0, 1)
+				current = localBuildCounts[name] or 0
 			end
 		elseif t == "kill" then
-			return math.clamp(localKillCount / (cond.count :: number), 0, 1)
+			current = localKillCount
 		elseif t == "train" then
-			return math.clamp((localTrainCounts[cond.name :: string] or 0) / (cond.count :: number), 0, 1)
+			current = localTrainCounts[cond.name :: string] or 0
 		end
-		return 0
+		return { current = current, needed = needed, label = label }
 	end)
 TurretPanel.init(Network,
 	function() return currentResources end,
@@ -489,6 +489,8 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 		Tutorial.notify("cc_placed")
 		CameraModule.setFocus(pos)
 		FogManager.forceRefresh()
+		-- Research is now manual, so expose the upgrades button immediately.
+		HUD.setUpgradesVisible(true)
 	end
 
 	if buildingType == "Monument" then
@@ -1399,6 +1401,7 @@ Network.onCondProgressSync(function(stats: any)
 	localBuildCounts = stats.builds  or {}
 	localTrainCounts = stats.trained or {}
 	WorkshopPanel.refreshIfVisible()
+	WorkshopPanel.runAutoUpgrade()  -- newly-met requirements may auto-start
 end)
 
 Network.onUnlockGranted(function(techName: string)
@@ -1414,6 +1417,7 @@ Network.onUnlockGranted(function(techName: string)
 	HUD.refreshTrayState(ownedBuildingCounts)
 	applyUnlockVisuals(techName)
 	UnlockNotification.showUnlock(techName)
+	WorkshopPanel.runAutoUpgrade()  -- a slot freed / a prereq unlocked
 end)
 
 Network.onUnlockChoice(function(group: string, options: {string})
@@ -1422,6 +1426,11 @@ Network.onUnlockChoice(function(group: string, options: {string})
 		-- Optimistically mark it; server will also send UnlockGranted
 		researchedTechs[chosen] = true
 	end)
+end)
+
+-- A research timer has begun on the server (techName, server-clock end time)
+Network.onUpgradeStarted(function(techName: string, endTime: number)
+	WorkshopPanel.onUpgradeStarted(techName, endTime)
 end)
 
 -- ── Monument & win condition ──────────────────────────────────────────────────

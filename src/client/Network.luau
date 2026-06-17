@@ -119,6 +119,16 @@ function Network.sendUnlockChoose(techName: string)
 	RemoteHandler.get(Config.REMOTES.UnlockChoose):FireServer(techName)
 end
 
+-- Player clicked UPGRADE on a tech in the research panel.
+function Network.requestUpgrade(techName: string)
+	RemoteHandler.get(Config.REMOTES.RequestUpgrade):FireServer(techName)
+end
+
+-- techName, endTime (server clock seconds): a research has begun
+function Network.onUpgradeStarted(fn: (string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.UpgradeStarted).OnClientEvent:Connect(fn)
+end
+
 -- { kills, builds, trained } progress payload from server
 function Network.onCondProgressSync(fn: (any) -> ())
 	RemoteHandler.get(Config.REMOTES.CondProgressSync).OnClientEvent:Connect(fn)

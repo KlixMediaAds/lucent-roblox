@@ -25,7 +25,7 @@ local LobbyManager = {}
 local readyMap:        { [number]: boolean } = {}
 local rerollCooldown   = false
 local active           = true
-local terrainEnabled   = false
+local terrainEnabled   = true   -- tiered terrain is on by default
 local terrainManagerRef: any = nil
 local currentGamemode  = "Default"
 
@@ -96,6 +96,11 @@ end
 function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntry }, string) -> ())
 
 	terrainManagerRef = terrainManager
+
+	-- Terrain defaults on, so generate the tiered map immediately for the lobby.
+	if terrainEnabled and terrainManagerRef and currentGamemode == "Default" then
+		terrainManagerRef.generate()
+	end
 
 	Players.PlayerAdded:Connect(function(player)
 		if not active then return end

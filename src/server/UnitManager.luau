@@ -24,6 +24,8 @@ type UnitData = {
 	aggroHome   : Vector3?,
 	atkMoveDest : Vector3?,
 	velocity    : Vector3,   -- current world-space velocity (XZ only)
+	path        : { Vector3 }?, -- nav waypoints toward the move destination (cliff-aware)
+	pathIdx     : number?,   -- index of the current waypoint within `path`
 	moveSpeed   : number,    -- max speed in studs/s
 	accel       : number,    -- velocity lerp factor (higher = snappier)
 	focusBldId  : string?,   -- building ID to focus-fire (nil = none)
@@ -62,6 +64,8 @@ local resourceManagerRef:  any
 local researchManagerRef:  any
 local mineralManagerRef:   any
 local forestManagerRef:    any
+local terrainManagerRef:   any
+local navGridRef:          any
 
 -- Units big enough to bulldoze trees as they move (basic 4×4 infantry can't).
 local FELLS_TREES: { [string]: boolean } = {}
@@ -323,10 +327,11 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	-- Initialize decorator list before any decoration function is called
 	unitDecorators[id] = {}
 
+	local spawnGroundY  = terrainManagerRef and terrainManagerRef.heightAt(position.X, position.Z) or 0
 	local part          = Instance.new("Part")
 	part.Name           = id
 	part.Size           = typeDef.size
-	part.Position       = Vector3.new(position.X, typeDef.size.Y / 2 + 0.1, position.Z)
+	part.Position       = Vector3.new(position.X, spawnGroundY + typeDef.size.Y / 2 + 0.1, position.Z)
 	part.BrickColor     = player.TeamColor
 	part.Material       = Enum.Material.SmoothPlastic
 	part.Anchored       = true
@@ -428,6 +433,22 @@ end
 
 -- ── Move helpers ──────────────────────────────────────────────────────────────
 
+-- Issue a cliff-aware move: route the unit to `slot` via the nav grid so it walks
+-- around cliffs and up ramps instead of trying to climb. The final waypoint is the
+-- exact slot; intermediate ones are cleared of cliffs.
+local function orderMove(data: UnitData, slot: Vector3)
+	if navGridRef then
+		local path = navGridRef.findPath(data.part.Position, slot)
+		data.path    = path
+		data.pathIdx = 1
+		data.target  = path[1]
+	else
+		data.path    = nil
+		data.pathIdx = nil
+		data.target  = slot
+	end
+end
+
 local function applyFormation(valid: { string }, targetPos: Vector3)
 	local cols = math.max(1, math.ceil(math.sqrt(#valid)))
 	for i, id in valid do
@@ -439,10 +460,10 @@ local function applyFormation(valid: { string }, targetPos: Vector3)
 			targetPos.Z + r * Config.UNIT_FORMATION_SPACING
 		)
 		local data = units[id]
-		data.target     = formPos
 		data.aggroId    = nil
 		data.aggroHome  = nil
 		data.focusBldId = nil
+		orderMove(data, formPos)
 	end
 end
 
@@ -473,11 +494,11 @@ local function formationMove(player: Player, ids: { string }, positions: { Vecto
 		local data = units[id]
 		if not data or data.owner ~= player then continue end
 		local slot       = Vector3.new(pos.X, 0, pos.Z)
-		data.target      = slot
 		data.aggroId     = nil
 		data.aggroHome   = nil
 		data.focusBldId  = nil
 		data.atkMoveDest = attackMove and slot or nil
+		orderMove(data, slot)
 		table.insert(valid, id)
 	end
 	if #valid > 0 then
@@ -502,11 +523,11 @@ local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vecto
 			targetPos.Z + r * Config.UNIT_FORMATION_SPACING
 		)
 		local data = units[id]
-		data.target      = formPos
 		data.aggroId     = nil
 		data.aggroHome   = nil
 		data.focusBldId  = nil
 		data.atkMoveDest = formPos
+		orderMove(data, formPos)
 	end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
 end
@@ -735,6 +756,14 @@ function UnitManager.setForestManager(fm: any)
 	forestManagerRef = fm
 end
 
+function UnitManager.setTerrainManager(tm: any)
+	terrainManagerRef = tm
+end
+
+function UnitManager.setNavGrid(ng: any)
+	navGridRef = ng
+end
+
 -- Returns world positions of all of `ownerStr`'s living units. Used by the
 -- Artillery spotter check to decide whether a far target is out of the fog.
 function UnitManager.getOwnerUnitPositions(ownerStr: string): { Vector3 }
@@ -820,12 +849,37 @@ function UnitManager.init(resourceManager)
 	terrainRp.FilterDescendantsInstances = { workspace.Terrain }
 
 	local function getGroundY(x: number, z: number, halfSizeY: number): number
+		-- Origin well above the tallest terrain (main plateau ≈20, lane walls 26).
 		local result = workspace:Raycast(
-			Vector3.new(x, 22, z),
-			Vector3.new(0, -34, 0),
+			Vector3.new(x, 80, z),
+			Vector3.new(0, -120, 0),
 			terrainRp
 		)
 		return if result then result.Position.Y + halfSizeY else halfSizeY + 0.1
+	end
+
+	-- Cliff-aware move resolution: units may only change elevation gently (ramps).
+	-- If a straight step would cross a cliff, slide along it (try each axis alone);
+	-- if both are blocked, hold position. Returns the resolved world position.
+	local NAV_MAX_SLOPE = 0.6
+	local function resolveStep(pos: Vector3, nx: number, nz: number, halfSizeY: number): Vector3
+		local function tryXZ(x: number, z: number): (boolean, number)
+			local gy    = getGroundY(x, z, halfSizeY)
+			local dxx   = x - pos.X
+			local dzz   = z - pos.Z
+			local horiz = math.sqrt(dxx * dxx + dzz * dzz)
+			-- Constant slack absorbs voxel-smoothing noise and the small spawn offset;
+			-- a real cliff (a full STEP ≈12) is far above it and stays blocked.
+			local ok    = math.abs(gy - pos.Y) <= NAV_MAX_SLOPE * horiz + 0.5
+			return ok, gy
+		end
+		local ok, gy = tryXZ(nx, nz)
+		if ok then return Vector3.new(nx, gy, nz) end
+		local okx, gyx = tryXZ(nx, pos.Z)
+		if okx then return Vector3.new(nx, gyx, pos.Z) end
+		local okz, gyz = tryXZ(pos.X, nz)
+		if okz then return Vector3.new(pos.X, gyz, nz) end
+		return pos
 	end
 
 	RunService.Heartbeat:Connect(function(dt)
@@ -1006,7 +1060,7 @@ function UnitManager.init(resourceManager)
 				else
 					local step   = math.min(Config.ROLLER_CHARGE_SPEED * dt, cDist)
 					local np     = pos + cDelta.Unit * step
-					local newPos = Vector3.new(np.X, getGroundY(np.X, np.Z, data.part.Size.Y / 2), np.Z)
+					local newPos = resolveStep(pos, np.X, np.Z, data.part.Size.Y / 2)
 					data.rollerAngle = ((data.rollerAngle or 0) + step * Config.ROLLER_ROLL_PER_STUD) % (2 * math.pi)
 					data.part.CFrame = CFrame.lookAt(newPos, newPos + cDelta.Unit) * CFrame.Angles(-data.rollerAngle, 0, 0)
 				end
@@ -1014,15 +1068,30 @@ function UnitManager.init(resourceManager)
 				-- Normal velocity-based movement
 				local desired = Vector3.zero
 				if data.target then
+					-- Intermediate nav waypoints use a looser arrival radius than the
+					-- final destination so units don't stutter passing through them.
+					local onPath    = data.path ~= nil and data.pathIdx ~= nil
+						and (data.pathIdx :: number) < #(data.path :: { Vector3 })
+						and data.target == (data.path :: { Vector3 })[data.pathIdx :: number]
+					local arriveR   = onPath and 3.5 or 1.5
 					local flat  = Vector3.new(data.target.X, pos.Y, data.target.Z)
 					local delta = flat - pos
-					if delta.Magnitude < 1.5 then
-						-- Arrived
-						data.target = nil
-						if not data.aggroId then
-							data.home = pos
-							if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
-								data.atkMoveDest = nil
+					if delta.Magnitude < arriveR then
+						if onPath then
+							-- Advance to the next waypoint
+							local nextIdx = (data.pathIdx :: number) + 1
+							data.pathIdx  = nextIdx
+							data.target   = (data.path :: { Vector3 })[nextIdx]
+						else
+							-- Arrived at the final destination
+							data.path    = nil
+							data.pathIdx = nil
+							data.target  = nil
+							if not data.aggroId then
+								data.home = pos
+								if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
+									data.atkMoveDest = nil
+								end
 							end
 						end
 					else
@@ -1096,8 +1165,8 @@ function UnitManager.init(resourceManager)
 				if vel.Magnitude > 0.15 then
 					local newX   = math.clamp(pos.X + vel.X * dt, -MOVE_BOUND, MOVE_BOUND)
 					local newZ   = math.clamp(pos.Z + vel.Z * dt, -MOVE_BOUND, MOVE_BOUND)
-					local newY   = getGroundY(newX, newZ, data.part.Size.Y / 2)
-					local newPos = Vector3.new(newX, newY, newZ)
+					-- (elevation handled by resolveStep)
+					local newPos = resolveStep(pos, newX, newZ, data.part.Size.Y / 2)
 					local flatVel = Vector3.new(vel.X, 0, vel.Z)
 					if flatVel.Magnitude > 0.5 then
 						if isRoller then

@@ -67,6 +67,7 @@ local AIManager        = require(script:WaitForChild("AIManager"))
 local LobbyManager     = require(script:WaitForChild("LobbyManager"))
 local TerrainManager   = require(script:WaitForChild("TerrainManager"))
 local ForestManager    = require(script:WaitForChild("ForestManager"))
+local NavGrid          = require(script:WaitForChild("NavGrid"))
 
 TeamManager.init()
 ResourceManager.init()
@@ -85,9 +86,16 @@ AIManager.init(UnitManager, BuildingManager, ResourceManager)
 AIManager.setResearchManager(ResearchManager)
 
 ForestManager.init(MineralManager)
+ForestManager.setTerrainManager(TerrainManager)
 BuildingManager.setForestManager(ForestManager)
+BuildingManager.setTerrainManager(TerrainManager)
 UnitManager.setForestManager(ForestManager)
 MineralManager.setForestManager(ForestManager)
+
+NavGrid.setTerrainManager(TerrainManager)
+UnitManager.setTerrainManager(TerrainManager)
+UnitManager.setNavGrid(NavGrid)
+MineralManager.setTerrainManager(TerrainManager)
 
 -- ── Game end / reset ──────────────────────────────────────────────────────────
 local gameResetInProgress = false
@@ -335,6 +343,10 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	if isLane then
 		TerrainManager.generateLane()
 	end
+
+	-- Build the navigation grid from the now-final terrain so units route around
+	-- cliffs and up ramps.
+	NavGrid.rebuild()
 
 	-- Auto-place every human player's base
 	for _, player in Players:GetPlayers() do

@@ -14,12 +14,12 @@ function ResearchManager.addCompletionHook(fn: (any, string) -> ())
 end
 
 type PlayerState = {
-	done:        { [string]: boolean },
-	excluded:    { [string]: boolean },
-	builds:      { [string]: number  },
-	kills:       number,
-	trained:     { [string]: number  },
-	groupsFired: { [string]: boolean },
+	done:      { [string]: boolean },
+	excluded:  { [string]: boolean },
+	builds:    { [string]: number  },
+	kills:     number,
+	trained:   { [string]: number  },
+	upgrading: { [string]: number  },  -- techName → server end-time of its 30 s research
 }
 
 local playerState: { [number]: PlayerState } = {}
@@ -28,12 +28,12 @@ local function getState(player: any): PlayerState
 	local id = player.UserId
 	if not playerState[id] then
 		playerState[id] = {
-			done        = {},
-			excluded    = {},
-			builds      = {},
-			kills       = 0,
-			trained     = {},
-			groupsFired = {},
+			done      = {},
+			excluded  = {},
+			builds    = {},
+			kills     = 0,
+			trained   = {},
+			upgrading = {},
 		}
 	end
 	return playerState[id]
@@ -60,56 +60,54 @@ local function conditionMet(state: PlayerState, cond: any): boolean
 	return false
 end
 
--- Forward-declared so grantTech and checkConditions can mutually call each other
-local checkConditions: (any) -> ()
+local function categoryOf(techName: string): string
+	local unlock = (Config.UNLOCKS :: any)[techName]
+	return unlock and (unlock.category :: string?) or "Infra"
+end
+
+-- True if a sibling in the same mutually-exclusive group has already been chosen.
+local function isExcluded(state: PlayerState, techName: string): boolean
+	if state.excluded[techName] then return true end
+	local unlock = (Config.UNLOCKS :: any)[techName]
+	local group  = unlock and (unlock.group :: string?)
+	if not group then return false end
+	for other, otherU in (Config.UNLOCKS :: any) do
+		if other ~= techName and (otherU.group :: string?) == group and state.done[other] then
+			return true
+		end
+	end
+	return false
+end
+
+-- All requirements satisfied to begin researching this tech (does not check
+-- concurrency, done/in-progress state, or exclusion — callers handle those).
+local function requirementsMet(state: PlayerState, techName: string): boolean
+	local unlock = (Config.UNLOCKS :: any)[techName]
+	if not unlock then return false end
+	local requires = unlock.requires :: string?
+	if requires and not state.done[requires] then return false end
+	return conditionMet(state, unlock.cond)
+end
 
 local function grantTech(player: any, techName: string)
 	local state = getState(player)
-	state.done[techName] = true
+	if state.done[techName] then return end
+	state.done[techName]      = true
+	state.upgrading[techName] = nil
+
+	-- Lock out the other members of a mutually-exclusive group.
+	local unlock = (Config.UNLOCKS :: any)[techName]
+	local group  = unlock and (unlock.group :: string?)
+	if group then
+		for other, otherU in (Config.UNLOCKS :: any) do
+			if other ~= techName and (otherU.group :: string?) == group then
+				state.excluded[other] = true
+			end
+		end
+	end
+
 	RemoteHandler.get(Config.REMOTES.UnlockGranted):FireClient(player, techName)
 	for _, hook in completionHooks do hook(player, techName) end
-	checkConditions(player)  -- re-evaluate anything that was blocked by this prerequisite
-end
-
-checkConditions = function(player: any)
-	local state = getState(player)
-
-	-- Gather which groups have a member whose conditions are newly met
-	local pendingGroups: { [string]: { string } } = {}
-
-	for techName, unlock in (Config.UNLOCKS :: any) do
-		if state.done[techName]     then continue end
-		if state.excluded[techName] then continue end
-
-		local requires = unlock.requires :: string?
-		if requires and not state.done[requires] then continue end
-
-		if not conditionMet(state, unlock.cond) then continue end
-
-		local group = unlock.group :: string?
-		if not group then
-			-- No group: grant immediately
-			grantTech(player, techName)
-		else
-			if not state.groupsFired[group] then
-				if not pendingGroups[group] then pendingGroups[group] = {} end
-				table.insert(pendingGroups[group], techName)
-			end
-		end
-	end
-
-	-- Fire one choice prompt per pending group
-	for group, options in pendingGroups do
-		-- Collect all members of this group (not just the ones whose cond is met)
-		local allOptions: { string } = {}
-		for techName, unlock in (Config.UNLOCKS :: any) do
-			if (unlock.group :: string?) == group then
-				table.insert(allOptions, techName)
-			end
-		end
-		state.groupsFired[group] = true
-		RemoteHandler.get(Config.REMOTES.UnlockChoice):FireClient(player, group, allOptions)
-	end
 end
 
 -- ── Public recording API ──────────────────────────────────────────────────────
@@ -127,7 +125,6 @@ function ResearchManager.recordBuildingPlaced(player: any, buildingType: string)
 	if not player or player.UserId <= 0 then return end
 	local state = getState(player)
 	state.builds[buildingType] = (state.builds[buildingType] or 0) + 1
-	checkConditions(player)
 	fireProgressSync(player)
 end
 
@@ -138,7 +135,6 @@ function ResearchManager.recordEnemyKilled(attackerUserIdStr: string)
 	if not player then return end
 	local state = getState(player)
 	state.kills += 1
-	checkConditions(player)
 	fireProgressSync(player)
 end
 
@@ -146,8 +142,43 @@ function ResearchManager.recordUnitTrained(player: any, unitType: string)
 	if not player or player.UserId <= 0 then return end
 	local state = getState(player)
 	state.trained[unitType] = (state.trained[unitType] or 0) + 1
-	checkConditions(player)
 	fireProgressSync(player)
+end
+
+-- ── Manual upgrade flow ───────────────────────────────────────────────────────
+
+-- Player clicked UPGRADE. Validate requirements & concurrency, then start a timed
+-- research that grants the tech when it completes.
+function ResearchManager.requestUpgrade(player: any, techName: string)
+	if not player or player.UserId <= 0 then return end
+	if type(techName) ~= "string" then return end
+	local unlock = (Config.UNLOCKS :: any)[techName]
+	if not unlock then return end
+
+	local state = getState(player)
+	if state.done[techName] then return end
+	if state.upgrading[techName] then return end
+	if isExcluded(state, techName) then return end
+	if not requirementsMet(state, techName) then return end
+
+	-- Concurrency cap is per-category.
+	local cat = categoryOf(techName)
+	local active = 0
+	for name in state.upgrading do
+		if categoryOf(name) == cat then active += 1 end
+	end
+	if active >= Config.MAX_CONCURRENT_RESEARCH then return end
+
+	local endTime = workspace:GetServerTimeNow() + Config.UPGRADE_TIME
+	state.upgrading[techName] = endTime
+	RemoteHandler.get(Config.REMOTES.UpgradeStarted):FireClient(player, techName, endTime)
+
+	task.delay(Config.UPGRADE_TIME, function()
+		-- Bail if the player reset (state table swapped) or the research was cleared.
+		if getState(player) ~= state then return end
+		if not state.upgrading[techName] then return end
+		grantTech(player, techName)
+	end)
 end
 
 -- ── Compatibility API (used by UnitManager, BuildingManager, AIManager) ───────
@@ -159,12 +190,12 @@ end
 
 function ResearchManager.resetPlayer(player: any)
 	playerState[player.UserId] = {
-		done        = {},
-		excluded    = {},
-		builds      = {},
-		kills       = 0,
-		trained     = {},
-		groupsFired = {},
+		done      = {},
+		excluded  = {},
+		builds    = {},
+		kills     = 0,
+		trained   = {},
+		upgrading = {},
 	}
 	fireProgressSync(player)
 end
@@ -178,7 +209,7 @@ function ResearchManager.getStats(player: any): { kills: number, unitsTrained: n
 	return { kills = state.kills, unitsTrained = totalTrained, buildingsBuilt = totalBuilds }
 end
 
--- AI shortcut: grant a tech directly without conditions (bots don't do the gallery flow)
+-- AI shortcut: grant a tech directly without conditions or the research timer.
 function ResearchManager.startForPlayer(player: any, _workshopId: string, techName: string)
 	local tech = (Config.UNLOCKS :: any)[techName]
 	if not tech then return end
@@ -188,30 +219,9 @@ function ResearchManager.startForPlayer(player: any, _workshopId: string, techNa
 end
 
 function ResearchManager.init()
-	-- Handle player's choice in a grouped unlock
-	RemoteHandler.get(Config.REMOTES.UnlockChoose).OnServerEvent:Connect(
+	RemoteHandler.get(Config.REMOTES.RequestUpgrade).OnServerEvent:Connect(
 		function(player: any, techName: any)
-			if type(techName) ~= "string" then return end
-			local unlock = (Config.UNLOCKS :: any)[techName]
-			if not unlock then return end
-
-			local state = getState(player)
-			if state.done[techName] or state.excluded[techName] then return end
-
-			local group = unlock.group :: string?
-
-			-- Validate: the group choice was already fired for this player
-			if group and not state.groupsFired[group] then return end
-
-			-- Grant chosen tech, exclude all other members of the same group
-			grantTech(player, techName)
-			if group then
-				for otherName, otherUnlock in (Config.UNLOCKS :: any) do
-					if (otherUnlock.group :: string?) == group and otherName ~= techName then
-						state.excluded[otherName] = true
-					end
-				end
-			end
+			ResearchManager.requestUpgrade(player, techName)
 		end
 	)
 end
