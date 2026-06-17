@@ -42,7 +42,8 @@
       "Bash(echo \"EXIT:$?\")",
       "Bash(python -)",
       "Bash(ls *.toml *.json)",
-      "Bash(which selene *)"
+      "Bash(which selene *)",
+      "Bash(which rojo *)"
     ]
   }
 }

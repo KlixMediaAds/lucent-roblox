@@ -21,6 +21,7 @@ local SpiderLegs     = require(script:WaitForChild("SpiderLegs"))
 local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local WalkerLegs     = require(script:WaitForChild("WalkerLegs"))
 local LampreyBody    = require(script:WaitForChild("LampreyBody"))
+local HagfishBody    = require(script:WaitForChild("HagfishBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
@@ -217,6 +218,7 @@ SpiderLegs.init(workspace.CurrentCamera)
 CreepyLegs.init(workspace.CurrentCamera)
 WalkerLegs.init(workspace.CurrentCamera)
 LampreyBody.init(workspace.CurrentCamera)
+HagfishBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
@@ -623,7 +625,16 @@ UnitController.onBlobSelected(function(blobId: string?)
 end)
 
 -- ── Lamprey Nest panel ─────────────────────────────────────────────────────────
+local selectedNestId: string? = nil
+local rallyMarker:    Part?   = nil
+
+local function nestModel(nestId: string): Instance?
+	local bf = workspace:FindFirstChild("Buildings") :: Folder?
+	return bf and bf:FindFirstChild(nestId)
+end
+
 UnitController.onLampreyNestSelected(function(nestId: string?)
+	selectedNestId = nestId
 	if nestId then
 		BarracksPanel.hide()
 		MinePanel.hide()
@@ -635,6 +646,68 @@ UnitController.onLampreyNestSelected(function(nestId: string?)
 		LampreyNestPanel.show(nestId)
 	else
 		LampreyNestPanel.hide()
+	end
+end)
+
+-- A flat ground disc showing where an upgraded nest will launch its eggs.
+local function ensureRallyMarker(): Part
+	if rallyMarker and rallyMarker.Parent then return rallyMarker end
+	local p        = Instance.new("Part")
+	p.Name         = "_NestRallyMarker"
+	p.Shape        = Enum.PartType.Cylinder
+	p.Size         = Vector3.new(0.4, 8, 8)   -- thin disc (cylinder axis = local X → laid flat)
+	p.Color        = Color3.fromRGB(220, 150, 60)
+	p.Material     = Enum.Material.Neon
+	p.Transparency = 0.55
+	p.Anchored     = true
+	p.CanCollide   = false
+	p.CanQuery     = false
+	p.CastShadow   = false
+	p.Parent       = workspace
+	rallyMarker    = p
+	return p
+end
+
+-- Show/track the rally marker while an upgraded nest is selected; follows the
+-- replicated RallyPoint attribute (so it reflects the server's clamped value).
+RunService.RenderStepped:Connect(function()
+	local show = selectedNestId ~= nil and LampreyNestPanel.nestHasRally(selectedNestId)
+	if not show then
+		if rallyMarker then rallyMarker.Parent = nil end
+		return
+	end
+	local model = selectedNestId and nestModel(selectedNestId)
+	local rp    = model and model:GetAttribute("RallyPoint")
+	if typeof(rp) ~= "Vector3" then
+		-- No rally set yet: park the marker on the nest itself.
+		local base = model and model:FindFirstChild("Base") :: BasePart?
+		rp = base and Vector3.new(base.Position.X, 0, base.Position.Z) or nil
+	end
+	if typeof(rp) == "Vector3" then
+		local m  = ensureRallyMarker()
+		local t  = tick() * 2
+		m.Transparency = 0.5 + math.sin(t) * 0.12
+		m.CFrame = CFrame.new((rp :: Vector3).X, 0.2, (rp :: Vector3).Z) * CFrame.Angles(0, 0, math.rad(90))
+	end
+end)
+
+-- Right-click while a launcher-upgraded nest is selected: set the egg-launch rally
+-- point on EVERY selected nest that has the upgrade. Each nest clamps the point to
+-- its own range relative to its own position, so they all aim at the same spot.
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
+	if not selectedNestId or not LampreyNestPanel.nestHasRally(selectedNestId) then return end
+	local target = CameraModule.getGroundPosition()
+	if not target then return end
+	target = Vector3.new(target.X, 0, target.Z)
+
+	local sent: { [string]: boolean } = {}
+	for _, bid in UnitController.getSelectedBuildingIds() do
+		if not sent[bid] and LampreyNestPanel.nestHasRally(bid) then
+			sent[bid] = true
+			Network.setNestRally(bid, target)
+		end
 	end
 end)
 
@@ -977,6 +1050,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			WalkerLegs.attach(unitId, part)
 		elseif tv and tv.Value == "Lamprey" then
 			LampreyBody.attach(unitId, part)
+		elseif tv and tv.Value == "Hagfish" then
+			HagfishBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -3240,6 +3315,13 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 		end
 	end)
 end
+
+-- Hagfish head-slap: rear the nearest hagfish down and erupt the ground tentacles
+-- at every strike position the server resolved.
+Network.onHagfishStrike(function(hagPos: Vector3, strikes: { Vector3 })
+	HagfishBody.triggerAttackNear(hagPos)
+	HagfishBody.spawnTentacles(strikes)
+end)
 
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then

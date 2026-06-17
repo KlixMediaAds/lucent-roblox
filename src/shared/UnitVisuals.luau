@@ -165,6 +165,92 @@ local function addLampreyPreview(parent: Instance, body: BasePart)
 	end
 end
 
+-- Preview-only static hagfish: a slithering hagfish with its front third reared up
+-- like a cobra, six dark reddish-purple teeth ringing the sides of its mouth (three
+-- per side, like the six face of a die) and two tentacle-like antennae on its crown.
+-- The live unit's whole body is drawn + animated by the client HagfishBody module,
+-- so none of this lives in the blueprint. teamColor tints the belly stripe.
+local function addHagfishPreview(parent: Instance, body: BasePart)
+	local teamColor = body.Color
+	local C_BODY  = Color3.fromRGB(48, 40, 56)   -- dark purplish slate
+	local C_TOOTH = Color3.fromRGB(96, 32, 66)   -- dark reddish-purple fangs
+	local C_ANT   = Color3.fromRGB(70, 50, 78)   -- antennae
+	local C_EYE   = Color3.fromRGB(255, 120, 60)
+
+	local function ap(sz: Vector3, cf: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p      = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Size       = sz
+		p.CFrame     = cf
+		p.Color      = color
+		p.Material   = material
+		return p
+	end
+
+	-- S-curved spine: tail slithered out on the ground (+Z, low), rising through a
+	-- reared neck to a forward-leaning head (−Z, high) — a cobra ready to strike.
+	local pts = {
+		Vector3.new( 1.4, 0.4, 4.8),  -- tail tip (slithered to one side)
+		Vector3.new(-1.0, 0.4, 3.6),
+		Vector3.new( 0.8, 0.4, 2.4),
+		Vector3.new( 0.0, 0.6, 1.2),  -- neck base (where the rear leaves the ground)
+		Vector3.new( 0.0, 2.4, 0.5),  -- lower neck
+		Vector3.new( 0.0, 4.3, -0.3), -- upper neck
+		Vector3.new( 0.0, 5.7, -1.4), -- head centre (reared, leaning forward)
+	}
+	local thick = { 0.8, 1.8, 2.2, 2.4, 2.3, 2.1, 1.9 }
+
+	-- Body segments + knuckle balls + a glowing team-colour belly stripe
+	for i = 1, #pts - 1 do
+		local t   = (thick[i] + thick[i + 1]) * 0.5
+		local seg = ap(Vector3.new(1, 1, 1), CFrame.new(), C_BODY, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(seg, pts[i], pts[i + 1], t)
+		ap(Vector3.new(thick[i + 1], thick[i + 1], thick[i + 1]), CFrame.new(pts[i + 1]), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		local mid = (pts[i] + pts[i + 1]) * 0.5
+		ap(Vector3.new(0.3, 0.3, 0.3), CFrame.new(mid + Vector3.new(0, 0, -t * 0.5)), teamColor, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- Head bulb
+	local headPos = pts[#pts]
+	ap(Vector3.new(3.0, 2.8, 3.4), CFrame.new(headPos), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+
+	-- Head basis: forward = up-and-over toward the strike direction (−Z), with a
+	-- right axis and a head-up axis to lay the side teeth out across.
+	local fwd = (pts[#pts] - pts[#pts - 1])
+	fwd = if fwd.Magnitude > 0.01 then fwd.Unit else Vector3.new(0, 0, -1)
+	local right = fwd:Cross(Vector3.yAxis)
+	right = if right.Magnitude > 0.01 then right.Unit else Vector3.xAxis
+	local up = right:Cross(fwd).Unit
+
+	-- Mouth on the underside-front of the reared head
+	local mouth = headPos + fwd * 1.2 - up * 0.4
+
+	-- Six side teeth: three rows on each side of the mouth (the six face of a die),
+	-- splaying outward and slightly forward.
+	for _, s in { -1, 1 } do
+		for _, r in { -1, 0, 1 } do
+			local base = mouth + right * (s * 1.2) + up * (r * 0.85)
+			local tip  = base + right * (s * 0.7) + fwd * 0.6 - up * 0.1
+			local tooth = ap(Vector3.new(1, 1, 1), CFrame.new(), C_TOOTH, Enum.Material.SmoothPlastic)
+			UnitVisuals.orientYBetween(tooth, base, tip, 0.42)
+		end
+	end
+
+	-- Two tentacle-like antennae curving up and back off the crown
+	for _, s in { -1, 1 } do
+		local base = headPos + up * 1.3 + right * (s * 0.6) - fwd * 0.2
+		local tip  = base + up * 1.7 - fwd * 1.0 + right * (s * 0.3)
+		local ant  = ap(Vector3.new(1, 1, 1), CFrame.new(), C_ANT, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(ant, base, tip, 0.32)
+		ap(Vector3.new(0.5, 0.5, 0.5), CFrame.new(tip), C_ANT, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	end
+
+	-- Two glowing eyes high on the head
+	for _, s in { -1, 1 } do
+		ap(Vector3.new(0.7, 0.7, 0.7), CFrame.new(headPos + right * (s * 1.0) + up * 0.7 + fwd * 0.5), C_EYE, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+end
+
 -- ── Building helpers ──────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
@@ -410,6 +496,125 @@ function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame,
 	end
 end
 
+--[[
+	Builds the Lamprey Nest decoration under `parent`: a cluster of seven egg-tipped
+	tentacles (inspired by the Hagfish's ground tentacles, ~50% larger and longer)
+	erupting from one spot, each branching out on its own heading at its own height
+	and arching over under the weight of a glowing green egg at its tip. The central
+	green "Core" orifice is the egg-emergence point; the seven egg tips are "TubeTip_"
+	parts that bulge during egg production (see produceLampreyEgg). Shared by
+	BuildingManager (live, withFX) and buildBuildingPreview (thumbnail) so the two
+	stay in sync.
+
+	groundCF:  CFrame at the ground-level centre of the footprint (Y = 0 = ground).
+	teamColor: accent colour for the ownership band.
+	withFX:    true to add a glow light (live building only).
+]]
+function UnitVisuals.buildLampreyNestDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local GREEN  = Color3.fromRGB(120, 190, 60)
+	local EGGC   = Color3.fromRGB(120, 230, 90)
+	local DIRT   = Color3.fromRGB(74, 56, 38)
+	local V      = Vector3.new
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p      = Instance.new("Part")
+		p.Name       = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+	local function wpt(v: Vector3): Vector3
+		return groundCF:PointToWorldSpace(v)
+	end
+	local function seg(name: string, a: Vector3, b: Vector3, thick: number, color: Color3, material: Enum.Material)
+		local p = dp(name, V(1, 1, 1), CFrame.new(), color, material)
+		UnitVisuals.orientYBetween(p, wpt(a), wpt(b), thick)
+	end
+
+	-- ── Seven egg-tipped tentacles erupting from one spot ──
+	-- Inspired by the Hagfish's ground tentacles but ~50% larger and longer: each
+	-- stalk rises from the central orifice, branches out on its own heading, and
+	-- arches over under the weight of a glowing green egg fused to its tip — a gentle
+	-- droop, heavier than a reed but far short of a candy cane. The egg tips are the
+	-- "TubeTip_" parts pulsed during birth; the central green "Core" is where new
+	-- eggs actually emerge.
+	local TENT    = Color3.fromRGB(96, 32, 66)    -- hagfish reddish-purple
+	local TENT_DK = Color3.fromRGB(66, 22, 46)
+
+	-- Central muscular base + green emergence orifice (Core)
+	dp("BaseBulb", V(4.2, 2.4, 4.2), CFrame.new(0, 1.0, 0), TENT_DK, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	local core = dp("Core", V(2.5, 2.5, 2.5), CFrame.new(0, 1.8, 0), GREEN, Enum.Material.Neon, Enum.PartType.Ball)
+	core.Transparency = 0.15
+
+	-- A few tentacles tower over the rest; the tall ones bend less so they stand up
+	-- high rather than arching way out.
+	local heights = { 13.5, 8.0, 12.0, 7.5, 14.5, 8.8, 11.0 }
+	local bends   = { 1.45, 1.90, 1.55, 1.95, 1.35, 1.80, 1.60 }   -- radians (~77°–112°)
+	local M       = 6                                              -- spine points per stalk
+	local BT, TT  = 1.45, 0.5                                      -- base / tip thickness (~1.5× hagfish)
+
+	for i = 1, 7 do
+		local az      = (i - 1) / 7 * math.pi * 2 + 0.25
+		local outward = V(math.cos(az), 0, math.sin(az))
+		local sideAx  = V(-outward.Z, 0, outward.X)
+		local H       = heights[i]
+		local maxBend = bends[i]
+		local segLen  = H / M
+
+		-- Integrate the curve: near-vertical for most of the rise, arching over near
+		-- the top so the weighted tip droops outward.
+		local pts = { V(math.cos(az) * 0.6, 0.6, math.sin(az) * 0.6) }
+		local pos = pts[1]
+		for j = 1, M do
+			local s     = j / M
+			local bend  = (s ^ 2.6) * maxBend
+			local waver = math.sin(s * 5 + i * 1.3) * 0.14
+			local dir   = (Vector3.yAxis * math.cos(bend) + outward * math.sin(bend) + sideAx * waver).Unit
+			pos         = pos + dir * segLen
+			pts[j + 1]  = pos
+		end
+
+		-- Tapered segments + joint knots
+		for j = 1, M do
+			local th = BT + (TT - BT) * ((j - 1) / M)
+			seg("Stalk_" .. i .. "_" .. j, pts[j], pts[j + 1], th, TENT, Enum.Material.SmoothPlastic)
+			if j < M then
+				dp("Knot_" .. i .. "_" .. j, V(th, th, th), CFrame.new(pts[j + 1]), TENT, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+			end
+		end
+
+		-- Drooping green egg fused to the tip (TubeTip_ → bulges during birth)
+		local tip    = pts[M + 1]
+		local tipDir = (pts[M + 1] - pts[M]).Unit
+		local egg    = dp("TubeTip_" .. i, V(1.8, 2.0, 1.8), CFrame.new(tip + tipDir * 0.7), EGGC, Enum.Material.Neon, Enum.PartType.Ball)
+		egg.Transparency = 0.2
+	end
+
+	-- ── Disturbed earth the tentacles erupt from ──
+	dp("Mound", V(1.0, 9.2, 9.2), CFrame.new(0, 0.4, 0) * CFrame.Angles(0, 0, math.pi / 2), DIRT, Enum.Material.Ground, Enum.PartType.Cylinder)
+	for i = 1, 6 do
+		local ang = (i / 6) * math.pi * 2 + 0.5
+		local r   = 3.9
+		dp("Clod" .. i, V(1.7, 1.1, 1.7), CFrame.new(math.cos(ang) * r, 0.6, math.sin(ang) * r), DIRT, Enum.Material.Ground, Enum.PartType.Ball)
+	end
+
+	if withFX then
+		local light      = Instance.new("PointLight")
+		light.Color      = GREEN
+		light.Brightness = 2.2
+		light.Range      = 14
+		light.Parent     = core
+	end
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 --[[
@@ -455,6 +660,10 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	if unitType == "Lamprey" then
 		body.Transparency = 1   -- live unit + preview draw the eel, not the pivot block
 		addLampreyPreview(parent, body)
+	end
+	if unitType == "Hagfish" then
+		body.Transparency = 1   -- live unit + preview draw the hagfish, not the pivot block
+		addHagfishPreview(parent, body)
 	end
 
 	return body
@@ -777,59 +986,10 @@ function UnitVisuals.buildBuildingPreview(
 		local _ = bw2; _ = lw2; _ = rw2; _ = rf2; _ = ob2; _ = rl; _ = rr; _ = dp; _ = ns2; _ = sl; _ = sr; _ = ap; _ = an
 
 	elseif buildingType == "LampreyNest" then
-		-- Lamprey Nest: organic mound + birth tubes around a green orifice (preview).
-		local FLESH = Color3.fromRGB(40, 44, 52)
-		local GREEN = Color3.fromRGB(120, 190, 60)
-
-		base.Color    = FLESH
-		base.Material = Enum.Material.SmoothPlastic
-
-		for i = 1, 6 do
-			local angle = (i / 6) * math.pi * 2
-			local r     = 3.4
-			local lump  = makePart(parent)
-			lump.Name   = "Lump_" .. i
-			lump.Shape  = Enum.PartType.Ball
-			lump.Size   = Vector3.new(rng:NextNumber(2.6, 3.8), rng:NextNumber(2.2, 3.2), rng:NextNumber(2.6, 3.8))
-			lump.Position = Vector3.new(math.cos(angle) * r, size.Y - 1.4, math.sin(angle) * r)
-			lump.Color  = FLESH; lump.Material = Enum.Material.SmoothPlastic
-		end
-
-		local core    = makePart(parent)
-		core.Name     = "Core"
-		core.Shape    = Enum.PartType.Ball
-		core.Size     = Vector3.new(3.4, 3.4, 3.4)
-		core.Position = Vector3.new(0, size.Y + 0.3, 0)
-		core.Color    = GREEN; core.Material = Enum.Material.Neon
-		core.Transparency = 0.15
-
-		local tubeCount = 5
-		for i = 1, tubeCount do
-			local angle  = (i / tubeCount) * math.pi * 2 + 0.3
-			local r      = 3.1
-			local lean   = 0.30
-			local cf     = CFrame.new(Vector3.new(math.cos(angle) * r, size.Y + 1.4, math.sin(angle) * r))
-				* CFrame.Angles(math.sin(angle) * lean, 0, -math.cos(angle) * lean)
-			local tube   = makePart(parent)
-			tube.Name    = "Tube_" .. i
-			tube.Size    = Vector3.new(1.3, 4.4, 1.3)
-			tube.CFrame  = cf
-			tube.Color   = FLESH; tube.Material = Enum.Material.SmoothPlastic
-			local tip    = makePart(parent)
-			tip.Name     = "TubeTip_" .. i
-			tip.Shape    = Enum.PartType.Ball
-			tip.Size     = Vector3.new(1.0, 1.0, 1.0)
-			tip.CFrame   = cf * CFrame.new(0, 2.4, 0)
-			tip.Color    = GREEN; tip.Material = Enum.Material.Neon
-			tip.Transparency = 0.2
-		end
-
-		local band   = makePart(parent)
-		band.Name    = "TeamBand"
-		band.Shape   = Enum.PartType.Cylinder
-		band.Size    = Vector3.new(0.5, 11.6, 11.6)
-		band.CFrame  = CFrame.new(Vector3.new(0, 0.9, 0)) * CFrame.Angles(0, 0, math.pi / 2)
-		band.BrickColor = color; band.Material = Enum.Material.Neon
+		-- Lamprey Nest (preview): invisible base; the egg-tipped tentacle cluster comes
+		-- from the shared builder so the thumbnail matches the live building exactly.
+		base.Transparency = 1
+		UnitVisuals.buildLampreyNestDecor(parent, CFrame.new(position), color, false)
 
 	else
 		-- Barracks: open-top training facility (preview).

@@ -20,12 +20,13 @@ Config.UNIT_TYPES = {
 	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
 	Foamer        = { cost = 80,  size = Vector3.new(6, 5, 7)  },
 	Lamprey       = { cost = 110, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
+	Hagfish       = { cost = 120, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 }
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, CreepySoldier = 24 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  CreepySoldier = 14 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -108,6 +109,24 @@ Config.LAMPREY_NEST_MAX_EGGS   = 8    -- max concurrent eggs (in-flight + incuba
 Config.LAMPREY_NEST_SIZE       = Vector3.new(11, 7, 11)
 Config.LAMPREY_NEST_EJECT_TIME = 1.5  -- seconds the tubes pulse + the egg arcs out of the nest
 Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10s total per egg)
+
+-- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest
+-- births eggs: instead of settling them around its own footprint, the nest LAUNCHES
+-- each egg to a player-set rally point (right-click the ground while the nest is
+-- selected). Eggs scatter within a spread radius and refuse to overlap each other.
+Config.LAMPREY_NEST_RALLY_COST  = 160   -- one-time cost to unlock the rally launcher
+Config.LAMPREY_NEST_RALLY_RANGE = 90    -- max studs the rally point may sit from the nest
+Config.LAMPREY_NEST_EGG_SPREAD  = 7     -- radius around the rally point eggs scatter within
+Config.LAMPREY_NEST_EGG_GAP     = 4.2   -- min centre-to-centre spacing so eggs never overlap
+
+-- Hagfish — the nest's second unit. A light, fragile slithering hagfish that rears
+-- its front third like a cobra, then slaps its head into the earth to erupt six
+-- teeth-like tentacles from the ground around nearby enemies. Hatches from the
+-- same Lamprey Nest egg pipeline (its own egg cost, shared concurrent egg cap).
+Config.HAGFISH_EGG_COST        = 120  -- cost per Hagfish egg (matches the Hagfish unit cost)
+Config.HAGFISH_TENTACLES       = 6    -- tentacles erupting per attack (strikes split across foes)
+Config.HAGFISH_STRIKE_WINDOW   = 2.5  -- seconds across which the six tentacles strike, deviated
+Config.HAGFISH_ROOT_TIME       = 3.3  -- seconds the hagfish is head-down + rooted while attacking (slap + window + rear-up)
 
 -- Lamprey growth: each tree a Lamprey fells makes it 15% larger and tougher
 -- (size + max HP scale together), compounding up to a hard cap so a forest-fed
@@ -236,14 +255,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, CreepySoldier = 0 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, CreepySoldier = 55  }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55  }
 Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  CreepySoldier = 14  }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  CreepySoldier = 13  }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, CreepySoldier = 0.7 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14  }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13  }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -315,6 +334,9 @@ Config.REMOTES = {
 	SetDeployerType         = "SetDeployerType",
 	DeployerUpdate          = "DeployerUpdate",
 	LampreyEgg              = "LampreyEgg",
+	HagfishStrike           = "HagfishStrike",
+	UpgradeNest             = "UpgradeNest",
+	SetNestRally            = "SetNestRally",
 }
 
 return Config

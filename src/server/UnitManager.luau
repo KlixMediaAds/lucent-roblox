@@ -48,6 +48,8 @@ type UnitData = {
 	-- Foam debuff received by any unit (including non-foamers)
 	foamedUntil     : number?,    -- tick() when foam expires on this unit; nil = not foamed
 	foamDotAccum    : number?,    -- accumulated dt for 1-s DoT tick
+	-- Hagfish
+	attackLockUntil : number?,    -- tick() until which a hagfish stays rooted mid-attack
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -379,6 +381,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 2.5, 0) end  -- just above the reared head
 	end
+	if unitType == "Hagfish" then
+		-- Like the Lamprey, the whole hagfish is drawn client-side (HagfishBody); the
+		-- body part is an invisible, ground-snapped pivot for movement/targeting.
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 2.0, 0) end  -- just above the reared head
+	end
 	units[id] = {
 		part        = part,
 		owner       = player,
@@ -563,8 +572,8 @@ end
 function UnitManager.trainFromBarracks(barrackId: string, unitType: string, player: any): boolean
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return false end
-	-- Lampreys are born at the Lamprey Nest, never trained at a Barracks.
-	if unitType == "Lamprey" then return false end
+	-- Lampreys and Hagfish are born at the Lamprey Nest, never trained at a Barracks.
+	if unitType == "Lamprey" or unitType == "Hagfish" then return false end
 
 	if typeDef.researchReq then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, typeDef.researchReq) then
@@ -802,6 +811,7 @@ function UnitManager.init(resourceManager)
 	local unitHitRemote  = RemoteHandler.get(Config.REMOTES.UnitHit)
 	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
 	local healBeamRemote = RemoteHandler.get(Config.REMOTES.HealBeam)
+	local hagfishStrikeRemote = RemoteHandler.get(Config.REMOTES.HagfishStrike)
 
 	-- Terrain-height snapping: cast straight down to find the surface Y at any XZ.
 	-- Filters to Terrain only so buildings/units don't interfere.
@@ -884,6 +894,14 @@ function UnitManager.init(resourceManager)
 						data.target = nil   -- in range, hold position
 					end
 				end
+			end
+
+			-- ── Hagfish: rooted while its head is buried mid-attack ───────────
+			-- Holds position from the head-slap until the tentacles retreat and the
+			-- head rears back up, so the body doesn't slide during the animation.
+			if data.attackLockUntil and tick() < (data.attackLockUntil :: number) then
+				data.target   = nil
+				data.velocity = Vector3.zero
 			end
 
 			-- ── Foamer: deploy / undeploy state machine ───────────────────────
@@ -1420,7 +1438,105 @@ function UnitManager.init(resourceManager)
 					if hasBarrage and hitPos then vfxType = "TankBarrage" end
 				end
 			else
-				if isRoller then
+				if data.unitType == "Hagfish" then
+					-- ── Hagfish: head-slap ground eruption ───────────────────────
+					-- The hagfish slaps its head down and six teeth-like tentacles
+					-- erupt from the earth around nearby foes. The six strikes are
+					-- split as evenly as possible across whatever enemies are in
+					-- range, doubling up on the same target(s) when fewer than six
+					-- are present. All damage lands at once; the client renders the
+					-- staggered 2.5 s strike → retreat → head-rear animation.
+					local nT = Config.HAGFISH_TENTACLES
+
+					-- Collect enemy units in range, nearest first.
+					local targets: { string } = {}
+					do
+						local scratch: { {id: string, d: number} } = {}
+						fillGridScratch(myPos, atkRange)
+						for gi = 1, gridScratchN do
+							local otherId = gridScratch[gi]
+							local other = units[otherId]
+							if not other or other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == myOwnerStr then continue end
+							local d = (other.part.Position - myPos).Magnitude
+							if d <= atkRange then table.insert(scratch, { id = otherId, d = d }) end
+						end
+						table.sort(scratch, function(a, b) return a.d < b.d end)
+						for _, t in scratch do table.insert(targets, t.id) end
+					end
+
+					local strikes: { Vector3 } = {}
+					local function strikeAt(px: number, pz: number)
+						local jx = (math.random() - 0.5) * 5
+						local jz = (math.random() - 0.5) * 5
+						strikes[#strikes + 1] = Vector3.new(px + jx, getGroundY(px + jx, pz + jz, 0), pz + jz)
+					end
+
+					if #targets > 0 then
+						-- Round-robin the six strikes across the in-range enemies.
+						for k = 1, nT do
+							local tId   = targets[((k - 1) % #targets) + 1]
+							local other = units[tId]
+							if other and other.hp > 0 then
+								other.hp -= calcDamage(other, data.attackDmg)
+								applyHP(other, true)
+								if other.hp <= 0 then table.insert(toRemove, tId) end
+							end
+							local tp = other and other.part.Position or myPos
+							strikeAt(tp.X, tp.Z)
+						end
+					else
+						-- No enemy units: erupt the whole cluster on a building, else a miner.
+						local bId: string?, bPos: Vector3?
+						if data.focusBldId then
+							local bf    = workspace:FindFirstChild("Buildings")
+							local model = bf and bf:FindFirstChild(data.focusBldId)
+							local base  = model and model:FindFirstChild("Base")
+							if base and (base :: BasePart).Parent then
+								local bp = base :: BasePart
+								if (bp.Position - myPos).Magnitude <= atkRange then
+									bId = data.focusBldId; bPos = bp.Position
+								end
+							else
+								data.focusBldId = nil
+							end
+						end
+						if not bId and buildingManagerRef then
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+						end
+						if bId and bPos and buildingManagerRef then
+							for _ = 1, nT do
+								buildingManagerRef.damage(bId, data.attackDmg)
+								strikeAt((bPos :: Vector3).X, (bPos :: Vector3).Z)
+							end
+						elseif mineralManagerRef then
+							local hit, mPos = mineralManagerRef.damageNearestMiner(
+								myPos, myOwnerStr, atkRange, data.attackDmg * nT)
+							if hit and mPos then
+								for _ = 1, nT do strikeAt((mPos :: Vector3).X, (mPos :: Vector3).Z) end
+							end
+						end
+					end
+
+					-- If anything was struck: root the hagfish, face the cluster, and
+					-- tell every client to erupt the tentacles. hitPos stays nil so the
+					-- generic single-bolt VFX path below is skipped.
+					if #strikes > 0 then
+						data.attackLockUntil = tick() + Config.HAGFISH_ROOT_TIME
+						local cx, cz = 0, 0
+						for _, s in strikes do cx += s.X; cz += s.Z end
+						cx /= #strikes; cz /= #strikes
+						local flatDir = Vector3.new(cx - myPos.X, 0, cz - myPos.Z)
+						if flatDir.Magnitude > 0.1 then
+							data.part.CFrame = CFrame.lookAt(myPos, myPos + flatDir)
+						end
+						hagfishStrikeRemote:FireAllClients(myPos, strikes)
+					else
+						-- Nothing in range this cycle: stay loaded and re-check next
+						-- frame rather than burning the full cooldown on an empty swing.
+						data.attackTimer = effectiveRate
+					end
+				elseif isRoller then
 					-- Roller: melee charge attack — find target, deal damage, start dash
 					local bestId2, bestDist2 = nil :: string?, math.huge
 					for otherId, other in units do
@@ -1693,8 +1809,8 @@ function UnitManager.init(resourceManager)
 		if type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
-		-- Lampreys are born at the Lamprey Nest, never trained at a Barracks.
-		if unitType == "Lamprey" then return end
+		-- Lampreys and Hagfish are born at the Lamprey Nest, never trained at a Barracks.
+		if unitType == "Lamprey" or unitType == "Hagfish" then return end
 
 		-- Research gate: if this unit type requires a tech, verify the player has it
 		if typeDef.researchReq then

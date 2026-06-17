@@ -21,7 +21,7 @@ local researchManagerRef: any
 local forestManagerRef: any
 local onCCDestroyedCb: ((any) -> ())?
 
-type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number? }
+type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number?, rallyUpgrade: boolean?, rallyPoint: Vector3? }
 local buildingData: { [string]: BuildingData } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers:      { [string]: number } = {}   -- attackTimer per turret id
@@ -39,6 +39,7 @@ local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
 local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() expiry for soldier spawn
 local nestEggs:         { [string]: number } = {}   -- LampreyNest id → count of in-flight + incubating eggs
 local nestEggCounter    = 0                          -- monotonic id for naming egg parts
+local nestLauncherBusy: { [string]: boolean } = {}  -- LampreyNest id → a launcher throw is mid-animation
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
@@ -80,7 +81,7 @@ end
 local spawnDestructionVFX: (Vector3) -> ()
 local spawnWormBurstVFX:   (Vector3) -> ()
 local spawnEggHatchVFX:    (Vector3) -> ()
-local produceLampreyEgg:   (string, any) -> ()
+local produceLampreyEgg:   (string, any, string) -> ()
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -581,72 +582,13 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		bp(Vector3.new(0.15, 1.2, 1.8), Vector3.new(1.1, 7.35, -4.5),    col,  Enum.Material.Neon)
 
 	elseif buildingType == "LampreyNest" then
-		-- Lamprey Nest: organic fleshy mound ringed with pulsing birth tubes around
-		-- a glowing green orifice. The Core/Tube_* parts are pulsed by the egg-eject
-		-- animation; eggs emerge from the Core and arc out to settle nearby.
-		local FLESH = Color3.fromRGB(40, 44, 52)
-		local GREEN = Color3.fromRGB(120, 190, 60)
-
-		base.Color    = FLESH
-		base.Material = Enum.Material.SmoothPlastic
-
-		local function np(nm: string, sz: Vector3, cf: CFrame, col: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
-			local p        = Instance.new("Part")
-			p.Name         = nm
-			if shape then (p :: any).Shape = shape end
-			p.Size         = sz
-			p.CFrame       = cf
-			p.Color        = col
-			p.Material     = mat
-			p.Anchored     = true
-			p.CanCollide   = false
-			p.CanQuery     = false
-			p.CastShadow   = false
-			p.Parent       = model
-			return p
-		end
-
-		-- Organic mound lumps clustered around the top rim
-		for i = 1, 6 do
-			local angle = (i / 6) * math.pi * 2
-			local r     = 3.4
-			np("Lump_" .. i,
-				Vector3.new(rng:NextNumber(2.6, 3.8), rng:NextNumber(2.2, 3.2), rng:NextNumber(2.6, 3.8)),
-				CFrame.new(position + Vector3.new(math.cos(angle) * r, size.Y - 1.4, math.sin(angle) * r)),
-				FLESH, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-		end
-
-		-- Central green orifice — egg emergence point; pulses during production
-		local core = np("Core", Vector3.new(3.4, 3.4, 3.4),
-			CFrame.new(position + Vector3.new(0, size.Y + 0.3, 0)),
-			GREEN, Enum.Material.Neon, Enum.PartType.Ball)
-		core.Transparency = 0.15
-
-		-- Ring of fleshy birth tubes leaning outward, each capped with a neon tip
-		local tubeCount = 5
-		for i = 1, tubeCount do
-			local angle  = (i / tubeCount) * math.pi * 2 + 0.3
-			local r      = 3.1
-			local lean   = 0.30
-			local basePt = position + Vector3.new(math.cos(angle) * r, size.Y + 1.4, math.sin(angle) * r)
-			local cf     = CFrame.new(basePt)
-				* CFrame.Angles(math.sin(angle) * lean, 0, -math.cos(angle) * lean)
-			np("Tube_" .. i, Vector3.new(1.3, 4.4, 1.3), cf, FLESH, Enum.Material.SmoothPlastic)
-			local tip = np("TubeTip_" .. i, Vector3.new(1.0, 1.0, 1.0),
-				cf * CFrame.new(0, 2.4, 0), GREEN, Enum.Material.Neon, Enum.PartType.Ball)
-			tip.Transparency = 0.2
-		end
-
-		-- Team-colour neon band around the base for ownership readability
-		local band      = Instance.new("Part")
-		band.Name       = "TeamBand"
-		band.Shape      = Enum.PartType.Cylinder
-		band.Size       = Vector3.new(0.5, 11.6, 11.6)
-		band.CFrame     = CFrame.new(position + Vector3.new(0, 0.9, 0)) * CFrame.Angles(0, 0, math.pi / 2)
-		band.BrickColor = player.TeamColor
-		band.Material   = Enum.Material.Neon
-		band.Anchored   = true; band.CanCollide = false; band.CanQuery = false; band.CastShadow = false
-		band.Parent     = model
+		-- Lamprey Nest: the team-coloured base stays as the invisible collision/HP
+		-- box; the whole structure (seven egg-tipped tentacles erupting from a central
+		-- green orifice) comes from the shared builder so the thumbnail preview stays
+		-- in sync. The Core + TubeTip_* egg parts are pulsed by the egg-eject
+		-- animation; eggs emerge from the central Core and arc out to settle / launch.
+		base.Transparency = 1
+		UnitVisuals.buildLampreyNestDecor(model, CFrame.new(position), player.TeamColor, true)
 
 	else
 		-- Barracks: open-top training facility.
@@ -1953,11 +1895,144 @@ spawnEggHatchVFX = function(pos: Vector3)
 	end
 end
 
+-- ── Launcher tentacle (rally-upgraded nests) ────────────────────────────────
+-- A single large tentacle sprouting from the centre of an upgraded nest. It aims
+-- at the rally point and whips toward it to fling each egg in that direction.
+local LAUNCHER_M    = 5      -- spine segments
+local LAUNCHER_H    = 16     -- length (larger than the decorative tentacles)
+local LAUNCHER_BT   = 2.3    -- base thickness
+local LAUNCHER_TT   = 0.9    -- tip thickness
+local LAUNCHER_COL  = Color3.fromRGB(96, 32, 66)
+local LAUNCHER_REST = 0.55   -- rest lean (radians) toward the aim direction
+
+-- Where an upgraded nest's launcher tentacle sprouts from (centre, near the Core).
+local function launcherBase(data: BuildingData): Vector3
+	local p = data.base.Position
+	return Vector3.new(p.X, p.Y - buildingSize("LampreyNest").Y / 2 + 1.8, p.Z)
+end
+
+-- Curved spine of the launcher: rises from `basePos`, bending toward the horizontal
+-- `aimDir` by `lean` radians (negative leans back, away from aim).
+local function launcherSpine(basePos: Vector3, aimDir: Vector3, lean: number): { Vector3 }
+	local segLen = LAUNCHER_H / LAUNCHER_M
+	local pts    = { basePos }
+	local pos    = basePos
+	for j = 1, LAUNCHER_M do
+		local s    = j / LAUNCHER_M
+		local bend = (s ^ 1.7) * lean
+		local dir  = (Vector3.yAxis * math.cos(bend) + aimDir * math.sin(bend)).Unit
+		pos = pos + dir * segLen
+		pts[j + 1] = pos
+	end
+	return pts
+end
+
+-- Position the launcher parts (found by name) along the spine. Returns tip pos + dir.
+local function layoutNestLauncher(model: Instance, basePos: Vector3, aimDir: Vector3, lean: number): (Vector3, Vector3)
+	local pts = launcherSpine(basePos, aimDir, lean)
+	for j = 1, LAUNCHER_M do
+		local segP = model:FindFirstChild("Launcher_Seg" .. j) :: BasePart?
+		if segP then
+			local th = LAUNCHER_BT + (LAUNCHER_TT - LAUNCHER_BT) * ((j - 1) / LAUNCHER_M)
+			UnitVisuals.orientYBetween(segP, pts[j], pts[j + 1], th)
+		end
+		if j < LAUNCHER_M then
+			local knot = model:FindFirstChild("Launcher_Knot" .. j) :: BasePart?
+			if knot then
+				local th = LAUNCHER_BT + (LAUNCHER_TT - LAUNCHER_BT) * (j / LAUNCHER_M)
+				knot.Size   = Vector3.new(th, th, th)
+				knot.CFrame = CFrame.new(pts[j + 1])
+			end
+		end
+	end
+	local tipPos = pts[LAUNCHER_M + 1]
+	local tipDir = (pts[LAUNCHER_M + 1] - pts[LAUNCHER_M]).Unit
+	local tip    = model:FindFirstChild("Launcher_Tip") :: BasePart?
+	if tip then tip.CFrame = CFrame.new(tipPos) end
+	return tipPos, tipDir
+end
+
+-- Build the launcher parts under the nest model (idempotent; called on upgrade).
+local function buildNestLauncher(model: Instance, basePos: Vector3, aimDir: Vector3)
+	if model:FindFirstChild("Launcher_Seg1") then return end
+	local function lp(name: string, shape: Enum.PartType?): BasePart
+		local p      = Instance.new("Part")
+		p.Name       = name
+		if shape then (p :: any).Shape = shape end
+		p.Color      = LAUNCHER_COL
+		p.Material   = Enum.Material.SmoothPlastic
+		p.Size       = Vector3.new(1, 1, 1)
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CanQuery   = false
+		p.CastShadow = false
+		p.Parent     = model
+		return p
+	end
+	for j = 1, LAUNCHER_M do lp("Launcher_Seg" .. j) end
+	for j = 1, LAUNCHER_M - 1 do lp("Launcher_Knot" .. j, Enum.PartType.Ball) end
+	local tip = lp("Launcher_Tip", Enum.PartType.Ball)
+	tip.Size  = Vector3.new(1.9, 1.9, 1.9)
+	tip.Color = Color3.fromRGB(66, 22, 46)
+	layoutNestLauncher(model, basePos, aimDir, LAUNCHER_REST)
+end
+
+-- Animate the launcher whipping toward `aimDir` and fling `egg` to `target`.
+-- Blocks (stepping via task.wait) until the egg reaches the target.
+local function throwNestLauncher(model: Instance, basePos: Vector3, aimDir: Vector3, egg: BasePart, eggFull: Vector3, target: Vector3)
+	local WIND, WHIP, FLIGHT      = 0.18, 0.16, 0.62
+	local restLean, backLean, whipLean = LAUNCHER_REST, -0.55, 1.75
+
+	-- Seat the egg on the tip before the windup so it doesn't flash at the Core.
+	local seatPos = layoutNestLauncher(model, basePos, aimDir, restLean)
+	if egg.Parent then egg.Position = seatPos; egg.Size = eggFull * 0.55 end
+
+	-- Windup: rear back, egg riding the tip
+	local t = 0
+	while t < WIND do
+		t += task.wait()
+		if not model.Parent then return end
+		local lean   = restLean + (backLean - restLean) * math.clamp(t / WIND, 0, 1)
+		local tipPos = layoutNestLauncher(model, basePos, aimDir, lean)
+		if egg.Parent then egg.Position = tipPos end
+	end
+
+	-- Whip forward toward the aim
+	t = 0
+	local releasePos = seatPos
+	while t < WHIP do
+		t += task.wait()
+		if not model.Parent then return end
+		local lean = backLean + (whipLean - backLean) * math.clamp(t / WHIP, 0, 1)
+		releasePos = layoutNestLauncher(model, basePos, aimDir, lean)
+		if egg.Parent then egg.Position = releasePos; egg.Size = eggFull * 0.75 end
+	end
+
+	-- Flight: arc the egg from the release point to the target while the tentacle
+	-- settles back to its loaded rest pose.
+	local horiz = Vector3.new(target.X - releasePos.X, 0, target.Z - releasePos.Z).Magnitude
+	local apex  = Vector3.new((releasePos.X + target.X) / 2, math.max(releasePos.Y, target.Y) + 5 + horiz * 0.12, (releasePos.Z + target.Z) / 2)
+	t = 0
+	while t < FLIGHT do
+		t += task.wait()
+		if egg.Parent == nil then return end
+		local k = math.clamp(t / FLIGHT, 0, 1)
+		egg.Position = releasePos:Lerp(apex, k):Lerp(apex:Lerp(target, k), k)
+		egg.Size     = eggFull
+		layoutNestLauncher(model, basePos, aimDir, whipLean + (restLean - whipLean) * k)
+		if not model.Parent then return end
+	end
+	if egg.Parent then egg.Position = target end
+	layoutNestLauncher(model, basePos, aimDir, restLean)
+end
+
 -- ── Lamprey egg production (server-side, one task per egg) ───────────────────
--- Pulses the nest's tubes, ejects a green egg to a random spot nearby, lets it
--- incubate on its own timer, then hatches it into a Lamprey. The caller must
--- already have reserved a slot (incremented nestEggs[nestId]).
-produceLampreyEgg = function(nestId: string, player: any)
+-- Pulses the nest's tubes, ejects an egg to a random spot nearby, lets it
+-- incubate on its own timer, then hatches it into `unitType` ("Lamprey" |
+-- "Hagfish"). Lamprey eggs glow green; Hagfish eggs glow reddish-purple. The
+-- caller must already have reserved a slot (incremented nestEggs[nestId]).
+produceLampreyEgg = function(nestId: string, player: any, unitType: string)
+	local isHagfish = unitType == "Hagfish"
 	local data = buildingData[nestId]
 	if not data then
 		if nestEggs[nestId] then nestEggs[nestId] = math.max(0, nestEggs[nestId] - 1) end
@@ -1973,13 +2048,45 @@ produceLampreyEgg = function(nestId: string, player: any)
 	local core     = model:FindFirstChild("Core") :: BasePart?
 	local startPos = core and core.Position or (basePos + Vector3.new(0, data.base.Size.Y, 0))
 
-	-- Random settle spot around the nest footprint
 	local halfX    = buildingSize("LampreyNest").X / 2
-	local angle    = rng:NextNumber(0, math.pi * 2)
-	local radius   = halfX + rng:NextNumber(2, 6)
 	local EGG_FULL = Vector3.new(3, 3.8, 3)
 	local settleY  = EGG_FULL.Y / 2
-	local target   = Vector3.new(basePos.X + math.cos(angle) * radius, settleY, basePos.Z + math.sin(angle) * radius)
+
+	-- Where the egg settles. With the rally upgrade the nest LAUNCHES the egg to the
+	-- player's rally point (scattered within a spread radius); otherwise it settles
+	-- around the nest's own footprint. Either way, reject spots that would overlap an
+	-- egg already resting on the ground for this nest so eggs never stack.
+	local centerX, centerZ, minR, maxR
+	if data.rallyUpgrade and data.rallyPoint then
+		centerX, centerZ = (data.rallyPoint :: Vector3).X, (data.rallyPoint :: Vector3).Z
+		minR, maxR       = 0, Config.LAMPREY_NEST_EGG_SPREAD
+	else
+		centerX, centerZ = basePos.X, basePos.Z
+		minR, maxR       = halfX + 2, halfX + 6
+	end
+
+	local GAP = Config.LAMPREY_NEST_EGG_GAP
+	local function overlapsEgg(x: number, z: number): boolean
+		for _, child in model:GetChildren() do
+			if child:IsA("BasePart") and child.Name:match("^Egg_") then
+				local dx, dz = child.Position.X - x, child.Position.Z - z
+				if dx * dx + dz * dz < GAP * GAP then return true end
+			end
+		end
+		return false
+	end
+
+	local target: Vector3
+	do
+		local px, pz = centerX, centerZ
+		for _ = 1, 14 do
+			local a = rng:NextNumber(0, math.pi * 2)
+			local r = if maxR > minR then minR + math.sqrt(rng:NextNumber()) * (maxR - minR) else minR
+			px, pz  = centerX + math.cos(a) * r, centerZ + math.sin(a) * r
+			if not overlapsEgg(px, pz) then break end
+		end
+		target = Vector3.new(px, settleY, pz)
+	end
 
 	-- Egg (parented to the nest model so it replicates and the panel can count it)
 	nestEggCounter += 1
@@ -1988,7 +2095,7 @@ produceLampreyEgg = function(nestId: string, player: any)
 	egg.Shape           = Enum.PartType.Ball
 	egg.Size            = EGG_FULL * 0.4
 	egg.Position        = startPos
-	egg.Color           = Color3.fromRGB(150, 230, 90)
+	egg.Color           = if isHagfish then Color3.fromRGB(150, 60, 120) else Color3.fromRGB(150, 230, 90)
 	egg.Material        = Enum.Material.Neon
 	egg.Anchored        = true
 	egg.CanCollide      = false
@@ -1997,41 +2104,83 @@ produceLampreyEgg = function(nestId: string, player: any)
 	egg.Transparency    = 0.1
 	egg.Parent          = model
 	local eggLight      = Instance.new("PointLight")
-	eggLight.Color      = Color3.fromRGB(120, 230, 70)
+	eggLight.Color      = if isHagfish then Color3.fromRGB(150, 50, 120) else Color3.fromRGB(120, 230, 70)
 	eggLight.Brightness = 2
 	eggLight.Range      = 10
 	eggLight.Parent     = egg
 
-	-- ── Eject: pulse the nest tubes/core and arc the egg out to its spot ──────
+	-- ── Eject: pulse the nest core + egg tips, then arc the egg out to its spot ──
+	-- The pulse grows a part and settles it back. We capture each part's ORIGINAL
+	-- size/transparency once (stored as an attribute) and always tween toward those
+	-- constants — so when several eggs are produced at once the overlapping pulses
+	-- converge back to the original size instead of compounding larger each time.
 	local halfEject = math.max(0.05, Config.LAMPREY_NEST_EJECT_TIME / 2)
-	local pulseInfo = TweenInfo.new(halfEject, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, 0, true)
-	if core then
-		TweenService:Create(core, pulseInfo, { Size = core.Size * 1.3, Transparency = 0 }):Play()
+	local upInfo    = TweenInfo.new(halfEject, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+	local downInfo  = TweenInfo.new(halfEject, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
+	local function pulsePart(part: BasePart, factor: number, addY: number?)
+		local base = part:GetAttribute("PulseBase")
+		if typeof(base) ~= "Vector3" then
+			base = part.Size
+			part:SetAttribute("PulseBase", base)
+		end
+		local baseT = part:GetAttribute("PulseBaseT")
+		if typeof(baseT) ~= "number" then
+			baseT = part.Transparency
+			part:SetAttribute("PulseBaseT", baseT)
+		end
+		local enlarged = if addY then (base :: Vector3) + Vector3.new(0, addY, 0) else (base :: Vector3) * factor
+		TweenService:Create(part, upInfo, { Size = enlarged, Transparency = 0 }):Play()
+		task.delay(halfEject, function()
+			if part.Parent then
+				TweenService:Create(part, downInfo, { Size = base, Transparency = baseT }):Play()
+			end
+		end)
 	end
+
+	if core then pulsePart(core, 1.3) end
 	for _, child in model:GetChildren() do
 		if child:IsA("BasePart") and child.Name:match("^Tube_") then
-			TweenService:Create(child, pulseInfo, { Size = child.Size + Vector3.new(0, 1.6, 0) }):Play()
+			pulsePart(child, 1.0, 1.6)
 		elseif child:IsA("BasePart") and child.Name:match("^TubeTip_") then
-			TweenService:Create(child, pulseInfo, { Size = child.Size * 1.6, Transparency = 0 }):Play()
+			pulsePart(child, 1.6)
 		end
 	end
 
-	-- Arc the egg up out of the core, then down onto its settle spot
-	local apex = Vector3.new(
-		(startPos.X + target.X) / 2,
-		math.max(startPos.Y, target.Y) + 3,
-		(startPos.Z + target.Z) / 2
-	)
-	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Position = apex, Size = EGG_FULL,
-	}):Play()
-	task.wait(halfEject)
-	if egg.Parent == nil then return end
-	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-		Position = target,
-	}):Play()
-	task.wait(halfEject)
-	if egg.Parent == nil then return end
+	-- Deliver the egg to its settle spot. An upgraded nest's launcher tentacle whips
+	-- toward the target and flings the egg in that direction; an un-upgraded nest just
+	-- arcs the egg up out of the Core and down. Either way the egg ends on `target`.
+	if data.rallyUpgrade and model:FindFirstChild("Launcher_Seg1") then
+		-- Serialize throws so several eggs produced at once are flung one after the
+		-- other instead of fighting over the single shared launcher tentacle.
+		while nestLauncherBusy[nestId] do
+			task.wait()
+			if egg.Parent == nil then return end
+		end
+		nestLauncherBusy[nestId] = true
+		local lbase = launcherBase(data)
+		local aim   = Vector3.new(target.X - lbase.X, 0, target.Z - lbase.Z)
+		aim = if aim.Magnitude > 0.1 then aim.Unit else Vector3.new(0, 0, 1)
+		throwNestLauncher(model, lbase, aim, egg, EGG_FULL, target)
+		nestLauncherBusy[nestId] = nil
+		if egg.Parent == nil then return end
+	else
+		local throwDist = (Vector3.new(target.X, 0, target.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude
+		local apex = Vector3.new(
+			(startPos.X + target.X) / 2,
+			math.max(startPos.Y, target.Y) + 3 + throwDist * 0.18,
+			(startPos.Z + target.Z) / 2
+		)
+		TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Position = apex, Size = EGG_FULL,
+		}):Play()
+		task.wait(halfEject)
+		if egg.Parent == nil then return end
+		TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Position = target,
+		}):Play()
+		task.wait(halfEject)
+		if egg.Parent == nil then return end
+	end
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(target, target, "LampreyEggLand")
 
 	-- ── Incubate: the egg breathes green until it hatches ─────────────────────
@@ -2057,7 +2206,7 @@ produceLampreyEgg = function(nestId: string, player: any)
 	spawnEggHatchVFX(hatchPos)
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
 	if unitManagerRef then
-		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), "Lamprey")
+		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), unitType)
 	end
 	nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
 end
@@ -2785,9 +2934,13 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	-- ── LampreyEgg remote: births one egg per request from a Lamprey Nest
 	-- (up to LAMPREY_NEST_MAX_EGGS concurrent). Sequence + hatch in produceLampreyEgg.
 	RemoteHandler.get(Config.REMOTES.LampreyEgg).OnServerEvent:Connect(
-		function(player: any, nestIds: any)
+		function(player: any, nestIds: any, unitType: any)
 			local ids = type(nestIds) == "string" and {nestIds} or nestIds
 			if type(ids) ~= "table" then return end
+
+			-- Both the Lamprey and the Hagfish hatch from this nest's egg pipeline.
+			local kind = if unitType == "Hagfish" then "Hagfish" else "Lamprey"
+			local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
 
 			for _, nestId in ids do
 				if type(nestId) ~= "string" then continue end
@@ -2797,11 +2950,78 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				if data.owner ~= player then continue end
 				if data.isConstructing then continue end
 				if (nestEggs[nestId] or 0) >= Config.LAMPREY_NEST_MAX_EGGS then continue end
-				if not resourceManagerRef or resourceManagerRef.get(player) < Config.LAMPREY_EGG_COST then continue end
+				if not resourceManagerRef or resourceManagerRef.get(player) < cost then continue end
 
-				resourceManagerRef.spend(player, Config.LAMPREY_EGG_COST)
+				resourceManagerRef.spend(player, cost)
 				nestEggs[nestId] = (nestEggs[nestId] or 0) + 1
-				task.spawn(produceLampreyEgg, nestId, player)
+				task.spawn(produceLampreyEgg, nestId, player, kind)
+			end
+		end
+	)
+
+	-- ── UpgradeNest remote: unlocks the rally launcher on a Lamprey Nest ──────
+	RemoteHandler.get(Config.REMOTES.UpgradeNest).OnServerEvent:Connect(
+		function(player: any, nestIds: any)
+			local ids = type(nestIds) == "string" and {nestIds} or nestIds
+			if type(ids) ~= "table" then return end
+
+			for _, nestId in ids do
+				if type(nestId) ~= "string" then continue end
+				local data = buildingData[nestId]
+				if not data or data.buildingType ~= "LampreyNest" then continue end
+				if data.owner ~= player then continue end
+				if data.isConstructing then continue end
+				if data.rallyUpgrade then continue end
+				if not resourceManagerRef or not resourceManagerRef.spend(player, Config.LAMPREY_NEST_RALLY_COST) then continue end
+
+				data.rallyUpgrade = true
+				local model = buildingsFolder:FindFirstChild(nestId)
+				if model then
+					model:SetAttribute("RallyUpgrade", true)
+					-- Sprout the launcher tentacle from the nest's centre, aimed at the
+					-- rally point if one is already set (otherwise it just stands tall).
+					local lbase = launcherBase(data)
+					local aim   = Vector3.new(0, 0, 1)
+					if data.rallyPoint then
+						local f = Vector3.new(data.rallyPoint.X - lbase.X, 0, data.rallyPoint.Z - lbase.Z)
+						if f.Magnitude > 0.1 then aim = f.Unit end
+					end
+					buildNestLauncher(model, lbase, aim)
+				end
+			end
+		end
+	)
+
+	-- ── SetNestRally remote: sets where an upgraded nest launches its eggs ────
+	RemoteHandler.get(Config.REMOTES.SetNestRally).OnServerEvent:Connect(
+		function(player: any, nestId: any, target: any)
+			if type(nestId) ~= "string" then return end
+			if typeof(target) ~= "Vector3" then return end
+			local data = buildingData[nestId]
+			if not data or data.buildingType ~= "LampreyNest" then return end
+			if data.owner ~= player then return end
+			if not data.rallyUpgrade then return end
+
+			-- Clamp the rally point to within range of the nest (flat XZ).
+			local basePos = data.base.Position
+			local flat    = Vector3.new(target.X - basePos.X, 0, target.Z - basePos.Z)
+			local dist    = flat.Magnitude
+			if dist > Config.LAMPREY_NEST_RALLY_RANGE then
+				flat = flat.Unit * Config.LAMPREY_NEST_RALLY_RANGE
+			end
+			local rally = Vector3.new(basePos.X + flat.X, 0, basePos.Z + flat.Z)
+			data.rallyPoint = rally
+
+			local model = buildingsFolder:FindFirstChild(nestId)
+			if model then
+				model:SetAttribute("RallyPoint", rally)
+				-- Swing the launcher tentacle to point (loaded) at the new rally.
+				if model:FindFirstChild("Launcher_Seg1") then
+					local lbase = launcherBase(data)
+					local aim   = Vector3.new(rally.X - lbase.X, 0, rally.Z - lbase.Z)
+					aim = if aim.Magnitude > 0.1 then aim.Unit else Vector3.new(0, 0, 1)
+					layoutNestLauncher(model, lbase, aim, LAUNCHER_REST)
+				end
 			end
 		end
 	)

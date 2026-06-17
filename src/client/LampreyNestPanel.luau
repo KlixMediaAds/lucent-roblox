@@ -2,11 +2,12 @@
 --[[
     LampreyNestPanel — Radial panel for the Lamprey Nest building.
 
-    A single product node: "Lamprey". Each click pays LAMPREY_EGG_COST and asks the
-    server to birth one egg (the server caps concurrent eggs at LAMPREY_NEST_MAX_EGGS).
-    The eggs ARE the queue — they're real parts parented to the nest model, so this
-    panel counts them directly off the replicated model. The root label shows the
-    live egg count, and the node greys out when the nest is full or unaffordable.
+    Two product nodes: "Lamprey" and "Hagfish". Each click pays that unit's egg cost
+    and asks the server to birth one egg of that kind (the server caps concurrent eggs
+    at LAMPREY_NEST_MAX_EGGS, shared across both). The eggs ARE the queue — they're real
+    parts parented to the nest model, so this panel counts them directly off the
+    replicated model. The root label shows the live egg count, and each node greys out
+    when the nest is full or that unit is unaffordable.
 ]]
 
 local Players      = game:GetService("Players")
@@ -34,19 +35,45 @@ local overlay: Frame?
 
 local NEST_COL    = Color3.fromRGB(90, 130, 50)
 local LAMPREY_GRN = Color3.fromRGB(120, 190, 60)
+local HAGFISH_PUR = Color3.fromRGB(170, 70, 130)
 
 local RADIUS   = 155
 local ROOT_POS = UDim2.new(0.5, 0, 0.68, 0)
 
--- Single product node
-local node: {
-	wrapper: Frame,
-	btn:     TextButton,
-	line:    Frame,
-	stroke:  UIStroke,
-	label:   TextLabel,
+-- Product nodes (Lamprey + Hagfish), both fed by the shared egg pipeline
+type ProductNode = {
+	wrapper:  Frame,
+	btn:      TextButton,
+	line:     Frame,
+	stroke:   UIStroke,
+	label:    TextLabel,
+	finalPos: UDim2,
+	unitType: string,
+	cost:     number,
+	color:    Color3,
+}
+local nodes: { ProductNode } = {}
+
+local RALLY_COL = Color3.fromRGB(220, 150, 60)
+
+-- One-time "Rally" launcher upgrade node (separate from the egg product nodes)
+local upgradeNode: {
+	wrapper:  Frame,
+	btn:      TextButton,
+	line:     Frame,
+	stroke:   UIStroke,
+	label:    TextLabel,
 	finalPos: UDim2,
 }? = nil
+
+-- True once the rally launcher has been bought (read off a replicated model attribute)
+local function nestHasRally(nestId: string?): boolean
+	if not nestId then return false end
+	local bf    = workspace:FindFirstChild("Buildings") :: Folder?
+	local model = bf and bf:FindFirstChild(nestId)
+	return model ~= nil and model:GetAttribute("RallyUpgrade") == true
+end
+LampreyNestPanel.nestHasRally = nestHasRally
 
 -- ── Egg counting (off the replicated nest model) ───────────────────────────────
 local function eggCount(nestId: string): number
@@ -64,25 +91,37 @@ end
 local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
+local function expandOne(wrapper: Frame, btn: TextButton, line: Frame, finalPos: UDim2)
+	wrapper.Visible             = true
+	wrapper.Position            = ROOT_POS
+	btn.BackgroundTransparency  = 1
+	line.BackgroundTransparency = 1
+	TweenService:Create(wrapper, EXPAND_TI, { Position = finalPos }):Play()
+	TweenService:Create(btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
+	TweenService:Create(line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+end
+
 local function expandNodes()
-	if not node then return end
-	node.wrapper.Visible             = true
-	node.wrapper.Position            = ROOT_POS
-	node.btn.BackgroundTransparency  = 1
-	node.line.BackgroundTransparency = 1
-	TweenService:Create(node.wrapper, EXPAND_TI, { Position = node.finalPos }):Play()
-	TweenService:Create(node.btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
-	TweenService:Create(node.line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
+	for _, node in nodes do
+		expandOne(node.wrapper, node.btn, node.line, node.finalPos)
+	end
+	if upgradeNode then
+		expandOne(upgradeNode.wrapper, upgradeNode.btn, upgradeNode.line, upgradeNode.finalPos)
+	end
+end
+
+local function collapseOne(wrapper: Frame, btn: TextButton, line: Frame)
+	TweenService:Create(wrapper, COLLAPSE_TI, { Position = ROOT_POS }):Play()
+	TweenService:Create(btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
+	TweenService:Create(line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
 end
 
 local function collapseNodes(then_: (() -> ())?)
-	if node then
-		TweenService:Create(node.wrapper, COLLAPSE_TI, { Position = ROOT_POS }):Play()
-		TweenService:Create(node.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
-		TweenService:Create(node.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
-	end
+	for _, node in nodes do collapseOne(node.wrapper, node.btn, node.line) end
+	if upgradeNode then collapseOne(upgradeNode.wrapper, upgradeNode.btn, upgradeNode.line) end
 	task.delay(COLLAPSE_TI.Time, function()
-		if node then node.wrapper.Visible = false end
+		for _, node in nodes do node.wrapper.Visible = false end
+		if upgradeNode then upgradeNode.wrapper.Visible = false end
 		if then_ then then_() end
 	end)
 end
@@ -95,36 +134,67 @@ local function updateRootLabel()
 end
 
 local function refresh()
-	if not node then return end
 	local res   = getResources and getResources() or 0
 	local count = activeNestId and eggCount(activeNestId) or 0
 	local full  = count >= Config.LAMPREY_NEST_MAX_EGGS
-	local broke = res < Config.LAMPREY_EGG_COST
 
-	if full then
-		node.btn.BackgroundColor3       = C.BG_LOCKED
-		node.btn.BackgroundTransparency = 0.4
-		node.stroke.Color               = C.BORDER_LO
-		node.stroke.Thickness           = 1.5
-		node.label.Text                 = "Lamprey\nFull"
-		node.label.TextColor3           = C.DIM
-		node.btn.Active                 = false
-	elseif broke then
-		node.btn.BackgroundColor3       = C.BG_LOCKED
-		node.btn.BackgroundTransparency = 0.4
-		node.stroke.Color               = C.BORDER_LO
-		node.stroke.Thickness           = 1.5
-		node.label.Text                 = "Lamprey\n◆ " .. Config.LAMPREY_EGG_COST
-		node.label.TextColor3           = C.DIM
-		node.btn.Active                 = false
-	else
-		node.btn.BackgroundColor3       = LAMPREY_GRN
-		node.btn.BackgroundTransparency = 0.35
-		node.stroke.Color               = LAMPREY_GRN
-		node.stroke.Thickness           = 2
-		node.label.Text                 = "Lamprey\n◆ " .. Config.LAMPREY_EGG_COST
-		node.label.TextColor3           = C.TEXT
-		node.btn.Active                 = true
+	for _, node in nodes do
+		local broke = res < node.cost
+		if full then
+			node.btn.BackgroundColor3       = C.BG_LOCKED
+			node.btn.BackgroundTransparency = 0.4
+			node.stroke.Color               = C.BORDER_LO
+			node.stroke.Thickness           = 1.5
+			node.label.Text                 = node.unitType .. "\nFull"
+			node.label.TextColor3           = C.DIM
+			node.btn.Active                 = false
+		elseif broke then
+			node.btn.BackgroundColor3       = C.BG_LOCKED
+			node.btn.BackgroundTransparency = 0.4
+			node.stroke.Color               = C.BORDER_LO
+			node.stroke.Thickness           = 1.5
+			node.label.Text                 = node.unitType .. "\n◆ " .. node.cost
+			node.label.TextColor3           = C.DIM
+			node.btn.Active                 = false
+		else
+			node.btn.BackgroundColor3       = node.color
+			node.btn.BackgroundTransparency = 0.35
+			node.stroke.Color               = node.color
+			node.stroke.Thickness           = 2
+			node.label.Text                 = node.unitType .. "\n◆ " .. node.cost
+			node.label.TextColor3           = C.TEXT
+			node.btn.Active                 = true
+		end
+	end
+
+	-- Rally launcher upgrade: bought once, then shows as owned.
+	if upgradeNode then
+		local owned = nestHasRally(activeNestId)
+		if owned then
+			upgradeNode.btn.BackgroundColor3       = C.BG_LOCKED
+			upgradeNode.btn.BackgroundTransparency = 0.4
+			upgradeNode.stroke.Color               = RALLY_COL
+			upgradeNode.stroke.Thickness           = 1.5
+			upgradeNode.label.Text                 = "Launcher\nOwned ✓"
+			upgradeNode.label.TextColor3           = C.DIM
+			upgradeNode.btn.Active                 = false
+		elseif res < Config.LAMPREY_NEST_RALLY_COST then
+			upgradeNode.btn.BackgroundColor3       = C.BG_LOCKED
+			upgradeNode.btn.BackgroundTransparency = 0.4
+			upgradeNode.stroke.Color               = C.BORDER_LO
+			upgradeNode.stroke.Thickness           = 1.5
+			upgradeNode.label.Text                 = "Launcher\n◆ " .. Config.LAMPREY_NEST_RALLY_COST
+			upgradeNode.label.TextColor3           = C.DIM
+			upgradeNode.btn.Active                 = false
+		else
+			upgradeNode.btn.BackgroundColor3       = RALLY_COL
+			upgradeNode.btn.BackgroundTransparency = 0.35
+			upgradeNode.stroke.Color               = RALLY_COL
+			upgradeNode.stroke.Thickness           = 2
+			upgradeNode.label.Text                 = "Launcher\n◆ " .. Config.LAMPREY_NEST_RALLY_COST
+			upgradeNode.label.TextColor3           = C.TEXT
+			upgradeNode.btn.Active                 = true
+		end
 	end
 	updateRootLabel()
 end
@@ -166,36 +236,74 @@ function LampreyNestPanel.init(network: any, getResourcesFn: () -> number, getMu
 		LampreyNestPanel.hide()
 	end)
 
-	-- Single "Lamprey" product node (straight up from the root)
-	local angle    = -90
-	local rad      = math.rad(angle)
-	local dx       = math.cos(rad) * RADIUS
-	local dy       = math.sin(rad) * RADIUS
-	local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
+	-- Two product nodes fanned out above the root: Lamprey + Hagfish.
+	local function buildProduct(unitType: string, cost: number, color: Color3, emoji: string, angle: number)
+		local rad      = math.rad(angle)
+		local dx       = math.cos(rad) * RADIUS
+		local dy       = math.sin(rad) * RADIUS
+		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
 
-	local line          = UILib.connectorLine(ov, ROOT_POS, angle, RADIUS, 10)
-	local wrapper, btn  = UILib.radialNode(ov, "Lamprey\n◆ " .. Config.LAMPREY_EGG_COST, "🪱", LAMPREY_GRN, ROOT_POS, 70, 11)
-	wrapper.Visible     = false
-	UILib.setNodeViewport(btn, ViewportPreview.forUnit("Lamprey", Vector2.new(70, 70)))
+		local line         = UILib.connectorLine(ov, ROOT_POS, angle, RADIUS, 10)
+		local wrapper, btn = UILib.radialNode(ov, unitType .. "\n◆ " .. cost, emoji, color, ROOT_POS, 70, 11)
+		wrapper.Visible    = false
+		UILib.setNodeViewport(btn, ViewportPreview.forUnit(unitType, Vector2.new(70, 70)))
 
-	local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
-	local label  = wrapper:FindFirstChild("NodeLabel") :: TextLabel
+		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+		local label  = wrapper:FindFirstChild("NodeLabel") :: TextLabel
 
-	btn.MouseButton1Click:Connect(function()
-		if not activeNestId or not btn.Active then return end
-		local ids = getMultiIdsFn and getMultiIdsFn() or {activeNestId}
-		networkRef.lampreyEgg(ids)
-		refresh()
-	end)
+		btn.MouseButton1Click:Connect(function()
+			if not activeNestId or not btn.Active then return end
+			local ids = getMultiIdsFn and getMultiIdsFn() or {activeNestId}
+			networkRef.lampreyEgg(ids, unitType)
+			refresh()
+		end)
 
-	node = {
-		wrapper  = wrapper,
-		btn      = btn,
-		line     = line,
-		stroke   = stroke,
-		label    = label,
-		finalPos = finalPos,
-	}
+		table.insert(nodes, {
+			wrapper  = wrapper,
+			btn      = btn,
+			line     = line,
+			stroke   = stroke,
+			label    = label,
+			finalPos = finalPos,
+			unitType = unitType,
+			cost     = cost,
+			color    = color,
+		})
+	end
+
+	buildProduct("Lamprey", Config.LAMPREY_EGG_COST, LAMPREY_GRN, "🪱", -130)
+	buildProduct("Hagfish", Config.HAGFISH_EGG_COST, HAGFISH_PUR, "🐍", -50)
+
+	-- Rally launcher upgrade node (top centre). Buying it lets the nest LAUNCH eggs
+	-- to a right-click rally point instead of dropping them around its footprint.
+	do
+		local angle    = -90
+		local rad      = math.rad(angle)
+		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + math.cos(rad) * RADIUS, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + math.sin(rad) * RADIUS)
+
+		local line         = UILib.connectorLine(ov, ROOT_POS, angle, RADIUS, 10)
+		local wrapper, btn = UILib.radialNode(ov, "Launcher\n◆ " .. Config.LAMPREY_NEST_RALLY_COST, "🎯", RALLY_COL, ROOT_POS, 70, 11)
+		wrapper.Visible    = false
+
+		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+		local label  = wrapper:FindFirstChild("NodeLabel") :: TextLabel
+
+		btn.MouseButton1Click:Connect(function()
+			if not activeNestId or not btn.Active then return end
+			local ids = getMultiIdsFn and getMultiIdsFn() or {activeNestId}
+			networkRef.upgradeNest(ids)
+			refresh()
+		end)
+
+		upgradeNode = {
+			wrapper  = wrapper,
+			btn      = btn,
+			line     = line,
+			stroke   = stroke,
+			label    = label,
+			finalPos = finalPos,
+		}
+	end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

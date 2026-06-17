@@ -143,9 +143,25 @@ function Network.onBlobUpdate(fn: (string, number) -> ())
 	RemoteHandler.get(Config.REMOTES.BlobUpdate).OnClientEvent:Connect(fn)
 end
 
--- nestIds array — requests one egg from each Lamprey Nest (server caps concurrency)
-function Network.lampreyEgg(nestIds: {string})
-	RemoteHandler.get(Config.REMOTES.LampreyEgg):FireServer(nestIds)
+-- nestIds array — requests one egg from each Lamprey Nest (server caps concurrency).
+-- unitType selects which creature the egg hatches into ("Lamprey" | "Hagfish").
+function Network.lampreyEgg(nestIds: {string}, unitType: string?)
+	RemoteHandler.get(Config.REMOTES.LampreyEgg):FireServer(nestIds, unitType or "Lamprey")
+end
+
+-- hagPos, strikePositions: a hagfish slapped its head down — erupt the ground tentacles
+function Network.onHagfishStrike(fn: (Vector3, {Vector3}) -> ())
+	RemoteHandler.get(Config.REMOTES.HagfishStrike).OnClientEvent:Connect(fn)
+end
+
+-- nestIds array — unlock the rally launcher upgrade on each Lamprey Nest
+function Network.upgradeNest(nestIds: {string})
+	RemoteHandler.get(Config.REMOTES.UpgradeNest):FireServer(nestIds)
+end
+
+-- nestId, target — set where an upgraded nest launches its eggs (server clamps range)
+function Network.setNestRally(nestId: string, target: Vector3)
+	RemoteHandler.get(Config.REMOTES.SetNestRally):FireServer(nestId, target)
 end
 
 -- position: where the worm erupted
