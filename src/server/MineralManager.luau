@@ -1,5 +1,4 @@
 local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -8,19 +7,10 @@ local FungiCluster      = require(Shared:WaitForChild("FungiCluster"))
 
 local MineralManager = {}
 
-type MineData = {
-	pos:   Vector3,
-	owner: Player,
-	ready: boolean,  -- false while building is still under construction
-}
-
 local depositResources: { [string]: number } = {}  -- posKey → resources remaining
 local depositList:      { Vector3 }           = {}
-local mines:            { [string]: MineData } = {}
-local mineActive:            { [string]: boolean } = {}  -- tracks which mines currently have deposits in range
 local depositThresholdBand:  { [string]: number }  = {}  -- posKey → last visual band (4/3/2/1/0)
 local waveScheduled     = false
-local extractAccum      = 0
 
 local depositsFolder: Folder
 local resourceManager: any
@@ -37,8 +27,9 @@ local function makeDepositPart(pos: Vector3)
 	-- Derive a stable seed from grid position so every deposit looks unique but
 	-- regenerates identically on round reset.
 	local seed    = math.abs(math.round(pos.X) * 1000 + math.round(pos.Z) * 7919) % 999983 + 1
-	-- Sit the cluster on whatever terrain level it landed on (key stays XZ-only).
-	local groundY = terrainManagerRef and terrainManagerRef.heightAt(pos.X, pos.Z) or 0
+	-- Sit the cluster on the real terrain surface it landed on (key stays XZ-only)
+	-- so it isn't buried under a raised tier; matches the client deposit markers.
+	local groundY = terrainManagerRef and terrainManagerRef.surfaceHeightAt(pos.X, pos.Z) or 0
 	local cluster = FungiCluster.create(Vector3.new(pos.X, groundY, pos.Z), seed, 1.0)
 	cluster.Name  = posKey(pos)
 	cluster.Parent = depositsFolder
@@ -245,79 +236,63 @@ local function scheduleOreWave()
 	end)
 end
 
--- ── Extraction heartbeat ──────────────────────────────────────────────────────
+-- ── Harvester extraction API ──────────────────────────────────────────────────
 
-local function extractionTick()
+-- True if at least one deposit with resources remaining sits within `radius` of `point`.
+-- Used by a harvester on arrival to decide whether there's anything to drain.
+function MineralManager.hasResourcesNear(point: Vector3, radius: number): boolean
+	local r2 = radius * radius
+	for _, pos in depositList do
+		if (depositResources[posKey(pos)] or 0) <= 0 then continue end
+		local dx = pos.X - point.X
+		local dz = pos.Z - point.Z
+		if dx * dx + dz * dz <= r2 then return true end
+	end
+	return false
+end
+
+-- Drains the (up to 3) nearest in-range deposits by `perDeposit` each, applies the
+-- band visuals / depleted-deposit cleanup / ore-wave scheduling, and returns the total
+-- drained plus the deposit positions hit (for the caller's beam VFX). Returns 0 when
+-- the field around `point` is dry — the caller treats that as "recall the harvester".
+function MineralManager.drainNear(point: Vector3, radius: number, perDeposit: number): (number, { Vector3 })
+	local r2 = radius * radius
+
+	local found: { Vector3 } = {}
+	for _, pos in depositList do
+		if (depositResources[posKey(pos)] or 0) <= 0 then continue end
+		local dx = pos.X - point.X
+		local dz = pos.Z - point.Z
+		if dx * dx + dz * dz <= r2 then table.insert(found, pos) end
+	end
+	if #found == 0 then return 0, {} end
+
+	-- Limit to the nearest 3 deposits (one beam per deposit)
+	if #found > 3 then
+		local pXZ = Vector3.new(point.X, 0, point.Z)
+		table.sort(found, function(a, b)
+			return (Vector3.new(a.X, 0, a.Z) - pXZ).Magnitude
+			     < (Vector3.new(b.X, 0, b.Z) - pXZ).Magnitude
+		end)
+		while #found > 3 do table.remove(found, #found) end
+	end
+
+	local total       = 0
 	local anyDepleted = false
-
-	for mineId, data in mines do
-		if not (data.owner :: any).Parent then continue end
-		if not data.ready then continue end  -- still under construction
-
-		-- Find all deposits in range with resources remaining
-		local found: { Vector3 } = {}
-		for _, pos in depositList do
-			local key = posKey(pos)
-			if (depositResources[key] or 0) <= 0 then continue end
-			local d = (Vector3.new(data.pos.X, 0, data.pos.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude
-			if d <= Config.MINE_EXTRACT_RANGE then
-				table.insert(found, pos)
-			end
+	local hits: { Vector3 } = {}
+	for _, pos in found do
+		local key = posKey(pos)
+		local res = depositResources[key] or 0
+		if res <= 0 then continue end
+		local extract = math.min(perDeposit, res)
+		depositResources[key] = res - extract
+		total += extract
+		table.insert(hits, pos)
+		if depositResources[key] <= 0 then
+			anyDepleted = true
+		else
+			checkColonyRebuild(pos)
 		end
-
-		-- Resolve emitter world position from the mine model
-		local emitterPos = data.pos + Vector3.new(0, 12.2, 0)
-		local bf = workspace:FindFirstChild("Buildings")
-		if bf then
-			local model = bf:FindFirstChild(mineId)
-			if model then
-				local em = model:FindFirstChild("Emitter") :: BasePart?
-				if em then emitterPos = em.Position end
-			end
-		end
-
-		if #found == 0 then
-			-- Send a stop signal once when the mine transitions from active to idle
-			if mineActive[mineId] then
-				mineActive[mineId] = nil
-				RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(mineId, emitterPos, {})
-			end
-			continue
-		end
-
-		-- Limit to the nearest 3 deposits (one arm per deposit)
-		if #found > 3 then
-			local mineXZ = Vector3.new(data.pos.X, 0, data.pos.Z)
-			table.sort(found, function(a, b)
-				return (Vector3.new(a.X, 0, a.Z) - mineXZ).Magnitude
-				     < (Vector3.new(b.X, 0, b.Z) - mineXZ).Magnitude
-			end)
-			while #found > 3 do table.remove(found, #found) end
-		end
-
-		-- Extract from each deposit and tally income
-		local totalIncome = 0
-		for _, pos in found do
-			local key = posKey(pos)
-			local res = depositResources[key] or 0
-			if res <= 0 then continue end
-			local extract = math.min(Config.MINE_INCOME_PER_DEPOSIT, res)
-			depositResources[key] = res - extract
-			totalIncome += extract
-			if depositResources[key] <= 0 then
-				anyDepleted = true
-			else
-				checkColonyRebuild(pos)
-			end
-		end
-
-		if totalIncome > 0 then
-			resourceManager.add(data.owner, totalIncome)
-			RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(data.owner, mineId, totalIncome)
-		end
-
-		mineActive[mineId] = true
-		RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(mineId, emitterPos, found)
 	end
 
 	-- Remove any fully-depleted deposits
@@ -340,15 +315,11 @@ local function extractionTick()
 		)
 		scheduleOreWave()
 	end
+
+	return total, hits
 end
 
 -- ── Deposit API ───────────────────────────────────────────────────────────────
-
--- No-op stub kept for BuildingManager compatibility.
--- Mines no longer claim deposits; they can be placed anywhere.
-function MineralManager.tryClaimDeposit(_pos: Vector3): boolean
-	return true
-end
 
 function MineralManager.getUnclaimedPositions(): { Vector3 }
 	local out = {}
@@ -373,69 +344,39 @@ function MineralManager.rerollDeposits()
 	)
 end
 
--- ── Mine registration ────────────────────────────────────────────────────────
-
-function MineralManager.registerMine(mineId: string, minePos: Vector3, player: Player)
-	mines[mineId] = {
-		pos   = minePos,
-		owner = player,
-		ready = false,  -- set to true by BuildingManager once construction completes
-	}
-end
-
--- Called by BuildingManager when a mine's construction animation finishes.
-function MineralManager.setMineReady(mineId: string)
-	local data = mines[mineId]
-	if data then data.ready = true end
-end
-
--- ── Count / removal ───────────────────────────────────────────────────────────
-
-function MineralManager.getMineCount(player: any): number
-	local n = 0
-	for _, data in mines do
-		if data.owner == player then n += 1 end
-	end
-	return n
-end
-
-function MineralManager.removeMine(mineId: string)
-	mines[mineId]      = nil
-	mineActive[mineId] = nil
-end
-
-function MineralManager.removeAllMinesFor(player: any)
-	local toRemove = {}
-	for id, data in mines do
-		if data.owner == player then table.insert(toRemove, id) end
-	end
-	for _, id in toRemove do
-		mines[id]      = nil
-		mineActive[id] = nil
+-- Re-resolves every existing deposit's Y against the *current* terrain surface.
+-- Deposits are generated once (at MineralManager.init, before any terrain exists)
+-- and their cluster parts bake in a groundY at creation time. Whenever the terrain
+-- is (re)generated afterwards — lobby start, reroll, toggle, gamemode change — the
+-- baked Y goes stale and a deposit sitting on a raised tier ends up buried. Call
+-- this after each terrain (re)generation so deposits rest on the surface they
+-- actually landed on, mirroring how buildings snap via surfaceHeightAt at placement.
+function MineralManager.resnapDeposits()
+	if not (terrainManagerRef and depositsFolder) then return end
+	for _, pos in depositList do
+		local model = depositsFolder:FindFirstChild(posKey(pos))
+		if model and model:IsA("Model") and model.PrimaryPart then
+			local newY   = terrainManagerRef.surfaceHeightAt(pos.X, pos.Z)
+			local curY   = model.PrimaryPart.Position.Y
+			if math.abs(newY - curY) > 0.01 then
+				model:PivotTo(model:GetPivot() + Vector3.new(0, newY - curY, 0))
+				model:SetAttribute("ColonyOriginY", newY)
+			end
+		end
 	end
 end
 
 function MineralManager.resetAll()
-	mines                = {}
-	mineActive           = {}
 	depositList          = {}
 	depositResources     = {}
 	depositThresholdBand = {}
 	waveScheduled        = false
-	extractAccum     = 0
 	for _, model in depositsFolder:GetChildren() do model:Destroy() end
 	generateDeposits()
 	for _, pos in depositList do makeDepositPart(pos) end
 	RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
 		MineralManager.getUnclaimedPositions()
 	)
-end
-
--- ── Stubs for backward compatibility ─────────────────────────────────────────
-
--- No miners in new system; always returns no hit.
-function MineralManager.damageNearestMiner(_fromPos: Vector3, _attackerOwnerIdStr: string, _range: number, _damage: number): (boolean, Vector3?)
-	return false, nil
 end
 
 function MineralManager.setBuildingManager(_bm: any) end
@@ -498,23 +439,6 @@ function MineralManager.init(rm)
 		RemoteHandler.get(Config.REMOTES.SyncDeposits):FireClient(
 			player, MineralManager.getUnclaimedPositions()
 		)
-	end)
-
-	Players.PlayerRemoving:Connect(function(player)
-		local toRemove = {}
-		for id, data in mines do
-			if data.owner == player then table.insert(toRemove, id) end
-		end
-		for _, id in toRemove do mines[id] = nil end
-	end)
-
-	-- Extraction heartbeat
-	RunService.Heartbeat:Connect(function(dt)
-		extractAccum += dt
-		if extractAccum >= Config.MINE_EXTRACT_INTERVAL then
-			extractAccum -= Config.MINE_EXTRACT_INTERVAL
-			extractionTick()
-		end
 	end)
 end
 

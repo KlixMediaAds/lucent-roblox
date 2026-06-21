@@ -15,7 +15,7 @@ local currentType         = "Barracks"
 local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping to
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
 local outOfBuildZone      = false          -- non-CC mode: ghost is outside build zone
-local onTerrain           = false          -- ghost is overlapping a terrain obstacle
+local onTerrain           = false          -- ghost is overlapping a terrain obstacle, out of bounds, or on sloped/uneven ground
 local depositPositions: {Vector3} = {}
 local ccPositions: {Vector3}      = {}     -- all known CC positions
 local ownCcPosition: Vector3?     = nil    -- local player's own CC position
@@ -36,6 +36,17 @@ local lineGhosts:     { Part }  = {}
 local getResources:   (() -> number)? = nil
 
 local GRID = Config.BUILDING_GRID
+
+-- Straight-down terrain raycast so ghosts, deposit rings and the flatness check
+-- all sit on whichever tier they're over (the map has raised plateaus now).
+local terrainRayParams = RaycastParams.new()
+terrainRayParams.FilterType = Enum.RaycastFilterType.Include
+terrainRayParams.FilterDescendantsInstances = { workspace.Terrain }
+
+local function terrainHeightAt(x: number, z: number): number?
+	local result = workspace:Raycast(Vector3.new(x, 250, z), Vector3.new(0, -500, 0), terrainRayParams)
+	return result and result.Position.Y or nil
+end
 
 local placeSound        = Instance.new("Sound")
 placeSound.SoundId      = "rbxassetid://138637105380663"
@@ -72,7 +83,9 @@ local function rebuildBuildZoneRing()
 		table.insert(zones, { cx = rp.X, cz = rp.Z, radius = Config.RELAY_RADIUS })
 	end
 	if #zones > 0 then
-		buildZoneRing = RangeRing.createBuildZone(zones)
+		-- Lift the ring onto the CC's tier so it isn't buried under a raised plateau.
+		local baseY = ownCcPosition and terrainHeightAt(ownCcPosition.X, ownCcPosition.Z) or 0
+		buildZoneRing = RangeRing.createBuildZone(zones, baseY)
 	end
 end
 
@@ -109,11 +122,13 @@ local function createDepositMarkers()
     markerSg = sg
 
     for _, pos in depositPositions do
-        -- Ground ring
+        -- Ground ring — sit it on whichever terrain tier the deposit is on
+        -- (the synced deposit position carries no reliable Y).
+        local ringY             = (terrainHeightAt(pos.X, pos.Z) or 0) + 0.25
         local ring              = Instance.new("Part")
         ring.Name               = "_DepositRing"
         ring.Shape              = Enum.PartType.Cylinder
-        ring.CFrame             = CFrame.new(pos + Vector3.new(0, 0.25, 0))
+        ring.CFrame             = CFrame.new(pos.X, ringY, pos.Z)
                                   * CFrame.Angles(0, 0, math.pi / 2)
         ring.Size               = RING_BASE_SIZE
         ring.Color              = DEPOSIT_COLOR
@@ -236,6 +251,27 @@ local function snap(v: Vector3): Vector3
 	return Vector3.new(math.round(v.X / GRID) * GRID, v.Y, math.round(v.Z / GRID) * GRID)
 end
 
+-- Snaps to the grid and lifts the ghost so its centre is halfH above the terrain
+-- surface AT the snapped cell. The server raycasts straight down at the same
+-- snapped XZ, so the preview lands exactly where the building will — even near a
+-- plateau edge where the cursor cell and the snapped cell differ in height.
+local function snapToSurface(cursor: Vector3, halfH: number): Vector3
+	local s  = snap(cursor)
+	local sy = terrainHeightAt(s.X, s.Z)
+	if sy then return Vector3.new(s.X, sy + halfH, s.Z) end
+	return Vector3.new(s.X, cursor.Y, s.Z)
+end
+
+-- The position to send to the server when placing. The server trusts this Y as
+-- the base-bottom (ground) height — the client's terrain raycast is the source
+-- of truth (it's the same one the ghost preview uses), since recomputing the
+-- height server-side was burying structures. Grid-snapped XZ, surface Y.
+local function placePos(cursor: Vector3): Vector3
+	local s  = snap(cursor)
+	local sy = terrainHeightAt(s.X, s.Z)
+	return Vector3.new(s.X, sy or s.Y, s.Z)
+end
+
 local function ghostSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
@@ -280,6 +316,28 @@ end
 local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
 	local size = ghostSize(buildType)
 	return math.abs(pos.X) + size.X / 2 > 432 or math.abs(pos.Z) + size.Z / 2 > 432
+end
+
+-- ── Footprint flatness (ramp/tier-boundary) check ─────────────────────────────
+-- Mirrors the server's TerrainManager.isFootprintFlat using real terrain
+-- raycasts, so the ghost previews red over ramps/boundaries before the player
+-- clicks instead of silently failing to place.
+local FOOTPRINT_FLAT_EPS = 0.5
+local function isFootprintFlat(pos: Vector3, buildType: string): boolean
+	local size  = ghostSize(buildType)
+	local halfX, halfZ = size.X / 2, size.Z / 2
+	local h0 = terrainHeightAt(pos.X, pos.Z)
+	if not h0 then return true end  -- raycast miss: don't block on incomplete data
+	for _, corner in {
+		Vector3.new(pos.X - halfX, 0, pos.Z - halfZ),
+		Vector3.new(pos.X + halfX, 0, pos.Z - halfZ),
+		Vector3.new(pos.X - halfX, 0, pos.Z + halfZ),
+		Vector3.new(pos.X + halfX, 0, pos.Z + halfZ),
+	} do
+		local h = terrainHeightAt(corner.X, corner.Z)
+		if not h or math.abs(h - h0) > FOOTPRINT_FLAT_EPS then return false end
+	end
+	return true
 end
 
 local function buildingCost(btype: string): number
@@ -338,7 +396,7 @@ local function confirmLineDrag()
 			and not checkTerrainOverlap(lpos, currentType)
 			and not isOutOfMapBounds(lpos, currentType)
 		if valid then
-			networkRef.placeBuilding(lpos, currentType)
+			networkRef.placeBuilding(placePos(lpos), currentType)
 			resources -= cost
 			placed    += 1
 		end
@@ -400,7 +458,7 @@ function BuildingPlacer.init(network, cameraModule)
 					lineDragStart  = snap(pos)
 					return
 				end
-				network.placeBuilding(snap(pos), "Mine")
+				network.placeBuilding(placePos(pos), "Mine")
 				playPlaceSound()
 				task.defer(BuildingPlacer.exitPlacementMode)
 
@@ -409,7 +467,7 @@ function BuildingPlacer.init(network, cameraModule)
 					local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 					local pos   = cameraModule.getPositionAtHeight(halfH)
 					if pos then
-						network.placeBuilding(snap(pos), "CommandCenter")
+						network.placeBuilding(placePos(pos), "CommandCenter")
 						playPlaceSound()
 						task.defer(BuildingPlacer.exitPlacementMode)
 					end
@@ -425,7 +483,7 @@ function BuildingPlacer.init(network, cameraModule)
 					lineDragStart  = snap(pos)
 					return
 				end
-				network.placeBuilding(snap(pos), currentType)
+				network.placeBuilding(placePos(pos), currentType)
 				playPlaceSound()
 				task.defer(BuildingPlacer.exitPlacementMode)
 			end
@@ -484,6 +542,7 @@ function BuildingPlacer.init(network, cameraModule)
 					local valid = isInBuildZone(lpos)
 						and not checkTerrainOverlap(lpos, currentType)
 						and not isOutOfMapBounds(lpos, currentType)
+						and isFootprintFlat(lpos, currentType)
 					local affordable = i <= canAffordN
 					g.BrickColor   = not valid       and BrickColor.new("Bright red")
 						or not affordable and BrickColor.new("Bright orange")
@@ -500,19 +559,20 @@ function BuildingPlacer.init(network, cameraModule)
 		if currentType == "Mine" then
 			local cursor = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
 			if cursor then
-				local snapped = snap(cursor)
+				local snapped = snapToSurface(cursor, Config.BUILDING_SIZE.Y / 2)
 				ghost.Position = snapped
 
-				-- Terrain/bounds check overrides all other colouring
-				onTerrain      = checkTerrainOverlap(snapped, "Mine") or isOutOfMapBounds(snapped, "Mine")
-				outOfBuildZone = not onTerrain and not isInBuildZone(snapped)
+				-- A harvester walks out from the CC, so it can be deployed anywhere
+				-- in-bounds — only map bounds gate placement, not the build zone.
+				onTerrain      = isOutOfMapBounds(snapped, "Mine")
+				outOfBuildZone = false
 
-				if onTerrain or outOfBuildZone then
+				if onTerrain then
 					ghost.BrickColor   = BrickColor.new("Bright red")
 					ghost.Transparency = 0.65
 				else
-					-- Ghost is team-colour when at least one deposit is within extract range,
-					-- orange when no deposits are reachable (mine would produce nothing).
+					-- Ghost is team-colour when at least one deposit is within drain range,
+					-- orange when none are reachable (the harvester will report "no resources").
 					local inRange = false
 					for _, dep in depositPositions do
 						if (Vector3.new(snapped.X, 0, snapped.Z)
@@ -526,9 +586,9 @@ function BuildingPlacer.init(network, cameraModule)
 					ghost.Transparency = inRange and 0.5 or 0.62
 				end
 
-				-- Keep extract-range ring centred under ghost
+				-- Keep extract-range ring centred under ghost (on the ghost's tier)
 				if rangeRing then
-					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z)
+					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z, terrainHeightAt(snapped.X, snapped.Z) or 0)
 				end
 			end
 			updateDepositMarkers()
@@ -537,9 +597,10 @@ function BuildingPlacer.init(network, cameraModule)
 			local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 			local pos   = cameraModule.getPositionAtHeight(halfH)
 			if pos then
-				local snapped  = snap(pos)
+				local snapped  = snapToSurface(pos, halfH)
 				ccTooClose     = isCCTooClose(snapped)
 				onTerrain      = checkTerrainOverlap(snapped, "CommandCenter") or isOutOfMapBounds(snapped, "CommandCenter")
+					or not isFootprintFlat(snapped, "CommandCenter")
 				ghost.Position = snapped
 				local blocked  = ccTooClose or onTerrain
 				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
@@ -549,19 +610,20 @@ function BuildingPlacer.init(network, cameraModule)
 		else
 			local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
 			if pos then
-				local snapped = snap(pos)
+				local snapped = snapToSurface(pos, ghostSize(currentType).Y / 2)
 				ghost.Position = snapped
 
 				onTerrain      = checkTerrainOverlap(snapped, currentType) or isOutOfMapBounds(snapped, currentType)
+					or not isFootprintFlat(snapped, currentType)
 				outOfBuildZone = not onTerrain and not isInBuildZone(snapped)
 
 				local blocked  = onTerrain or outOfBuildZone
 				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
 				ghost.Transparency = blocked and 0.65 or 0.5
 
-				-- Keep attack-range ring (e.g. turret) centred under ghost
+				-- Keep attack-range ring (e.g. turret) centred under ghost (on its tier)
 				if rangeRing then
-					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z)
+					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z, terrainHeightAt(snapped.X, snapped.Z) or 0)
 				end
 			end
 		end

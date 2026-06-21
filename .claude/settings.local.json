@@ -43,7 +43,9 @@
       "Bash(python -)",
       "Bash(ls *.toml *.json)",
       "Bash(which selene *)",
-      "Bash(which rojo *)"
+      "Bash(which rojo *)",
+      "Bash(command -v luau-analyze luau selene stylua rojo)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }

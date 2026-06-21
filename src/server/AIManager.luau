@@ -292,6 +292,10 @@ local researchManager: any
 local botByUserId:  { [number]: any }     = {}
 local takenBaseIdx: { [number]: boolean } = {}  -- AI_BASES index → claimed
 
+-- Swarm gamemode: when on, every AI spawned builds only nests + creepy structures
+-- and fields an army of Lampreys / Hagfish / Creepy Soldiers (no Barracks army).
+local swarmMode = false
+
 -- ── Utility helpers ───────────────────────────────────────────────────────────
 
 local function snapGrid(v: Vector3): Vector3
@@ -352,19 +356,12 @@ local function nearestFreeDeposit(fromPos: Vector3): Vector3?
 	local folder = workspace:FindFirstChild("Deposits")
 	if not folder then return nil end
 
-	-- Build a set of positions that already have a Mine on them
+	-- Build a set of deposit positions already targeted by a live harvester (any owner)
+	-- so the AI doesn't pile multiple harvesters onto one field.
 	local minedKeys: { [string]: true } = {}
-	local buildingsF = workspace:FindFirstChild("Buildings")
-	if buildingsF then
-		for _, model in buildingsF:GetChildren() do
-			local btv = model:FindFirstChild("BuildingType")
-			if btv and btv.Value == "Mine" then
-				local base = model:FindFirstChild("Base")
-				if base and base:IsA("BasePart") then
-					local p = base.Position
-					minedKeys[math.round(p.X) .. "," .. math.round(p.Z)] = true
-				end
-			end
+	if unitManager then
+		for _, hp in unitManager.getActiveHarvestPoints() do
+			minedKeys[math.round(hp.X) .. "," .. math.round(hp.Z)] = true
 		end
 	end
 
@@ -780,7 +777,7 @@ end
 
 local function btExpansionPhase(ai)
 	-- Sync live counts (buildings can be destroyed)
-	local liveMines    = countOwnedBuildings(ai.ownerStr, "Mine")
+	local liveMines    = unitManager.getActiveHarvesterCount(ai.player)
 	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Barracks")
 	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
 	local liveRelays   = countOwnedBuildings(ai.ownerStr, "Relay")
@@ -1197,7 +1194,7 @@ end
 local function trainerStrategyTree(ai: any)
 
 	-- ── Mirror player economy / army ──────────────────────────────────────────
-	local playerMines    = countHumanBuildings("Mine")
+	local playerMines    = unitManager.getHumanHarvesterCount()
 	local playerBarracks = countHumanBuildings("Barracks")
 	local playerAllBld   = countHumanBuildings("any")
 	local playerArmy     = countHumanArmy()
@@ -1258,7 +1255,7 @@ local function trainerStrategyTree(ai: any)
 	end
 
 	-- Inline expansion (bypasses checkAndGrantResearch to keep trainer tech-free)
-	local liveMines    = countOwnedBuildings(ai.ownerStr, "Mine")
+	local liveMines    = unitManager.getActiveHarvesterCount(ai.player)
 	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Barracks")
 	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
 
@@ -1475,9 +1472,95 @@ local function trainerReactionTree(ai: any)
 	btCommandArmyTrainer(ai)
 end
 
+-- ── Swarm gamemode behavior ────────────────────────────────────────────────────
+-- Swarm AIs build only economy (CC + mines) plus Lamprey Nests and Creepy Blobs,
+-- and field an army entirely of Lampreys / Hagfish / Creepy Soldiers. Army command
+-- reuses the standard btCommandArmy (it operates on owned units of any type).
+
+-- Per-level structure caps: { nests, blobs, mines }.
+local function swarmCaps(level: number): (number, number, number)
+	if level <= 1 then return 1, 0, 1
+	elseif level == 2 then return 1, 1, 2
+	elseif level == 3 then return 2, 1, 2
+	elseif level == 4 then return 3, 2, 3
+	else return 4, 3, 4 end
+end
+
+local function swarmStrategyTree(ai)
+	-- Nightmare swarm: keep coffers full and raise the caps so the tide never stops.
+	if ai.isNightmare then
+		local current = resourceManager.get(ai.player)
+		if current < 9999 then resourceManager.add(ai.player, 9999 - current) end
+	end
+
+	if btBuildCC(ai) ~= SUCCESS then return end
+
+	-- Grant the Creepy Blob unlock once so the AI may place blobs. Set the flag
+	-- first: grantTech records the tech before its (AI-unsafe) client ping, so the
+	-- unlock sticks even if that ping is swallowed by the tick's pcall.
+	if not ai.swarmTechGranted then
+		ai.swarmTechGranted = true
+		grantTech(ai.player, "CreepyBlob")
+	end
+
+	local maxNests, maxBlobs, maxMines = swarmCaps(ai.level)
+	if ai.isNightmare then maxNests += 2; maxBlobs += 2 end
+
+	-- Economy: harvesters on nearby deposits fund the swarm.
+	local liveMines = unitManager.getActiveHarvesterCount(ai.player)
+	if liveMines < maxMines and canAfford(ai.player, Config.MINE_COST, ai.diff.reserveResources) then
+		local deposit = nearestFreeDeposit(ai.base)
+		if deposit and buildingManager.placeForPlayer(ai.player, deposit, "Mine") then
+			ai.builtMines += 1
+		end
+	end
+
+	-- Primary production: Lamprey Nests (Lamprey + Hagfish).
+	local liveNests = countOwnedBuildings(ai.ownerStr, "LampreyNest")
+	if liveNests < maxNests and canAfford(ai.player, Config.LAMPREY_NEST_COST, ai.diff.reserveResources) then
+		tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "LampreyNest", 15, 45)
+	end
+
+	-- Secondary production: Creepy Blobs (Creepy Soldier factories).
+	local liveBlobs = countOwnedBuildings(ai.ownerStr, "CreepyBlob")
+	if liveBlobs < maxBlobs and canAfford(ai.player, Config.CREEPY_BLOB_COST, ai.diff.reserveResources) then
+		tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "CreepyBlob", 15, 45)
+	end
+
+	-- Reshuffle squads when the army size changes.
+	local currentCount = unitManager.getUnitCount(ai.player)
+	if currentCount ~= ai.lastSquadCount then
+		rebuildSquads(ai)
+		ai.lastSquadCount = currentCount
+	end
+end
+
+local function btProduceSwarm(ai)
+	if unitManager.getUnitCount(ai.player) >= ai.diff.maxUnits then return end
+
+	-- Nests: lay one egg each, alternating Lamprey / Hagfish. The nest egg cap and
+	-- resource reserve naturally throttle output.
+	for _, nestId in getOwnedBuildingIds(ai.ownerStr, "LampreyNest") do
+		ai.swarmEggToggle = not ai.swarmEggToggle
+		local kind = if ai.swarmEggToggle then "Lamprey" else "Hagfish"
+		local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
+		if canAfford(ai.player, cost, ai.diff.reserveResources) then
+			buildingManager.requestNestEgg(ai.player, nestId, kind)
+		end
+	end
+
+	-- Blobs: spawn Creepy Soldiers when off cooldown.
+	for _, blobId in getOwnedBuildingIds(ai.ownerStr, "CreepyBlob") do
+		if canAfford(ai.player, Config.BLOB_SOLDIER_COST, ai.diff.reserveResources) then
+			buildingManager.requestBlobSoldier(ai.player, blobId)
+		end
+	end
+end
+
 -- ── Behavior Trees ────────────────────────────────────────────────────────────
 
 local function strategyTree(ai)
+	if ai.swarm then swarmStrategyTree(ai); return end
 	if ai.personality == "trainer" then trainerStrategyTree(ai); return end
 	-- Nightmare: exponential scaling — every stat grows with elapsed time.
 	-- scale ≈ 2× at 1 min, ≈ 7× at 3 min, ≈ 28× at 5 min (math.exp(t/90)).
@@ -1512,6 +1595,12 @@ local function strategyTree(ai)
 end
 
 local function reactionTree(ai)
+	if ai.swarm then
+		btUpdateVision(ai)
+		btProduceSwarm(ai)
+		btCommandArmy(ai)
+		return
+	end
 	if ai.personality == "trainer" then trainerReactionTree(ai); return end
 	btUpdateVision(ai)
 	btTrainUnit(ai)
@@ -1528,6 +1617,11 @@ type AIState = {
 	personality: string,
 	level:       number,
 	isNightmare: boolean,
+
+	-- Swarm gamemode
+	swarm:           boolean,
+	swarmTechGranted: boolean,
+	swarmEggToggle:  boolean,
 
 	-- Infrastructure flags
 	hasCC:       boolean,
@@ -1619,11 +1713,18 @@ function AIManager.setResearchManager(rm: any)
 	researchManager = rm
 end
 
+-- Toggle Swarm gamemode for all subsequently-spawned AI bots.
+function AIManager.setSwarmMode(on: boolean)
+	swarmMode = on and true or false
+end
+
 function AIManager.resetBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end
 	ai.hasCC             = false
 	ai.hasMonument       = false
+	ai.swarmTechGranted  = false
+	ai.swarmEggToggle    = false
 	ai.builtMines        = 0
 	ai.builtBarracks     = 0
 	ai.builtTurrets      = 0
@@ -1790,6 +1891,10 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		personality = personality,
 		level       = personality == "nightmare" and 5 or personality == "trainer" and 1 or level,
 		isNightmare = personality == "nightmare",
+
+		swarm            = swarmMode,
+		swarmTechGranted = false,
+		swarmEggToggle   = false,
 
 		hasCC       = false,
 		hasMonument = false,

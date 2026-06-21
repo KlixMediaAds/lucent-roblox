@@ -34,6 +34,7 @@ local onPlayerWonCb: ((number) -> ())?
 local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
 local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
 local monumentHeartbeatAccum = 0
+local ccIncomeAccum          = 0   -- accumulator for Command Center passive income
 
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
@@ -195,12 +196,24 @@ end
 
 -- ── Building creation ─────────────────────────────────────────────────────────
 
-local function createBuilding(player: any, position: Vector3, buildingType: string): string
-	-- Snap to the terrain level under the placement point so structures sit on
-	-- whichever tier they're built on (ground / natural / main plateau).
-	if terrainManagerRef then
-		position = Vector3.new(position.X, terrainManagerRef.heightAt(position.X, position.Z), position.Z)
+local function createBuilding(player: any, position: Vector3, buildingType: string, groundY: number?): string
+	-- Height resolution. If the caller knows the exact ground height the build
+	-- should sit on (e.g. the drop-pod path passes the very height the pod landed
+	-- and the on-site construction used), trust it so the finished building lines
+	-- up with them. Otherwise fall back to the terrain lookup.
+	local passedY = position.Y
+	local baseBottomY = groundY
+	if baseBottomY == nil and terrainManagerRef then
+		baseBottomY = terrainManagerRef.surfaceHeightAt(position.X, position.Z)
 	end
+	if baseBottomY ~= nil then
+		position = Vector3.new(position.X, baseBottomY, position.Z)
+	end
+	print(string.format("[LUCENT-H][createBuilding] %s xz=(%.1f,%.1f) passedY=%.2f groundYParam=%s -> baseBottomY=%.2f  heightAt=%s",
+		buildingType, position.X, position.Z, passedY,
+		groundY and string.format("%.2f", groundY) or "nil",
+		position.Y,
+		terrainManagerRef and string.format("%.2f", terrainManagerRef.heightAt(position.X, position.Z)) or "nil"))
 
 	counter += 1
 	local id   = "b" .. counter
@@ -229,52 +242,6 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		-- operator pulpit at the platform edge (see init.server seatAvatarOnCC).
 		base.Material = Enum.Material.Metal
 		UnitVisuals.buildCommandCenterDecor(model, CFrame.new(position), player.TeamColor, true)
-
-	elseif buildingType == "Mine" then
-		-- Dark-metal base platform
-		base.Size     = Vector3.new(10, 2, 10)
-		base.Position = position + Vector3.new(0, 1, 0)   -- center Y=1, bottom Y=0
-		base.Material = Enum.Material.Metal
-		base.BrickColor = BrickColor.new("Dark stone grey")
-
-		-- Central emission shaft
-		local shaft       = Instance.new("Part")
-		shaft.Name        = "Shaft"
-		shaft.Size        = Vector3.new(2, 9, 2)
-		shaft.Position    = position + Vector3.new(0, 6.5, 0)  -- bottom Y=2, top Y=11
-		shaft.BrickColor  = BrickColor.new("Dark stone grey")
-		shaft.Material    = Enum.Material.Metal
-		shaft.Anchored    = true
-		shaft.CastShadow  = false
-		shaft.CanCollide  = false
-		shaft.Parent      = model
-
-		-- Team-color neon emitter ring at top of shaft
-		local ring        = Instance.new("Part")
-		ring.Name         = "EmitterRing"
-		ring.Shape        = Enum.PartType.Cylinder
-		ring.Size         = Vector3.new(0.4, 7, 7)
-		ring.CFrame       = CFrame.new(position + Vector3.new(0, 11.2, 0))
-		                  * CFrame.Angles(0, 0, math.pi / 2)
-		ring.BrickColor   = player.TeamColor
-		ring.Material     = Enum.Material.Neon
-		ring.Anchored     = true
-		ring.CastShadow   = false
-		ring.CanCollide   = false
-		ring.Parent       = model
-
-		-- Emitter orb — beam origin point, used by clients for VFX anchoring
-		local emitter     = Instance.new("Part")
-		emitter.Name      = "Emitter"
-		emitter.Shape     = Enum.PartType.Ball
-		emitter.Size      = Vector3.new(2, 2, 2)
-		emitter.Position  = position + Vector3.new(0, 12.2, 0)
-		emitter.BrickColor = player.TeamColor
-		emitter.Material  = Enum.Material.Neon
-		emitter.Anchored  = true
-		emitter.CastShadow = false
-		emitter.CanCollide = false
-		emitter.Parent    = model
 
 	elseif buildingType == "Turret" then
 		-- Military tripod-mounted machine gun
@@ -717,12 +684,15 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	-- ── Construction animation ────────────────────────────────────────────────
 	if buildTime > 0 then
 		model:ScaleTo(0.04)
-		model:PivotTo(CFrame.new(position.X, 0, position.Z))
+		model:PivotTo(CFrame.new(position.X, position.Y, position.Z))
 
 		task.spawn(function()
 			local elapsed   = 0
-			-- Mine uses a thin platform (center Y=1) instead of the full BUILDING_SIZE height
-			local finalY    = buildingType == "Mine" and 1.0 or size.Y / 2
+			local finalY    = size.Y / 2
+			-- All pivot heights below are RELATIVE to the terrain surface the build
+			-- sits on (position.Y), so the rise lands on the correct tier instead of
+			-- snapping back to the world Y=0 ground.
+			local surfY     = position.Y
 
 			while elapsed < buildTime do
 				local dt = task.wait(0.05)
@@ -741,14 +711,14 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 					local tiltZ = math.cos(elapsed * 5.7) * math.min(progress * 0.6, 0.11)
 					local spin  = elapsed * 0.35  -- slow base rotation
 					model:PivotTo(
-						CFrame.new(position.X, wEase * finalY, position.Z)
+						CFrame.new(position.X, surfY + wEase * finalY, position.Z)
 						* CFrame.Angles(tiltX, spin, tiltZ)
 					)
 				else
 					-- Grow in scale and rise simultaneously — building emerges from ground up
 					local s = math.max(ease, 0.04)
 					model:ScaleTo(s)
-					model:PivotTo(CFrame.new(position.X, ease * finalY, position.Z))
+					model:PivotTo(CFrame.new(position.X, surfY + ease * finalY, position.Z))
 				end
 
 				local target = math.max(1, math.floor(progress * maxHp))
@@ -762,7 +732,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			local data = buildingData[id]
 			if data then
 				model:ScaleTo(1)
-				model:PivotTo(CFrame.new(position.X, finalY, position.Z))
+				model:PivotTo(CFrame.new(position.X, surfY + finalY, position.Z))
 				data.hp            = math.max(data.hp, maxHp)
 				data.isConstructing = false
 				applyHP(data)
@@ -774,7 +744,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 						if not buildingData[id] then return end
 						local t    = i / 12
 						local spin = t * math.pi * 2.2
-						local lungeY = finalY + math.sin(t * math.pi) * 7
+						local lungeY = surfY + finalY + math.sin(t * math.pi) * 7
 						model:PivotTo(
 							CFrame.new(position.X, lungeY, position.Z)
 							* CFrame.Angles(math.sin(spin * 0.5) * 0.3, spin, math.cos(spin * 0.7) * 0.3)
@@ -784,7 +754,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 					-- Pause at peak height for a beat, then drop back to spawn height for explosion
 					task.wait(0.08)
 					if not buildingData[id] then return end
-					model:PivotTo(CFrame.new(position.X, finalY + 4, position.Z))
+					model:PivotTo(CFrame.new(position.X, surfY + finalY + 4, position.Z))
 
 					-- Erupt: VFX, spawn 10 soldiers, destroy the building
 					task.spawn(spawnWormBurstVFX, position + Vector3.new(0, 5, 0))
@@ -799,10 +769,6 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 					buildingData[id] = nil
 					model:Destroy()
 					return
-				end
-
-				if buildingType == "Mine" and mineralManager then
-					mineralManager.setMineReady(id)
 				end
 
 				if buildingType == "Monument" then
@@ -1227,7 +1193,11 @@ end
 -- build a scaffold + frame through staged passes, then the finished building
 -- rises from the ground while the scaffold sinks and the pod fades away. All
 -- scaffold / frame dimensions scale to the building footprint.
-local function runConstruction(player: any, targetPos: Vector3, buildingType: string, pod: Model, isMine: boolean)
+-- pod may be nil (the Core→Command-Center deploy has no pod — the welding arms
+-- emerge from above the build site instead). assemblyOverride forces the total
+-- weld-stage duration (else it stretches to Config.BUILD_TIME). onBuilt(id) fires
+-- the moment the finished structure is created.
+local function runConstruction(player: any, targetPos: Vector3, buildingType: string, pod: Model?, isMine: boolean, assemblyOverride: number?, onBuilt: ((string) -> ())?)
 	local sz   = buildingSize(buildingType)
 	local hx   = sz.X / 2 + 1.1                 -- scaffold half-extent (just outside footprint)
 	local hz   = sz.Z / 2 + 1.1
@@ -1304,8 +1274,9 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 		table.insert(roof, r)
 	end
 
-	-- Welding arms: one per corner, emerging from the pod down to the rising frame.
-	local podCenter = pod:GetPivot().Position
+	-- Welding arms: one per corner, emerging from the pod (or, on a pod-less Core
+	-- deploy, from a point hovering above the build site) down to the rising frame.
+	local podCenter = pod and pod:GetPivot().Position or (targetPos + Vector3.new(0, topY + 3.5, 0))
 	local arms: { any } = {}
 	for _, s in signs do
 		local dir      = Vector3.new(s[1], 0, s[2]).Unit
@@ -1331,7 +1302,7 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 	-- Phase boundaries (cumulative seconds). The welding-assembly stages stretch to
 	-- fill the structure's configured Config.BUILD_TIME; the rise is a fixed tail.
 	local buildTime = (Config.BUILD_TIME :: any)[buildingType] or 8
-	local assembly  = math.max(buildTime, 2)
+	local assembly  = assemblyOverride or math.max(buildTime, 2)
 	local F  = assembly * CONSTRUCT_FOUNDATION_FRAC
 	local B  = F + assembly * CONSTRUCT_BEAMS_FRAC
 	local R  = B + assembly * CONSTRUCT_ROOF_FRAC
@@ -1399,19 +1370,26 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 			-- ── Final stage: building rises, scaffold sinks, pod fades ──────────
 			if not built then
 				built = true
-				nextBuildRiseTime = CONSTRUCT_RISE_TIME
-				local id = createBuilding(player, targetPos, buildingType)
-				if buildingType == "Mine" and isMine and mineralManager then
-					mineralManager.registerMine(id, targetPos, player)
+				-- The CC is instant in createBuilding (buildTime 0) and wouldn't
+				-- consume this override, so only arm it for buildings that rise.
+				if buildingType ~= "CommandCenter" then
+					nextBuildRiseTime = CONSTRUCT_RISE_TIME
 				end
+				-- Use the exact height the pod landed at and the on-site rig built
+				-- around, so the finished structure lines up with them instead of
+				-- being re-snapped to a separately-computed height.
+				local id = createBuilding(player, targetPos, buildingType, targetPos.Y)
 				if researchManagerRef and buildingType ~= "CommandCenter" then
 					researchManagerRef.recordBuildingPlaced(player, buildingType)
 				end
+				if onBuilt then task.spawn(onBuilt, id) end
 				for _, p in rig:GetChildren() do
 					if p:IsA("BasePart") then sinkBase[p] = p.CFrame end
 				end
-				for _, p in pod:GetDescendants() do
-					if p:IsA("BasePart") then table.insert(podParts, p) end
+				if pod then
+					for _, p in pod:GetDescendants() do
+						if p:IsA("BasePart") then table.insert(podParts, p) end
+					end
 				end
 				local sp = Instance.new("Part")
 				sp.Size = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos + Vector3.new(0, 1, 0))
@@ -1448,7 +1426,7 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 			if t >= Ri then
 				conn:Disconnect()
 				rig:Destroy()
-				if pod.Parent then pod:Destroy() end
+				if pod and pod.Parent then pod:Destroy() end
 			end
 		end
 	end)
@@ -1632,6 +1610,160 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 	end)
 end
 
+-- ── Core deploy pod ────────────────────────────────────────────────────────────
+-- At match start (and on respawn) a player's base arrives as a drop pod that
+-- streaks in from the sky and deploys a mobile "Core" unit on impact. The player
+-- drives the Core to a chosen spot and presses DEPLOY (deployCommandCenter), which
+-- transforms it into the Command Center using the same on-site weld animation.
+local function launchCorePod(player: any, targetPos: Vector3)
+	local pod      = createDropPodModel()
+	pod.Name       = "_CorePod_" .. tostring(player.UserId)
+
+	local startPos = targetPos + Vector3.new(-70, 250, -70)
+	local endPos   = targetPos + Vector3.new(0, 4, 0)
+	local apexPos  = Vector3.new(
+		(startPos.X + endPos.X) * 0.5,
+		startPos.Y + 30,
+		(startPos.Z + endPos.Z) * 0.5
+	)
+
+	pod:PivotTo(CFrame.new(startPos))
+	pod.Parent = workspace
+
+	-- Tell the owning client to track the pod with its camera as it descends.
+	if player.UserId > 0 then
+		RemoteHandler.get(Config.REMOTES.CorePodLaunched):FireClient(player, pod, targetPos)
+	end
+
+	-- Launch sound
+	do
+		local sp  = Instance.new("Part")
+		sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(startPos)
+		sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+		sp.Parent = workspace
+		local snd = Instance.new("Sound")
+		snd.SoundId = "rbxassetid://78110429907701"
+		snd.Volume  = 1
+		snd.Parent  = sp
+		snd:Play()
+		Debris:AddItem(sp, 14)
+	end
+
+	-- Smoke contrail
+	do
+		local anchor = pod.PrimaryPart
+		local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(-1.1, 0, 0); a0.Parent = anchor
+		local a1 = Instance.new("Attachment"); a1.Position = Vector3.new( 1.1, 0, 0); a1.Parent = anchor
+		local tr          = Instance.new("Trail")
+		tr.Attachment0    = a0
+		tr.Attachment1    = a1
+		tr.Color          = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,   Color3.fromRGB(225, 222, 215)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(155, 150, 145)),
+			ColorSequenceKeypoint.new(1,   Color3.fromRGB(60,  58,  55)),
+		})
+		tr.Transparency   = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1.0),
+		})
+		tr.WidthScale     = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1.0), NumberSequenceKeypoint.new(1, 0.06),
+		})
+		tr.Lifetime       = 2.0
+		tr.LightEmission  = 0.04
+		tr.LightInfluence = 0.85
+		tr.Parent         = anchor
+	end
+
+	local FLIGHT  = 2.8
+	local elapsed = 0
+	local conn: RBXScriptConnection
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not pod or not pod.Parent then conn:Disconnect(); return end
+		elapsed += dt
+		local t    = math.min(elapsed / FLIGHT, 1)
+		local ease = t * t * (3 - 2 * t)
+		local u    = 1 - ease
+		local pos  = startPos * (u * u) + apexPos * (2 * u * ease) + endPos * (ease * ease)
+		local tangent = (apexPos - startPos) * (2 * (1 - ease)) + (endPos - apexPos) * (2 * ease)
+		if tangent.Magnitude > 0.5 then
+			pod:PivotTo(CFrame.new(pos, pos + tangent) * CFrame.Angles(-math.pi / 2, 0, 0))
+		else
+			pod:PivotTo(CFrame.new(pos))
+		end
+
+		if t < 1 then return end
+		conn:Disconnect()
+
+		-- Landing sound + dirt burst
+		do
+			local sp  = Instance.new("Part")
+			sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos)
+			sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
+			sp.Parent = workspace
+			local snd = Instance.new("Sound")
+			snd.SoundId = "rbxassetid://76696468542735"
+			snd.Volume  = 0.35
+			snd.Parent  = sp
+			snd:Play()
+			Debris:AddItem(sp, 8)
+		end
+		local rng2 = Random.new()
+		for _ = 1, 8 do
+			local d      = Instance.new("Part")
+			d.Shape      = Enum.PartType.Ball
+			d.Size       = Vector3.one * rng2:NextNumber(0.12, 0.38)
+			d.Color      = Color3.fromRGB(rng2:NextInteger(78, 112), rng2:NextInteger(52, 76), rng2:NextInteger(22, 42))
+			d.Material   = Enum.Material.SmoothPlastic
+			d.Position   = targetPos + Vector3.new(rng2:NextNumber(-2, 2), rng2:NextNumber(0.2, 0.8), rng2:NextNumber(-2, 2))
+			d.Anchored   = false; d.CanCollide = false; d.CastShadow = false
+			d.Parent     = workspace
+			local bv     = Instance.new("BodyVelocity")
+			bv.Velocity  = Vector3.new(rng2:NextNumber(-9, 9), rng2:NextNumber(5, 12), rng2:NextNumber(-9, 9))
+			bv.MaxForce  = Vector3.new(1e5, 1e5, 1e5)
+			bv.Parent    = d
+			Debris:AddItem(d, 1.2)
+		end
+
+		-- Open the fins, deploy the Core, then lift the spent pod away and fade it.
+		task.spawn(function()
+			openPodFins(pod)
+			if unitManagerRef then
+				unitManagerRef.spawnUnitNow(player, targetPos, "Core")
+			end
+			task.wait(0.5)
+			local fadeParts: { BasePart } = {}
+			for _, p in pod:GetDescendants() do
+				if p:IsA("BasePart") then table.insert(fadeParts, p) end
+			end
+			local liftBase = pod:GetPivot()
+			for i = 1, 16 do
+				task.wait(0.04)
+				if not pod.Parent then return end
+				pod:PivotTo(liftBase + Vector3.new(0, i * 0.9, 0))
+				for _, p in fadeParts do
+					if p.Parent then p.Transparency = math.min(1, p.Transparency + 0.07) end
+				end
+			end
+			if pod.Parent then pod:Destroy() end
+		end)
+	end)
+end
+
+-- Transforms a deployed Core (at groundPos) into the player's Command Center using
+-- the on-site weld animation, timed to Config.CORE_DEPLOY_TIME. onBuilt(ccId) fires
+-- when the CC instance is created (used to seat the avatar on its pulpit).
+local function deployCommandCenter(player: any, groundPos: Vector3, onBuilt: ((string) -> ())?)
+	if playerHasCC[player.UserId] then return end
+	local snapped  = snapGrid(groundPos)
+	local groundY  = terrainManagerRef and terrainManagerRef.surfaceHeightAt(snapped.X, snapped.Z) or 0
+	local pos      = Vector3.new(snapped.X, groundY, snapped.Z)
+	local assembly = math.max(Config.CORE_DEPLOY_TIME - CONSTRUCT_RISE_TIME, 1.2)
+	runConstruction(player, pos, "CommandCenter", nil, false, assembly, onBuilt)
+end
+
+BuildingManager.launchCorePod        = launchCorePod
+BuildingManager.deployCommandCenter  = deployCommandCenter
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function BuildingManager.hasCommandCenter(player: any): boolean
@@ -1649,6 +1781,7 @@ function BuildingManager.resetAll()
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
+	ccIncomeAccum            = 0
 	blobCooldowns            = {}
 	ccMobileUnlocked         = {}
 	ccMobile                 = {}
@@ -1658,6 +1791,60 @@ end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
 	onCCDestroyedCb = fn
+end
+
+-- Player voluntarily forfeits the match: destroy their Command Center, which runs
+-- the normal destruction + elimination/endgame path (onCCDestroyedCb). Returns
+-- false if the player has no live CC (already eliminated / not yet placed).
+function BuildingManager.forfeit(player: any): boolean
+	local ccId = playerCCId[player.UserId]
+	if not ccId or not buildingData[ccId] then return false end
+	BuildingManager.damage(ccId, math.huge)
+	return true
+end
+
+-- True if a disc centred at (x, z) with the given radius overlaps any building's
+-- footprint. Building footprints are grid-aligned, so an AABB test is exact enough.
+-- Used by unit movement so units can't walk through structures.
+function BuildingManager.blocksMovement(x: number, z: number, radius: number): boolean
+	for _, data in buildingData do
+		local b = data.base
+		if not b then continue end
+		if math.abs(x - b.Position.X) < b.Size.X * 0.5 + radius
+			and math.abs(z - b.Position.Z) < b.Size.Z * 0.5 + radius then
+			return true
+		end
+	end
+	return false
+end
+
+-- Fraction of a structure's build cost refunded when it is sold.
+local SELL_REFUND_FRAC = 0.5
+local SELL_COST: { [string]: number } = {
+	Mine        = Config.MINE_COST,
+	Barracks    = Config.BUILDING_COST,
+	Deployer    = Config.DEPLOYER_COST,
+	Turret      = Config.TURRET_COST,
+	Relay       = Config.RELAY_COST,
+	CreepyBlob  = Config.CREEPY_BLOB_COST,
+	LampreyNest = Config.LAMPREY_NEST_COST,
+}
+
+-- Sell a structure: refund part of its cost to the owner and demolish it. The
+-- Command Center and Monument can't be sold. Returns false on any rejection.
+function BuildingManager.sellBuilding(player: any, id: string): boolean
+	local data = buildingData[id]
+	if not data then return false end
+	if tostring(data.owner.UserId) ~= tostring(player.UserId) then return false end
+	if data.buildingType == "CommandCenter" or data.buildingType == "Monument" then return false end
+
+	local refund = math.floor((SELL_COST[data.buildingType] or 0) * SELL_REFUND_FRAC)
+	if refund > 0 and resourceManagerRef then
+		resourceManagerRef.add(player, refund)
+	end
+	-- Reuse the normal destruction path (model + timers + mine cleanup + VFX).
+	BuildingManager.damage(id, math.huge)
+	return true
 end
 
 function BuildingManager.setOnPlayerWon(fn: (number) -> ())
@@ -2222,6 +2409,58 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
 end
 
+-- ── Server-callable production (shared by remote handlers + AI swarm bots) ──────
+-- Births one egg from `player`'s Lamprey Nest. Returns true if a slot was
+-- reserved and production started. Safe for AI (fake) players — uses FireAllClients.
+function BuildingManager.requestNestEgg(player: any, nestId: string, unitType: string): boolean
+	local kind = if unitType == "Hagfish" then "Hagfish" else "Lamprey"
+	local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
+	local data = buildingData[nestId]
+	if not data or data.buildingType ~= "LampreyNest" then return false end
+	if data.owner ~= player then return false end
+	if data.isConstructing then return false end
+	if (nestEggs[nestId] or 0) >= Config.LAMPREY_NEST_MAX_EGGS then return false end
+	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
+
+	resourceManagerRef.spend(player, cost)
+	nestEggs[nestId] = (nestEggs[nestId] or 0) + 1
+	task.spawn(produceLampreyEgg, nestId, player, kind)
+	return true
+end
+
+-- Spawns one CreepySoldier from `player`'s Creepy Blob (respects the per-blob
+-- cooldown + cost). Safe for AI players — the BlobUpdate UI ping is skipped for them.
+function BuildingManager.requestBlobSoldier(player: any, blobId: string): boolean
+	local data = buildingData[blobId]
+	if not data or data.buildingType ~= "CreepyBlob" then return false end
+	if data.owner ~= player then return false end
+	if data.isConstructing then return false end
+
+	local now = os.clock()
+	if (blobCooldowns[blobId] or 0) > now then return false end
+	if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_SOLDIER_COST then return false end
+	resourceManagerRef.spend(player, Config.BLOB_SOLDIER_COST)
+
+	if unitManagerRef then
+		local blobPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+		local angle   = math.random() * math.pi * 2
+		local offset  = Vector3.new(math.cos(angle) * 6, 0, math.sin(angle) * 6)
+		unitManagerRef.spawnUnitNow(player, blobPos + offset, "CreepySoldier")
+	end
+
+	blobCooldowns[blobId] = now + Config.BLOB_SOLDIER_COOLDOWN
+	-- UI cooldown ping only goes to real players (AI players are fake tables).
+	if (player.UserId or 0) > 0 then
+		RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, Config.BLOB_SOLDIER_COOLDOWN)
+		task.delay(Config.BLOB_SOLDIER_COOLDOWN, function()
+			if buildingData[blobId] then
+				RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, 0)
+			end
+		end)
+	end
+	return true
+end
+
 function BuildingManager.damage(id: string, amount: number)
 	local data = buildingData[id]
 	if not data then return end
@@ -2254,10 +2493,6 @@ function BuildingManager.damage(id: string, amount: number)
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
 	nestEggs[id]          = nil
-
-	if data.buildingType == "Mine" and mineralManager then
-		mineralManager.removeMine(id)
-	end
 
 	local model      = buildingsFolder:FindFirstChild(id)
 	local destroyPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
@@ -2309,9 +2544,6 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		deployerUpdateAcc[id] = nil
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
-		if data.buildingType == "Mine" and mineralManager then
-			mineralManager.removeMine(id)
-		end
 		local model = buildingsFolder:FindFirstChild(id)
 		if model then model:Destroy() end
 	end
@@ -2319,13 +2551,48 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 	monumentByOwner[player.UserId] = nil
 end
 
+-- "Mine" is no longer a building — it's a deploy order. Charges MINE_COST (or consumes
+-- a free stashed harvester), then sends a harvester unit out from the player's CC to
+-- drain the deposit field at `point`. Income/recall/stash are handled by UnitManager.
+function BuildingManager.deployHarvester(player: any, point: Vector3): boolean
+	if not playerHasCC[player.UserId] then return false end
+	if not unitManagerRef then return false end
+
+	local fromStash = unitManagerRef.getHarvesterStash(player) > 0
+	if not fromStash then
+		if not resourceManagerRef or resourceManagerRef.get(player) < Config.MINE_COST then return false end
+	end
+
+	if not unitManagerRef.deployHarvester(player, point) then return false end
+
+	if fromStash then
+		unitManagerRef.takeHarvesterStash(player)
+	else
+		resourceManagerRef.spend(player, Config.MINE_COST)
+	end
+	-- Keep "Build N Mines"-style unlock conditions progressing on harvester deploys.
+	if researchManagerRef then
+		researchManagerRef.recordBuildingPlaced(player, "Mine")
+	end
+	return true
+end
+
 function BuildingManager.placeForPlayer(player: any, position: Vector3, buildingType: string): boolean
 	local snapped = snapGrid(position)
+
+	-- Mine = harvester deploy order (no structure, placeable anywhere reachable).
+	if buildingType == "Mine" then
+		return BuildingManager.deployHarvester(player, Vector3.new(snapped.X, 0, snapped.Z))
+	end
 
 	-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 	if isOccupied(snapped, buildingType) then return false end
 	if isTerrainBlocked(snapped, buildingType) then return false end
 	if isOutOfMapBounds(snapped, buildingType) then return false end
+	-- NOTE: no flatness gate here. This path places the mandatory starting base
+	-- (CC + mines) and AI buildings, which must always succeed — the caller
+	-- (findFlatSpot) already nudges them onto flat ground. The flatness gate
+	-- lives only on the player-driven PlaceBuilding remote.
 
 	if buildingType == "CommandCenter" then
 		if playerHasCC[player.UserId] then return false end
@@ -2360,17 +2627,16 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if not inZone then return false end
 	end
 
-	-- Mine cap
-	if buildingType == "Mine" then
-		if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return false end
-	end
-
-	-- Requirement check: Barracks needs a Mine; Turret/Deployer needs a Barracks; Relay needs research
-	-- AI bots (UserId < 0) bypass the mine prerequisite — deposits may be outside their build zone.
-	if buildingType == "Barracks" and player.UserId > 0 and getPlayerBuildingCount(player, "Mine") < 1 then return false end
+	-- Requirement check: Barracks needs a harvester; Turret/Deployer needs a Barracks; Relay needs research
+	-- AI bots (UserId < 0) bypass the harvester prerequisite — deposits may be outside their build zone.
+	if buildingType == "Barracks" and player.UserId > 0
+		and (not unitManagerRef or unitManagerRef.getHarvesterTotal(player) < 1) then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
-	if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	-- LampreyNest normally needs a Barracks first; AI swarm bots (UserId < 0) skip
+	-- this so their entire army can come from nests + creepy structures.
+	if buildingType == "LampreyNest" and player.UserId > 0
+		and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
@@ -2378,8 +2644,7 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return false end
 	end
 
-	local cost = buildingType == "Mine"       and Config.MINE_COST
-		or buildingType == "Turret"     and Config.TURRET_COST
+	local cost = buildingType == "Turret"     and Config.TURRET_COST
 		or buildingType == "Deployer"   and Config.DEPLOYER_COST
 		or buildingType == "Relay"      and Config.RELAY_COST
 		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
@@ -2387,16 +2652,9 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
-	if buildingType == "Mine" then
-		if not mineralManager or not mineralManager.tryClaimDeposit(snapped) then return false end
-	end
-
 	resourceManagerRef.spend(player, cost)
 	local id = createBuilding(player, snapped, buildingType)
 
-	if buildingType == "Mine" then
-		mineralManager.registerMine(id, snapped, player)
-	end
 	if researchManagerRef and buildingType ~= "CommandCenter" then
 		researchManagerRef.recordBuildingPlaced(player, buildingType)
 	end
@@ -2409,10 +2667,6 @@ function BuildingManager.placeInstantForPlayer(player: any, position: Vector3, b
 	skipNextConstruction = true
 	local ok, id = BuildingManager.placeForPlayer(player, position, buildingType)
 	skipNextConstruction = false
-	-- registerMine runs inside placeForPlayer, so setMineReady is safe to call now
-	if ok and id and buildingType == "Mine" and mineralManager then
-		mineralManager.setMineReady(id)
-	end
 	return ok, id
 end
 
@@ -2517,7 +2771,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 			local targetPos: Vector3? = nil
 
-			-- Prefer hitting units → buildings → miners
+			-- Prefer hitting units → buildings
 			if unitManagerRef then
 				local hitUnit, unitHitPos = unitManagerRef.damageNearestUnit(myPos, myOwnerStr, tRange, tDamage, canTarget)
 				if hitUnit then targetPos = unitHitPos end
@@ -2528,10 +2782,6 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					BuildingManager.damage(bId, tDamage)
 					targetPos = bPos
 				end
-			end
-			if not targetPos and mineralManager then
-				local hit, mPos = mineralManager.damageNearestMiner(myPos, myOwnerStr, tRange, tDamage)
-				if hit then targetPos = mPos end
 			end
 
 			if targetPos then
@@ -2605,6 +2855,20 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					deployerUpdateAcc[id] = 0
 					local unitType = deployerUnitType[id] or "Soldier"
 					deployerUpdateRemote:FireClient(data.owner, id, unitType, progress)
+				end
+			end
+		end
+
+		-- ── Command Center passive income ──────────────────────────────────────
+		ccIncomeAccum += dt
+		if ccIncomeAccum >= Config.CC_PASSIVE_INTERVAL then
+			ccIncomeAccum -= Config.CC_PASSIVE_INTERVAL
+			if resourceManagerRef then
+				for _, data in buildingData do
+					if data.buildingType == "CommandCenter" and not data.isConstructing
+						and data.owner and data.owner.UserId > 0 then
+						resourceManagerRef.add(data.owner, Config.CC_PASSIVE_INCOME)
+					end
 				end
 			end
 		end
@@ -2723,10 +2987,32 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		local snapped = snapGrid(pos)
 
+		-- The client (whose ghost preview already sits at the correct height) sends
+		-- the ground point under the cursor in pos.Y. Trust it as the base-bottom
+		-- height — it's the same value the holograms use — instead of recomputing
+		-- it server-side (which is what was burying structures). snapGrid zeroes Y,
+		-- so re-apply the client Y onto the grid-snapped XZ.
+		snapped = Vector3.new(snapped.X, pos.Y, snapped.Z)
+
+		-- Mine = harvester deploy order: no structure, placeable on any in-bounds spot
+		-- (deposits sit outside the build zone). Routed straight to the harvester path.
+		if buildingType == "Mine" then
+			if isOutOfMapBounds(snapped, "Mine") then return end
+			BuildingManager.deployHarvester(player, Vector3.new(snapped.X, 0, snapped.Z))
+			return
+		end
+
 		-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 		if isOccupied(snapped, buildingType) then return end
 		if isTerrainBlocked(snapped, buildingType) then return end
 		if isOutOfMapBounds(snapped, buildingType) then return end
+
+		-- Reject footprints that straddle a ramp or a tier boundary — the building's
+		-- flat base would float over part of the ground and clip into the rest.
+		if terrainManagerRef then
+			local ns = buildingSize(buildingType)
+			if not terrainManagerRef.isFootprintFlat(snapped.X, snapped.Z, ns.X / 2, ns.Z / 2) then return end
+		end
 
 		-- Reject non-CC buildings while CC is mobile
 		if buildingType ~= "CommandCenter" then
@@ -2742,7 +3028,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					- Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 				if d.Magnitude < Config.COMMAND_CENTER_MIN_DIST then return end
 			end
-			createBuilding(player, snapped, "CommandCenter")
+			-- Trust the client ground height (snapped.Y) so the CC sits where its
+			-- ghost previewed, rather than a re-computed server height.
+			createBuilding(player, snapped, "CommandCenter", snapped.Y)
 			return
 		end
 
@@ -2766,17 +3054,14 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if not inZone then return end
 		end
 
-		-- Mine cap
-		if buildingType == "Mine" then
-			if mineralManager and mineralManager.getMineCount(player) >= Config.MAX_MINES then return end
-		end
-
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Mine=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true }
+		-- (Mine is intercepted above as a harvester deploy order)
+		local PLACEABLE = { CommandCenter=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Barracks needs a Mine; Turret/Deployer/Nest need a Barracks; Relay/Blob need research
-		if buildingType == "Barracks" and getPlayerBuildingCount(player, "Mine") < 1 then return end
+		-- Requirement check: Barracks needs a harvester; Turret/Deployer/Nest need a Barracks; Relay/Blob need research
+		if buildingType == "Barracks"
+			and (not unitManagerRef or unitManagerRef.getHarvesterTotal(player) < 1) then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
@@ -2787,18 +3072,13 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return end
 		end
 
-		local cost = buildingType == "Mine"      and Config.MINE_COST
-			or buildingType == "Turret"    and Config.TURRET_COST
+		local cost = buildingType == "Turret"    and Config.TURRET_COST
 			or buildingType == "Deployer"  and Config.DEPLOYER_COST
 			or buildingType == "Relay"     and Config.RELAY_COST
 			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 			or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
-
-		if buildingType == "Mine" then
-			if not mineralManager or not mineralManager.tryClaimDeposit(snapped) then return end
-		end
 
 		resourceManager.spend(player, cost)
 
@@ -2815,13 +3095,21 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local ccTopY     = Config.COMMAND_CENTER_SIZE.Y + 2
 			local launchPos  = ccPos + Vector3.new(0, ccTopY, 0)
 			local relayChain = findRelayChain(player, ccPos, snapped)
-			launchDropPod(player, launchPos, relayChain, snapped, buildingType, buildingType == "Mine")
+			launchDropPod(player, launchPos, relayChain, snapped, buildingType, false)
 		end
 	end)
 
 	-- ── BuildMonument remote ──────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.BuildMonument).OnServerEvent:Connect(function(player)
 		BuildingManager.buildMonument(player)
+	end)
+
+	-- ── SellBuilding remote ────────────────────────────────────────────────────
+	RemoteHandler.get(Config.REMOTES.SellBuilding).OnServerEvent:Connect(function(player, ids)
+		if type(ids) ~= "table" then return end
+		for _, id in ids do
+			if type(id) == "string" then BuildingManager.sellBuilding(player, id) end
+		end
 	end)
 
 	-- ── SetDeployerType remote ─────────────────────────────────────────────────
@@ -2891,25 +3179,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				local blobPos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 
 				if productType == "CreepySoldier" then
-					local now = os.clock()
-					if (blobCooldowns[blobId] or 0) > now then continue end
-					if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_SOLDIER_COST then continue end
-					resourceManagerRef.spend(player, Config.BLOB_SOLDIER_COST)
-
-					if unitManagerRef then
-						local angle  = math.random() * math.pi * 2
-						local offset = Vector3.new(math.cos(angle) * 6, 0, math.sin(angle) * 6)
-						unitManagerRef.spawnUnitNow(player, blobPos + offset, "CreepySoldier")
-					end
-
-					local expiry = now + Config.BLOB_SOLDIER_COOLDOWN
-					blobCooldowns[blobId] = expiry
-					RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, Config.BLOB_SOLDIER_COOLDOWN)
-					task.delay(Config.BLOB_SOLDIER_COOLDOWN, function()
-						if buildingData[blobId] then
-							RemoteHandler.get(Config.REMOTES.BlobUpdate):FireClient(player, blobId, 0)
-						end
-					end)
+					BuildingManager.requestBlobSoldier(player, blobId)
 
 				elseif productType == "CreepyWorm" then
 					if not resourceManagerRef or resourceManagerRef.get(player) < Config.BLOB_WORM_COST then continue end
@@ -2949,23 +3219,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			local ids = type(nestIds) == "string" and {nestIds} or nestIds
 			if type(ids) ~= "table" then return end
 
-			-- Both the Lamprey and the Hagfish hatch from this nest's egg pipeline.
-			local kind = if unitType == "Hagfish" then "Hagfish" else "Lamprey"
-			local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
-
 			for _, nestId in ids do
 				if type(nestId) ~= "string" then continue end
-
-				local data = buildingData[nestId]
-				if not data or data.buildingType ~= "LampreyNest" then continue end
-				if data.owner ~= player then continue end
-				if data.isConstructing then continue end
-				if (nestEggs[nestId] or 0) >= Config.LAMPREY_NEST_MAX_EGGS then continue end
-				if not resourceManagerRef or resourceManagerRef.get(player) < cost then continue end
-
-				resourceManagerRef.spend(player, cost)
-				nestEggs[nestId] = (nestEggs[nestId] or 0) + 1
-				task.spawn(produceLampreyEgg, nestId, player, kind)
+				BuildingManager.requestNestEgg(player, nestId, unitType)
 			end
 		end
 	)

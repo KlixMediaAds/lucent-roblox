@@ -1,7 +1,7 @@
 local Config = {}
 
 -- Gamemodes
-Config.GAMEMODES = { Default = "Default", Lane = "Lane" }
+Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 
 -- Economy
 Config.STARTING_RESOURCES   = 400
@@ -22,11 +22,19 @@ Config.UNIT_TYPES = {
 	Lamprey       = { cost = 110, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
 	Hagfish       = { cost = 120, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
+	Core          = { cost = 0,   size = Vector3.new(5, 3, 6) },  -- mobile deploy seed: drops in, then transforms into the Command Center
+	Harvester     = { cost = 75,  size = Vector3.new(5, 4, 5) },  -- mobile miner: deployed via "Mine" order, walks to a deposit, drains it, returns to the CC and stashes
 }
 
+-- Command Center deploy: the Core (above) lands from a drop pod, the player drives
+-- it to a chosen spot, then presses DEPLOY to transform it into the CC.
+Config.CORE_DEPLOY_TIME       = 3     -- seconds the Core takes to transform into the Command Center
+Config.CC_PASSIVE_INCOME      = 10    -- resources granted per tick to every standing Command Center
+Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-income ticks
+
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24, Core = 42, Harvester = 18 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14, Core = 20, Harvester = 8 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -58,26 +66,6 @@ Config.ORE_COMET_CLUSTER_SIZE_MIN = 2  -- deposits spawned per wave (min)
 Config.ORE_COMET_CLUSTER_SIZE_MAX = 4  -- deposits spawned per wave (max)
 Config.ORE_COMET_HEIGHT         = 220  -- studs above ground comets spawn
 Config.ORE_COMET_SPEED          = 85   -- studs per second fall speed
-
--- Mini Miners (spawned automatically by Mine buildings)
-Config.MINI_MINER_SIZE           = Vector3.new(5, 4, 5)
-Config.MINI_MINER_HP             = 100   -- health points per mini miner
-Config.MINI_MINER_MAX            = 6
-Config.MINI_MINER_SPAWN_INTERVAL = 30   -- seconds between new spawns
-Config.MINI_MINER_INCOME         = 5    -- resources per tick per miner
-Config.MINI_MINER_INCOME_INTERVAL = 10  -- seconds per income tick
-
--- Offsets (unit direction vectors) for Mini Miner positions around Mine center.
--- Order: N, E, S, W, NE, NW  (all 6 fill MINI_MINER_MAX exactly).
--- Multiply by BUILDING_SIZE.X at runtime for real-world spacing.
-Config.MINER_OFFSETS = {
-	Vector3.new( 0, 0, -1),  -- N
-	Vector3.new( 1, 0,  0),  -- E
-	Vector3.new( 0, 0,  1),  -- S
-	Vector3.new(-1, 0,  0),  -- W
-	Vector3.new( 1, 0, -1),  -- NE
-	Vector3.new(-1, 0, -1),  -- NW
-}
 
 -- Command Center
 Config.COMMAND_CENTER_SIZE     = Vector3.new(14, 10, 14)
@@ -139,12 +127,12 @@ Config.MONUMENT_COST         = 1500
 Config.MONUMENT_WIN_DURATION = 300    -- seconds to hold monument for victory (5 minutes)
 Config.MONUMENT_SIZE         = Vector3.new(5, 20, 5)
 
--- Mine limits & deposits
-Config.MAX_MINES                = math.huge  -- no cap on mine buildings per player
+-- Harvester limits & deposits
+Config.MAX_MINES                = math.huge  -- no cap on active harvesters deployed per player
 Config.DEPOSIT_TOTAL_RESOURCES  = 1000  -- total resources a deposit holds before depleting
-Config.MINE_EXTRACT_RANGE       = 60    -- studs; mine scans for deposits within this radius
-Config.MINE_EXTRACT_INTERVAL    = 5     -- seconds between extraction ticks
-Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources per deposit per extraction tick
+Config.MINE_EXTRACT_RANGE       = 60    -- studs; a parked harvester drains deposits within this radius of its deploy point
+Config.MINE_EXTRACT_INTERVAL    = 5     -- seconds between harvester drain ticks
+Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources drained per deposit per drain tick
 
 -- Condition-based unlocks.
 -- cond.type: "building" (cumulative placed), "kill" (enemies killed), "train" (units trained)
@@ -287,15 +275,15 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Mine = 12, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, CreepySoldier = 0 }
+Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, CreepySoldier = 0, Core = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55  }
-Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, Mine = 300, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14  }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13  }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7 }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55,  Core = 250, Harvester = 300 }
+Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14,  Core = 0,  Harvester = 0 }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13,  Core = 0,  Harvester = 0 }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7, Core = 1.0, Harvester = 1.0 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -341,6 +329,7 @@ Config.REMOTES = {
 	PlayerWon        = "PlayerWon",
 	MineIncome              = "MineIncome",
 	MineBeams               = "MineBeams",
+	HarvesterStash          = "HarvesterStash",
 	CCAttacked              = "CCAttacked",
 	AttackAlert             = "AttackAlert",
 	MineDepletionWarning    = "MineDepletionWarning",
@@ -356,6 +345,8 @@ Config.REMOTES = {
 	LobbyAddAI              = "LobbyAddAI",
 	LobbyRemoveAI           = "LobbyRemoveAI",
 	LobbyRemoveAIFull       = "LobbyRemoveAIFull",
+	LobbySetAICount         = "LobbySetAICount",
+	LobbySetAIDifficulty    = "LobbySetAIDifficulty",
 	ShowEndScreen           = "ShowEndScreen",
 	CondProgressSync        = "CondProgressSync",
 	WormBurst               = "WormBurst",
@@ -372,6 +363,10 @@ Config.REMOTES = {
 	HagfishStrike           = "HagfishStrike",
 	UpgradeNest             = "UpgradeNest",
 	SetNestRally            = "SetNestRally",
+	ForfeitMatch            = "ForfeitMatch",
+	SellBuilding            = "SellBuilding",
+	CorePodLaunched         = "CorePodLaunched",
+	DeployCore              = "DeployCore",
 }
 
 return Config

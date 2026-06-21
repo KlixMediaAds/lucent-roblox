@@ -28,10 +28,11 @@ local function makeLayer(radius: number, width: number, transparency: number, y:
 	end
 end
 
--- Creates a movable radius ring centred at (cx, cz).
+-- Creates a movable radius ring centred at (cx, cz). `y` lifts the whole ring
+-- onto a raised terrain tier (defaults to the y=0 base level).
 -- Sits above fog-of-war tiles so it is always visible.
--- Returns a Model; reposition with RangeRing.moveTo or Model:PivotTo(CFrame.new(cx,0,cz)).
-function RangeRing.create(radius: number, cx: number, cz: number): Model
+-- Returns a Model; reposition with RangeRing.moveTo.
+function RangeRing.create(radius: number, cx: number, cz: number, y: number?): Model
 	local model = Instance.new("Model")
 	model.Name  = "_RangeRing"
 
@@ -52,13 +53,13 @@ function RangeRing.create(radius: number, cx: number, cz: number): Model
 	makeLayer(radius - 1.0, 2.0, 0.85, 0.29, model)  -- 2-stud inner fade
 
 	model.Parent = workspace
-	model:PivotTo(CFrame.new(cx, 0, cz))
+	model:PivotTo(CFrame.new(cx, y or 0, cz))
 	return model
 end
 
--- Moves a ring to a new XZ position without recreating it.
-function RangeRing.moveTo(model: Model, cx: number, cz: number)
-	model:PivotTo(CFrame.new(cx, 0, cz))
+-- Moves a ring to a new XZ position (and optional tier height) without recreating it.
+function RangeRing.moveTo(model: Model, cx: number, cz: number, y: number?)
+	model:PivotTo(CFrame.new(cx, y or 0, cz))
 end
 
 function RangeRing.destroy(model: Model?)
@@ -70,7 +71,7 @@ end
 -- a single outer perimeter when circles overlap.
 -- zones: { {cx: number, cz: number, radius: number} }
 type Zone = { cx: number, cz: number, radius: number }
-function RangeRing.createBuildZone(zones: { Zone }): Model
+function RangeRing.createBuildZone(zones: { Zone }, baseY: number?): Model
 	local model = Instance.new("Model")
 	model.Name  = "_BuildZoneRing"
 
@@ -166,6 +167,10 @@ function RangeRing.createBuildZone(zones: { Zone }): Model
 	end
 
 	model.Parent = workspace
+	if baseY and baseY ~= 0 then
+		-- Pivot sits at the origin, so this lifts every segment by baseY (XZ unchanged).
+		model:PivotTo(CFrame.new(0, baseY, 0))
+	end
 	return model
 end
 

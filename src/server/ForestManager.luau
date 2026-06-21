@@ -286,9 +286,9 @@ function ForestManager.generate()
 			if counter < MAX_TREES and rng:NextNumber(0, 1) >= SKIP_CHANCE then
 				local px  = math.clamp(x + rng:NextNumber(-JITTER, JITTER), -lim, lim)
 				local pz  = math.clamp(z + rng:NextNumber(-JITTER, JITTER), -lim, lim)
-				local py  = terrainManagerRef and terrainManagerRef.heightAt(px, pz) or 0
+				local py  = terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz) or 0
 					local pos = Vector3.new(px, py, pz)
-					-- (pos.Y now matches the tier the tree stands on)
+					-- (pos.Y is the real surface so the tree isn't buried under a tier)
 				if not depositTooClose(pos, deposits)
 					and not onTerrainObstacle(pos)
 					and not nearBuilding(pos) then

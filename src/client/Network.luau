@@ -76,6 +76,11 @@ function Network.onMineBeams(fn: (string, Vector3, {Vector3}) -> ())
 	RemoteHandler.get(Config.REMOTES.MineBeams).OnClientEvent:Connect(fn)
 end
 
+-- current number of stashed (recalled) harvesters available to redeploy for free
+function Network.onHarvesterStash(fn: (number) -> ())
+	RemoteHandler.get(Config.REMOTES.HarvesterStash).OnClientEvent:Connect(fn)
+end
+
 -- Fired when the player needs to (re)place their Command Center
 function Network.onNeedCommandCenter(fn: () -> ())
 	RemoteHandler.get(Config.REMOTES.NeedCommandCenter).OnClientEvent:Connect(fn)
@@ -232,6 +237,26 @@ end
 
 function Network.spawnLaneUnit(unitType: string)
 	RemoteHandler.get(Config.REMOTES.SpawnLaneUnit):FireServer(unitType)
+end
+
+-- Player chose "Leave Match" — forfeit the current match (server destroys our CC).
+function Network.forfeitMatch()
+	RemoteHandler.get(Config.REMOTES.ForfeitMatch):FireServer()
+end
+
+-- Sell the given structures for a partial refund (server validates ownership).
+function Network.sellBuildings(ids: { string })
+	RemoteHandler.get(Config.REMOTES.SellBuilding):FireServer(ids)
+end
+
+-- pod (Model), targetPos: the player's Core drop pod has launched — follow it in.
+function Network.onCorePodLaunched(fn: (Model, Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.CorePodLaunched).OnClientEvent:Connect(fn)
+end
+
+-- Request the server transform the player's deployed Core into the Command Center.
+function Network.deployCore()
+	RemoteHandler.get(Config.REMOTES.DeployCore):FireServer()
 end
 
 function Network.setDeployerType(deployerId: string, unitType: string)

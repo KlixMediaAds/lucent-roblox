@@ -130,8 +130,24 @@ local function refreshRequirements()
 	HUD.refreshTrayState(ownedBuildingCounts)
 end
 
+-- Harvester counts: live (currently deployed) + stashed (recalled, free to redeploy).
+-- Their sum is mirrored into ownedBuildingCounts["Mine"] so the existing Barracks
+-- requirement ("needs a Mine") is satisfied once the player has any harvester.
+local harvesterLive  = 0
+local harvesterStash = 0
+local function updateHarvesterReq()
+	ownedBuildingCounts["Mine"] = harvesterLive + harvesterStash
+	refreshRequirements()
+	HUD.setHarvesterStash(harvesterStash)
+end
+
 -- Whether the local player's CC is currently in mobile (walking) state
 local ccIsMobile = false
+
+-- Core deploy flow: the local player's Core unit id (pre-CC), and a guard so the
+-- DEPLOY button can only be pressed once per Core.
+local coreUnitId:    string? = nil
+local deployRequested        = false
 
 -- Transparent CC+legs preview shown at cursor while CC is in move mode
 local ccMoveGhost:  Model?   = nil
@@ -451,12 +467,19 @@ local function enterCCMode()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ccIsMobile          = false
+	coreUnitId          = nil
+	deployRequested     = false
+	CameraModule.stopFollow()
+	HUD.setDeployVisible(false)
 	ownedBuildingCounts = {}
+	harvesterLive       = 0
+	harvesterStash      = 0
 	researchedTechs     = {}
 	localKillCount      = 0
 	localTrainCounts    = {}
 	localBuildCounts    = {}
 	refreshRequirements()
+	HUD.setHarvesterStash(0)
 	HUD.setCommandCenterMode(true)
 	BarracksPanel.hide()
 	BarracksPanel.cleanupAllTrainingModels()
@@ -478,13 +501,71 @@ Network.onNeedCommandCenter(function()
 	enterCCMode()
 end)
 
-ccBtn.MouseButton1Click:Connect(function()
-	BuildingPlacer.enterPlacementMode("CommandCenter")
+-- ── Core drop pod → Deploy flow ───────────────────────────────────────────────
+-- A drop pod streaks in from the sky and deploys a mobile "Core" unit; the player
+-- drives it to a chosen spot, then presses DEPLOY to transform it into the CC.
+
+-- DEPLOY button: ask the server to transform the Core into the Command Center.
+HUD.wireDeploy(function()
+	if deployRequested or not coreUnitId then return end
+	deployRequested = true
+	HUD.setDeployVisible(false)
+	CameraModule.stopFollow()
+	Network.deployCore()
+end)
+
+-- Follow the incoming pod with the camera as it descends.
+Network.onCorePodLaunched(function(pod: Model, _targetPos: Vector3)
+	deployRequested = false
+	coreUnitId      = nil
+	HUD.setDeployVisible(false)
+	HUD.setCommandCenterMode(true)   -- keep the build/research tray hidden
+	task.spawn(function()
+		local anchor = pod.PrimaryPart
+			or pod:FindFirstChild("Anchor") :: BasePart?
+			or pod:WaitForChild("Anchor", 3) :: BasePart?
+		if anchor and anchor:IsA("BasePart") then
+			CameraModule.followPart(anchor)
+		end
+	end)
+	HUD.showNotification("⬇  Core drop pod incoming…", Color3.fromRGB(0, 210, 220))
+end)
+
+-- The Core has landed and deployed: hand control to the player.
+Network.onUnitSpawned(function(unitId: string, ownerId: number, pos: Vector3)
+	if ownerId ~= localUserId then return end
+	task.spawn(function()
+		local unitsFolder = workspace:WaitForChild("Units", 10) :: Folder?
+		if not unitsFolder then return end
+		local part = unitsFolder:WaitForChild(unitId, 10) :: BasePart?
+		if not part then return end
+		local tv = part:FindFirstChild("UnitType") :: StringValue?
+		if not (tv and tv.Value == "Core") then return end
+
+		coreUnitId      = unitId
+		deployRequested = false
+		CameraModule.stopFollow()
+		CameraModule.setFocus(part.Position)
+		HUD.setCommandCenterMode(true)   -- ensure the build tray stays hidden
+		HUD.setDeployVisible(true)
+		-- Auto-select the Core so the player can drive it immediately.
+		task.wait(0.15)
+		if coreUnitId == unitId then
+			UnitController.selectUnit(unitId)
+		end
+		HUD.showNotification("✦  Core deployed — drive it, then DEPLOY", Color3.fromRGB(120, 224, 255))
+	end)
 end)
 
 Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
 		ownCCId = id
+		-- Core has finished deploying into the CC: drop the deploy UI / camera lock
+		-- and reveal the build + research tray.
+		coreUnitId      = nil
+		deployRequested = false
+		CameraModule.stopFollow()
+		HUD.setDeployVisible(false)
 		HUD.setCommandCenterMode(false)
 		Tutorial.notify("cc_placed")
 		CameraModule.setFocus(pos)
@@ -689,7 +770,8 @@ RunService.RenderStepped:Connect(function()
 		local m  = ensureRallyMarker()
 		local t  = tick() * 2
 		m.Transparency = 0.5 + math.sin(t) * 0.12
-		m.CFrame = CFrame.new((rp :: Vector3).X, 0.2, (rp :: Vector3).Z) * CFrame.Angles(0, 0, math.rad(90))
+		local ry = CameraModule.terrainHeightAt((rp :: Vector3).X, (rp :: Vector3).Z) + 0.2
+		m.CFrame = CFrame.new((rp :: Vector3).X, ry, (rp :: Vector3).Z) * CFrame.Angles(0, 0, math.rad(90))
 	end
 end)
 
@@ -1361,6 +1443,53 @@ Network.onMineIncome(function(mineId: string, income: number)
 	mineLastIncome[mineId] = income
 	HUD.setIncome(totalIncome())
 	-- Per-arm "+N res" popups are fired by setupMineArms when each arm delivers
+end)
+
+-- Harvesters are mobile units that drain deposits. Register our own harvesters in
+-- mineOwners so their extraction beams render (the beam system is keyed by id), track
+-- the live count for the Barracks requirement, and clean up when one is stashed or dies.
+Network.onUnitSpawned(function(unitId: string, ownerId: number, _pos: Vector3)
+	if ownerId ~= localUserId then return end
+	task.spawn(function()
+		local unitsFolder = workspace:WaitForChild("Units", 10) :: Folder?
+		if not unitsFolder then return end
+		local part = unitsFolder:WaitForChild(unitId, 10) :: BasePart?
+		if not part then return end
+		local tv = part:FindFirstChild("UnitType") :: StringValue?
+		if not (tv and tv.Value == "Harvester") then return end
+
+		mineOwners[unitId] = ownerId
+		harvesterLive += 1
+		updateHarvesterReq()
+
+		local conn: RBXScriptConnection
+		conn = part.Destroying:Connect(function()
+			conn:Disconnect()
+			harvesterLive = math.max(0, harvesterLive - 1)
+			updateHarvesterReq()
+			local bd = mineBeams[unitId]
+			if bd then
+				if bd.conn then bd.conn:Disconnect() end
+				for _, arm in bd.arms do
+					if arm.beam.Parent    then arm.beam:Destroy()    end
+					if arm.tip.Parent     then arm.tip:Destroy()     end
+					if arm.crystal.Parent then arm.crystal:Destroy() end
+				end
+				mineBeams[unitId] = nil
+			end
+			minePhaseOffsets[unitId] = nil
+			if mineLastIncome[unitId] then
+				mineLastIncome[unitId] = nil
+				HUD.setIncome(totalIncome())
+			end
+			mineOwners[unitId] = nil
+		end)
+	end)
+end)
+
+Network.onHarvesterStash(function(count: number)
+	harvesterStash = count
+	updateHarvesterReq()
 end)
 
 Network.onResourceSync(function(amount: number)

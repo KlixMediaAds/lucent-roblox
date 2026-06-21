@@ -6,7 +6,10 @@
 	  2. Any client can fire LobbyReady to toggle their own ready state.
 	  3. Any client can fire LobbyReroll to regenerate mineral deposits
 	     (3-second server-enforced cooldown; resets all ready states).
-	  4. Any client can fire LobbyAddAI / LobbyRemoveAI to manage the AI queue.
+	  4. AI is configured with two cycling settings instead of a personality queue:
+	       • LobbySetAICount      — cycles the number of AI opponents 0 → 1 → 2 → 3 → 0
+	       • LobbySetAIDifficulty — cycles Easy → Medium → Hard → Nightmare
+	     Teams are FFA-only for now (the lobby Teams control is "coming soon").
 	  5. When every connected player is ready, LobbyStart fires to all clients,
 	     then onLobbyEnd(aiQueue) is called ~3.5 s later to kick off the game.
 	     AI bots are spawned AFTER human players place their CCs.
@@ -29,29 +32,38 @@ local terrainEnabled   = true   -- tiered terrain is on by default
 local terrainManagerRef: any = nil
 local currentGamemode  = "Default"
 
+-- AI configuration (replaces the old per-personality queue).
+local MAX_AI           = 3
+local aiCount          = 1          -- number of AI opponents, 0..MAX_AI
+local aiDifficulty     = "Medium"   -- one of DIFFICULTY_ORDER
+
+local DIFFICULTY_ORDER = { "Easy", "Medium", "Hard", "Nightmare" }
+-- Each difficulty maps onto the existing personality + 1-5 level system.
+local DIFFICULTY = {
+	Easy      = { personality = "balanced",  level = 1 },
+	Medium    = { personality = "balanced",  level = 3 },
+	Hard      = { personality = "balanced",  level = 5 },
+	Nightmare = { personality = "nightmare", level = 5 },
+}
+
 type AIEntry = { personality: string, level: number }
-local aiQueue: { AIEntry } = {}
-
-local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, trainer = true }
-
-local function findAIEntry(personality: string): (number?, AIEntry?)
-	for i, entry in aiQueue do
-		if entry.personality == personality then return i, entry end
-	end
-	return nil, nil
-end
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
-local function buildReadyList(): { { name: string, ready: boolean } }
+local function buildReadyList(): { { name: string, userId: number, ready: boolean } }
 	local list = {}
 	for _, player in Players:GetPlayers() do
 		table.insert(list, {
-			name  = player.Name,
-			ready = readyMap[player.UserId] == true,
+			name   = player.Name,
+			userId = player.UserId,
+			ready  = readyMap[player.UserId] == true,
 		})
 	end
 	return list
+end
+
+local function buildSettings(): { aiCount: number, aiDifficulty: string }
+	return { aiCount = aiCount, aiDifficulty = aiDifficulty }
 end
 
 local function syncAll(mineralManager)
@@ -59,13 +71,23 @@ local function syncAll(mineralManager)
 		buildReadyList(),
 		mineralManager.getUnclaimedPositions(),
 		terrainEnabled,
-		aiQueue,
+		buildSettings(),
 		currentGamemode
 	)
 end
 
 local function resetAllReady()
 	for userId in readyMap do readyMap[userId] = false end
+end
+
+-- Expand the AI settings into a concrete spawn list for the game handoff.
+local function buildAISnapshot(): { AIEntry }
+	local d = DIFFICULTY[aiDifficulty] or DIFFICULTY.Medium
+	local snapshot: { AIEntry } = {}
+	for _ = 1, aiCount do
+		table.insert(snapshot, { personality = d.personality, level = d.level })
+	end
+	return snapshot
 end
 
 local function checkAllReady(mineralManager, onLobbyEnd)
@@ -82,12 +104,7 @@ local function checkAllReady(mineralManager, onLobbyEnd)
 		RemoteHandler.get(Config.REMOTES.SyncDeposits):FireAllClients(
 			mineralManager.getUnclaimedPositions()
 		)
-		-- Pass a copy of the AI queue to the game
-		local snapshot: { AIEntry } = {}
-		for _, entry in aiQueue do
-			table.insert(snapshot, { personality = entry.personality, level = entry.level })
-		end
-		onLobbyEnd(snapshot, currentGamemode)
+		onLobbyEnd(buildAISnapshot(), currentGamemode)
 	end)
 end
 
@@ -98,8 +115,11 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 	terrainManagerRef = terrainManager
 
 	-- Terrain defaults on, so generate the tiered map immediately for the lobby.
+	-- Deposits were already placed by MineralManager.init (on flat Y=0 ground);
+	-- resnap them onto the freshly raised tiers so none end up buried.
 	if terrainEnabled and terrainManagerRef and currentGamemode == "Default" then
 		terrainManagerRef.generate()
+		mineralManager.resnapDeposits()
 	end
 
 	Players.PlayerAdded:Connect(function(player)
@@ -112,7 +132,7 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 				buildReadyList(),
 				mineralManager.getUnclaimedPositions(),
 				terrainEnabled,
-				aiQueue,
+				buildSettings(),
 				currentGamemode
 			)
 		end)
@@ -138,12 +158,13 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		if rerollCooldown then return end
 		rerollCooldown = true
 		resetAllReady()
-		mineralManager.rerollDeposits()
+		-- Regenerate terrain first so the rerolled deposits snap onto the new tiers.
 		if currentGamemode == "Lane" and terrainManagerRef then
 			terrainManagerRef.generateLane()
 		elseif terrainEnabled and terrainManagerRef then
 			terrainManagerRef.generate()
 		end
+		mineralManager.rerollDeposits()
 		syncAll(mineralManager)
 		task.delay(3, function() rerollCooldown = false end)
 	end)
@@ -158,13 +179,15 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		elseif not terrainEnabled and terrainManagerRef then
 			terrainManagerRef.clear()
 		end
+		-- Terrain heights changed under the existing deposits — resnap them.
+		mineralManager.resnapDeposits()
 		syncAll(mineralManager)
 	end)
 
 	RemoteHandler.get(Config.REMOTES.LobbySetGamemode).OnServerEvent:Connect(function(_player, gamemode: any)
 		if not active then return end
 		if type(gamemode) ~= "string" then return end
-		if gamemode ~= "Default" and gamemode ~= "Lane" then return end
+		if gamemode ~= "Default" and gamemode ~= "Lane" and gamemode ~= "Swarm" then return end
 		if currentGamemode == gamemode then return end
 		currentGamemode = gamemode
 		resetAllReady()
@@ -175,57 +198,32 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		else
 			terrainManagerRef.clear()
 		end
+		-- Terrain heights changed under the existing deposits — resnap them.
+		mineralManager.resnapDeposits()
 		syncAll(mineralManager)
 	end)
 
-	-- Left-click a personality button: increment level (1→5) or add at level 1
-	RemoteHandler.get(Config.REMOTES.LobbyAddAI).OnServerEvent:Connect(function(_player, personality: any)
+	-- Cycle the number of AI opponents: 0 → 1 → 2 → 3 → 0.
+	RemoteHandler.get(Config.REMOTES.LobbySetAICount).OnServerEvent:Connect(function(_player)
 		if not active then return end
-		if type(personality) ~= "string" then return end
-		if not VALID_PERSONALITIES[personality] then return end
-
-		local idx, entry = findAIEntry(personality)
-		if entry then
-			if entry.level < 5 then entry.level += 1 end
-		else
-			if #aiQueue >= 3 then return end  -- max one of each personality (3 total)
-			table.insert(aiQueue, { personality = personality, level = 1 })
-		end
+		aiCount = (aiCount + 1) % (MAX_AI + 1)
 		resetAllReady()
 		syncAll(mineralManager)
 	end)
 
-	-- Right-click a personality button: decrement level, remove at 0
-	RemoteHandler.get(Config.REMOTES.LobbyRemoveAI).OnServerEvent:Connect(function(_player, personality: any)
+	-- Cycle the AI difficulty: Easy → Medium → Hard → Nightmare → Easy.
+	RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty).OnServerEvent:Connect(function(_player)
 		if not active then return end
-		if type(personality) ~= "string" then return end
-		local idx, entry = findAIEntry(personality)
-		if not entry then return end
-		entry.level -= 1
-		if entry.level <= 0 then table.remove(aiQueue, idx) end
+		local idx = table.find(DIFFICULTY_ORDER, aiDifficulty) or 2
+		aiDifficulty = DIFFICULTY_ORDER[(idx % #DIFFICULTY_ORDER) + 1]
 		resetAllReady()
 		syncAll(mineralManager)
-	end)
-
-	-- × button on queue entry: fully remove the personality
-	RemoteHandler.get(Config.REMOTES.LobbyRemoveAIFull).OnServerEvent:Connect(function(_player, personality: any)
-		if not active then return end
-		if type(personality) ~= "string" then return end
-		local idx = findAIEntry(personality)
-		if idx then
-			table.remove(aiQueue, idx)
-			resetAllReady()
-			syncAll(mineralManager)
-		end
 	end)
 
 	RemoteHandler.get(Config.REMOTES.LobbySetColor).OnServerEvent:Connect(function(player, colorName: string)
 		if not active then return end
 		player.TeamColor = BrickColor.new(colorName)
 	end)
-
-	-- Default AI so solo players always have an opponent
-	table.insert(aiQueue, { personality = "trainer", level = 1 })
 
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false

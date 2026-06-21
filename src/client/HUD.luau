@@ -14,18 +14,21 @@ local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local SoundService     = game:GetService("SoundService")
+local RunService       = game:GetService("RunService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
+local Network           = require(script.Parent:WaitForChild("Network"))
 
 -- ── UI scaling ────────────────────────────────────────────────────────────────
--- All pixel offsets are authored at 1920×1080.  UIScale adjusts them uniformly
--- for any resolution so the layout stays proportional.
-local BASE_W = 1920
-local BASE_H = 1080
+-- Pixel offsets are authored against this reference resolution; a UIScale adjusts
+-- them uniformly for any viewport so the layout stays proportional. The base is set
+-- a little below 1080p so the HUD reads larger (and grows further on big screens).
+local BASE_W = 1680
+local BASE_H = 945
 
 local function setupScaling(sg: ScreenGui)
 	local uiScale        = Instance.new("UIScale")
@@ -94,7 +97,12 @@ local BUILDING_INFO: { [string]: BuildingInfo } = {
 -- Display labels that differ from the internal building-type id.
 local DISPLAY_NAME: { [string]: string } = {
 	LampreyNest = "Nest",
+	Mine        = "Harvester",
 }
+
+-- Stashed (recalled) harvesters available to redeploy for free — drives the FREE label
+-- on the Harvester build node. Updated via HUD.setHarvesterStash.
+local harvesterStashCount = 0
 local function dispName(btype: string): string
 	return (DISPLAY_NAME[btype] or btype):upper()
 end
@@ -102,7 +110,7 @@ end
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
-	{ btype = "Mine",       icon = "⛏", color = C.MINE,                        desc = "Harvests nearby mineral deposits"              },
+	{ btype = "Mine",       icon = "⛏", color = C.MINE,                        desc = "Sends a harvester to drain a deposit, then returns to your CC"  },
 	{ btype = "Barracks",   icon = "⚔", color = C.BARRACKS,                    desc = "Trains and deploys combat units"               },
 	{ btype = "Deployer",   icon = "🚀", color = C.DEPLOYER,                    desc = "Auto-spawns up to 4 soldiers"                  },
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
@@ -110,7 +118,7 @@ local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string }
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 	{ btype = "LampreyNest", icon = "🥚", color = Color3.fromRGB(120, 190, 60), desc = "Births Lampreys from pulsing eggs"             },
 }
-local CHILD_SPACING = 95   -- px between child centres
+local CHILD_SPACING = 114   -- px between child centres
 
 -- Lane mode unit spawn panel definitions
 local LANE_UNIT_DEFS: { { utype: string, icon: string, color: Color3 } } = {
@@ -140,10 +148,31 @@ local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
 local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
+local deployBtnRef:    TextButton?
+local deployGlowRef:   UIStroke?
+local deployPulseOn  = false
 local upgradesBtnRef:     TextButton?
 local upgradesStroke:     UIStroke?
 local upgradesBtnWrapper: Frame?
-local UPGRADES_COLOR = Color3.fromRGB(190, 140, 255)
+local sellBtnRef:         TextButton?
+local UPGRADES_COLOR = Color3.fromRGB(232, 196, 120)  -- gold, cohesive with the new UI
+local SELL_COLOR     = Color3.fromRGB(214, 78, 78)    -- red, demolish/sell
+
+-- Of the given selected building ids, the ones that may actually be sold (own,
+-- non-CC, non-Monument). Reads the BuildingType tag on each model in workspace.
+local function sellableSelectedIds(ids: { string }): { string }
+	local out: { string } = {}
+	local bf = workspace:FindFirstChild("Buildings")
+	if not bf then return out end
+	for _, id in ids do
+		local m  = bf:FindFirstChild(id)
+		local bt = m and m:FindFirstChild("BuildingType") :: StringValue?
+		if bt and bt.Value ~= "CommandCenter" and bt.Value ~= "Monument" then
+			table.insert(out, id)
+		end
+	end
+	return out
+end
 
 -- ── Build-menu hover tooltip ──────────────────────────────────────────────────
 local tooltipFrame: Frame?
@@ -244,13 +273,15 @@ local function applyNodeState(node: ChildNode)
 	local info    = BUILDING_INFO[node.btype]
 	local cost    = info and info.cost or 0
 
+	-- New design: the node body stays dark glass; the building's colour lives in the
+	-- stroke + icon + label so the tray reads as a cohesive set of framed tiles.
 	if placing then
-		node.btn.BackgroundColor3     = C.ACCENT
-		node.btn.BackgroundTransparency = 0.1
-		node.stroke.Color             = C.ACCENT
-		node.stroke.Thickness         = 3
-		node.label.Text               = dispName(node.btype) .. "\nPLACING…"
-		node.label.TextColor3         = C.ACCENT
+		node.btn.BackgroundColor3 = Color3.fromRGB(14, 26, 34)
+		node.stroke.Color         = C.ACCENT
+		node.stroke.Thickness     = 3
+		node.btn.TextColor3       = C.ACCENT
+		node.label.Text           = dispName(node.btype) .. "\nPLACING…"
+		node.label.TextColor3     = C.ACCENT
 	elseif locked then
 		local lockReason = "LOCKED"
 		if info then
@@ -260,21 +291,26 @@ local function applyNodeState(node: ChildNode)
 				end
 			end
 		end
-		node.btn.BackgroundColor3     = C.BG_LOCKED
-		node.btn.BackgroundTransparency = 0.4
-		node.stroke.Color             = C.BORDER_LO
-		node.stroke.Thickness         = 1.5
-		node.label.Text               = dispName(node.btype) .. "\n" .. lockReason
-		node.label.TextColor3         = C.DIM
+		node.btn.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+		node.stroke.Color         = C.BORDER_LO
+		node.stroke.Thickness     = 1.5
+		node.btn.TextColor3       = C.DIM
+		node.label.Text           = dispName(node.btype) .. "\n" .. lockReason
+		node.label.TextColor3     = C.DIM
 	else
-		node.btn.BackgroundColor3     =
-			({ Mine = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
+		local accent = ({ Mine = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
 			or node.color
-		node.btn.BackgroundTransparency = 0.35
-		node.stroke.Color             = node.btn.BackgroundColor3
-		node.stroke.Thickness         = 2
-		node.label.Text               = dispName(node.btype) .. "\n◆ " .. cost
-		node.label.TextColor3         = C.TEXT
+		node.btn.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
+		node.stroke.Color         = accent
+		node.stroke.Thickness     = 2
+		node.btn.TextColor3       = accent
+		if node.btype == "Mine" and harvesterStashCount > 0 then
+			-- Stashed harvesters redeploy for free.
+			node.label.Text       = dispName(node.btype) .. "\nFREE ×" .. harvesterStashCount
+		else
+			node.label.Text       = dispName(node.btype) .. "\n◆ " .. cost
+		end
+		node.label.TextColor3     = C.TEXT
 	end
 end
 
@@ -297,7 +333,7 @@ local function expandMenu()
 		n.wrapper.Position             = n.startPos
 		n.btn.BackgroundTransparency   = 1
 		TweenService:Create(n.wrapper, EXPAND_TI, { Position = n.finalPos }):Play()
-		TweenService:Create(n.btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
+		TweenService:Create(n.btn,     EXPAND_TI, { BackgroundTransparency = 0.12 }):Play()
 	end
 end
 
@@ -314,6 +350,332 @@ local function collapseMenu()
 	task.delay(COLLAPSE_TI.Time, function()
 		for _, n in childNodes do n.wrapper.Visible = false end
 	end)
+end
+
+-- ── System / pause menu (top-right) ───────────────────────────────────────────
+-- A Wuthering-Waves-styled popup with RESUME / SECRETS / LEAVE MATCH. Lives in its
+-- own ScreenGui (no UIScale) so the dim overlay always covers the full screen.
+local PM_GOLD = Color3.fromRGB(232, 196, 120)
+local PM_CYAN = Color3.fromRGB(120, 224, 255)
+local PM_INK  = Color3.fromRGB(7, 9, 14)
+
+local function diamond(parent: Instance, sizePx: number, color: Color3, pos: UDim2, zIndex: number): Frame
+	local d                  = Instance.new("Frame")
+	d.Size                   = UDim2.fromOffset(sizePx, sizePx)
+	d.Position               = pos
+	d.AnchorPoint            = Vector2.new(0.5, 0.5)
+	d.Rotation               = 45
+	d.BackgroundColor3       = color
+	d.BorderSizePixel        = 0
+	d.ZIndex                 = zIndex
+	d.Parent                 = parent
+	return d
+end
+
+-- L-shaped corner brackets on all four corners of `parent` (WuWa framing).
+local function cornerBrackets(parent: Instance, color: Color3, len: number, thick: number, zIndex: number)
+	for _, a in { Vector2.new(0, 0), Vector2.new(1, 0), Vector2.new(0, 1), Vector2.new(1, 1) } do
+		local h            = Instance.new("Frame")
+		h.Size             = UDim2.fromOffset(len, thick)
+		h.AnchorPoint      = a
+		h.Position         = UDim2.new(a.X, 0, a.Y, 0)
+		h.BackgroundColor3 = color
+		h.BorderSizePixel  = 0
+		h.ZIndex           = zIndex
+		h.Parent           = parent
+		local v            = Instance.new("Frame")
+		v.Size             = UDim2.fromOffset(thick, len)
+		v.AnchorPoint      = a
+		v.Position         = UDim2.new(a.X, 0, a.Y, 0)
+		v.BackgroundColor3 = color
+		v.BorderSizePixel  = 0
+		v.ZIndex           = zIndex
+		v.Parent           = parent
+	end
+end
+
+-- Angular "tile" node for the build / research menu — dark glass with a coloured
+-- stroke, gold corner brackets and a caption below. Returns (wrapper, btn) with the
+-- contract the radial menu logic expects: a UIStroke child + a "NodeLabel" child;
+-- viewport icons swap in over the text via UILib.setNodeViewport.
+local function buildNode(
+	parent: Instance, labelText: string, icon: string, color: Color3,
+	position: UDim2, diameter: number, zIndex: number
+): (Frame, TextButton)
+	local d  = diameter
+	local zi = zIndex
+
+	local wrapper                  = Instance.new("Frame")
+	wrapper.Name                   = "RadialNode"
+	wrapper.Size                   = UDim2.fromOffset(d, d + 38)
+	wrapper.Position               = position
+	wrapper.AnchorPoint            = Vector2.new(0.5, 0.5)
+	wrapper.BackgroundTransparency = 1
+	wrapper.ZIndex                 = zi
+	wrapper.Parent                 = parent
+
+	local btn                      = Instance.new("TextButton")
+	btn.Name                       = "NodeBtn"
+	btn.Size                       = UDim2.fromOffset(d, d)
+	btn.BackgroundColor3           = Color3.fromRGB(16, 20, 30)
+	btn.BackgroundTransparency     = 0.12
+	btn.Text                       = icon
+	btn.TextSize                   = math.max(20, math.floor(d * 0.40))
+	btn.TextColor3                 = color
+	btn.TextStrokeTransparency     = 0.6
+	btn.TextStrokeColor3           = Color3.new(0, 0, 0)
+	btn.Font                       = Enum.Font.GothamBold
+	btn.AutoButtonColor            = false
+	btn.BorderSizePixel            = 0
+	btn.ZIndex                     = zi + 1
+	btn.Parent                     = wrapper
+	UILib.corner(btn, 12)
+
+	-- Light sheen only. A UIGradient also multiplies the button's TEXT colour, so a
+	-- dark gradient here would crush the ⚒ / ⚗ icons to black — keep it near-white.
+	local g                        = Instance.new("UIGradient")
+	g.Rotation                     = 90
+	g.Color                        = ColorSequence.new(
+		Color3.fromRGB(255, 255, 255), Color3.fromRGB(208, 208, 208))
+	g.Parent                       = btn
+
+	UILib.stroke(btn, color, 2)
+	cornerBrackets(btn, PM_GOLD, math.floor(d * 0.20), 2, zi + 4)
+
+	local lbl                      = Instance.new("TextLabel")
+	lbl.Name                       = "NodeLabel"
+	lbl.Size                       = UDim2.fromOffset(d + 50, 32)
+	lbl.Position                   = UDim2.fromOffset(-25, d + 4)
+	lbl.BackgroundTransparency     = 1
+	lbl.Text                       = labelText
+	lbl.Font                       = Enum.Font.GothamBold
+	lbl.TextSize                   = 13
+	lbl.TextColor3                 = C.TEXT
+	lbl.TextStrokeTransparency     = 0.55
+	lbl.TextStrokeColor3           = Color3.new(0, 0, 0)
+	lbl.TextXAlignment             = Enum.TextXAlignment.Center
+	lbl.TextWrapped                = true
+	lbl.ZIndex                     = zi + 1
+	lbl.Parent                     = wrapper
+
+	return wrapper, btn
+end
+
+local function createSystemMenu()
+	local sg                = Instance.new("ScreenGui")
+	sg.Name                 = "RTSSystemMenu"
+	sg.ResetOnSpawn         = false
+	sg.IgnoreGuiInset       = true
+	sg.DisplayOrder         = 200
+	sg.ZIndexBehavior       = Enum.ZIndexBehavior.Sibling
+	sg.Parent               = localPlayer.PlayerGui
+
+	-- ── Top-right trigger button ──────────────────────────────────────────────
+	local menuBtn                   = Instance.new("TextButton")
+	menuBtn.Name                    = "SystemMenuBtn"
+	menuBtn.Size                    = UDim2.fromOffset(46, 46)
+	menuBtn.AnchorPoint             = Vector2.new(1, 0)
+	menuBtn.Position                = UDim2.new(1, -14, 0, 12)
+	menuBtn.BackgroundColor3        = PM_INK
+	menuBtn.BackgroundTransparency  = 0.08
+	menuBtn.AutoButtonColor         = false
+	menuBtn.Text                    = "☰"
+	menuBtn.Font                    = Enum.Font.GothamBold
+	menuBtn.TextSize                = 22
+	menuBtn.TextColor3              = PM_GOLD
+	menuBtn.BorderSizePixel         = 0
+	menuBtn.ZIndex                  = 5
+	menuBtn.Parent                  = sg
+	UILib.corner(menuBtn, 9)
+	local menuBtnStroke             = UILib.stroke(menuBtn, PM_GOLD, 1)
+	menuBtnStroke.Transparency      = 0.35
+
+	-- ── Dim overlay (click outside the card to close) ─────────────────────────
+	local overlay                   = Instance.new("TextButton")
+	overlay.Name                    = "Overlay"
+	overlay.Size                    = UDim2.fromScale(1, 1)
+	overlay.BackgroundColor3        = Color3.fromRGB(2, 3, 6)
+	overlay.BackgroundTransparency  = 0.45
+	overlay.AutoButtonColor         = false
+	overlay.Text                    = ""
+	overlay.Visible                 = false
+	overlay.ZIndex                  = 10
+	overlay.Parent                  = sg
+
+	-- ── Card (its own TextButton so inside-clicks don't reach the overlay) ────
+	local card                      = Instance.new("TextButton")
+	card.Name                       = "Card"
+	card.Size                       = UDim2.fromOffset(380, 322)
+	card.AnchorPoint                = Vector2.new(0.5, 0.5)
+	card.Position                   = UDim2.fromScale(0.5, 0.5)
+	card.BackgroundColor3           = Color3.fromRGB(12, 15, 22)
+	card.BackgroundTransparency     = 0.02
+	card.AutoButtonColor            = false
+	card.Text                       = ""
+	card.BorderSizePixel            = 0
+	card.ZIndex                     = 11
+	card.Parent                     = overlay
+	UILib.corner(card, 6)
+	local cardStroke                = UILib.stroke(card, PM_GOLD, 1.5)
+	cardStroke.Transparency         = 0.2
+
+	local cardGrad                  = Instance.new("UIGradient")
+	cardGrad.Rotation               = 90
+	cardGrad.Color                  = ColorSequence.new(
+		Color3.fromRGB(20, 25, 36), Color3.fromRGB(10, 12, 18))
+	cardGrad.Parent                 = card
+
+	local cardScale                 = Instance.new("UIScale")
+	cardScale.Scale                 = 1
+	cardScale.Parent                = card
+
+	-- Gold accent bar + diamond along the card's top
+	local accentBar                 = Instance.new("Frame")
+	accentBar.Size                  = UDim2.fromOffset(54, 3)
+	accentBar.Position              = UDim2.fromOffset(26, 24)
+	accentBar.BackgroundColor3      = PM_GOLD
+	accentBar.BorderSizePixel       = 0
+	accentBar.ZIndex                = 12
+	accentBar.Parent                = card
+	diamond(card, 8, PM_GOLD, UDim2.fromOffset(90, 25), 12)
+
+	local title                     = Instance.new("TextLabel")
+	title.Size                      = UDim2.new(1, -52, 0, 30)
+	title.Position                  = UDim2.fromOffset(26, 36)
+	title.BackgroundTransparency    = 1
+	title.Text                      = "PAUSED"
+	title.Font                      = Enum.Font.GothamBold
+	title.TextSize                  = 24
+	title.TextColor3                = Color3.fromRGB(238, 240, 245)
+	title.TextXAlignment            = Enum.TextXAlignment.Left
+	title.ZIndex                    = 12
+	title.Parent                    = card
+
+	local subtitle                  = Instance.new("TextLabel")
+	subtitle.Size                   = UDim2.new(1, -52, 0, 16)
+	subtitle.Position               = UDim2.fromOffset(27, 66)
+	subtitle.BackgroundTransparency = 1
+	subtitle.Text                   = "SYSTEM MENU"
+	subtitle.Font                   = Enum.Font.Gotham
+	subtitle.TextSize               = 11
+	subtitle.TextColor3             = Color3.fromRGB(120, 134, 158)
+	subtitle.TextXAlignment         = Enum.TextXAlignment.Left
+	subtitle.ZIndex                 = 12
+	subtitle.Parent                 = card
+
+	-- ── State + open/close ─────────────────────────────────────────────────────
+	local isOpen     = false
+	local leaveArmed = false
+	local leaveBtn: TextButton? = nil
+
+	local statusLine                = Instance.new("TextLabel")
+	statusLine.Size                 = UDim2.new(1, -52, 0, 16)
+	statusLine.Position             = UDim2.new(0, 26, 1, -26)
+	statusLine.BackgroundTransparency = 1
+	statusLine.Text                 = ""
+	statusLine.Font                 = Enum.Font.GothamMedium
+	statusLine.TextSize             = 12
+	statusLine.TextColor3           = PM_CYAN
+	statusLine.TextXAlignment       = Enum.TextXAlignment.Left
+	statusLine.ZIndex               = 12
+	statusLine.Parent               = card
+
+	local function setOpen(open: boolean)
+		isOpen = open
+		if open then
+			leaveArmed       = false
+			statusLine.Text  = ""
+			if leaveBtn then leaveBtn.Text = "LEAVE MATCH" end
+			overlay.Visible  = true
+			overlay.BackgroundTransparency = 1
+			cardScale.Scale  = 0.86
+			TweenService:Create(overlay, TweenInfo.new(0.14), { BackgroundTransparency = 0.45 }):Play()
+			TweenService:Create(cardScale,
+				TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+				{ Scale = 1 }):Play()
+		else
+			TweenService:Create(overlay, TweenInfo.new(0.12), { BackgroundTransparency = 1 }):Play()
+			TweenService:Create(cardScale, TweenInfo.new(0.12), { Scale = 0.9 }):Play()
+			task.delay(0.12, function()
+				if not isOpen then overlay.Visible = false end
+			end)
+		end
+	end
+
+	-- ── Menu item factory ──────────────────────────────────────────────────────
+	local function menuItem(text: string, y: number, accent: Color3, onClick: () -> ()): TextButton
+		local b                     = Instance.new("TextButton")
+		b.Size                      = UDim2.new(1, -52, 0, 48)
+		b.Position                  = UDim2.fromOffset(26, y)
+		b.BackgroundColor3          = Color3.fromRGB(18, 22, 32)
+		b.AutoButtonColor           = false
+		b.Text                      = text
+		b.Font                      = Enum.Font.GothamBold
+		b.TextSize                  = 15
+		b.TextColor3                = Color3.fromRGB(206, 214, 228)
+		b.TextXAlignment            = Enum.TextXAlignment.Left
+		b.BorderSizePixel           = 0
+		b.ZIndex                    = 12
+		b.Parent                    = card
+		UILib.corner(b, 5)
+		local pad                   = Instance.new("UIPadding")
+		pad.PaddingLeft             = UDim.new(0, 44)
+		pad.Parent                  = b
+		local st                    = UILib.stroke(b, Color3.fromRGB(38, 46, 62), 1)
+
+		-- Left accent stripe
+		local bar                   = Instance.new("Frame")
+		bar.Size                    = UDim2.fromOffset(4, 24)
+		bar.Position                = UDim2.new(0, 16, 0.5, -12)
+		bar.BackgroundColor3        = accent
+		bar.BorderSizePixel         = 0
+		bar.ZIndex                  = 13
+		bar.Parent                  = b
+		UILib.corner(bar, 2)
+
+		b.MouseEnter:Connect(function()
+			TweenService:Create(b,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(26, 32, 46) }):Play()
+			TweenService:Create(st, TweenInfo.new(0.12), { Color = accent, Thickness = 1.5 }):Play()
+		end)
+		b.MouseLeave:Connect(function()
+			TweenService:Create(b,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(18, 22, 32) }):Play()
+			TweenService:Create(st, TweenInfo.new(0.12), { Color = Color3.fromRGB(38, 46, 62), Thickness = 1 }):Play()
+		end)
+		b.MouseButton1Click:Connect(onClick)
+		return b
+	end
+
+	menuItem("RESUME", 92, PM_CYAN, function()
+		setOpen(false)
+	end)
+
+	menuItem("SECRETS", 146, PM_GOLD, function()
+		leaveArmed       = false
+		statusLine.Text  = "✦  Secrets — coming soon"
+		statusLine.TextColor3 = PM_GOLD
+	end)
+
+	leaveBtn = menuItem("LEAVE MATCH", 200, Color3.fromRGB(210, 70, 70), function()
+		if not leaveArmed then
+			leaveArmed            = true
+			if leaveBtn then leaveBtn.Text = "CONFIRM — LEAVE MATCH?" end
+			statusLine.Text       = "You will forfeit the match."
+			statusLine.TextColor3 = Color3.fromRGB(220, 110, 110)
+			return
+		end
+		Network.forfeitMatch()
+		setOpen(false)
+	end)
+
+	-- ── Wiring ─────────────────────────────────────────────────────────────────
+	menuBtn.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
+	menuBtn.MouseEnter:Connect(function()
+		TweenService:Create(menuBtnStroke, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.5 }):Play()
+	end)
+	menuBtn.MouseLeave:Connect(function()
+		TweenService:Create(menuBtnStroke, TweenInfo.new(0.12), { Transparency = 0.35, Thickness = 1 }):Play()
+	end)
+	overlay.MouseButton1Click:Connect(function() setOpen(false) end)
 end
 
 -- ── HUD.create ────────────────────────────────────────────────────────────────
@@ -558,30 +920,34 @@ function HUD.create(): (Frame, TextButton)
 	buildOverlay = ov
 
 	-- Root "BUILD" node — bottom-left, always visible when overlay is visible
-	local rootPos                       = UDim2.new(0, 80, 1, -110)
-	local rootWrapper, rBtn             = UILib.radialNode(ov, "BUILD", "⚒", C.ACCENT, rootPos, 80, 4)
+	local rootPos                       = UDim2.new(0, 88, 1, -120)
+	local rootWrapper, rBtn             = buildNode(ov, "BUILD", "⚒", C.ACCENT, rootPos, 96, 4)
 	rootBtn                             = rBtn
 	rootStroke                          = rBtn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 	local _rw = rootWrapper  -- suppress unused
 
-	-- "UPGRADES" node — circular, matching BUILD style
+	-- Hover helper shared by the stacked side nodes (SELL / UPGRADES)
+	local function wireNodeHover(btn: TextButton, stroke: UIStroke)
+		btn.MouseEnter:Connect(function()
+			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0 }):Play()
+			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 3 }):Play()
+		end)
+		btn.MouseLeave:Connect(function()
+			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.12 }):Play()
+			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 2 }):Play()
+		end)
+	end
+
+	-- "UPGRADES" / research node — matches the BUILD tile, gold-accented
 	do
-		local upgPos = UDim2.new(0, 80, 1, -212)
-		local _w, btn = UILib.radialNode(ov, "UPGRADES", "⚗", UPGRADES_COLOR, upgPos, 80, 4)
+		local upgPos = UDim2.new(0, 88, 1, -234)
+		local _w, btn = buildNode(ov, "UPGRADES", "⚗", UPGRADES_COLOR, upgPos, 96, 4)
 		;(_w:FindFirstChild("NodeLabel") :: TextLabel).TextSize = 15
 
 		local stroke     = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		stroke.Color     = UPGRADES_COLOR
-		stroke.Thickness = 1.5
-
-		btn.MouseEnter:Connect(function()
-			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.15 }):Play()
-			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 2.5 }):Play()
-		end)
-		btn.MouseLeave:Connect(function()
-			TweenService:Create(btn,    TweenInfo.new(0.12), { BackgroundTransparency = 0.35 }):Play()
-			TweenService:Create(stroke, TweenInfo.new(0.12), { Thickness = 1.5 }):Play()
-		end)
+		stroke.Thickness = 2
+		wireNodeHover(btn, stroke)
 
 		upgradesBtnRef     = btn
 		upgradesStroke     = stroke
@@ -595,7 +961,7 @@ function HUD.create(): (Frame, TextButton)
 		tip.Name                         = "BuildTooltip"
 		tip.Size                         = UDim2.fromOffset(420, 92)
 		-- Anchored bottom-left, sitting well above the UPGRADES button
-		tip.Position                     = UDim2.new(0, 22, 1, -340)
+		tip.Position                     = UDim2.new(0, 22, 1, -366)
 		tip.BackgroundTransparency       = 1
 		tip.BorderSizePixel              = 0
 		tip.Visible                      = false
@@ -603,9 +969,19 @@ function HUD.create(): (Frame, TextButton)
 		tip.Parent                       = ov
 		tooltipFrame = tip
 
+		-- Gold left accent bar + diamond to tie the tooltip into the new UI
+		local tipBar                     = Instance.new("Frame")
+		tipBar.Size                      = UDim2.fromOffset(3, 42)
+		tipBar.Position                  = UDim2.fromOffset(0, 8)
+		tipBar.BackgroundColor3          = PM_GOLD
+		tipBar.BorderSizePixel           = 0
+		tipBar.ZIndex                    = 6
+		tipBar.Parent                    = tip
+		diamond(tip, 8, PM_GOLD, UDim2.fromOffset(2, 4), 6)
+
 		local tipTitle                   = Instance.new("TextLabel")
-		tipTitle.Size                    = UDim2.new(1, 0, 0, 54)
-		tipTitle.Position                = UDim2.new(0, 0, 0, 0)
+		tipTitle.Size                    = UDim2.new(1, -16, 0, 54)
+		tipTitle.Position                = UDim2.new(0, 16, 0, 0)
 		tipTitle.BackgroundTransparency  = 1
 		tipTitle.Text                    = ""
 		tipTitle.Font                    = Enum.Font.GothamBold
@@ -619,8 +995,8 @@ function HUD.create(): (Frame, TextButton)
 		tooltipTitle = tipTitle
 
 		local tipDesc                    = Instance.new("TextLabel")
-		tipDesc.Size                     = UDim2.new(1, 0, 0, 30)
-		tipDesc.Position                 = UDim2.new(0, 2, 0, 58)
+		tipDesc.Size                     = UDim2.new(1, -16, 0, 30)
+		tipDesc.Position                 = UDim2.new(0, 18, 0, 58)
 		tipDesc.BackgroundTransparency   = 1
 		tipDesc.Text                     = ""
 		tipDesc.Font                     = Enum.Font.GothamBold
@@ -643,10 +1019,10 @@ function HUD.create(): (Frame, TextButton)
 			rootPos.Y.Offset
 		)
 
-		local wrapper, btn = UILib.radialNode(ov, def.btype, def.icon, def.color, rootPos, 60, 4)
+		local wrapper, btn = buildNode(ov, def.btype, def.icon, def.color, rootPos, 76, 4)
 		wrapper.Visible = false
 
-		UILib.setNodeViewport(btn, ViewportPreview.forBuilding(def.btype, Vector2.new(60, 60)))
+		UILib.setNodeViewport(btn, ViewportPreview.forBuilding(def.btype, Vector2.new(76, 76)))
 
 		local stroke  = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
 		local label   = wrapper:FindFirstChild("NodeLabel") :: TextLabel
@@ -675,6 +1051,41 @@ function HUD.create(): (Frame, TextButton)
 	end
 
 	updateAllNodes()
+
+	-- ── Contextual SELL button (bottom-centre) ─────────────────────────────────
+	-- Only shown while a sellable structure is selected (wired in HUD.wire). Sits
+	-- below the build-node row and clear of the centre building panels.
+	do
+		local sellBtn                   = Instance.new("TextButton")
+		sellBtn.Name                    = "SellStructureBtn"
+		sellBtn.Size                    = UDim2.fromOffset(196, 46)
+		sellBtn.AnchorPoint             = Vector2.new(0.5, 1)
+		sellBtn.Position                = UDim2.new(0.5, 0, 1, -16)
+		sellBtn.BackgroundColor3        = Color3.fromRGB(16, 20, 30)
+		sellBtn.BackgroundTransparency  = 0.06
+		sellBtn.AutoButtonColor         = false
+		sellBtn.Font                    = Enum.Font.GothamBold
+		sellBtn.TextSize                = 16
+		sellBtn.TextColor3              = SELL_COLOR
+		sellBtn.Text                    = "$   SELL STRUCTURE"
+		sellBtn.BorderSizePixel         = 0
+		sellBtn.ZIndex                  = 6
+		sellBtn.Visible                 = false
+		sellBtn.Parent                  = sg
+		UILib.corner(sellBtn, 6)
+		local sellStroke                = UILib.stroke(sellBtn, SELL_COLOR, 1.5)
+		cornerBrackets(sellBtn, PM_GOLD, 12, 2, 8)
+
+		sellBtn.MouseEnter:Connect(function()
+			TweenService:Create(sellBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(26, 32, 46) }):Play()
+			TweenService:Create(sellStroke, TweenInfo.new(0.12), { Thickness = 2.5 }):Play()
+		end)
+		sellBtn.MouseLeave:Connect(function()
+			TweenService:Create(sellBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(16, 20, 30) }):Play()
+			TweenService:Create(sellStroke, TweenInfo.new(0.12), { Thickness = 1.5 }):Play()
+		end)
+		sellBtnRef = sellBtn
+	end
 
 	-- ── Lane mode spawn panel ──────────────────────────────────────────────────
 	do
@@ -791,6 +1202,97 @@ function HUD.create(): (Frame, TextButton)
 		lanePanel = panel
 	end
 
+	-- ── DEPLOY button (bottom-left, shown while the Core awaits deployment) ────
+	-- Occupies the build/research corner: the build + upgrade tray stays hidden
+	-- until the Core transforms into the Command Center.
+	do
+		local dBtn                       = Instance.new("TextButton")
+		dBtn.Name                        = "DeployButton"
+		dBtn.Size                        = UDim2.fromOffset(330, 92)
+		dBtn.AnchorPoint                 = Vector2.new(0, 1)
+		dBtn.Position                    = UDim2.new(0, 22, 1, -22)
+		dBtn.BackgroundColor3            = Color3.fromRGB(4, 20, 28)
+		dBtn.BorderSizePixel             = 0
+		dBtn.AutoButtonColor             = false
+		dBtn.Text                        = ""
+		dBtn.ZIndex                      = 6
+		dBtn.Visible                     = false
+		dBtn.Parent                      = sg
+		UILib.corner(dBtn, 14)
+
+		local dGrad                      = Instance.new("UIGradient")
+		dGrad.Color                      = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 38, 52)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(2, 18, 30)),
+		})
+		dGrad.Rotation                   = 90
+		dGrad.Parent                     = dBtn
+
+		local dGlow                      = Instance.new("UIStroke")
+		dGlow.Color                      = Color3.fromRGB(0, 210, 220)
+		dGlow.Thickness                  = 2
+		dGlow.ApplyStrokeMode            = Enum.ApplyStrokeMode.Border
+		dGlow.Parent                     = dBtn
+		deployGlowRef                    = dGlow
+		cornerBrackets(dBtn, PM_GOLD, 14, 2, 8)
+
+		local dIcon                      = Instance.new("Frame")
+		dIcon.Size                       = UDim2.fromOffset(58, 58)
+		dIcon.Position                   = UDim2.fromOffset(14, 17)
+		dIcon.BackgroundColor3           = Color3.fromRGB(0, 160, 180)
+		dIcon.BackgroundTransparency     = 0.25
+		dIcon.BorderSizePixel            = 0
+		dIcon.ZIndex                     = 7
+		dIcon.Parent                     = dBtn
+		UILib.corner(dIcon, 29)
+		local dIconLbl                   = Instance.new("TextLabel")
+		dIconLbl.Size                    = UDim2.new(1, 0, 1, 0)
+		dIconLbl.BackgroundTransparency  = 1
+		dIconLbl.Font                    = Enum.Font.GothamBold
+		dIconLbl.TextSize                = 30
+		dIconLbl.TextColor3              = Color3.fromRGB(180, 255, 255)
+		dIconLbl.Text                    = "⌂"
+		dIconLbl.ZIndex                  = 8
+		dIconLbl.Parent                  = dIcon
+
+		local dTitle                     = Instance.new("TextLabel")
+		dTitle.Size                      = UDim2.fromOffset(244, 34)
+		dTitle.Position                  = UDim2.fromOffset(82, 14)
+		dTitle.BackgroundTransparency    = 1
+		dTitle.Font                      = Enum.Font.GothamBold
+		dTitle.TextSize                  = 24
+		dTitle.TextColor3                = Color3.fromRGB(180, 255, 255)
+		dTitle.TextXAlignment            = Enum.TextXAlignment.Left
+		dTitle.Text                      = "DEPLOY"
+		dTitle.ZIndex                    = 7
+		dTitle.Parent                    = dBtn
+
+		local dSub                       = Instance.new("TextLabel")
+		dSub.Size                        = UDim2.fromOffset(244, 24)
+		dSub.Position                    = UDim2.fromOffset(82, 50)
+		dSub.BackgroundTransparency      = 1
+		dSub.Font                        = Enum.Font.Gotham
+		dSub.TextSize                    = 13
+		dSub.TextColor3                  = Color3.fromRGB(100, 190, 200)
+		dSub.TextXAlignment              = Enum.TextXAlignment.Left
+		dSub.Text                        = "Transform Core → Command Center"
+		dSub.ZIndex                      = 7
+		dSub.Parent                      = dBtn
+
+		dBtn.MouseEnter:Connect(function()
+			TweenService:Create(dBtn,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(0, 35, 48) }):Play()
+			TweenService:Create(dGlow, TweenInfo.new(0.12), { Thickness = 3.5 }):Play()
+		end)
+		dBtn.MouseLeave:Connect(function()
+			TweenService:Create(dBtn,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(4, 20, 28) }):Play()
+			TweenService:Create(dGlow, TweenInfo.new(0.12), { Thickness = 2 }):Play()
+		end)
+		deployBtnRef = dBtn
+	end
+
+	-- Top-right system / pause menu (own ScreenGui)
+	createSystemMenu()
+
 	return dragFrame, ccBtn
 end
 
@@ -896,51 +1398,24 @@ function HUD.setIncome(perMin: number)
 	refreshResDisplay()
 end
 
+-- Number of stashed harvesters available to redeploy for free; refreshes the build
+-- node so the Harvester tile shows "FREE ×N" while a stash is available.
+function HUD.setHarvesterStash(n: number)
+	harvesterStashCount = n
+	updateAllNodes()
+end
+
 local ccPulseActive = false
 
 function HUD.setCommandCenterMode(isCC: boolean)
+	-- isCC = "no Command Center yet" → hide the build/research tray. The legacy
+	-- "PLACE COMMAND CENTER" button is retired (players deploy via the Core drop
+	-- pod + bottom-left DEPLOY button), so it stays hidden either way.
 	if buildOverlay  then buildOverlay.Visible  = not isCC and not isLaneModeActive end
-	if ccBtnInternal then ccBtnInternal.Visible = isCC and not isLaneModeActive     end
+	if ccBtnInternal then ccBtnInternal.Visible = false end
 	if lanePanel     then lanePanel.Visible     = not isCC and isLaneModeActive     end
 	if isCC and buildMenuOpen then collapseMenu() end
-
-	if isCC and not isLaneModeActive then
-		-- Pop-in spring
-		if ccScaleRef then
-			ccScaleRef.Scale = 0.78
-			TweenService:Create(ccScaleRef,
-				TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-				{ Scale = 1 }
-			):Play()
-		end
-
-		-- Continuous border pulse while CC mode is active
-		if not ccPulseActive then
-			ccPulseActive = true
-			task.spawn(function()
-				while ccPulseActive and ccGlowRef do
-					TweenService:Create(ccGlowRef,
-						TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
-						{ Thickness = 5, Transparency = 0.1 }
-					):Play()
-					task.wait(0.9)
-					if not ccPulseActive then break end
-					TweenService:Create(ccGlowRef,
-						TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.In),
-						{ Thickness = 2, Transparency = 0 }
-					):Play()
-					task.wait(0.9)
-				end
-			end)
-		end
-	else
-		ccPulseActive = false
-		if ccGlowRef then
-			TweenService:Create(ccGlowRef,
-				TweenInfo.new(0.15), { Thickness = 2, Transparency = 0 }
-			):Play()
-		end
-	end
+	ccPulseActive = false
 end
 
 function HUD.refreshTrayState(counts: { [string]: number })
@@ -957,6 +1432,45 @@ function HUD.setUpgradesVisible(visible: boolean)
 	local w = upgradesBtnWrapper
 	if not w then return end
 	w.Visible = visible
+end
+
+-- Shows/hides the bottom-left DEPLOY button (the Core-awaiting-deployment state).
+-- While visible it gently pulses its border to draw the eye.
+function HUD.setDeployVisible(visible: boolean)
+	local btn = deployBtnRef
+	if not btn then return end
+	btn.Visible = visible
+	if visible then
+		local sc = (btn:FindFirstChildWhichIsA("UIScale") or Instance.new("UIScale")) :: UIScale
+		sc.Parent = btn
+		sc.Scale  = 0.82
+		TweenService:Create(sc, TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+		if not deployPulseOn then
+			deployPulseOn = true
+			task.spawn(function()
+				while deployPulseOn and deployGlowRef and deployBtnRef and deployBtnRef.Visible do
+					TweenService:Create(deployGlowRef, TweenInfo.new(0.85, Enum.EasingStyle.Sine), { Thickness = 4.5 }):Play()
+					task.wait(0.9)
+					if not deployPulseOn then break end
+					TweenService:Create(deployGlowRef, TweenInfo.new(0.85, Enum.EasingStyle.Sine), { Thickness = 2 }):Play()
+					task.wait(0.9)
+				end
+				deployPulseOn = false
+			end)
+		end
+	else
+		deployPulseOn = false
+		if deployGlowRef then
+			TweenService:Create(deployGlowRef, TweenInfo.new(0.15), { Thickness = 2 }):Play()
+		end
+	end
+end
+
+-- Wires the DEPLOY button click to the supplied callback.
+function HUD.wireDeploy(onDeploy: () -> ())
+	if deployBtnRef then
+		deployBtnRef.MouseButton1Click:Connect(onDeploy)
+	end
 end
 
 function HUD.setLaneMode(enabled: boolean)
@@ -1041,6 +1555,29 @@ function HUD.wire(
 	-- hidePanelsFn first or it resets the toggle flag before upgradesFn checks it.
 	if upgradesBtnRef and upgradesFn then
 		upgradesBtnRef.MouseButton1Click:Connect(upgradesFn)
+	end
+
+	-- Sell button — only present while a sellable structure is selected.
+	if sellBtnRef then
+		sellBtnRef.MouseButton1Click:Connect(function()
+			local ids = sellableSelectedIds(unitController.getSelectedBuildingIds())
+			if #ids == 0 then return end
+			network.sellBuildings(ids)
+			hidePanelsFn()
+			HUD.showNotification("Structure sold  ◆ refund", C.GOLD)
+		end)
+
+		-- Toggle visibility from the live selection (cheap: a tiny table scan / frame).
+		local sellShown = false
+		RunService.Heartbeat:Connect(function()
+			local btn = sellBtnRef
+			if not btn then return end
+			local show = #sellableSelectedIds(unitController.getSelectedBuildingIds()) > 0
+			if show ~= sellShown then
+				sellShown   = show
+				btn.Visible = show
+			end
+		end)
 	end
 
 	-- Placement mode changes

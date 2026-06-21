@@ -100,17 +100,31 @@ local function playLampreyDeath()
 	end
 end
 
+-- Straight-down terrain raycast so range rings around buildings sit on their tier.
+local terrainRayParams = RaycastParams.new()
+terrainRayParams.FilterType = Enum.RaycastFilterType.Include
+terrainRayParams.FilterDescendantsInstances = { workspace.Terrain }
+
+local function terrainHeightAt(x: number, z: number): number
+	local result = workspace:Raycast(Vector3.new(x, 250, z), Vector3.new(0, -500, 0), terrainRayParams)
+	return result and result.Position.Y or 0
+end
+
 -- ── Move-order ping ───────────────────────────────────────────────────────────
 local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
 	local color = isAtkMove
 		and Color3.fromRGB(255, 140, 0)   -- orange = attack-move
 		or  Color3.fromRGB(0, 230, 80)    -- green  = regular move
 
+	-- Resolve the real terrain Y under the target so the ping shows on whichever
+	-- tier it lands on (callers sometimes flatten the order target to Y=0).
+	local pingY         = terrainHeightAt(pos.X, pos.Z) + 0.3
+
 	local ring          = Instance.new("Part")
 	ring.Name           = "_MovePing"
 	ring.Shape          = Enum.PartType.Cylinder
 	-- Cylinder's length runs along X by default; rotate so it lies flat (Y-up)
-	ring.CFrame         = CFrame.new(pos + Vector3.new(0, 0.3, 0))
+	ring.CFrame         = CFrame.new(pos.X, pingY, pos.Z)
 		* CFrame.Angles(0, 0, math.pi / 2)
 	ring.Size           = Vector3.new(0.12, 2, 2)
 	ring.Color          = color
@@ -290,7 +304,7 @@ local function updateFormationPreview(path: { Vector3 }, atkMove: boolean)
 			slotMarkers[i] = m
 		end
 		m.Color  = color
-		m.CFrame = CFrame.new(s.X, 0.3, s.Z) * CFrame.Angles(0, 0, math.pi / 2)
+		m.CFrame = CFrame.new(s.X, terrainHeightAt(s.X, s.Z) + 0.3, s.Z) * CFrame.Angles(0, 0, math.pi / 2)
 	end
 	for i = #slotMarkers, n + 1, -1 do
 		local m = slotMarkers[i]
@@ -448,7 +462,7 @@ local function setHover(bid: string?)
 		local info = knownBuildings[bid]
 		if info then
 			local pos = info.base.Position
-			hoverRing = RangeRing.create(range, pos.X, pos.Z)
+			hoverRing = RangeRing.create(range, pos.X, pos.Z, terrainHeightAt(pos.X, pos.Z))
 		end
 	end
 
@@ -487,7 +501,7 @@ local function selectBuilding(bid: string?)
 		local info = knownBuildings[bid]
 		if info then
 			local pos = info.base.Position
-			selectedRing = RangeRing.create(range, pos.X, pos.Z)
+			selectedRing = RangeRing.create(range, pos.X, pos.Z, terrainHeightAt(pos.X, pos.Z))
 		end
 	end
 
@@ -991,6 +1005,13 @@ end
 
 function UnitController.getSelected(): {string}
 	return selected
+end
+
+-- Programmatically select a single owned unit by id (used to auto-select the Core
+-- the instant it deploys so the player can drive it immediately).
+function UnitController.selectUnit(id: string)
+	selected = { id }
+	notify()
 end
 
 function UnitController.onSelectionChanged(fn: (number) -> ())

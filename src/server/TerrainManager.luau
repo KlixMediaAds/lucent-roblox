@@ -269,6 +269,45 @@ function TerrainManager.heightAt(x: number, z: number): number
 	return GROUND_TOP
 end
 
+-- Actual rendered terrain surface height via a downward raycast — the same
+-- surface the client's holograms snap to. heightAt() is an analytic *logical*
+-- level (used by NavGrid and the flatness test); its tier boundaries don't line
+-- up perfectly with the smoothed voxels, so structures/deposits placed by
+-- heightAt could end up buried under a raised tier. Use this for anything that
+-- must visually rest on the ground. Falls back to heightAt if the ray misses.
+local surfaceRayParams = RaycastParams.new()
+surfaceRayParams.FilterType = Enum.RaycastFilterType.Include
+surfaceRayParams.FilterDescendantsInstances = { Terrain }
+
+function TerrainManager.surfaceHeightAt(x: number, z: number): number
+	local result = workspace:Raycast(Vector3.new(x, 256, z), Vector3.new(0, -512, 0), surfaceRayParams)
+	if result then
+		return result.Position.Y
+	end
+	return TerrainManager.heightAt(x, z)
+end
+
+-- Returns true if a building footprint centred at (x, z) with the given
+-- half-extents sits entirely on one terrain tier — i.e. every corner (plus the
+-- centre) resolves to the same analytic level. False means the footprint spans
+-- a ramp or a tier boundary. Uses heightAt (not a raycast): the analytic level
+-- is perfectly flat across a tier, whereas Roblox's voxel surface is bumpy at
+-- the stud level and would make a flat plateau read as "not flat".
+local FLAT_EPS = 0.5
+function TerrainManager.isFootprintFlat(x: number, z: number, halfX: number, halfZ: number): boolean
+	local h0 = TerrainManager.heightAt(x, z)
+	local corners = {
+		TerrainManager.heightAt(x - halfX, z - halfZ),
+		TerrainManager.heightAt(x + halfX, z - halfZ),
+		TerrainManager.heightAt(x - halfX, z + halfZ),
+		TerrainManager.heightAt(x + halfX, z + halfZ),
+	}
+	for _, h in corners do
+		if math.abs(h - h0) > FLAT_EPS then return false end
+	end
+	return true
+end
+
 -- Returns true if a box centred at pos.X/pos.Z with the given half-extents
 -- overlaps any terrain obstacle Part.  Used by BuildingManager and BuildingPlacer.
 function TerrainManager.isPositionBlocked(pos: Vector3, halfW: number, halfD: number): boolean

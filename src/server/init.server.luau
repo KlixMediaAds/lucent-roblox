@@ -101,6 +101,18 @@ MineralManager.setTerrainManager(TerrainManager)
 local gameResetInProgress = false
 local gameStartTime       = os.clock()
 
+-- Base-assignment + gamemode state. Hoisted here (above triggerEndGame /
+-- onCCDestroyed) so every handler shares one set of variables rather than
+-- closing over a later, separate declaration.
+local nextBaseIndex   = 0
+local nextLaneAIIdx   = 0
+local currentGamemode = "Default"
+
+-- Default-mode base delivery (defined later; forward-declared so the reset /
+-- elimination handlers above its definition can call it).
+local playerBasePos: { [number]: Vector3 } = {}
+local deliverCoreForPlayer: (Player) -> ()
+
 local function triggerEndGame(winnerUserId: number, reason: string)
 	if gameResetInProgress then return end
 	gameResetInProgress = true
@@ -140,13 +152,21 @@ local function triggerEndGame(winnerUserId: number, reason: string)
 		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
 	end
 
-	-- In lane mode, immediately auto-place CCs again
+	-- Re-establish bases for the new round.
 	if currentGamemode == "Lane" then
 		nextBaseIndex = 0
 		nextLaneAIIdx = 0
 		task.wait(0.1)  -- let NeedCommandCenter process first
 		for _, player in Players:GetPlayers() do
 			setupLanePlayerBase(player)
+		end
+	else
+		-- Default mode: re-deliver a fresh Core drop pod to every player.
+		nextBaseIndex = 0
+		playerBasePos = {}
+		task.wait(0.1)  -- let NeedCommandCenter reset client state first
+		for _, player in Players:GetPlayers() do
+			deliverCoreForPlayer(player)
 		end
 	end
 
@@ -180,6 +200,14 @@ BuildingManager.setOnCCDestroyed(function(player)
 			ResourceManager.reset(player)
 			ResearchManager.resetPlayer(player)
 			RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+			-- Default mode: redeliver a Core drop pod so they can rebuild their base.
+			-- (Lane mode auto-replaces CCs through the lobby flow instead.)
+			if currentGamemode ~= "Lane" then
+				playerBasePos[player.UserId] = nil
+				task.delay(0.3, function()
+					if player.Parent then deliverCoreForPlayer(player) end
+				end)
+			end
 		end
 	else
 		ResourceManager.reset(player)
@@ -191,6 +219,13 @@ end)
 -- ── Monument win ──────────────────────────────────────────────────────────────
 BuildingManager.setOnPlayerWon(function(winnerUserId: number)
 	triggerEndGame(winnerUserId, "monument")
+end)
+
+-- ── Forfeit (player chose "Leave Match" from the in-game menu) ─────────────────
+-- Destroys the forfeiter's Command Center, routing through the normal elimination
+-- flow (DEFEAT screen vs others, or a base reset in solo/AI matches).
+RemoteHandler.get(Config.REMOTES.ForfeitMatch).OnServerEvent:Connect(function(player)
+	BuildingManager.forfeit(player)
 end)
 
 -- ── Chat commands (always active, not gated by lobby) ────────────────────────
@@ -225,7 +260,6 @@ local PLAYER_BASES: { Vector3 } = {
 	Vector3.new( 120, Config.COMMAND_CENTER_SIZE.Y / 2, -280),  -- south-east
 	Vector3.new(-120, Config.COMMAND_CENTER_SIZE.Y / 2,  280),  -- north-west (opposite)
 }
-local nextBaseIndex = 0
 
 -- Lane mode bases: players at the south end (Z≈−290), AI at the north end (Z≈+290)
 local LANE_PLAYER_BASES: { Vector3 } = {
@@ -239,26 +273,33 @@ local LANE_AI_BASES: { Vector3 } = {
 	Vector3.new(-50, Config.COMMAND_CENTER_SIZE.Y / 2,  290),
 	Vector3.new( 50, Config.COMMAND_CENTER_SIZE.Y / 2,  290),
 }
-local nextLaneAIIdx   = 0
-local currentGamemode = "Default"
 
--- Returns two mine positions offset from ccPos in its home direction.
-local function minePositionsFor(ccPos: Vector3): (Vector3, Vector3)
-	local GRID    = Config.BUILDING_GRID
-	local mineY   = Config.BUILDING_SIZE.Y / 2
-	local flat    = Vector3.new(ccPos.X, 0, ccPos.Z)
-	local homeDir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(0, 0, 1)
-	local perpDir = Vector3.new(-homeDir.Z, 0, homeDir.X)
+-- Nudges a desired XZ spot to the nearest grid-snapped position whose
+-- footprint sits entirely on one terrain level, searching outward in a
+-- small spiral. Falls back to the (grid-snapped) desired spot if nothing
+-- flat turns up nearby — shouldn't happen given how wide the plateaus are.
+local function findFlatSpot(desired: Vector3, halfX: number, halfZ: number): Vector3
+	local GRID = Config.BUILDING_GRID
 	local function snap(v: Vector3): Vector3
-		return Vector3.new(
-			math.round(v.X / GRID) * GRID,
-			mineY,
-			math.round(v.Z / GRID) * GRID
-		)
+		return Vector3.new(math.round(v.X / GRID) * GRID, 0, math.round(v.Z / GRID) * GRID)
 	end
-	return
-		snap(flat + homeDir * 28 + perpDir *  20),
-		snap(flat + homeDir * 28 + perpDir * -20)
+	local base = snap(desired)
+	if TerrainManager.isFootprintFlat(base.X, base.Z, halfX, halfZ) then
+		return base
+	end
+	for radius = 1, 12 do
+		local d = radius * GRID
+		for _, offset in { Vector3.new(d, 0, 0), Vector3.new(-d, 0, 0),
+			Vector3.new(0, 0, d), Vector3.new(0, 0, -d),
+			Vector3.new(d, 0, d), Vector3.new(-d, 0, d),
+			Vector3.new(d, 0, -d), Vector3.new(-d, 0, -d) } do
+			local cand = snap(base + offset)
+			if TerrainManager.isFootprintFlat(cand.X, cand.Z, halfX, halfZ) then
+				return cand
+			end
+		end
+	end
+	return base
 end
 
 -- Seats the player's avatar on the CC's operator pulpit (the roof centre is
@@ -302,23 +343,6 @@ local function seatAvatarOnCC(player: Player, ccId: string)
 	end)
 end
 
--- Auto-sets up a human player's starting base: CC + deposits + 2 instant mines.
-local function setupPlayerBase(player: Player)
-	nextBaseIndex += 1
-	local base = PLAYER_BASES[nextBaseIndex] or PLAYER_BASES[1]
-
-	local _, ccId = BuildingManager.placeForPlayer(player, base, "CommandCenter")
-	MineralManager.spawnDepositsForBase(base, 5)
-
-	local m1, m2 = minePositionsFor(base)
-	ResourceManager.add(player, Config.MINE_COST)
-	BuildingManager.placeInstantForPlayer(player, m1, "Mine")
-	ResourceManager.add(player, Config.MINE_COST)
-	BuildingManager.placeInstantForPlayer(player, m2, "Mine")
-
-	if ccId then seatAvatarOnCC(player, ccId) end
-end
-
 -- Sets up a player base for lane mode: auto-placed CC + extra starting resources.
 local function setupLanePlayerBase(player: Player)
 	nextBaseIndex += 1
@@ -327,6 +351,41 @@ local function setupLanePlayerBase(player: Player)
 	ResourceManager.add(player, 600)  -- extra resources since there are no mines
 	if ccId then seatAvatarOnCC(player, ccId) end
 end
+
+-- ── Core-pod base delivery (default mode) ─────────────────────────────────────
+-- Default mode no longer pre-places a CC + mines. Instead each player's base
+-- arrives as a drop pod that deploys a mobile "Core" unit; the player drives it
+-- where they want and presses DEPLOY to transform it into the Command Center.
+function deliverCoreForPlayer(player: Player)
+	-- Idempotent: never deliver a second Core or stomp an existing CC.
+	if BuildingManager.hasCommandCenter(player) then return end
+	if UnitManager.getCorePosition(player) ~= nil then return end
+
+	local uid  = player.UserId
+	local base = playerBasePos[uid]
+	if not base then
+		nextBaseIndex += 1
+		local desired = PLAYER_BASES[nextBaseIndex] or PLAYER_BASES[1]
+		local ccHalf  = Config.COMMAND_CENTER_SIZE.X / 2
+		base = findFlatSpot(desired, ccHalf, ccHalf)
+		playerBasePos[uid] = base
+		-- Seed deposits near the chosen base so there's ore to mine once the CC is up.
+		MineralManager.spawnDepositsForBase(base, 5)
+	end
+
+	BuildingManager.launchCorePod(player, base)
+end
+
+-- ── Deploy: Core → Command Center ─────────────────────────────────────────────
+RemoteHandler.get(Config.REMOTES.DeployCore).OnServerEvent:Connect(function(player)
+	if BuildingManager.hasCommandCenter(player) then return end
+	local corePos = UnitManager.getCorePosition(player)
+	if not corePos then return end
+	UnitManager.removeCoreFor(player)
+	BuildingManager.deployCommandCenter(player, corePos, function(ccId)
+		seatAvatarOnCC(player, ccId)
+	end)
+end)
 
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
 LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
@@ -348,30 +407,35 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	-- cliffs and up ramps.
 	NavGrid.rebuild()
 
-	-- Auto-place every human player's base
+	-- Auto-place every human player's base. Lane mode pre-places the CC; default
+	-- mode delivers a Core drop pod the player deploys into a CC themselves.
 	for _, player in Players:GetPlayers() do
 		if isLane then
 			setupLanePlayerBase(player)
 		else
-			setupPlayerBase(player)
+			deliverCoreForPlayer(player)
 		end
 	end
 
 	-- Grow the forest now that bases/deposits exist (it avoids both).
 	ForestManager.generate()
 
-	-- Late joiners also get auto-placed bases
+	-- Late joiners also get auto-placed bases / Core deliveries
 	Players.PlayerAdded:Connect(function(player)
 		task.delay(1, function()
 			if player.Parent and not BuildingManager.hasCommandCenter(player) then
 				if isLane then
 					setupLanePlayerBase(player)
 				else
-					setupPlayerBase(player)
+					deliverCoreForPlayer(player)
 				end
 			end
 		end)
 	end)
+
+	-- Swarm gamemode: every AI bot fields a nest/creepy army instead of the
+	-- standard Barracks composition.
+	AIManager.setSwarmMode(currentGamemode == "Swarm")
 
 	-- Spawn AI bots
 	if #aiQueue > 0 then

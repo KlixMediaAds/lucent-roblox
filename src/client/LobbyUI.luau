@@ -1,18 +1,25 @@
 --[[
-	LobbyUI — full-screen pre-game lobby.
+	LobbyUI — full-screen pre-game lobby (reworked).
 
 	Resolution independence:
-	  All UI is designed at DESIGN_W×DESIGN_H (1280×800). A UIScale on `container`
-	  scales everything uniformly to fit the actual viewport, letterboxing if needed.
-	  `bg` (full-screen backdrop) lives outside the container so it always fills the
-	  screen regardless of scale.
+	  All UI is designed at DESIGN_W×DESIGN_H. A UIScale on `container` scales
+	  everything uniformly to fit the actual viewport, letterboxing if needed.
+	  `bg` (full-screen backdrop) lives outside the container so it always fills
+	  the screen regardless of scale.
 
-	Layout (right panel):
-	  • PLAYERS section — ready-state list
-	  • AI section       — queued AI bots (hidden when queue is empty)
-	  • READY UP button
-	  • OPTIONS button   — toggles a dropdown card below the panel:
-	      Re-Roll Map | Terrain toggle | Add AI (Easy / Medium / Hard)
+	Layout:
+	  ┌──────────┐  ┌──────────────────────────┐
+	  │ MATCH    │  │                          │
+	  │ SETUP    │  │       TACTICAL MAP       │  ← map on the right of the settings
+	  │ • Gamemode  │       (large square)     │
+	  │ • AI Diff   │                          │
+	  │ • AI Count  │  └──────────────────────────┘
+	  │ • Teams  │  ┌───────────────┐ ┌──────────┐
+	  └──────────┘  │  COMBATANTS    │ │  READY   │  ← roster beneath the map,
+	                │ [P][P][AI]…    │ │   UP     │     large READY button bottom-right
+	                └───────────────┘ └──────────┘
+
+	Sizes are ~40% larger than the previous lobby for readability.
 ]]
 
 local Players           = game:GetService("Players")
@@ -26,86 +33,87 @@ local LobbyUI     = {}
 local localPlayer = Players.LocalPlayer
 
 -- ── Design constants ──────────────────────────────────────────────────────────
-local DESIGN_W   = 1280   -- reference design width
-local DESIGN_H   = 800    -- reference design height (taller than 720p to fit dropdown)
+local DESIGN_W   = 960    -- reference design width
+local DESIGN_H   = 900    -- reference design height
 local WORLD_HALF = 432
-local PREVIEW_PX = 370    -- map preview side length in design pixels
-local PANEL_W    = 300
-local PANEL_H    = 370
-local OPT_H      = 244    -- options dropdown card height
 
--- Minimap constants — must match MiniMap.luau
+-- Layout (design pixels)
+local PREVIEW_PX  = 520            -- map preview side length (~40% bigger than before)
+local MAP_BORDER  = PREVIEW_PX + 4 -- 524
+local SETTINGS_W  = 300
+local GAP         = 24             -- gap between settings column and map
+local ROSTER_GAP  = 18             -- vertical gap between map and the bottom row
+local ROW2_H      = 150            -- bottom row height (roster + ready)
+local READY_W     = 210
+local READY_GAP   = 18
+local HEADER_H    = 158            -- title block height at the top
+
+-- Derived layout values (design space)
+local CONTENT_W  = SETTINGS_W + GAP + MAP_BORDER         -- 848
+local CONTENT_H  = MAP_BORDER + ROSTER_GAP + ROW2_H      -- 692
+local CONTENT_X  = math.floor((DESIGN_W - CONTENT_W) / 2)
+local CONTENT_Y  = HEADER_H + 14
+
+-- Minimap constants — must match MiniMap.luau (used by the game-start slide)
 local MINIMAP_SIZE = 180
 local MINIMAP_PAD  = 10
 
--- Derived layout values (in design space)
-local CONTENT_W  = PREVIEW_PX + 4 + 16 + PANEL_W   -- 690
-local CONTENT_X  = math.floor((DESIGN_W - CONTENT_W) / 2)  -- left edge of content in container
-local CONTENT_Y  = math.floor((DESIGN_H - PANEL_H)  / 2 + 18)  -- top edge of content in container
-
 -- ── Palette ───────────────────────────────────────────────────────────────────
-local C_BG          = Color3.fromRGB(  8,  12,  26)
-local C_PANEL       = Color3.fromRGB( 14,  20,  40)
-local C_BORDER      = Color3.fromRGB( 35,  75, 140)
-local C_GRID        = Color3.fromRGB( 20,  30,  55)
-local C_TITLE       = Color3.fromRGB(180, 210, 255)
-local C_TEXT        = Color3.fromRGB(200, 220, 255)
-local C_SUBTEXT     = Color3.fromRGB(100, 130, 180)
-local C_ACCENT      = Color3.fromRGB(  0, 190, 255)
-local C_DEPOSIT     = Color3.fromRGB(255, 248, 160)
-local C_READY_ON    = Color3.fromRGB( 45, 190,  75)
-local C_READY_OFF   = Color3.fromRGB( 30,  60, 120)
-local C_READY_DOT   = Color3.fromRGB( 45, 190,  75)
-local C_WAITING_DOT = Color3.fromRGB(180,  60,  60)
-local C_REROLL      = Color3.fromRGB( 18,  34,  72)
-local C_COOLDOWN    = Color3.fromRGB( 40,  40,  70)
-local C_TERRAIN_OFF = Color3.fromRGB( 18,  34,  72)
-local C_TERRAIN_ON  = Color3.fromRGB( 55,  38,  18)
-local C_OPTIONS_BTN = Color3.fromRGB( 22,  42,  90)
-local C_OPTIONS_ON  = Color3.fromRGB( 40,  55, 110)
-local C_OPTIONS_BG  = Color3.fromRGB( 12,  18,  38)
-local C_AI_BALANCED = Color3.fromRGB( 22,  68,  42)
-local C_AI_TERR     = Color3.fromRGB( 70,  38,  12)
-local C_AI_WAVES    = Color3.fromRGB( 14,  42,  90)
-local C_AI_ROW      = Color3.fromRGB( 16,  25,  52)
-local C_AI_HEADER   = Color3.fromRGB( 55,  85, 160)
-local C_SECTION_DIV = Color3.fromRGB( 25,  45,  90)
+-- Wuthering-Waves-inspired: near-black slate, ivory text, signature gold + cyan.
+local C_BG          = Color3.fromRGB(  6,   8,  13)
+local C_BG2         = Color3.fromRGB( 11,  14,  21)
+local C_GOLD        = Color3.fromRGB(232, 196, 120)
+local C_PANEL       = Color3.fromRGB( 14,  17,  25)
+local C_PANEL_HI    = Color3.fromRGB( 23,  28,  39)
+local C_BORDER      = Color3.fromRGB( 64,  76,  98)
+local C_GRID        = Color3.fromRGB( 22,  28,  40)
+local C_TITLE       = Color3.fromRGB(238, 240, 245)
+local C_TEXT        = Color3.fromRGB(206, 214, 228)
+local C_SUBTEXT     = Color3.fromRGB(120, 134, 158)
+local C_ACCENT      = Color3.fromRGB(120, 224, 255)
+local C_DEPOSIT     = Color3.fromRGB(255, 236, 150)
+local C_READY_ON    = Color3.fromRGB(232, 196, 120)
+local C_READY_OFF   = Color3.fromRGB( 24,  30,  42)
+local C_READY_DOT   = Color3.fromRGB(110, 224, 175)
+local C_WAITING_DOT = Color3.fromRGB(206,  92,  92)
+local C_SLOT        = Color3.fromRGB( 20,  25,  36)   -- inactive value button
+local C_SLOT_DIS    = Color3.fromRGB( 16,  19,  27)   -- disabled (coming soon)
+local C_TERRAIN_DOT = Color3.fromRGB( 80,  68,  58)
+
+-- AI difficulty accent colors
+local DIFF_COLORS = {
+	Easy      = Color3.fromRGB(110, 210, 130),
+	Medium    = Color3.fromRGB(232, 196, 120),
+	Hard      = Color3.fromRGB(230, 150,  70),
+	Nightmare = Color3.fromRGB(225,  90,  90),
+}
 
 -- ── Module refs ───────────────────────────────────────────────────────────────
-local sg:          ScreenGui
-local bg:          Frame        -- full-screen color backdrop (NOT inside container)
-local container:   Frame        -- DESIGN_W×DESIGN_H, has UIScale, all real UI inside here
-local uiScaleObj:  UIScale
-local mapBorder:   Frame
-local mapCanvas:   Frame
-local panel:       Frame
-local optionsCard: Frame
-local playerList:  Frame
-local aiListFrame: Frame
-local aiSectionHeader: Frame
-local readyBtn:    TextButton
-local optionsBtn:  TextButton
-local rerollBtn:   TextButton
-local statusLbl:   TextLabel
-local titleLbl:    TextLabel
-local mapLabelRef: TextLabel
-local terrainToggleBtn: TextButton
+local sg:            ScreenGui
+local bg:            Frame
+local container:     Frame
+local uiScaleObj:    UIScale
+local mapBorder:     Frame
+local mapCanvas:     Frame
+local settingsPanel: Frame
+local rosterPanel:   Frame
+local rosterContent: Frame
+local readyBtn:      TextButton
+local statusLbl:     TextLabel
+local titleLbl:      TextLabel
+local titleDeco:     Frame
+local mapLabelRef:   TextLabel
 
-local depositDots:    { Frame } = {}
-local terrainDots:    { Frame } = {}
-local isReady           = false
-local rerollOnCooldown  = false
-local pendingRerollAnim = false
-local optionsOpen       = false
+local aiCountBtn:    TextButton
+local aiDiffBtn:     TextButton
+local gamemodeBtn:   TextButton
+
+local depositDots: { Frame } = {}
+local terrainDots: { Frame } = {}
+local isReady             = false
 local lobbyTerrainEnabled = false
-local lobbyGamemode     = "Default"
-local gamemodeBtns: { [string]: TextButton } = {}
-
-type AIEntry = { personality: string, level: number }
-local localAIQueue: { AIEntry } = {}
-
--- personality button refs so we can update their level display
-local personalityBtns: { [string]: TextButton } = {}
+local lobbyGamemode       = "Default"
+local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
 
 -- ── UIScale update ────────────────────────────────────────────────────────────
 local function updateScale()
@@ -129,106 +137,104 @@ local function corner(parent: Instance, r: number)
 	c.Parent = parent
 end
 
-local function stroke(parent: Instance, color: Color3, thickness: number)
+local function stroke(parent: Instance, color: Color3, thickness: number): UIStroke
 	local s = Instance.new("UIStroke")
 	s.Color = color; s.Thickness = thickness; s.Parent = parent
+	return s
+end
+
+local function gradient(parent: Instance, c1: Color3, c2: Color3, rotation: number?): UIGradient
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(c1, c2)
+	g.Rotation = rotation or 90
+	g.Parent = parent
+	return g
+end
+
+local function diamond(parent: Instance, sizePx: number, color: Color3, pos: UDim2, zIndex: number?)
+	local d = Instance.new("Frame")
+	d.Size = UDim2.fromOffset(sizePx, sizePx)
+	d.Position = pos
+	d.AnchorPoint = Vector2.new(0.5, 0.5)
+	d.Rotation = 45
+	d.BackgroundColor3 = color
+	d.BorderSizePixel = 0
+	d.ZIndex = zIndex or 5
+	d.Parent = parent
+end
+
+local function cornerBrackets(parent: Instance, color: Color3, len: number, thick: number, zIndex: number?)
+	local zi = zIndex or 6
+	local corners = {
+		{ a = Vector2.new(0, 0) }, { a = Vector2.new(1, 0) },
+		{ a = Vector2.new(0, 1) }, { a = Vector2.new(1, 1) },
+	}
+	for _, c in corners do
+		local h = Instance.new("Frame")
+		h.Size = UDim2.fromOffset(len, thick)
+		h.AnchorPoint = c.a; h.Position = UDim2.new(c.a.X, 0, c.a.Y, 0)
+		h.BackgroundColor3 = color; h.BorderSizePixel = 0; h.ZIndex = zi; h.Parent = parent
+		local v = Instance.new("Frame")
+		v.Size = UDim2.fromOffset(thick, len)
+		v.AnchorPoint = c.a; v.Position = UDim2.new(c.a.X, 0, c.a.Y, 0)
+		v.BackgroundColor3 = color; v.BorderSizePixel = 0; v.ZIndex = zi; v.Parent = parent
+	end
 end
 
 local function label(
-	parent: Instance,
-	text: string,
-	size: number,
-	color: Color3,
-	font: Enum.Font,
-	uiSize: UDim2,
-	pos: UDim2,
-	align: Enum.TextXAlignment?
+	parent: Instance, text: string, size: number, color: Color3, font: Enum.Font,
+	uiSize: UDim2, pos: UDim2, align: Enum.TextXAlignment?
 ): TextLabel
 	local l = Instance.new("TextLabel")
-	l.Text               = text
-	l.TextSize           = size
-	l.TextColor3         = color
-	l.Font               = font
-	l.Size               = uiSize
-	l.Position           = pos
-	l.BackgroundTransparency = 1
-	l.TextScaled         = false
-	l.TextXAlignment     = align or Enum.TextXAlignment.Center
-	l.Parent             = parent
+	l.Text = text; l.TextSize = size; l.TextColor3 = color; l.Font = font
+	l.Size = uiSize; l.Position = pos
+	l.BackgroundTransparency = 1; l.TextScaled = false
+	l.TextXAlignment = align or Enum.TextXAlignment.Center
+	l.Parent = parent
 	return l
 end
 
 local function makeBtn(
-	parent: Instance, text: string,
-	size: UDim2, pos: UDim2,
+	parent: Instance, text: string, size: UDim2, pos: UDim2,
 	bgColor: Color3, textColor: Color3, fontSize: number
 ): TextButton
 	local b = Instance.new("TextButton")
-	b.Size             = size
-	b.Position         = pos
-	b.BackgroundColor3 = bgColor
-	b.BorderSizePixel  = 0
-	b.Font             = Enum.Font.GothamBold
-	b.TextSize         = fontSize
-	b.TextColor3       = textColor
-	b.Text             = text
-	b.Parent           = parent
-	corner(b, 6)
+	b.Size = size; b.Position = pos
+	b.BackgroundColor3 = bgColor; b.BorderSizePixel = 0; b.AutoButtonColor = false
+	b.Font = Enum.Font.GothamBold; b.TextSize = fontSize; b.TextColor3 = textColor
+	b.Text = text; b.Parent = parent
+	corner(b, 5)
+	gradient(b, Color3.fromRGB(255, 255, 255), Color3.fromRGB(214, 214, 214), 90)
+	local st = stroke(b, C_BORDER, 1); st.Transparency = 0.25
+	b.MouseEnter:Connect(function()
+		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.5, Color = C_ACCENT }):Play()
+	end)
+	b.MouseLeave:Connect(function()
+		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0.25, Thickness = 1, Color = C_BORDER }):Play()
+	end)
 	return b
 end
 
 -- ── Deposit dots ──────────────────────────────────────────────────────────────
-local function syncDeposits(positions: { Vector3 }, animate: boolean?)
-	if animate then
-		for _, dot in depositDots do
-			TweenService:Create(dot, TweenInfo.new(0.14), { BackgroundTransparency = 1 }):Play()
-		end
-		task.delay(0.17, function()
-			while #depositDots > #positions do
-				depositDots[#depositDots]:Destroy(); table.remove(depositDots)
-			end
-			for _ = #depositDots + 1, #positions do
-				local f = Instance.new("Frame")
-				f.Size = UDim2.fromOffset(2, 2); f.AnchorPoint = Vector2.new(0.5, 0.5)
-				f.BackgroundColor3 = C_DEPOSIT; f.BorderSizePixel = 0
-				f.ZIndex = 5; f.BackgroundTransparency = 1; f.Parent = mapCanvas
-				table.insert(depositDots, f)
-			end
-			for i, pos in positions do
-				local u, v = w2p(pos.X, pos.Z)
-				depositDots[i].Position = UDim2.fromOffset(u, v)
-				TweenService:Create(depositDots[i],
-					TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-					{ BackgroundTransparency = 0, Size = UDim2.fromOffset(6, 6) }
-				):Play()
-			end
-		end)
-	else
-		while #depositDots > #positions do
-			depositDots[#depositDots]:Destroy(); table.remove(depositDots)
-		end
-		while #depositDots < #positions do
-			local f = Instance.new("Frame")
-			f.Size = UDim2.fromOffset(6, 6); f.AnchorPoint = Vector2.new(0.5, 0.5)
-			f.BackgroundColor3 = C_DEPOSIT; f.BorderSizePixel = 0; f.ZIndex = 5; f.Parent = mapCanvas
-			table.insert(depositDots, f)
-		end
-		for i, pos in positions do
-			local u, v = w2p(pos.X, pos.Z)
-			depositDots[i].Position = UDim2.fromOffset(u, v)
-		end
+local function syncDeposits(positions: { Vector3 })
+	while #depositDots > #positions do
+		depositDots[#depositDots]:Destroy(); table.remove(depositDots)
+	end
+	while #depositDots < #positions do
+		local f = Instance.new("Frame")
+		f.Size = UDim2.fromOffset(7, 7); f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.BackgroundColor3 = C_DEPOSIT; f.BorderSizePixel = 0; f.ZIndex = 5; f.Parent = mapCanvas
+		table.insert(depositDots, f)
+	end
+	for i, pos in positions do
+		local u, v = w2p(pos.X, pos.Z)
+		depositDots[i].Position = UDim2.fromOffset(u, v)
 	end
 end
 
 -- ── Terrain preview ───────────────────────────────────────────────────────────
-local C_TERRAIN_DOT = Color3.fromRGB(80, 68, 58)
-
 local function syncTerrain(enabled: boolean)
 	lobbyTerrainEnabled = enabled
-	if terrainToggleBtn then
-		terrainToggleBtn.Text             = enabled and "TERRAIN: ON" or "TERRAIN: OFF"
-		terrainToggleBtn.BackgroundColor3 = enabled and C_TERRAIN_ON or C_TERRAIN_OFF
-	end
 	for _, dot in terrainDots do dot:Destroy() end
 	terrainDots = {}
 	if not enabled or not mapCanvas then return end
@@ -236,11 +242,9 @@ local function syncTerrain(enabled: boolean)
 	if not folder then return end
 	for _, part in folder:GetChildren() do
 		if not part:IsA("BasePart") then continue end
-		local cx, cz = part.Position.X, part.Position.Z
-		local hw, hd = part.Size.X / 2, part.Size.Z / 2
-		local pu, pv = w2p(cx, cz)
-		local pw = math.max(4, hw * 2 / (WORLD_HALF * 2) * PREVIEW_PX)
-		local ph = math.max(4, hd * 2 / (WORLD_HALF * 2) * PREVIEW_PX)
+		local pu, pv = w2p(part.Position.X, part.Position.Z)
+		local pw = math.max(4, part.Size.X / (WORLD_HALF * 2) * PREVIEW_PX)
+		local ph = math.max(4, part.Size.Z / (WORLD_HALF * 2) * PREVIEW_PX)
 		local dot = Instance.new("Frame")
 		dot.Size = UDim2.fromOffset(pw, ph); dot.AnchorPoint = Vector2.new(0.5, 0.5)
 		dot.Position = UDim2.fromOffset(pu, pv); dot.BackgroundColor3 = C_TERRAIN_DOT
@@ -251,229 +255,207 @@ local function syncTerrain(enabled: boolean)
 	end
 end
 
--- ── Player list ───────────────────────────────────────────────────────────────
-local function syncPlayers(list: { { name: string, ready: boolean } })
-	for _, child in playerList:GetChildren() do
+-- ── Combatant roster (beneath the map) ─────────────────────────────────────────
+-- FFA for now: a single horizontal list of every human player and every AI bot.
+local function makeRosterCard(): (Frame, ImageLabel, Frame, TextLabel, TextLabel)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(0, 80, 1, 0)   -- fill the roster row height
+	card.BackgroundColor3 = Color3.fromRGB(17, 21, 31)
+	card.BorderSizePixel = 0
+	corner(card, 6)
+	local cst = stroke(card, C_BORDER, 1); cst.Transparency = 0.45
+
+	-- portrait holder (image for players, color block + glyph for AI)
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.fromOffset(56, 56)
+	holder.Position = UDim2.new(0.5, 0, 0, 8)
+	holder.AnchorPoint = Vector2.new(0.5, 0)
+	holder.BackgroundColor3 = Color3.fromRGB(10, 13, 20)
+	holder.BorderSizePixel = 0
+	holder.ClipsDescendants = true
+	holder.Parent = card
+	corner(holder, 6)
+
+	local img = Instance.new("ImageLabel")
+	img.Size = UDim2.new(1, 0, 1, 0)
+	img.BackgroundTransparency = 1
+	img.ScaleType = Enum.ScaleType.Crop
+	img.Parent = holder
+
+	local glyph = label(holder, "", 22, C_GOLD, Enum.Font.GothamBlack,
+		UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
+	glyph.TextYAlignment = Enum.TextYAlignment.Center
+
+	local nameLbl = label(card, "", 12, C_TEXT, Enum.Font.GothamMedium,
+		UDim2.new(1, -8, 0, 16), UDim2.new(0, 4, 0, 68))
+	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+	local statusLblC = label(card, "", 11, C_SUBTEXT, Enum.Font.GothamBold,
+		UDim2.new(1, -8, 0, 14), UDim2.new(0, 4, 0, 86))
+
+	return card, img, glyph, nameLbl, statusLblC
+end
+
+local function syncRoster(readyList: { { name: string, userId: number, ready: boolean } }, settings)
+	for _, child in rosterContent:GetChildren() do
 		if child:IsA("Frame") then child:Destroy() end
 	end
-	for i, entry in list do
-		local row = Instance.new("Frame")
-		row.Size = UDim2.new(1, 0, 0, 30); row.Position = UDim2.fromOffset(0, (i-1) * 36)
-		row.BackgroundColor3 = Color3.fromRGB(18, 28, 55); row.BorderSizePixel = 0
-		row.Parent = playerList; corner(row, 5)
 
-		local dot = Instance.new("Frame")
-		dot.Size = UDim2.fromOffset(9, 9); dot.Position = UDim2.fromOffset(9, 10)
-		dot.BackgroundColor3 = entry.ready and C_READY_DOT or C_WAITING_DOT
-		dot.BorderSizePixel = 0; dot.Parent = row; corner(dot, 5)
-
-		label(row, entry.name, 13, C_TEXT, Enum.Font.Gotham,
-			UDim2.new(0.55, -24, 1, 0), UDim2.fromOffset(25, 0), Enum.TextXAlignment.Left)
-		label(row, entry.ready and "READY" or "waiting...", 11,
-			entry.ready and C_READY_DOT or C_SUBTEXT, Enum.Font.GothamBold,
-			UDim2.new(0.45, -8, 1, 0), UDim2.new(0.55, 0, 0, 0), Enum.TextXAlignment.Right)
-	end
-	for _, entry in list do
+	-- Human players
+	for _, entry in readyList do
+		local card, img, glyph, nameLbl, statusLblC = makeRosterCard()
+		card.Parent = rosterContent
+		if entry.userId and entry.userId > 0 then
+			img.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", entry.userId)
+			glyph.Text = ""
+		else
+			glyph.Text = string.sub(entry.name, 1, 1):upper()
+		end
+		nameLbl.Text   = entry.name
+		statusLblC.Text = entry.ready and "READY" or "waiting"
+		statusLblC.TextColor3 = entry.ready and C_READY_DOT or C_SUBTEXT
 		if entry.name == localPlayer.Name then
-			isReady = entry.ready
-			readyBtn.BackgroundColor3 = isReady and C_READY_ON or C_READY_OFF
-			readyBtn.Text = isReady and "✓  CANCEL READY" or "READY UP"
+			local cst = card:FindFirstChildOfClass("UIStroke")
+			if cst then cst.Color = C_GOLD; cst.Thickness = 1.6; cst.Transparency = 0.1 end
+		end
+	end
+
+	-- AI bots (one card per configured AI, all at the chosen difficulty)
+	local n    = (settings and settings.aiCount) or 0
+	local diff = (settings and settings.aiDifficulty) or "Medium"
+	local diffColor = DIFF_COLORS[diff] or C_GOLD
+	for _ = 1, n do
+		local card, img, glyph, nameLbl, statusLblC = makeRosterCard()
+		card.Parent = rosterContent
+		img.Image = ""
+		glyph.Text = "🤖"; glyph.TextColor3 = diffColor; glyph.TextSize = 26
+		nameLbl.Text = "AI Bot"; nameLbl.TextColor3 = diffColor
+		statusLblC.Text = diff:upper(); statusLblC.TextColor3 = diffColor
+	end
+
+	-- Empty-state hint when there are no AI and you're the only player
+	if #readyList == 0 and n == 0 then
+		label(rosterContent, "No combatants", 13, C_SUBTEXT, Enum.Font.Gotham,
+			UDim2.fromOffset(160, 30), UDim2.fromOffset(0, ROW2_H / 2 - 30))
+	end
+end
+
+-- ── Settings value display ─────────────────────────────────────────────────────
+local function applySettings(settings)
+	lastSettings = settings or lastSettings
+	local n    = lastSettings.aiCount or 0
+	local diff = lastSettings.aiDifficulty or "Medium"
+
+	if aiCountBtn then
+		aiCountBtn.Text = n == 0 and "NONE" or tostring(n)
+		aiCountBtn.TextColor3 = n == 0 and C_SUBTEXT or C_TITLE
+	end
+	if aiDiffBtn then
+		local c = DIFF_COLORS[diff] or C_GOLD
+		aiDiffBtn.Text = diff:upper()
+		aiDiffBtn.TextColor3 = c
+		local st = aiDiffBtn:FindFirstChildOfClass("UIStroke")
+		if st then st.Color = c; st.Transparency = 0.35 end
+	end
+end
+
+-- ── Gamemode display ───────────────────────────────────────────────────────────
+local GAMEMODE_LABELS = { Default = "DEFAULT", Swarm = "SWARM" }
+local function applyGamemode(gm: string?)
+	if gm then lobbyGamemode = gm end
+	if gamemodeBtn then
+		gamemodeBtn.Text = GAMEMODE_LABELS[lobbyGamemode] or string.upper(lobbyGamemode)
+	end
+end
+
+-- ── Ready button display ───────────────────────────────────────────────────────
+local function applyReadyState(ready: boolean)
+	isReady = ready
+	readyBtn.BackgroundColor3 = ready and C_READY_ON or C_READY_OFF
+	readyBtn.TextColor3 = ready and Color3.fromRGB(20, 24, 32) or Color3.fromRGB(238, 240, 245)
+	readyBtn.Text = ready and "✓\nCANCEL" or "READY\nUP"
+end
+
+-- ── Player ready sync ──────────────────────────────────────────────────────────
+local function syncPlayers(readyList)
+	for _, entry in readyList do
+		if entry.name == localPlayer.Name then
+			applyReadyState(entry.ready)
 			break
 		end
 	end
 end
 
--- ── AI list ───────────────────────────────────────────────────────────────────
-local PERSONALITY_COLORS = {
-	balanced    = Color3.fromRGB( 45, 190,  75),
-	territorial = Color3.fromRGB(210, 140,  30),
-	waves       = Color3.fromRGB( 80, 160, 255),
-}
-local PERSONALITY_LABELS = {
-	balanced    = "Balanced",
-	territorial = "Territorial",
-	waves       = "Waves",
-}
-
-local function levelDots(level: number): string
-	local s = ""
-	for i = 1, 5 do s = s .. (i <= level and "●" or "○") end
-	return s
-end
-
-local function getQueueEntry(personality: string): AIEntry?
-	for _, e in localAIQueue do
-		if e.personality == personality then return e end
+-- ── Game-start transition ──────────────────────────────────────────────────────
+local function fadeFrame(frame: Instance, info: TweenInfo)
+	if frame:IsA("GuiObject") then
+		pcall(function() TweenService:Create(frame, info, { BackgroundTransparency = 1 }):Play() end)
 	end
-	return nil
-end
-
-local function updatePersonalityButtons()
-	for personality, btn in personalityBtns do
-		local entry = getQueueEntry(personality)
-		local lbl   = PERSONALITY_LABELS[personality] or personality
-		btn.Text = entry and (lbl .. "  " .. levelDots(entry.level)) or lbl
+	for _, d in frame:GetDescendants() do
+		if d:IsA("GuiObject") then
+			pcall(function() TweenService:Create(d, info, { BackgroundTransparency = 1 }):Play() end)
+		end
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			pcall(function() TweenService:Create(d, info, { TextTransparency = 1 }):Play() end)
+		end
+		if d:IsA("ImageLabel") then
+			pcall(function() TweenService:Create(d, info, { ImageTransparency = 1 }):Play() end)
+		end
 	end
 end
 
-local function rebuildAIList()
-	local hasAIs = #localAIQueue > 0
-	aiSectionHeader.Visible = hasAIs
-	aiListFrame.Visible     = hasAIs
-	for _, child in aiListFrame:GetChildren() do
-		if child:IsA("Frame") then child:Destroy() end
-	end
-	for i, entry in localAIQueue do
-		local row = Instance.new("Frame")
-		row.Size = UDim2.new(1, 0, 0, 28); row.Position = UDim2.fromOffset(0, (i-1)*32)
-		row.BackgroundColor3 = C_AI_ROW; row.BorderSizePixel = 0
-		row.Parent = aiListFrame; corner(row, 4)
-
-		local dot = Instance.new("Frame")
-		dot.Size = UDim2.fromOffset(8, 8); dot.Position = UDim2.fromOffset(8, 10)
-		dot.BackgroundColor3 = PERSONALITY_COLORS[entry.personality] or C_SUBTEXT
-		dot.BorderSizePixel = 0; dot.Parent = row; corner(dot, 4)
-
-		local nameStr = (PERSONALITY_LABELS[entry.personality] or entry.personality) .. " AI"
-		label(row, nameStr, 11, C_TEXT, Enum.Font.Gotham,
-			UDim2.new(0.55, -20, 1, 0), UDim2.fromOffset(22, 0), Enum.TextXAlignment.Left)
-
-		label(row, levelDots(entry.level), 11, PERSONALITY_COLORS[entry.personality] or C_SUBTEXT,
-			Enum.Font.GothamBold, UDim2.new(0.35, 0, 1, 0), UDim2.new(0.45, 0, 0, 0),
-			Enum.TextXAlignment.Center)
-
-		local xBtn = Instance.new("TextButton")
-		xBtn.Size = UDim2.fromOffset(22, 22); xBtn.Position = UDim2.new(1, -28, 0.5, -11)
-		xBtn.BackgroundColor3 = Color3.fromRGB(100, 30, 30); xBtn.BorderSizePixel = 0
-		xBtn.Font = Enum.Font.GothamBold; xBtn.TextSize = 13
-		xBtn.TextColor3 = Color3.fromRGB(255, 180, 180); xBtn.Text = "×"
-		xBtn.Parent = row; corner(xBtn, 4)
-
-		local capturedPersonality = entry.personality
-		xBtn.MouseButton1Click:Connect(function()
-			RemoteHandler.get(Config.REMOTES.LobbyRemoveAIFull):FireServer(capturedPersonality)
-		end)
-	end
-	updatePersonalityButtons()
-end
-
--- ── Map-roll scan animation ───────────────────────────────────────────────────
-local function playMapScan(onDone: () -> ())
-	local scan = Instance.new("Frame")
-	scan.Name = "ScanLine"; scan.Size = UDim2.new(1, 0, 0, 90)
-	scan.Position = UDim2.new(0, 0, 0, -90); scan.BackgroundColor3 = C_ACCENT
-	scan.BackgroundTransparency = 0.25; scan.BorderSizePixel = 0; scan.ZIndex = 20
-	scan.Parent = mapCanvas
-
-	local grad = Instance.new("UIGradient")
-	grad.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0,    1), NumberSequenceKeypoint.new(0.18, 0.3),
-		NumberSequenceKeypoint.new(0.82, 0.3), NumberSequenceKeypoint.new(1,    1),
-	})
-	grad.Rotation = 90; grad.Parent = scan
-
-	TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = C_ACCENT }):Play()
-	task.delay(0.2, function()
-		TweenService:Create(mapBorder, TweenInfo.new(0.3), { BackgroundColor3 = C_BORDER }):Play()
-	end)
-
-	local sweep = TweenService:Create(scan,
-		TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-		{ Position = UDim2.new(0, 0, 1, 0) })
-	sweep:Play()
-	sweep.Completed:Connect(function() scan:Destroy(); onDone() end)
-end
-
--- ── Game-start transition ─────────────────────────────────────────────────────
---[[
-  t=0.00  countdown "3"
-  t=0.65  "2"
-  t=1.30  "1"
-  t=1.80  "GO!" + text/panel fade (0.38s)  — bg stays opaque
-  t=2.00  mapBorder captured via AbsolutePosition/Size, re-parented to sg;
-          slide+shrink starts (0.70s)
-  t=2.70  arrival flash
-  t=3.10  map fades (0.26s)
-  t=3.38  onComplete() — Camera.init() + HUD.create()
-  t=3.38  bg fades (0.25s)
-  t=3.63  sg:Destroy()
-]]
 local function playGameStartTransition(onComplete: (string) -> ())
-	readyBtn.Active  = false
-	optionsBtn.Active = false
+	readyBtn.Active = false
 
 	task.spawn(function()
 		for _, txt in { "3", "2", "1" } do
 			statusLbl.Text = "Game starting in  " .. txt
-			statusLbl.TextColor3 = C_TEXT; statusLbl.TextSize = 16
-			TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 21 }):Play()
+			statusLbl.TextColor3 = C_TEXT; statusLbl.TextSize = 18
+			TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 24 }):Play()
 			task.delay(0.12, function()
-				TweenService:Create(statusLbl, TweenInfo.new(0.22), { TextSize = 15 }):Play()
+				TweenService:Create(statusLbl, TweenInfo.new(0.22), { TextSize = 17 }):Play()
 			end)
 			task.wait(0.65)
 		end
-		statusLbl.Text = "GO!"; statusLbl.TextColor3 = C_READY_DOT; statusLbl.TextSize = 16
-		TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 26 }):Play()
+		statusLbl.Text = "GO!"; statusLbl.TextColor3 = C_READY_DOT; statusLbl.TextSize = 18
+		TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 30 }):Play()
 		task.delay(0.14, function()
-			TweenService:Create(statusLbl, TweenInfo.new(0.30), { TextSize = 16 }):Play()
+			TweenService:Create(statusLbl, TweenInfo.new(0.30), { TextSize = 18 }):Play()
 		end)
 	end)
 
-	-- Fade out UI elements (bg stays opaque to hide camera snap)
+	-- Fade out UI (bg stays opaque to hide the camera snap)
 	task.delay(1.80, function()
 		local fade = TweenInfo.new(0.38, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 		TweenService:Create(titleLbl,    fade, { TextTransparency = 1 }):Play()
 		TweenService:Create(statusLbl,   fade, { TextTransparency = 1 }):Play()
 		TweenService:Create(mapLabelRef, fade, { TextTransparency = 1 }):Play()
-		TweenService:Create(panel, fade, { BackgroundTransparency = 1 }):Play()
-		for _, d in panel:GetDescendants() do
-			if d:IsA("GuiObject") then
-				pcall(function() TweenService:Create(d, fade, { BackgroundTransparency = 1 }):Play() end)
-			end
-			if d:IsA("TextLabel") or d:IsA("TextButton") then
-				pcall(function() TweenService:Create(d, fade, { TextTransparency = 1 }):Play() end)
-			end
-		end
-		if optionsCard then
-			TweenService:Create(optionsCard, fade, { BackgroundTransparency = 1 }):Play()
-			for _, d in optionsCard:GetDescendants() do
-				if d:IsA("GuiObject") then
-					pcall(function() TweenService:Create(d, fade, { BackgroundTransparency = 1 }):Play() end)
-				end
-				if d:IsA("TextLabel") or d:IsA("TextButton") then
-					pcall(function() TweenService:Create(d, fade, { TextTransparency = 1 }):Play() end)
-				end
-			end
-		end
+		if titleDeco then fadeFrame(titleDeco, fade) end
+		fadeFrame(settingsPanel, fade)
+		fadeFrame(rosterPanel,   fade)
+		fadeFrame(readyBtn,      fade)
 		task.delay(0.42, function()
-			panel.Visible = false
-			if optionsCard then optionsCard.Visible = false end
+			settingsPanel.Visible = false
+			rosterPanel.Visible   = false
+			readyBtn.Visible      = false
 		end)
 	end)
 
-	-- Map card slide to minimap corner
+	-- Map card slide to the minimap corner
 	task.delay(2.00, function()
 		mapBorder.ClipsDescendants = true
-
-		-- Capture real screen-space position/size BEFORE reparenting.
-		-- AbsolutePosition/Size already account for UIScale.
 		local absPos  = mapBorder.AbsolutePosition
 		local absSize = mapBorder.AbsoluteSize
 		local canvasAbsPos = mapCanvas.AbsolutePosition
 
-		-- Move mapBorder into sg (screen space) at its current visual position
 		mapBorder.Size     = UDim2.fromOffset(absSize.X, absSize.Y)
 		mapBorder.Position = UDim2.fromOffset(absPos.X, absPos.Y)
 		mapBorder.ZIndex   = 12
 		mapBorder.Parent   = sg
 
-		-- mapCanvas: adjust relative to new parent (mapBorder in screen space)
-		local relX = canvasAbsPos.X - absPos.X
-		local relY = canvasAbsPos.Y - absPos.Y
-		mapCanvas.Position = UDim2.fromOffset(relX, relY)
+		mapCanvas.Position = UDim2.fromOffset(canvasAbsPos.X - absPos.X, canvasAbsPos.Y - absPos.Y)
 		mapCanvas.Size     = UDim2.fromOffset(mapCanvas.AbsoluteSize.X, mapCanvas.AbsoluteSize.Y)
 
-		-- Departure flash
 		TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = C_ACCENT }):Play()
 		task.delay(0.12, function()
 			TweenService:Create(mapBorder, TweenInfo.new(0.22), { BackgroundColor3 = C_BORDER }):Play()
@@ -493,27 +475,19 @@ local function playGameStartTransition(onComplete: (string) -> ())
 		}):Play()
 
 		task.delay(0.72, function()
-			TweenService:Create(mapBorder, TweenInfo.new(0.08), {
-				BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-			}):Play()
+			TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = Color3.fromRGB(255, 255, 255) }):Play()
 			task.delay(0.10, function()
-				TweenService:Create(mapBorder, TweenInfo.new(0.30), {
-					BackgroundColor3 = C_BORDER
-				}):Play()
+				TweenService:Create(mapBorder, TweenInfo.new(0.30), { BackgroundColor3 = C_BORDER }):Play()
 			end)
-
 			task.delay(0.40, function()
 				local finalFade = TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 				TweenService:Create(mapBorder, finalFade, { BackgroundTransparency = 1 }):Play()
 				TweenService:Create(mapCanvas, finalFade, { BackgroundTransparency = 1 }):Play()
 				for _, child in mapCanvas:GetDescendants() do
 					if child:IsA("GuiObject") then
-						pcall(function()
-							TweenService:Create(child, finalFade, { BackgroundTransparency = 1 }):Play()
-						end)
+						pcall(function() TweenService:Create(child, finalFade, { BackgroundTransparency = 1 }):Play() end)
 					end
 				end
-
 				task.delay(0.28, function()
 					onComplete(lobbyGamemode)
 					TweenService:Create(bg,
@@ -527,84 +501,212 @@ local function playGameStartTransition(onComplete: (string) -> ())
 	end)
 end
 
--- ── Options toggle ────────────────────────────────────────────────────────────
-local function setOptionsOpen(open: boolean)
-	optionsOpen = open
-	optionsBtn.BackgroundColor3 = open and C_OPTIONS_ON or C_OPTIONS_BTN
-	optionsBtn.Text = open and "OPTIONS  ▲" or "OPTIONS  ▼"
-	optionsCard.Visible = open
-end
-
--- ── Gamemode buttons ─────────────────────────────────────────────────────────
-local function updateGamemodeButtons()
-	for gid, btn in gamemodeBtns do
-		local isActive = lobbyGamemode == gid
-		btn.BackgroundColor3 = isActive and C_READY_ON or C_OPTIONS_BTN
-		btn.TextColor3       = isActive and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 185, 235)
-	end
-end
-
--- ── Build UI ──────────────────────────────────────────────────────────────────
-local function buildUI()
-	sg = Instance.new("ScreenGui")
-	sg.Name = "LobbyUI"; sg.ResetOnSpawn = false
-	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	sg.IgnoreGuiInset = true; sg.DisplayOrder = 100
-	sg.Parent = localPlayer.PlayerGui
-
-	-- Full-screen backdrop — NOT inside container so it always fills the screen
+-- ── Build: backdrop ─────────────────────────────────────────────────────────────
+local function buildBackdrop()
 	bg = Instance.new("Frame")
 	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C_BG
 	bg.BorderSizePixel = 0; bg.Parent = sg
+	gradient(bg, C_BG, C_BG2, 90)
 
-	-- Centered design-space container with UIScale
-	container = Instance.new("Frame")
-	container.Name             = "Container"
-	container.Size             = UDim2.fromOffset(DESIGN_W, DESIGN_H)
-	container.AnchorPoint      = Vector2.new(0.5, 0.5)
-	container.Position         = UDim2.new(0.5, 0, 0.5, 0)
-	container.BackgroundTransparency = 1
-	container.ClipsDescendants = false
-	container.Parent           = sg
+	local deco = Instance.new("Frame")
+	deco.Name = "Deco"; deco.Size = UDim2.new(1, 0, 1, 0)
+	deco.BackgroundTransparency = 1; deco.Parent = bg
+	for _, cfg in {
+		{ x = 0.13, w = 1, rot =  17, col = C_BORDER, tr = 0.86 },
+		{ x = 0.84, w = 2, rot = -15, col = C_GOLD,   tr = 0.9  },
+		{ x = 0.9,  w = 1, rot = -15, col = C_ACCENT, tr = 0.93 },
+	} do
+		local ln = Instance.new("Frame")
+		ln.Size = UDim2.new(0, cfg.w, 1.7, 0); ln.AnchorPoint = Vector2.new(0.5, 0.5)
+		ln.Position = UDim2.new(cfg.x, 0, 0.5, 0); ln.Rotation = cfg.rot
+		ln.BackgroundColor3 = cfg.col; ln.BackgroundTransparency = cfg.tr
+		ln.BorderSizePixel = 0; ln.Parent = deco
+	end
+	local bigDia = Instance.new("Frame")
+	bigDia.Size = UDim2.fromOffset(520, 520); bigDia.AnchorPoint = Vector2.new(0.5, 0.5)
+	bigDia.Position = UDim2.new(0.5, 0, 0.5, 0); bigDia.Rotation = 45
+	bigDia.BackgroundTransparency = 1; bigDia.Parent = deco
+	local bd = stroke(bigDia, C_BORDER, 1); bd.Transparency = 0.9
 
-	uiScaleObj = Instance.new("UIScale")
-	uiScaleObj.Scale = 1
-	uiScaleObj.Parent = container
+	local glow = Instance.new("Frame")
+	glow.Name = "Glow"; glow.Size = UDim2.new(1, 0, 1, 0)
+	glow.BackgroundColor3 = Color3.fromRGB(42, 122, 152); glow.BackgroundTransparency = 0.5
+	glow.BorderSizePixel = 0; glow.ZIndex = 0; glow.Parent = bg
+	local glowGrad = Instance.new("UIGradient")
+	glowGrad.Rotation = 90
+	glowGrad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.93),
+		NumberSequenceKeypoint.new(1, 0.15),
+	})
+	glowGrad.Parent = glow
+	TweenService:Create(glow,
+		TweenInfo.new(3.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ BackgroundTransparency = 0.82 }
+	):Play()
 
-	-- Title
-	titleLbl = label(container, "LUCENT", 40, C_TITLE, Enum.Font.GothamBold,
-		UDim2.new(1, 0, 0, 56), UDim2.fromOffset(0, 16))
+	local particles = Instance.new("Frame")
+	particles.Name = "Particles"; particles.Size = UDim2.new(1, 0, 1, 0)
+	particles.BackgroundTransparency = 1; particles.ClipsDescendants = true
+	particles.ZIndex = 1; particles.Parent = bg
 
-	statusLbl = label(container, "Waiting for players to ready up...", 14, C_SUBTEXT, Enum.Font.Gotham,
-		UDim2.new(1, 0, 0, 22), UDim2.fromOffset(0, 68))
+	local PARTICLE_COLS = { C_GOLD, C_ACCENT, Color3.fromRGB(206, 222, 246) }
+	local function spawnParticle()
+		local sz = math.random(2, 5)
+		local p  = Instance.new("Frame")
+		p.Size = UDim2.fromOffset(sz, sz); p.AnchorPoint = Vector2.new(0.5, 0.5)
+		p.Position = UDim2.new(math.random(), 0, 1.04, math.random(0, 30)); p.Rotation = 45
+		p.BackgroundColor3 = PARTICLE_COLS[math.random(1, #PARTICLE_COLS)]
+		p.BackgroundTransparency = 0.25 + math.random() * 0.35
+		p.BorderSizePixel = 0; p.ZIndex = 1; p.Parent = particles
+		local rise  = 5.5 + math.random() * 4.5
+		local drift = (math.random() - 0.5) * 0.08
+		local tw = TweenService:Create(p, TweenInfo.new(rise, Enum.EasingStyle.Linear),
+			{ Position = UDim2.new(p.Position.X.Scale + drift, 0, -0.05, 0), BackgroundTransparency = 1 })
+		tw:Play(); tw.Completed:Connect(function() p:Destroy() end)
+	end
+	task.spawn(function()
+		while sg and sg.Parent do
+			spawnParticle(); task.wait(0.18 + math.random() * 0.24)
+		end
+	end)
+end
 
-	-- ── Content frame (map + panel, centered in container) ────────────────────
-	local content = Instance.new("Frame")
-	content.Size             = UDim2.fromOffset(CONTENT_W, PANEL_H)
-	content.Position         = UDim2.fromOffset(CONTENT_X, CONTENT_Y)
-	content.BackgroundTransparency = 1
-	content.ClipsDescendants = false
-	content.Parent           = container
+-- ── Build: title lockup ─────────────────────────────────────────────────────────
+local function buildTitle()
+	titleDeco = Instance.new("Frame")
+	titleDeco.Name = "TitleDeco"; titleDeco.Size = UDim2.new(1, 0, 0, 130)
+	titleDeco.Position = UDim2.fromOffset(0, 14); titleDeco.BackgroundTransparency = 1
+	titleDeco.ZIndex = 1; titleDeco.Parent = container
 
-	-- ── Map preview ───────────────────────────────────────────────────────────
-	mapLabelRef = label(content, "MAP PREVIEW", 11, C_BORDER, Enum.Font.GothamBold,
-		UDim2.fromOffset(PREVIEW_PX + 4, 22), UDim2.fromOffset(0, 0))
+	local TITLE_Y = 8
+	local echo = label(titleDeco, "LUCENT", 64, Color3.fromRGB(18, 60, 80), Enum.Font.GothamBlack,
+		UDim2.new(1, 0, 0, 74), UDim2.fromOffset(3, TITLE_Y + 4))
+	echo.TextTransparency = 0.5; echo.ZIndex = 1
+
+	for _, s in { -1, 1 } do
+		local ln = Instance.new("Frame")
+		ln.Size = UDim2.fromOffset(92, 2); ln.AnchorPoint = Vector2.new(0.5, 0.5)
+		ln.Position = UDim2.new(0.5, s * 240, 0, TITLE_Y + 38); ln.Rotation = s * -7
+		ln.BackgroundColor3 = C_GOLD; ln.BorderSizePixel = 0; ln.ZIndex = 2; ln.Parent = titleDeco
+		gradient(ln, C_GOLD, C_BG2, s == -1 and 0 or 180)
+		diamond(titleDeco, 10, C_GOLD, UDim2.new(0.5, s * 188, 0, TITLE_Y + 38), 2)
+		diamond(titleDeco, 5, C_ACCENT, UDim2.new(0.5, s * 292, 0, TITLE_Y + 38), 2)
+	end
+
+	local badge = Instance.new("Frame")
+	badge.Size = UDim2.fromOffset(58, 28); badge.AnchorPoint = Vector2.new(0.5, 0.5)
+	badge.Position = UDim2.new(0.5, 150, 0, TITLE_Y + 16)
+	badge.BackgroundColor3 = C_GOLD; badge.BorderSizePixel = 0; badge.ZIndex = 2; badge.Parent = titleDeco
+	corner(badge, 4)
+	local badgeLbl = label(badge, "RTS", 17, Color3.fromRGB(16, 20, 28), Enum.Font.GothamBold,
+		UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
+	badgeLbl.TextYAlignment = Enum.TextYAlignment.Center; badgeLbl.ZIndex = 3
+
+	local ruleY = TITLE_Y + 74
+	local rule = Instance.new("Frame")
+	rule.Size = UDim2.fromOffset(176, 2); rule.AnchorPoint = Vector2.new(0.5, 0.5)
+	rule.Position = UDim2.new(0.5, 0, 0, ruleY); rule.BackgroundColor3 = C_GOLD
+	rule.BorderSizePixel = 0; rule.ZIndex = 2; rule.Parent = titleDeco
+	diamond(titleDeco, 7, C_GOLD, UDim2.new(0.5, -100, 0, ruleY), 2)
+	diamond(titleDeco, 7, C_GOLD, UDim2.new(0.5,  100, 0, ruleY), 2)
+
+	local tagline = label(titleDeco, "R E A L - T I M E   S T R A T E G Y", 13, C_SUBTEXT,
+		Enum.Font.GothamMedium, UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, ruleY + 12))
+	tagline.ZIndex = 2
+
+	titleLbl = label(container, "LUCENT", 64, C_TITLE, Enum.Font.GothamBlack,
+		UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 14 + TITLE_Y))
+	titleLbl.ZIndex = 3
+	gradient(titleLbl, Color3.fromRGB(248, 250, 255), C_GOLD, 90)
+	local titleGlow = stroke(titleLbl, C_GOLD, 1.4); titleGlow.Transparency = 0.5
+
+	statusLbl = label(container, "Waiting for players to ready up...", 15, C_SUBTEXT, Enum.Font.Gotham,
+		UDim2.new(1, 0, 0, 24), UDim2.fromOffset(0, HEADER_H - 30))
+end
+
+-- ── Build: settings column ──────────────────────────────────────────────────────
+-- A labeled value control. `interactive` styles + returns the value button; when
+-- false the control is rendered as a static/disabled chip.
+local function settingRow(parent: Instance, y: number, caption: string,
+	valueText: string, valueColor: Color3, interactive: boolean): TextButton
+	label(parent, caption, 12, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -32, 0, 16), UDim2.fromOffset(16, y), Enum.TextXAlignment.Left)
+	local btn = makeBtn(parent, valueText,
+		UDim2.new(1, -32, 0, 50), UDim2.fromOffset(16, y + 20),
+		interactive and C_SLOT or C_SLOT_DIS, valueColor, 18)
+	if not interactive then
+		btn.AutoButtonColor = false
+		btn.Active = false
+		local st = btn:FindFirstChildOfClass("UIStroke")
+		if st then st.Transparency = 0.7 end
+	end
+	return btn
+end
+
+local function buildSettingsColumn()
+	settingsPanel = Instance.new("Frame")
+	settingsPanel.Name = "Settings"
+	settingsPanel.Size = UDim2.fromOffset(SETTINGS_W, MAP_BORDER)
+	settingsPanel.Position = UDim2.fromOffset(CONTENT_X, CONTENT_Y)
+	settingsPanel.BackgroundColor3 = C_PANEL
+	settingsPanel.BackgroundTransparency = 0.04
+	settingsPanel.BorderSizePixel = 0
+	settingsPanel.Parent = container
+	corner(settingsPanel, 8)
+	local ps = stroke(settingsPanel, C_BORDER, 1); ps.Transparency = 0.15
+	gradient(settingsPanel, C_PANEL_HI, C_PANEL, 90)
+	cornerBrackets(settingsPanel, C_GOLD, 14, 2, 9)
+
+	label(settingsPanel, "◆  MATCH SETUP", 14, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -32, 0, 22), UDim2.fromOffset(16, 16), Enum.TextXAlignment.Left)
+
+	local div = Instance.new("Frame")
+	div.Size = UDim2.new(1, -32, 0, 1); div.Position = UDim2.fromOffset(16, 46)
+	div.BackgroundColor3 = C_BORDER; div.BackgroundTransparency = 0.5
+	div.BorderSizePixel = 0; div.Parent = settingsPanel
+
+	local rowY = 62
+	local ROW_STEP = 92
+
+	-- Gamemode (cycles Default ↔ Swarm)
+	gamemodeBtn = settingRow(settingsPanel, rowY, "GAMEMODE", "DEFAULT", Color3.fromRGB(20, 24, 32), true)
+	gamemodeBtn.BackgroundColor3 = C_READY_ON  -- reads as the active selection
+	rowY += ROW_STEP
+
+	-- AI Difficulty (cycles Easy/Medium/Hard/Nightmare)
+	aiDiffBtn = settingRow(settingsPanel, rowY, "AI DIFFICULTY", "MEDIUM", C_GOLD, true)
+	rowY += ROW_STEP
+
+	-- AI Count (cycles 0..3)
+	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C_TITLE, true)
+	rowY += ROW_STEP
+
+	-- Teams (coming soon — FFA for now)
+	local teamsBtn = settingRow(settingsPanel, rowY, "TEAMS", "FFA · COMING SOON", C_SUBTEXT, false)
+	teamsBtn.TextSize = 13
+end
+
+-- ── Build: map preview ──────────────────────────────────────────────────────────
+local function buildMap()
+	local mapX = CONTENT_X + SETTINGS_W + GAP
+
+	mapLabelRef = label(container, "◆  TACTICAL MAP", 13, C_GOLD, Enum.Font.GothamBold,
+		UDim2.fromOffset(MAP_BORDER, 22), UDim2.fromOffset(mapX, CONTENT_Y - 26), Enum.TextXAlignment.Left)
 
 	mapBorder = Instance.new("Frame")
-	mapBorder.Size             = UDim2.fromOffset(PREVIEW_PX + 4, PREVIEW_PX + 4)
-	mapBorder.Position         = UDim2.fromOffset(0, 22)
-	mapBorder.BackgroundColor3 = C_BORDER
-	mapBorder.BorderSizePixel  = 0
-	mapBorder.Parent           = content
+	mapBorder.Size = UDim2.fromOffset(MAP_BORDER, MAP_BORDER)
+	mapBorder.Position = UDim2.fromOffset(mapX, CONTENT_Y)
+	mapBorder.BackgroundColor3 = C_BORDER; mapBorder.BorderSizePixel = 0
+	mapBorder.Parent = container
 	corner(mapBorder, 4)
 
 	mapCanvas = Instance.new("Frame")
-	mapCanvas.Size             = UDim2.fromOffset(PREVIEW_PX, PREVIEW_PX)
-	mapCanvas.Position         = UDim2.fromOffset(2, 2)
-	mapCanvas.BackgroundColor3 = Color3.fromRGB(10, 16, 34)
-	mapCanvas.BorderSizePixel  = 0
-	mapCanvas.ClipsDescendants = true
-	mapCanvas.Parent           = mapBorder
+	mapCanvas.Size = UDim2.fromOffset(PREVIEW_PX, PREVIEW_PX)
+	mapCanvas.Position = UDim2.fromOffset(2, 2)
+	mapCanvas.BackgroundColor3 = Color3.fromRGB(8, 11, 18)
+	mapCanvas.BorderSizePixel = 0; mapCanvas.ClipsDescendants = true
+	mapCanvas.Parent = mapBorder
+	gradient(mapCanvas, Color3.fromRGB(12, 16, 24), Color3.fromRGB(7, 9, 15), 90)
 
 	for _, frac in { 0.25, 0.5, 0.75 } do
 		local h = Instance.new("Frame")
@@ -620,151 +722,89 @@ local function buildUI()
 	} do
 		local c2 = Instance.new("Frame")
 		c2.Size = cfg.size; c2.Position = cfg.pos
-		c2.BackgroundColor3 = Color3.fromRGB(30,46,90); c2.BorderSizePixel = 0
+		c2.BackgroundColor3 = C_BORDER; c2.BackgroundTransparency = 0.4; c2.BorderSizePixel = 0
 		c2.ZIndex = 2; c2.Parent = mapCanvas
 	end
+	cornerBrackets(mapCanvas, C_GOLD, 18, 2, 6)
+end
 
-	-- ── Right panel ───────────────────────────────────────────────────────────
-	panel = Instance.new("Frame")
-	panel.Size             = UDim2.fromOffset(PANEL_W, PANEL_H)
-	panel.Position         = UDim2.fromOffset(PREVIEW_PX + 4 + 16, 0)
-	panel.BackgroundColor3 = C_PANEL
-	panel.BorderSizePixel  = 0
-	panel.ClipsDescendants = false
-	panel.Parent           = content
-	corner(panel, 6); stroke(panel, C_BORDER, 1)
+-- ── Build: roster + ready ───────────────────────────────────────────────────────
+local function buildRosterAndReady()
+	local rowY     = CONTENT_Y + MAP_BORDER + ROSTER_GAP
+	-- The bottom row spans the full content width: roster on the left (extending
+	-- under the settings column too) and the large READY button at the far right,
+	-- aligned with the map's right edge.
+	local rosterW  = CONTENT_W - READY_W - READY_GAP
 
-	-- PLAYERS header
-	label(panel, "PLAYERS", 11, C_BORDER, Enum.Font.GothamBold,
-		UDim2.new(1, -20, 0, 24), UDim2.fromOffset(10, 10), Enum.TextXAlignment.Left)
+	rosterPanel = Instance.new("Frame")
+	rosterPanel.Name = "Roster"
+	rosterPanel.Size = UDim2.fromOffset(rosterW, ROW2_H)
+	rosterPanel.Position = UDim2.fromOffset(CONTENT_X, rowY)
+	rosterPanel.BackgroundColor3 = C_PANEL
+	rosterPanel.BackgroundTransparency = 0.04
+	rosterPanel.BorderSizePixel = 0
+	rosterPanel.Parent = container
+	corner(rosterPanel, 8)
+	local rs = stroke(rosterPanel, C_BORDER, 1); rs.Transparency = 0.15
+	gradient(rosterPanel, C_PANEL_HI, C_PANEL, 90)
+	cornerBrackets(rosterPanel, C_GOLD, 12, 2, 9)
 
-	-- Player list
-	playerList = Instance.new("Frame")
-	playerList.Size = UDim2.new(1, -20, 0, 108); playerList.Position = UDim2.fromOffset(10, 36)
-	playerList.BackgroundTransparency = 1; playerList.ClipsDescendants = true
-	playerList.Parent = panel
+	label(rosterPanel, "◆  COMBATANTS", 12, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -24, 0, 16), UDim2.fromOffset(12, 8), Enum.TextXAlignment.Left)
+	label(rosterPanel, "FREE-FOR-ALL", 10, C_SUBTEXT, Enum.Font.GothamBold,
+		UDim2.new(1, -24, 0, 14), UDim2.fromOffset(12, 8), Enum.TextXAlignment.Right)
 
-	-- AI section header
-	aiSectionHeader = Instance.new("Frame")
-	aiSectionHeader.Size = UDim2.new(1, -20, 0, 22); aiSectionHeader.Position = UDim2.fromOffset(10, 150)
-	aiSectionHeader.BackgroundTransparency = 1; aiSectionHeader.Visible = false
-	aiSectionHeader.Parent = panel
+	rosterContent = Instance.new("Frame")
+	rosterContent.Name = "RosterContent"
+	rosterContent.Size = UDim2.new(1, -24, 1, -38)
+	rosterContent.Position = UDim2.fromOffset(12, 30)
+	rosterContent.BackgroundTransparency = 1
+	rosterContent.ClipsDescendants = true
+	rosterContent.Parent = rosterPanel
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 8)
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Parent = rosterContent
 
-	for _, cfg in {
-		{ size = UDim2.new(0.2, 0, 0, 1), pos = UDim2.new(0,   0, 0.5, 0) },
-		{ size = UDim2.new(0.2, 0, 0, 1), pos = UDim2.new(0.8, 0, 0.5, 0) },
-	} do
-		local ln = Instance.new("Frame")
-		ln.Size = cfg.size; ln.Position = cfg.pos
-		ln.BackgroundColor3 = C_SECTION_DIV; ln.BackgroundTransparency = 0.3
-		ln.BorderSizePixel = 0; ln.Parent = aiSectionHeader
-	end
-	label(aiSectionHeader, "AI", 10, C_AI_HEADER, Enum.Font.GothamBold,
-		UDim2.new(0.6, 0, 1, 0), UDim2.new(0.2, 0, 0, 0))
+	-- Large READY button, bottom-right (aligned with the map's right edge)
+	readyBtn = makeBtn(container, "READY\nUP",
+		UDim2.fromOffset(READY_W, ROW2_H),
+		UDim2.fromOffset(CONTENT_X + rosterW + READY_GAP, rowY),
+		C_READY_OFF, Color3.fromRGB(238, 240, 245), 26)
+	readyBtn.TextYAlignment = Enum.TextYAlignment.Center
+	cornerBrackets(readyBtn, C_GOLD, 14, 2, 9)
+end
 
-	-- AI list
-	aiListFrame = Instance.new("Frame")
-	aiListFrame.Size = UDim2.new(1, -20, 0, 96); aiListFrame.Position = UDim2.fromOffset(10, 174)
-	aiListFrame.BackgroundTransparency = 1; aiListFrame.ClipsDescendants = true
-	aiListFrame.Visible = false; aiListFrame.Parent = panel
+-- ── Build UI ────────────────────────────────────────────────────────────────────
+local function buildUI()
+	sg = Instance.new("ScreenGui")
+	sg.Name = "LobbyUI"; sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.IgnoreGuiInset = true; sg.DisplayOrder = 100
+	sg.Parent = localPlayer.PlayerGui
 
-	-- Bottom buttons (anchored from panel bottom edge)
-	local div = Instance.new("Frame")
-	div.Size = UDim2.new(1, -20, 0, 1); div.Position = UDim2.new(0, 10, 1, -96)
-	div.BackgroundColor3 = C_BORDER; div.BackgroundTransparency = 0.55
-	div.BorderSizePixel = 0; div.Parent = panel
+	buildBackdrop()
 
-	readyBtn = makeBtn(panel, "READY UP",
-		UDim2.new(1, -20, 0, 46), UDim2.new(0, 10, 1, -88),
-		C_READY_OFF, Color3.fromRGB(255, 255, 255), 15)
+	container = Instance.new("Frame")
+	container.Name = "Container"; container.Size = UDim2.fromOffset(DESIGN_W, DESIGN_H)
+	container.AnchorPoint = Vector2.new(0.5, 0.5); container.Position = UDim2.new(0.5, 0, 0.5, 0)
+	container.BackgroundTransparency = 1; container.ClipsDescendants = false
+	container.Parent = sg
 
-	optionsBtn = makeBtn(panel, "OPTIONS  ▼",
-		UDim2.new(1, -20, 0, 34), UDim2.new(0, 10, 1, -38),
-		C_OPTIONS_BTN, Color3.fromRGB(150, 185, 235), 12)
-	stroke(optionsBtn, C_BORDER, 1)
+	uiScaleObj = Instance.new("UIScale"); uiScaleObj.Scale = 1; uiScaleObj.Parent = container
 
-	-- ── Options dropdown card (child of panel, below it) ─────────────────────
-	optionsCard = Instance.new("Frame")
-	optionsCard.Size             = UDim2.fromOffset(PANEL_W, OPT_H)
-	optionsCard.Position         = UDim2.fromOffset(0, PANEL_H + 4)
-	optionsCard.BackgroundColor3 = C_OPTIONS_BG
-	optionsCard.BorderSizePixel  = 0
-	optionsCard.Visible          = false
-	optionsCard.ZIndex           = 8
-	optionsCard.Parent           = panel
-	corner(optionsCard, 6); stroke(optionsCard, C_BORDER, 1)
-
-	local oy = 8
-
-	label(optionsCard, "MAP & SETTINGS", 10, C_SUBTEXT, Enum.Font.GothamBold,
-		UDim2.new(1, -20, 0, 12), UDim2.fromOffset(10, oy), Enum.TextXAlignment.Left)
-	oy += 16
-
-	rerollBtn = makeBtn(optionsCard, "RE-ROLL MAP",
-		UDim2.new(1, -20, 0, 26), UDim2.fromOffset(10, oy),
-		C_REROLL, Color3.fromRGB(150, 185, 235), 12)
-	stroke(rerollBtn, C_BORDER, 1); oy += 30
-
-	terrainToggleBtn = makeBtn(optionsCard, "TERRAIN: OFF",
-		UDim2.new(1, -20, 0, 26), UDim2.fromOffset(10, oy),
-		C_TERRAIN_OFF, Color3.fromRGB(185, 155, 110), 12)
-	stroke(terrainToggleBtn, C_BORDER, 1); oy += 30
-
-	label(optionsCard, "GAMEMODE", 10, C_SUBTEXT, Enum.Font.GothamBold,
-		UDim2.new(1, -20, 0, 12), UDim2.fromOffset(10, oy), Enum.TextXAlignment.Left)
-	oy += 16
-
-	local GMB_W = math.floor((PANEL_W - 28) / 2)  -- 136
-	for i, gm in ipairs({ { id = "Default", text = "DEFAULT" }, { id = "Lane", text = "LANE" } }) do
-		local isActive = lobbyGamemode == gm.id
-		local xPos = 10 + (i - 1) * (GMB_W + 8)
-		local gmBtn = makeBtn(optionsCard, gm.text,
-			UDim2.fromOffset(GMB_W, 26), UDim2.fromOffset(xPos, oy),
-			isActive and C_READY_ON or C_OPTIONS_BTN,
-			isActive and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 185, 235), 11)
-		stroke(gmBtn, C_BORDER, 1)
-		gamemodeBtns[gm.id] = gmBtn
-		local gmId = gm.id
-		gmBtn.MouseButton1Click:Connect(function()
-			RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(gmId)
-		end)
-	end
-	oy += 30
-
-	label(optionsCard, "AI PERSONALITIES", 10, C_SUBTEXT, Enum.Font.GothamBold,
-		UDim2.new(1, -20, 0, 12), UDim2.fromOffset(10, oy), Enum.TextXAlignment.Left)
-	oy += 16
-
-	for _, d in ipairs({
-		{ personality = "balanced",    bgColor = C_AI_BALANCED, tc = Color3.fromRGB(130, 215, 155) },
-		{ personality = "territorial", bgColor = C_AI_TERR,     tc = Color3.fromRGB(220, 170, 100) },
-		{ personality = "waves",       bgColor = C_AI_WAVES,    tc = Color3.fromRGB(130, 185, 255) },
-	}) do
-		local btn = makeBtn(optionsCard, PERSONALITY_LABELS[d.personality],
-			UDim2.new(1, -20, 0, 26), UDim2.fromOffset(10, oy),
-			d.bgColor, d.tc, 11)
-		stroke(btn, C_BORDER, 1)
-		oy += 30
-
-		local p = d.personality
-		personalityBtns[p] = btn
-
-		btn.MouseButton1Click:Connect(function()
-			RemoteHandler.get(Config.REMOTES.LobbyAddAI):FireServer(p)
-		end)
-		btn.InputBegan:Connect(function(input: InputObject)
-			if input.UserInputType == Enum.UserInputType.MouseButton2 then
-				RemoteHandler.get(Config.REMOTES.LobbyRemoveAI):FireServer(p)
-			end
-		end)
-	end
+	buildTitle()
+	buildSettingsColumn()
+	buildMap()
+	buildRosterAndReady()
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
 function LobbyUI.init(onGameStart: (string) -> ())
 	buildUI()
 
-	-- Scale to fit viewport
 	updateScale()
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
 
@@ -776,33 +816,20 @@ function LobbyUI.init(onGameStart: (string) -> ())
 		cam.CFrame = CFrame.lookAt(Vector3.new(0, 700, 1), Vector3.new(0, 0, 0))
 	end)
 
-	-- LobbySync
 	RemoteHandler.get(Config.REMOTES.LobbySync).OnClientEvent:Connect(
 		function(
-			readyList: { { name: string, ready: boolean } },
+			readyList: { { name: string, userId: number, ready: boolean } },
 			positions: { Vector3 },
 			terrainOn: boolean,
-			aiList:    { AIEntry }?,
+			settings:  { aiCount: number, aiDifficulty: string }?,
 			gamemode:  string?
 		)
 			syncPlayers(readyList)
-			localAIQueue = aiList or {}
-			rebuildAIList()
-			if gamemode and gamemode ~= lobbyGamemode then
-				lobbyGamemode = gamemode
-				updateGamemodeButtons()
-			end
-			if pendingRerollAnim then
-				pendingRerollAnim = false
-				playMapScan(function()
-					syncDeposits(positions, true)
-					task.wait(0.05)
-					syncTerrain(terrainOn)
-				end)
-			else
-				syncDeposits(positions, false)
-				syncTerrain(terrainOn)
-			end
+			applySettings(settings)
+			syncRoster(readyList, settings or lastSettings)
+			applyGamemode(gamemode)
+			syncDeposits(positions)
+			syncTerrain(terrainOn)
 		end
 	)
 
@@ -810,27 +837,18 @@ function LobbyUI.init(onGameStart: (string) -> ())
 		RemoteHandler.get(Config.REMOTES.LobbyReady):FireServer()
 	end)
 
-	optionsBtn.MouseButton1Click:Connect(function()
-		setOptionsOpen(not optionsOpen)
+	aiDiffBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty):FireServer()
 	end)
 
-	rerollBtn.MouseButton1Click:Connect(function()
-		if rerollOnCooldown then return end
-		rerollOnCooldown  = true
-		pendingRerollAnim = true
-		RemoteHandler.get(Config.REMOTES.LobbyReroll):FireServer()
-		rerollBtn.BackgroundColor3 = C_COOLDOWN
-		for i = 3, 1, -1 do
-			rerollBtn.Text = string.format("RE-ROLL  (%ds)", i)
-			task.wait(1)
-		end
-		rerollOnCooldown           = false
-		rerollBtn.BackgroundColor3 = C_REROLL
-		rerollBtn.Text             = "RE-ROLL MAP"
+	aiCountBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbySetAICount):FireServer()
 	end)
 
-	terrainToggleBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle):FireServer()
+	-- Gamemode cycles Default ↔ Swarm.
+	gamemodeBtn.MouseButton1Click:Connect(function()
+		local next = lobbyGamemode == "Swarm" and "Default" or "Swarm"
+		RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(next)
 	end)
 
 	RemoteHandler.get(Config.REMOTES.LobbyStart).OnClientEvent:Connect(function()

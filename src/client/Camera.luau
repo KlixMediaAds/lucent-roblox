@@ -16,6 +16,10 @@ local yaw       = 0   -- degrees
 local midDrag   = false
 local lastMouse = Vector2.zero
 
+-- When set, the camera locks its focus onto this part each frame (used to follow
+-- the incoming Core drop pod). WASD panning is suspended while following.
+local followTarget: BasePart? = nil
+
 local function apply()
 	local yr = math.rad(yaw)
 	local pr = math.rad(Config.CAMERA_PITCH)
@@ -72,6 +76,18 @@ function Camera.init()
 	-- Priority > Camera (200) so this runs AFTER Roblox's built-in camera script
 	-- and overwrites whatever it set, keeping full control of cam.CFrame.
 	RunService:BindToRenderStep("RTSCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		-- Follow mode: lock focus onto the tracked part (e.g. the descending Core
+		-- pod) and skip WASD/edge panning until the follow is released.
+		if followTarget then
+			if followTarget.Parent then
+				focus = Vector3.new(followTarget.Position.X, 0, followTarget.Position.Z)
+				apply()
+				return
+			else
+				followTarget = nil
+			end
+		end
+
 		local yr  = math.rad(yaw)
 		local fwd = Vector3.new(-math.sin(yr), 0, -math.cos(yr))
 		local rgt = Vector3.new( math.cos(yr), 0, -math.sin(yr))
@@ -112,10 +128,44 @@ function Camera.setFocus(pos: Vector3)
 	apply()
 end
 
--- Returns the world position on the y=0 ground plane under the cursor.
--- Uses Mouse.UnitRay which Roblox resolves internally, avoiding the
--- coordinate-space mismatch between GetMouseLocation and ScreenPointToRay.
+-- Lock the camera onto a moving part (the camera keeps it centred each frame and
+-- ignores WASD until stopFollow is called).
+function Camera.followPart(part: BasePart?)
+	followTarget = part
+end
+
+function Camera.stopFollow()
+	followTarget = nil
+end
+
+-- Cast the cursor ray against the real Terrain so the returned point follows
+-- raised plateaus / ramps. Without this, intersecting a flat y=0 plane lands the
+-- point *under* elevated terrain and offset from the cursor, which is why ghosts,
+-- move pings and rally markers were invisible (buried) when standing on a plateau.
+local terrainRayParams = RaycastParams.new()
+terrainRayParams.FilterType = Enum.RaycastFilterType.Include
+terrainRayParams.FilterDescendantsInstances = { workspace.Terrain }
+
+local function raycastTerrain(): Vector3?
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, terrainRayParams)
+	return result and result.Position or nil
+end
+
+-- Terrain surface height at an XZ position (straight-down raycast). Lets ground
+-- markers (rally points, pings) sit on raised tiers instead of at a fixed Y.
+-- Returns 0 if no terrain is hit (shouldn't happen over the play area).
+function Camera.terrainHeightAt(x: number, z: number): number
+	local result = workspace:Raycast(Vector3.new(x, 250, z), Vector3.new(0, -500, 0), terrainRayParams)
+	return result and result.Position.Y or 0
+end
+
+-- Returns the world position on the terrain surface under the cursor (true Y on
+-- whichever tier the cursor is over). Falls back to the y=0 plane if the cursor
+-- isn't over terrain (e.g. pointing at the skybox).
 function Camera.getGroundPosition(): Vector3?
+	local surf = raycastTerrain()
+	if surf then return surf end
 	local ray = mouse.UnitRay
 	if math.abs(ray.Direction.Y) < 1e-6 then return nil end
 	local t = -ray.Origin.Y / ray.Direction.Y
@@ -123,9 +173,13 @@ function Camera.getGroundPosition(): Vector3?
 	return ray.Origin + ray.Direction * t
 end
 
--- Intersect the cursor ray with an arbitrary horizontal plane at height h.
--- Used by BuildingPlacer so the ghost center (not its base) tracks the cursor.
+-- Returns a point h studs above the terrain surface under the cursor, so a ghost
+-- whose centre is set to this point rests its base on the ground at any elevation.
+-- Used by BuildingPlacer so the ghost (and the CC move ghost) track the cursor.
+-- Falls back to a flat plane at height h if the cursor isn't over terrain.
 function Camera.getPositionAtHeight(h: number): Vector3?
+	local surf = raycastTerrain()
+	if surf then return Vector3.new(surf.X, surf.Y + h, surf.Z) end
 	local ray = mouse.UnitRay
 	if math.abs(ray.Direction.Y) < 1e-6 then return nil end
 	local t = (h - ray.Origin.Y) / ray.Direction.Y
