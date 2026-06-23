@@ -89,8 +89,8 @@ local function rebuildBuildZoneRing()
 	end
 end
 
--- ── Deposit markers (Mine placement mode only) ────────────────────────────────
--- When the player enters Mine placement mode every unclaimed deposit gets:
+-- ── Deposit markers (Foundry placement mode only) ─────────────────────────────
+-- When the player enters Foundry placement mode every unclaimed deposit gets:
 --   • A gold neon ring on the ground  +  a "⛏ Mine here" billboard label
 --   • A screen-edge arrow that appears when the deposit is off-screen
 -- All markers are cleaned up when placement mode exits.
@@ -193,7 +193,7 @@ local function destroyDepositMarkers()
     if markerSg then markerSg:Destroy(); markerSg = nil end
 end
 
--- Called every RenderStepped while in Mine placement mode.
+-- Called every RenderStepped while in Foundry placement mode.
 local function updateDepositMarkers()
     local cam = workspace.CurrentCamera
     local vp  = cam.ViewportSize
@@ -276,6 +276,7 @@ local function ghostSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
+	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -341,7 +342,7 @@ local function isFootprintFlat(pos: Vector3, buildType: string): boolean
 end
 
 local function buildingCost(btype: string): number
-	if btype == "Mine"       then return Config.MINE_COST end
+	if btype == "Foundry"    then return Config.FOUNDRY_COST end
 	if btype == "Turret"     then return Config.TURRET_COST end
 	if btype == "Relay"      then return Config.RELAY_COST end
 	if btype == "CreepyBlob" then return Config.CREEPY_BLOB_COST end
@@ -449,20 +450,7 @@ function BuildingPlacer.init(network, cameraModule)
 		if not isPlacing then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
-			if currentType == "Mine" then
-				if outOfBuildZone or onTerrain then return end
-				local pos = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
-				if not pos then return end
-				if lineShiftHeld then
-					isLineDragging = true
-					lineDragStart  = snap(pos)
-					return
-				end
-				network.placeBuilding(placePos(pos), "Mine")
-				playPlaceSound()
-				task.defer(BuildingPlacer.exitPlacementMode)
-
-			elseif currentType == "CommandCenter" then
+			if currentType == "CommandCenter" then
 				if not ccTooClose and not onTerrain then
 					local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 					local pos   = cameraModule.getPositionAtHeight(halfH)
@@ -556,44 +544,7 @@ function BuildingPlacer.init(network, cameraModule)
 
 		if not ghost then return end
 
-		if currentType == "Mine" then
-			local cursor = cameraModule.getPositionAtHeight(Config.BUILDING_SIZE.Y / 2)
-			if cursor then
-				local snapped = snapToSurface(cursor, Config.BUILDING_SIZE.Y / 2)
-				ghost.Position = snapped
-
-				-- A harvester walks out from the CC, so it can be deployed anywhere
-				-- in-bounds — only map bounds gate placement, not the build zone.
-				onTerrain      = isOutOfMapBounds(snapped, "Mine")
-				outOfBuildZone = false
-
-				if onTerrain then
-					ghost.BrickColor   = BrickColor.new("Bright red")
-					ghost.Transparency = 0.65
-				else
-					-- Ghost is team-colour when at least one deposit is within drain range,
-					-- orange when none are reachable (the harvester will report "no resources").
-					local inRange = false
-					for _, dep in depositPositions do
-						if (Vector3.new(snapped.X, 0, snapped.Z)
-							- Vector3.new(dep.X, 0, dep.Z)).Magnitude
-							<= Config.MINE_EXTRACT_RANGE then
-							inRange = true
-							break
-						end
-					end
-					ghost.BrickColor   = inRange and localPlayer.TeamColor or BrickColor.new("Bright orange")
-					ghost.Transparency = inRange and 0.5 or 0.62
-				end
-
-				-- Keep extract-range ring centred under ghost (on the ghost's tier)
-				if rangeRing then
-					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z, terrainHeightAt(snapped.X, snapped.Z) or 0)
-				end
-			end
-			updateDepositMarkers()
-
-		elseif currentType == "CommandCenter" then
+		if currentType == "CommandCenter" then
 			local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 			local pos   = cameraModule.getPositionAtHeight(halfH)
 			if pos then
@@ -621,11 +572,14 @@ function BuildingPlacer.init(network, cameraModule)
 				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
 				ghost.Transparency = blocked and 0.65 or 0.5
 
-				-- Keep attack-range ring (e.g. turret) centred under ghost (on its tier)
+				-- Keep range ring (turret attack range / Foundry boost radius) centred
+				-- under the ghost on its tier.
 				if rangeRing then
 					RangeRing.moveTo(rangeRing, snapped.X, snapped.Z, terrainHeightAt(snapped.X, snapped.Z) or 0)
 				end
 			end
+			-- Foundry mode shows deposit markers so the player can place near ore.
+			if currentType == "Foundry" then updateDepositMarkers() end
 		end
 	end)
 end
@@ -642,9 +596,10 @@ function BuildingPlacer.enterPlacementMode(buildingType: string?)
 	-- Build-zone ring: shown for all non-CC placements
 	rebuildBuildZoneRing()
 
-	if currentType == "Mine" then
-		-- Mine extract-range ring follows the ghost cursor
-		rangeRing = RangeRing.create(Config.MINE_EXTRACT_RANGE, 0, 0)
+	if currentType == "Foundry" then
+		-- Foundry boost-radius ring follows the ghost cursor; deposit markers show
+		-- where ore is so the player can place inside its pull radius.
+		rangeRing = RangeRing.create(Config.FOUNDRY_BOOST_RADIUS, 0, 0)
 		createDepositMarkers()
 	elseif currentType == "Turret" then
 		-- Turret attack-range ring follows the ghost cursor

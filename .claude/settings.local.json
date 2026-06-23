@@ -45,7 +45,9 @@
       "Bash(which selene *)",
       "Bash(which rojo *)",
       "Bash(command -v luau-analyze luau selene stylua rojo)",
-      "Bash(echo \"EXIT: $?\")"
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(command -v selene luau luau-analyze stylua rojo lua luajit)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

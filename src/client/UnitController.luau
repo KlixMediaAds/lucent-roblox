@@ -23,9 +23,23 @@ local onTurretSelectedCb:    ((string?) -> ())?
 local onBlobSelectedCb:      ((string?) -> ())?
 local onDeployerSelectedCb:  ((string?) -> ())?
 local onLampreyNestSelectedCb: ((string?) -> ())?
+local onEngineeringSelectedCb: ((string?) -> ())?
 local onMoveIssuedCb:        (() -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
+
+-- Tell every building-info panel to close. Each branch of the selection handler calls
+-- this, then re-opens the one panel for the building actually selected.
+local function clearBuildingPanels()
+	if onBarracksSelectedCb    then onBarracksSelectedCb(nil)    end
+	if onMineSelectedCb        then onMineSelectedCb(nil)        end
+	if onCCSelectedCb          then onCCSelectedCb(nil)          end
+	if onTurretSelectedCb      then onTurretSelectedCb(nil)      end
+	if onBlobSelectedCb        then onBlobSelectedCb(nil)        end
+	if onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
+	if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
+	if onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
+end
 
 -- ── Building hover + selection highlight ──────────────────────────────────────
 local hoverBuildingId:     string?      = nil
@@ -47,8 +61,8 @@ local function getBuildingRange(id: string): number?
 	local info = knownBuildings[id]
 	if not info then return nil end
 	local bt = info.buildingType
-	if bt == "Mine" then
-		return Config.MINE_EXTRACT_RANGE
+	if bt == "Foundry" then
+		return Config.FOUNDRY_BOOST_RADIUS
 	elseif bt == "Turret" then
 		local model = info.base.Parent
 		if model and (model :: any):IsA("Model") then
@@ -921,82 +935,31 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 						multiSelectBuildingsOnScreen(bid)
 					end
 					local info = knownBuildings[bid]
-					if info and info.buildingType == "Barracks" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(bid)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "Mine" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(bid)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "CommandCenter" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(bid)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "Turret" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(bid)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "CreepyBlob" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(bid)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "Deployer" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(bid)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
-					elseif info and info.buildingType == "LampreyNest" and info.ownerId == localPlayer.UserId then
-						if onBarracksSelectedCb    then onBarracksSelectedCb(nil)    end
-						if onMineSelectedCb        then onMineSelectedCb(nil)        end
-						if onCCSelectedCb          then onCCSelectedCb(nil)          end
-						if onTurretSelectedCb      then onTurretSelectedCb(nil)      end
-						if onBlobSelectedCb        then onBlobSelectedCb(nil)        end
-						if onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
+					local owned = info ~= nil and info.ownerId == localPlayer.UserId
+					clearBuildingPanels()
+					if owned and info.buildingType == "Barracks" then
+						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
+					elseif owned and info.buildingType == "Foundry" then
+						if onMineSelectedCb then onMineSelectedCb(bid) end
+					elseif owned and info.buildingType == "CommandCenter" then
+						if onCCSelectedCb then onCCSelectedCb(bid) end
+					elseif owned and info.buildingType == "Turret" then
+						if onTurretSelectedCb then onTurretSelectedCb(bid) end
+					elseif owned and info.buildingType == "CreepyBlob" then
+						if onBlobSelectedCb then onBlobSelectedCb(bid) end
+					elseif owned and info.buildingType == "Deployer" then
+						if onDeployerSelectedCb then onDeployerSelectedCb(bid) end
+					elseif owned and info.buildingType == "LampreyNest" then
 						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(bid) end
-					else
-						if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-						if onMineSelectedCb      then onMineSelectedCb(nil)      end
-						if onCCSelectedCb        then onCCSelectedCb(nil)        end
-						if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-						if onBlobSelectedCb      then onBlobSelectedCb(nil)      end
-						if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
+					elseif owned and info.buildingType == "EngineeringPost" then
+						if onEngineeringSelectedCb then onEngineeringSelectedCb(bid) end
 					end
 				else
 					lastClickTime   = 0
 					lastClickTarget = nil
 					clearSelection()
 					selectBuilding(nil)
-					if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-					if onMineSelectedCb      then onMineSelectedCb(nil)      end
-					if onCCSelectedCb        then onCCSelectedCb(nil)        end
-					if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
-					if onDeployerSelectedCb  then onDeployerSelectedCb(nil)  end
-					if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
+					clearBuildingPanels()
 				end
 			end
 		end
@@ -1044,6 +1007,10 @@ end
 
 function UnitController.onLampreyNestSelected(fn: (string?) -> ())
 	onLampreyNestSelectedCb = fn
+end
+
+function UnitController.onEngineeringSelected(fn: (string?) -> ())
+	onEngineeringSelectedCb = fn
 end
 
 -- Returns the primary selected building ID plus all secondary double-click selected IDs.

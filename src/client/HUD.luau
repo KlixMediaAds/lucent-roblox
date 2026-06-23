@@ -85,24 +85,22 @@ local hasResearchFn: ((string) -> boolean)?
 -- ── Building metadata ─────────────────────────────────────────────────────────
 type BuildingInfo = { cost: number, requires: { [string]: number }, researchReq: string? }
 local BUILDING_INFO: { [string]: BuildingInfo } = {
-	Mine       = { cost = Config.MINE_COST,         requires = {},             researchReq = nil          },
-	Barracks   = { cost = Config.BUILDING_COST,     requires = { Mine = 1 },   researchReq = nil          },
+	Foundry    = { cost = Config.FOUNDRY_COST,      requires = {},               researchReq = nil        },
+	Barracks   = { cost = Config.BUILDING_COST,     requires = { Foundry = 1 },  researchReq = nil        },
 	Deployer   = { cost = Config.DEPLOYER_COST,     requires = { Barracks = 1 }, researchReq = nil        },
 	Turret     = { cost = Config.TURRET_COST,       requires = { Barracks = 1 }, researchReq = nil        },
 	Relay      = { cost = Config.RELAY_COST,        requires = {},             researchReq = "Relay"      },
 	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
 	LampreyNest = { cost = Config.LAMPREY_NEST_COST, requires = { Barracks = 1 }, researchReq = nil       },
+	EngineeringPost = { cost = Config.ENGINEERING_POST_COST, requires = { Barracks = 1 }, researchReq = nil },
 }
 
 -- Display labels that differ from the internal building-type id.
 local DISPLAY_NAME: { [string]: string } = {
-	LampreyNest = "Nest",
-	Mine        = "Harvester",
+	LampreyNest     = "Nest",
+	EngineeringPost = "Eng Post",
 }
 
--- Stashed (recalled) harvesters available to redeploy for free — drives the FREE label
--- on the Harvester build node. Updated via HUD.setHarvesterStash.
-local harvesterStashCount = 0
 local function dispName(btype: string): string
 	return (DISPLAY_NAME[btype] or btype):upper()
 end
@@ -110,13 +108,14 @@ end
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
-	{ btype = "Mine",       icon = "⛏", color = C.MINE,                        desc = "Sends a harvester to drain a deposit, then returns to your CC"  },
+	{ btype = "Foundry",    icon = "🏭", color = C.MINE,                        desc = "Passive income; +15% per nearby mineral deposit (deposits drain)" },
 	{ btype = "Barracks",   icon = "⚔", color = C.BARRACKS,                    desc = "Trains and deploys combat units"               },
 	{ btype = "Deployer",   icon = "🚀", color = C.DEPLOYER,                    desc = "Auto-spawns up to 4 soldiers"                  },
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
 	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 	{ btype = "LampreyNest", icon = "🥚", color = Color3.fromRGB(120, 190, 60), desc = "Births Lampreys from pulsing eggs"             },
+	{ btype = "EngineeringPost", icon = "🔬", color = Color3.fromRGB(90, 200, 255), desc = "Researches random combat upgrades for your units" },
 }
 local CHILD_SPACING = 114   -- px between child centres
 
@@ -298,18 +297,13 @@ local function applyNodeState(node: ChildNode)
 		node.label.Text           = dispName(node.btype) .. "\n" .. lockReason
 		node.label.TextColor3     = C.DIM
 	else
-		local accent = ({ Mine = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
+		local accent = ({ Foundry = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
 			or node.color
 		node.btn.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
 		node.stroke.Color         = accent
 		node.stroke.Thickness     = 2
 		node.btn.TextColor3       = accent
-		if node.btype == "Mine" and harvesterStashCount > 0 then
-			-- Stashed harvesters redeploy for free.
-			node.label.Text       = dispName(node.btype) .. "\nFREE ×" .. harvesterStashCount
-		else
-			node.label.Text       = dispName(node.btype) .. "\n◆ " .. cost
-		end
+		node.label.Text       = dispName(node.btype) .. "\n◆ " .. cost
 		node.label.TextColor3     = C.TEXT
 	end
 end
@@ -1396,13 +1390,6 @@ end
 function HUD.setIncome(perMin: number)
 	currentIncome = perMin
 	refreshResDisplay()
-end
-
--- Number of stashed harvesters available to redeploy for free; refreshes the build
--- node so the Harvester tile shows "FREE ×N" while a stash is available.
-function HUD.setHarvesterStash(n: number)
-	harvesterStashCount = n
-	updateAllNodes()
 end
 
 local ccPulseActive = false

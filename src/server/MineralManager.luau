@@ -236,58 +236,42 @@ local function scheduleOreWave()
 	end)
 end
 
--- ── Harvester extraction API ──────────────────────────────────────────────────
+-- ── Foundry boost / drain API ───────────────────────────────────────────────────
 
--- True if at least one deposit with resources remaining sits within `radius` of `point`.
--- Used by a harvester on arrival to decide whether there's anything to drain.
-function MineralManager.hasResourcesNear(point: Vector3, radius: number): boolean
+-- Counts the active (non-empty) deposits within `radius` of `point`. Drives the
+-- Foundry income boost (+X% per nearby deposit) without mutating anything.
+function MineralManager.countActiveDepositsNear(point: Vector3, radius: number): number
 	local r2 = radius * radius
+	local n  = 0
 	for _, pos in depositList do
 		if (depositResources[posKey(pos)] or 0) <= 0 then continue end
 		local dx = pos.X - point.X
 		local dz = pos.Z - point.Z
-		if dx * dx + dz * dz <= r2 then return true end
+		if dx * dx + dz * dz <= r2 then n += 1 end
 	end
-	return false
+	return n
 end
 
--- Drains the (up to 3) nearest in-range deposits by `perDeposit` each, applies the
--- band visuals / depleted-deposit cleanup / ore-wave scheduling, and returns the total
--- drained plus the deposit positions hit (for the caller's beam VFX). Returns 0 when
--- the field around `point` is dry — the caller treats that as "recall the harvester".
-function MineralManager.drainNear(point: Vector3, radius: number, perDeposit: number): (number, { Vector3 })
-	local r2 = radius * radius
-
-	local found: { Vector3 } = {}
-	for _, pos in depositList do
-		if (depositResources[posKey(pos)] or 0) <= 0 then continue end
-		local dx = pos.X - point.X
-		local dz = pos.Z - point.Z
-		if dx * dx + dz * dz <= r2 then table.insert(found, pos) end
-	end
-	if #found == 0 then return 0, {} end
-
-	-- Limit to the nearest 3 deposits (one beam per deposit)
-	if #found > 3 then
-		local pXZ = Vector3.new(point.X, 0, point.Z)
-		table.sort(found, function(a, b)
-			return (Vector3.new(a.X, 0, a.Z) - pXZ).Magnitude
-			     < (Vector3.new(b.X, 0, b.Z) - pXZ).Magnitude
-		end)
-		while #found > 3 do table.remove(found, #found) end
-	end
-
-	local total       = 0
+-- Drains EVERY active deposit within `radius` of `point` by up to `perDeposit` each
+-- (unlike drainNear, which caps at the 3 nearest for harvester beam VFX). Applies the
+-- band visuals, removes depleted deposits, schedules ore waves, and returns the number
+-- of deposits that still had resources when the drain began — i.e. the count that
+-- boosted the Foundry this tick. Used by the Foundry passive-income tick.
+function MineralManager.drainAllNear(point: Vector3, radius: number, perDeposit: number): number
+	local r2          = radius * radius
+	local count       = 0
 	local anyDepleted = false
-	local hits: { Vector3 } = {}
-	for _, pos in found do
+	for _, pos in depositList do
 		local key = posKey(pos)
 		local res = depositResources[key] or 0
 		if res <= 0 then continue end
+		local dx = pos.X - point.X
+		local dz = pos.Z - point.Z
+		if dx * dx + dz * dz > r2 then continue end
+
+		count += 1
 		local extract = math.min(perDeposit, res)
 		depositResources[key] = res - extract
-		total += extract
-		table.insert(hits, pos)
 		if depositResources[key] <= 0 then
 			anyDepleted = true
 		else
@@ -295,7 +279,6 @@ function MineralManager.drainNear(point: Vector3, radius: number, perDeposit: nu
 		end
 	end
 
-	-- Remove any fully-depleted deposits
 	if anyDepleted then
 		local i = #depositList
 		while i >= 1 do
@@ -316,7 +299,7 @@ function MineralManager.drainNear(point: Vector3, radius: number, perDeposit: nu
 		scheduleOreWave()
 	end
 
-	return total, hits
+	return count
 end
 
 -- ── Deposit API ───────────────────────────────────────────────────────────────

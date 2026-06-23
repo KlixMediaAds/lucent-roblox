@@ -91,6 +91,7 @@ local DIFF_COLORS = {
 -- ── Module refs ───────────────────────────────────────────────────────────────
 local sg:            ScreenGui
 local bg:            Frame
+local redWash:       Frame   -- full-screen red overlay that fades in as the game starts
 local container:     Frame
 local uiScaleObj:    UIScale
 local mapBorder:     Frame
@@ -407,6 +408,15 @@ end
 local function playGameStartTransition(onComplete: (string) -> ())
 	readyBtn.Active = false
 
+	-- Bleed the backdrop to red through the countdown, so the lobby is fully red
+	-- before the match begins.
+	if redWash then
+		TweenService:Create(redWash,
+			TweenInfo.new(1.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ BackgroundTransparency = 0 }
+		):Play()
+	end
+
 	task.spawn(function()
 		for _, txt in { "3", "2", "1" } do
 			statusLbl.Text = "Game starting in  " .. txt
@@ -464,8 +474,11 @@ local function playGameStartTransition(onComplete: (string) -> ())
 		local mmBorder  = MINIMAP_SIZE + 4
 		local slideInfo = TweenInfo.new(0.70, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
 
+		-- Land on the live minimap's corner. MiniMap.luau anchors its border at
+		-- UDim2.new(1, -(MAP_SIZE+4+PADDING), 0, PADDING) — top-right — so target that
+		-- (top edge), not the bottom-right the slide used to fly to.
 		TweenService:Create(mapBorder, slideInfo, {
-			Position = UDim2.new(1, -(mmBorder + MINIMAP_PAD), 1, -(mmBorder + MINIMAP_PAD)),
+			Position = UDim2.new(1, -(mmBorder + MINIMAP_PAD), 0, MINIMAP_PAD),
 			Size     = UDim2.fromOffset(mmBorder, mmBorder),
 		}):Play()
 
@@ -490,10 +503,11 @@ local function playGameStartTransition(onComplete: (string) -> ())
 				end
 				task.delay(0.28, function()
 					onComplete(lobbyGamemode)
-					TweenService:Create(bg,
-						TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-						{ BackgroundTransparency = 1 }
-					):Play()
+					local bgFade = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+					TweenService:Create(bg, bgFade, { BackgroundTransparency = 1 }):Play()
+					if redWash then
+						TweenService:Create(redWash, bgFade, { BackgroundTransparency = 1 }):Play()
+					end
 					task.delay(0.27, function() sg:Destroy() end)
 				end)
 			end)
@@ -507,6 +521,17 @@ local function buildBackdrop()
 	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C_BG
 	bg.BorderSizePixel = 0; bg.Parent = sg
 	gradient(bg, C_BG, C_BG2, 90)
+
+	-- Red wash that fades in over the backdrop as the match begins (sits above the
+	-- backdrop decoration but below the panels, so the lobby reddens before the game).
+	redWash = Instance.new("Frame")
+	redWash.Name = "RedWash"
+	redWash.Size = UDim2.new(1, 0, 1, 0)
+	redWash.BackgroundColor3 = Color3.fromRGB(130, 18, 18)
+	redWash.BackgroundTransparency = 1
+	redWash.BorderSizePixel = 0
+	redWash.ZIndex = 2
+	redWash.Parent = bg
 
 	local deco = Instance.new("Frame")
 	deco.Name = "Deco"; deco.Size = UDim2.new(1, 0, 1, 0)

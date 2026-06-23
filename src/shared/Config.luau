@@ -6,7 +6,7 @@ Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 -- Economy
 Config.STARTING_RESOURCES   = 400
 Config.BUILDING_COST         = 50   -- Barracks cost
-Config.MINE_COST             = 75   -- Mine building cost
+Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure)
 Config.DEPLOYER_COST         = 100  -- Deployer building cost
 Config.DEPLOYER_MAX_UNITS    = 4    -- max simultaneous auto-deployed soldiers per Deployer
 Config.DEPLOYER_SPAWN_INTERVAL = 15 -- seconds between auto-spawn checks
@@ -23,7 +23,6 @@ Config.UNIT_TYPES = {
 	Hagfish       = { cost = 120, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 	Core          = { cost = 0,   size = Vector3.new(5, 3, 6) },  -- mobile deploy seed: drops in, then transforms into the Command Center
-	Harvester     = { cost = 75,  size = Vector3.new(5, 4, 5) },  -- mobile miner: deployed via "Mine" order, walks to a deposit, drains it, returns to the CC and stashes
 }
 
 -- Command Center deploy: the Core (above) lands from a drop pod, the player drives
@@ -32,9 +31,19 @@ Config.CORE_DEPLOY_TIME       = 3     -- seconds the Core takes to transform int
 Config.CC_PASSIVE_INCOME      = 10    -- resources granted per tick to every standing Command Center
 Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-income ticks
 
+-- Foundry: a large industrial structure (4× the Command Center footprint) that
+-- passively produces income. Every active mineral deposit within FOUNDRY_BOOST_RADIUS
+-- boosts its output by FOUNDRY_BOOST_PER_DEPOSIT (uncapped) and is drained a little each
+-- income tick, so a deposit-rich site pays out more but exhausts the field faster.
+Config.FOUNDRY_BASE_INCOME       = 12    -- resources per tick with no nearby deposits
+Config.FOUNDRY_INCOME_INTERVAL   = 6     -- seconds between Foundry income ticks
+Config.FOUNDRY_BOOST_RADIUS      = 60    -- studs; active deposits within this of a Foundry boost it
+Config.FOUNDRY_BOOST_PER_DEPOSIT = 0.15  -- +15% income per active nearby deposit (no cap)
+Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting deposit per income tick
+
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24, Core = 42, Harvester = 18 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14, Core = 20, Harvester = 8 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24, Core = 42 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14, Core = 20 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -46,6 +55,18 @@ Config.TANK_SLOW_MULT         = 0.4  -- speed multiplier while slowed (requires 
 -- Buildings
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
 Config.BUILDING_GRID         = 5     -- snap grid in studs
+Config.FOUNDRY_SIZE          = Vector3.new(28, 10, 28)  -- 4× the Command Center's ground area
+Config.ENGINEERING_POST_SIZE = Vector3.new(12, 10, 12)
+
+-- Engineering Post — researches random combat upgrades. Light research rolls one
+-- random stat (+5–15%) on a random unit type, applied to all that player's units of
+-- that type (current + future). Heavy research is a placeholder ("coming soon").
+Config.ENGINEERING_POST_COST   = 150   -- cost to build the post (needs a Barracks first)
+Config.ENGINEERING_RESEARCH_COST = 75  -- resource cost to start one Light research
+Config.ENGINEERING_LIGHT_TIME  = 30    -- seconds for a Light research
+Config.ENGINEERING_HEAVY_TIME  = 90    -- seconds for a Heavy research (not yet implemented)
+Config.ENGINEERING_UPGRADE_MIN_PCT = 5   -- min % a Light research improves a stat by
+Config.ENGINEERING_UPGRADE_MAX_PCT = 15  -- max %
 
 -- Mineral Deposits — cluster spawning
 Config.DEPOSIT_SIZE          = Vector3.new(5, 10, 5)
@@ -127,12 +148,8 @@ Config.MONUMENT_COST         = 1500
 Config.MONUMENT_WIN_DURATION = 300    -- seconds to hold monument for victory (5 minutes)
 Config.MONUMENT_SIZE         = Vector3.new(5, 20, 5)
 
--- Harvester limits & deposits
-Config.MAX_MINES                = math.huge  -- no cap on active harvesters deployed per player
+-- Mineral deposits
 Config.DEPOSIT_TOTAL_RESOURCES  = 1000  -- total resources a deposit holds before depleting
-Config.MINE_EXTRACT_RANGE       = 60    -- studs; a parked harvester drains deposits within this radius of its deploy point
-Config.MINE_EXTRACT_INTERVAL    = 5     -- seconds between harvester drain ticks
-Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources drained per deposit per drain tick
 
 -- Condition-based unlocks.
 -- cond.type: "building" (cumulative placed), "kill" (enemies killed), "train" (units trained)
@@ -142,10 +159,10 @@ Config.MINE_INCOME_PER_DEPOSIT  = 8    -- resources drained per deposit per drai
 -- upgrades) and maps to a unit/building so the upgrade UI can render a 3D preview.
 -- `vp` = { kind = "unit"|"building", name = <type> }.
 Config.UNLOCKS = {
-	BetterMines      = { icon = "⛏", title = "Better Mines", category = "Infra",
-		vp = { kind = "building", name = "Mine" },
-		desc = "Mines gain upgrade options.",
-		condText = "Build 3 Mines",    cond = { type = "building", name = "Mine",     count = 3 } },
+	BetterMines      = { icon = "🏭", title = "Better Foundries", category = "Infra",
+		vp = { kind = "building", name = "Foundry" },
+		desc = "Foundries you build run hotter, refining a touch more each tick.",
+		condText = "Build 3 Foundries", cond = { type = "building", name = "Foundry", count = 3 } },
 	EliteUnits       = { icon = "⭐", title = "Elite Units", category = "Army",
 		vp = { kind = "unit", name = "Elite" },
 		desc = "Unlocks the Elite unit at Barracks.",
@@ -196,7 +213,7 @@ Config.UNLOCKS = {
 	MobileCC         = { icon = "🦾", title = "Mobile CC", category = "Infra",
 		vp = { kind = "building", name = "CommandCenter" },
 		desc = "Unlocks Command Center mobility (building disabled while mobile).",
-		condText = "Build 2 Mines",    cond = { type = "building", name = "Mine",  count = 2 } },
+		condText = "Build 2 Foundries", cond = { type = "building", name = "Foundry", count = 2 } },
 }
 
 -- Tech upgrade pacing (manual research from the upgrade panel)
@@ -259,7 +276,7 @@ Config.TURRET_ARTILLERY = { range = 200, damage = 130, rate = 5.0 }
 Config.VISION_UNIT    = 65
 Config.VISION_DEFAULT = 40
 Config.VISION_RADIUS  = {
-	CommandCenter = 75, Barracks = 50, Mine = 45, Turret = 40,
+	CommandCenter = 75, Barracks = 50, Foundry = 55, Turret = 40, EngineeringPost = 50,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
 	LampreyNest = 50,
 }
@@ -275,15 +292,15 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18 }
+Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, CreepySoldier = 0, Core = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55,  Core = 250, Harvester = 300 }
-Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14,  Core = 0,  Harvester = 0 }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13,  Core = 0,  Harvester = 0 }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7, Core = 1.0, Harvester = 1.0 }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55,  Core = 250 }
+Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14,  Core = 0 }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13,  Core = 0 }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7, Core = 1.0 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -308,8 +325,6 @@ Config.REMOTES = {
 	BuildingPlaced   = "BuildingPlaced",
 	UnitsOrderedMove = "UnitsOrderedMove",
 	SyncDeposits      = "SyncDeposits",
-	DepositClaimed    = "DepositClaimed",
-	MinerSpawned      = "MinerSpawned",
 	NeedCommandCenter = "NeedCommandCenter",
 	TrainingUpdate    = "TrainingUpdate",
 	TurretShot        = "TurretShot",
@@ -317,7 +332,6 @@ Config.REMOTES = {
 	FocusAttack       = "FocusAttack",
 	UnitDied          = "UnitDied",
 	UnitHit           = "UnitHit",
-	UpgradeMine       = "UpgradeMine",
 	UpgradeTurret     = "UpgradeTurret",
 	UnlockGranted     = "UnlockGranted",
 	UnlockChoice      = "UnlockChoice",
@@ -327,12 +341,13 @@ Config.REMOTES = {
 	BuildMonument    = "BuildMonument",
 	MonumentProgress = "MonumentProgress",
 	PlayerWon        = "PlayerWon",
-	MineIncome              = "MineIncome",
-	MineBeams               = "MineBeams",
-	HarvesterStash          = "HarvesterStash",
+	FoundryIncome           = "FoundryIncome",
+	EngineeringStart        = "EngineeringStart",
+	EngineeringCollect      = "EngineeringCollect",
+	EngineeringRequest      = "EngineeringRequest",
+	EngineeringSync         = "EngineeringSync",
 	CCAttacked              = "CCAttacked",
 	AttackAlert             = "AttackAlert",
-	MineDepletionWarning    = "MineDepletionWarning",
 	HealBeam                = "HealBeam",
 	CometWave               = "CometWave",
 	TentacleTargets         = "TentacleTargets",

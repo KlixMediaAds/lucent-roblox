@@ -1,8 +1,7 @@
 --!strict
 --[[
-    MinePanel — Info card shown when the player clicks a mine.
-    Displays the root "MINE" node; click it (or click away) to close.
-    Upgrade nodes removed — mines no longer have buildable upgrades.
+    MinePanel — Info card shown when the player clicks a Foundry.
+    Displays the root "FOUNDRY" node; click it (or click away) to close.
 ]]
 
 local Players      = game:GetService("Players")
@@ -43,10 +42,10 @@ function MinePanel.init(network, _getResourcesFn, _hasResearchFn)
 	ov.Parent                        = sg
 	overlay = ov
 
-	local rootWrapper, rBtn = UILib.radialNode(ov, "MINE", "⛏", C.MINE, ROOT_POS, 70, 11)
+	local rootWrapper, rBtn = UILib.radialNode(ov, "FOUNDRY", "🏭", C.MINE, ROOT_POS, 70, 11)
 	rootLbl = rootWrapper:FindFirstChild("NodeLabel") :: TextLabel?
 
-	UILib.setNodeViewport(rBtn, ViewportPreview.forBuilding("Mine", Vector2.new(70, 70)))
+	UILib.setNodeViewport(rBtn, ViewportPreview.forBuilding("Foundry", Vector2.new(70, 70)))
 
 	rBtn.MouseButton1Click:Connect(function()
 		MinePanel.hide()
@@ -69,7 +68,7 @@ end
 
 function MinePanel.show(mineId: string)
 	activeMineId = mineId
-	if rootLbl then rootLbl.Text = "MINE" end
+	if rootLbl then rootLbl.Text = "FOUNDRY" end
 	if overlay then overlay.Visible = true end
 end
 

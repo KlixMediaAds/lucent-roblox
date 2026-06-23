@@ -30,7 +30,7 @@ function Network.onUnitDied(fn: (unitType: string, pos: Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitDied).OnClientEvent:Connect(fn)
 end
 
--- buildingType: "Barracks" or "Mine"
+-- buildingType: "Barracks", "Foundry", etc.
 function Network.placeBuilding(pos: Vector3, buildingType: string)
 	RemoteHandler.get(Config.REMOTES.PlaceBuilding):FireServer(pos, buildingType)
 end
@@ -52,33 +52,29 @@ function Network.onUnitsOrderedMove(fn: ({string}, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove).OnClientEvent:Connect(fn)
 end
 
--- Mineral / Mine events
+-- Mineral deposit events
 function Network.onSyncDeposits(fn: ({Vector3}) -> ())
 	RemoteHandler.get(Config.REMOTES.SyncDeposits).OnClientEvent:Connect(fn)
 end
 
-function Network.onDepositClaimed(fn: (Vector3) -> ())
-	RemoteHandler.get(Config.REMOTES.DepositClaimed).OnClientEvent:Connect(fn)
+-- foundryId, income earned this tick → drives the floating "+N" popup
+function Network.onFoundryIncome(fn: (string, number) -> ())
+	RemoteHandler.get(Config.REMOTES.FoundryIncome).OnClientEvent:Connect(fn)
 end
 
--- mineId, ownerUserId, new total miner count for that mine
-function Network.onMinerSpawned(fn: (string, number, number) -> ())
-	RemoteHandler.get(Config.REMOTES.MinerSpawned).OnClientEvent:Connect(fn)
+-- Engineering Post research
+function Network.engineeringStart(buildingId: string)
+	RemoteHandler.get(Config.REMOTES.EngineeringStart):FireServer(buildingId)
 end
-
--- mineId, income amount produced this tick
-function Network.onMineIncome(fn: (string, number) -> ())
-	RemoteHandler.get(Config.REMOTES.MineIncome).OnClientEvent:Connect(fn)
+function Network.engineeringCollect(buildingId: string)
+	RemoteHandler.get(Config.REMOTES.EngineeringCollect):FireServer(buildingId)
 end
-
--- mineId, emitterPos, depositPositions: extraction beam VFX update
-function Network.onMineBeams(fn: (string, Vector3, {Vector3}) -> ())
-	RemoteHandler.get(Config.REMOTES.MineBeams).OnClientEvent:Connect(fn)
+function Network.engineeringRequest(buildingId: string)
+	RemoteHandler.get(Config.REMOTES.EngineeringRequest):FireServer(buildingId)
 end
-
--- current number of stashed (recalled) harvesters available to redeploy for free
-function Network.onHarvesterStash(fn: (number) -> ())
-	RemoteHandler.get(Config.REMOTES.HarvesterStash).OnClientEvent:Connect(fn)
+-- buildingId, payload { state, remaining, history, discovery? }
+function Network.onEngineeringSync(fn: (string, any) -> ())
+	RemoteHandler.get(Config.REMOTES.EngineeringSync).OnClientEvent:Connect(fn)
 end
 
 -- Fired when the player needs to (re)place their Command Center
@@ -99,10 +95,6 @@ end
 -- fromPos, toPos, unitType: unit landed a hit
 function Network.onUnitHit(fn: (Vector3, Vector3, string) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitHit).OnClientEvent:Connect(fn)
-end
-
-function Network.upgradeMine(mineId: string, upgradeType: string)
-	RemoteHandler.get(Config.REMOTES.UpgradeMine):FireServer(mineId, upgradeType)
 end
 
 function Network.upgradeTurret(turretIds: {string}, upgradeType: string)
@@ -203,11 +195,6 @@ end
 -- per region). worldPos = where, category = "base" or "army".
 function Network.onAttackAlert(fn: (worldPos: Vector3, category: string) -> ())
 	RemoteHandler.get(Config.REMOTES.AttackAlert).OnClientEvent:Connect(fn)
-end
-
--- Fired by server when a mine owned by the local player is depleted
-function Network.onMineDepletionWarning(fn: (mineId: string) -> ())
-	RemoteHandler.get(Config.REMOTES.MineDepletionWarning).OnClientEvent:Connect(fn)
 end
 
 -- ccId: toggle mobility unlock/on/off

@@ -193,7 +193,7 @@ local function buildingTypeRadius(btype: string): (number, number, number)
 	if      btype == "CommandCenter" then r = VIS_CC
 	elseif  btype == "Monument"      then r = VIS_CC
 	elseif  btype == "Barracks"      then r = VIS_BARRACKS
-	elseif  btype == "Mine"          then r = VIS_MINE
+	elseif  btype == "Foundry"       then r = VIS_MINE
 	elseif  btype == "Turret"        then r = VIS_TURRET
 	else                                  r = VIS_BARRACKS
 	end

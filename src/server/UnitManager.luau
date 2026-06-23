@@ -52,10 +52,6 @@ type UnitData = {
 	foamDotAccum    : number?,    -- accumulated dt for 1-s DoT tick
 	-- Hagfish
 	attackLockUntil : number?,    -- tick() until which a hagfish stays rooted mid-attack
-	-- Harvester deploy → drain → recall state machine
-	harvestPoint    : Vector3?,   -- the deposit-field location this harvester was deployed to
-	harvestState    : string?,    -- nil = not a harvester; "toField"|"draining"|"toCC"
-	gatherAccum     : number?,    -- dt accumulator for drain ticks while parked
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -123,11 +119,40 @@ local unitDecorators: { [string]: { Decorator } } = {}
 local playerUnitCount: { [number]: number } = {}
 local MAX_UNITS_PER_PLAYER = 30
 
--- Stashed (recalled) harvesters per player userId. A stashed harvester redeploys for
--- free; the live harvester unit is destroyed when it's stashed.
-local harvesterStash: { [number]: number } = {}
-local HARVEST_ARRIVE2     = 8 * 8     -- studs²: harvester is "at the field" within this of its deploy point
-local HARVEST_CC_ARRIVE2  = 18 * 18   -- studs²: harvester is "home" within this of the CC (CC is 14 wide)
+-- ── Engineering Post random upgrades ────────────────────────────────────────────
+-- Per-player, per-unit-type stat multipliers granted by Light research. Applied to
+-- every unit of that type at spawn (and retroactively to live units when granted).
+-- Each stat is a plain multiplier (rate is a period multiplier: <1 means faster).
+type StatMult = { dmg: number, range: number, speed: number, rate: number, hp: number }
+local playerStatMult:  { [number]: { [string]: StatMult } } = {}
+-- Global per-player discovery log (newest last); each entry is the popup/history line.
+local playerUpgradeLog: { [number]: { string } } = {}
+
+-- Unit types a Light research may roll, with player-facing plural names.
+local UPGRADE_UNITS: { string } = { "Soldier", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish" }
+local UPGRADE_UNIT_NAME: { [string]: string } = {
+	Soldier = "Soldiers", Tank = "Tanks", Howitzer = "Howitzers", Foamer = "Foamers",
+	Elite = "Elites", Medic = "Medics", Lamprey = "Lampreys", Hagfish = "Hagfish",
+}
+-- Stats a Light research may roll: { field key, player-facing name }.
+local UPGRADE_STATS: { { field: string, name: string } } = {
+	{ field = "dmg",   name = "damage" },
+	{ field = "range", name = "range" },
+	{ field = "speed", name = "movement speed" },
+	{ field = "rate",  name = "attack speed" },
+	{ field = "hp",    name = "durability" },
+}
+
+local function statMultFor(userId: number, unitType: string): StatMult
+	local byType = playerStatMult[userId]
+	if not byType then byType = {}; playerStatMult[userId] = byType end
+	local m = byType[unitType]
+	if not m then
+		m = { dmg = 1, range = 1, speed = 1, rate = 1, hp = 1 }
+		byType[unitType] = m
+	end
+	return m
+end
 
 local function rebuildSpatialGrid()
 	for i = 1, gridOccupiedCount do
@@ -373,6 +398,16 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	local spd      = (Config.UNIT_MOVE_SPEED :: any)[unitType] or 22
 	local acc      = (Config.UNIT_ACCEL :: any)[unitType] or 8
 	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 15
+
+	-- Apply any Engineering-Post stat upgrades this player has researched.
+	local pm = playerStatMult[player.UserId] and playerStatMult[player.UserId][unitType]
+	if pm then
+		maxHp    = maxHp    * pm.hp
+		dmg      = dmg      * pm.dmg
+		atkRate  = atkRate  * pm.rate
+		spd      = spd      * pm.speed
+		atkRange = atkRange * pm.range
+	end
 	addHealthBar(part)
 
 	-- Static body geometry comes from the shared blueprint (single source of
@@ -459,50 +494,6 @@ local function orderMove(data: UnitData, slot: Vector3)
 		data.path    = nil
 		data.pathIdx = nil
 		data.target  = slot
-	end
-end
-
--- ── Harvester helpers ──────────────────────────────────────────────────────────
-
--- Set a player's stash count and notify their client (drives the HUD "stashed ×N" badge
--- and the Barracks "have a harvester" requirement).
-local function setHarvesterStash(player: any, n: number)
-	harvesterStash[player.UserId] = n
-	if player.UserId > 0 and player.Parent then
-		RemoteHandler.get(Config.REMOTES.HarvesterStash):FireClient(player, n)
-	end
-end
-
--- Float a short message over a unit (e.g. "No resources here!"). Server-created
--- BillboardGui replicates to all clients, mirroring how addHealthBar works.
-local function showHarvesterBubble(part: BasePart, text: string)
-	local bb           = Instance.new("BillboardGui")
-	bb.Name            = "HarvesterBubble"
-	bb.Size            = UDim2.new(0, 150, 0, 28)
-	bb.StudsOffset     = Vector3.new(0, part.Size.Y / 2 + 3, 0)
-	bb.AlwaysOnTop     = true
-	bb.Parent          = part
-	local lbl                   = Instance.new("TextLabel")
-	lbl.Size                    = UDim2.new(1, 0, 1, 0)
-	lbl.BackgroundTransparency  = 1
-	lbl.Font                    = Enum.Font.GothamBold
-	lbl.TextSize                = 15
-	lbl.TextColor3              = Color3.fromRGB(255, 120, 120)
-	lbl.TextStrokeTransparency  = 0.3
-	lbl.Text                    = text
-	lbl.Parent                  = bb
-	game:GetService("Debris"):AddItem(bb, 2)
-end
-
--- Send a harvester back to its owner's Command Center to be stashed.
-local function recallHarvester(data: UnitData)
-	data.harvestState = "toCC"
-	data.gatherAccum  = 0
-	local cc = buildingManagerRef and buildingManagerRef.getCCPosition(data.owner)
-	if cc then
-		orderMove(data, cc)
-	else
-		data.target = nil  -- no CC: the toCC branch stashes it where it stands
 	end
 end
 
@@ -747,85 +738,6 @@ function UnitManager.getUnitCount(player: Player): number
 	return n
 end
 
--- ── Harvester deploy / stash API ────────────────────────────────────────────────
-
--- Spawns a harvester just outside the player's CC and sends it to drain the deposit
--- field at `harvestPoint`. Returns false if the player has no CC or the unit cap is hit.
-function UnitManager.deployHarvester(player: any, harvestPoint: Vector3): boolean
-	if not buildingManagerRef then return false end
-	local cc = buildingManagerRef.getCCPosition(player)
-	if not cc then return false end
-
-	-- Spawn just outside the CC footprint, facing the field.
-	local toField  = Vector3.new(harvestPoint.X - cc.X, 0, harvestPoint.Z - cc.Z)
-	local dir      = toField.Magnitude > 0.1 and toField.Unit or Vector3.new(0, 0, 1)
-	local spawnPos = cc + dir * (Config.COMMAND_CENTER_SIZE.X / 2 + 5)
-
-	local uid = spawnUnit(player, spawnPos, "Harvester")
-	if not uid then return false end
-	local data = units[uid]
-	if data then
-		data.harvestPoint = Vector3.new(harvestPoint.X, 0, harvestPoint.Z)
-		data.harvestState = "toField"
-		data.gatherAccum  = 0
-		orderMove(data, data.harvestPoint)
-	end
-	return true
-end
-
-function UnitManager.getHarvesterStash(player: any): number
-	return harvesterStash[player.UserId] or 0
-end
-
--- Consume one stashed harvester (free redeploy). Returns false if the stash is empty.
-function UnitManager.takeHarvesterStash(player: any): boolean
-	local n = harvesterStash[player.UserId] or 0
-	if n <= 0 then return false end
-	setHarvesterStash(player, n - 1)
-	return true
-end
-
--- Live harvesters + stashed harvesters. Gates the Barracks prerequisite.
-function UnitManager.getHarvesterTotal(player: any): number
-	local n = harvesterStash[player.UserId] or 0
-	for _, data in units do
-		if data.owner == player and data.unitType == "Harvester" then n += 1 end
-	end
-	return n
-end
-
--- Currently-deployed (live) harvesters only — excludes the stash. Drives the AI's
--- "how many harvesters do I have out" capacity check so a stashed one gets redeployed.
-function UnitManager.getActiveHarvesterCount(player: any): number
-	local n = 0
-	for _, data in units do
-		if data.owner == player and data.unitType == "Harvester" then n += 1 end
-	end
-	return n
-end
-
--- Count of live harvesters owned by human players (UserId > 0). Lets the trainer AI
--- mirror the human economy now that "mines" are harvester units, not buildings.
-function UnitManager.getHumanHarvesterCount(): number
-	local n = 0
-	for _, data in units do
-		if data.unitType == "Harvester" and data.owner.UserId > 0 then n += 1 end
-	end
-	return n
-end
-
--- Deploy points of every live harvester (all owners). Lets the AI / placement avoid
--- piling multiple harvesters onto one deposit field.
-function UnitManager.getActiveHarvestPoints(): { Vector3 }
-	local out: { Vector3 } = {}
-	for _, data in units do
-		if data.unitType == "Harvester" and data.harvestPoint then
-			table.insert(out, data.harvestPoint)
-		end
-	end
-	return out
-end
-
 function UnitManager.sendAllUnitsTo(player: Player, targetPos: Vector3)
 	local ids = {}
 	for id, data in units do
@@ -904,7 +816,53 @@ function UnitManager.resetAll()
 	units            = {}
 	unitDecorators   = {}
 	playerUnitCount  = {}
-	harvesterStash   = {}
+	playerStatMult   = {}
+	playerUpgradeLog = {}
+end
+
+-- Rolls one random Light-research upgrade for `player`: a random stat on a random unit
+-- type, improved by a random % within the configured band. Updates the player's stat
+-- multipliers (future spawns), retroactively buffs their live units of that type, logs
+-- the discovery, and returns (discoveryText, fullHistory). Called by the Engineering Post.
+function UnitManager.applyRandomUpgrade(player: any): (string, { string })
+	local userId   = player.UserId
+	local unitType = UPGRADE_UNITS[math.random(1, #UPGRADE_UNITS)]
+	local stat     = UPGRADE_STATS[math.random(1, #UPGRADE_STATS)]
+	local pct      = math.random(Config.ENGINEERING_UPGRADE_MIN_PCT, Config.ENGINEERING_UPGRADE_MAX_PCT)
+	local factor   = 1 + pct / 100
+
+	local m = statMultFor(userId, unitType)
+	for _, data in units do
+		local hit = data.owner == player and data.unitType == unitType
+		if stat.field == "rate" then
+			-- "attack speed" — lower period is faster
+			if hit then data.attackRate = data.attackRate / factor end
+		elseif stat.field == "dmg" then
+			if hit then data.attackDmg = data.attackDmg * factor end
+		elseif stat.field == "range" then
+			if hit then data.attackRange = data.attackRange * factor end
+		elseif stat.field == "speed" then
+			if hit then data.moveSpeed = data.moveSpeed * factor end
+		elseif stat.field == "hp" then
+			if hit then data.maxHp = data.maxHp * factor; data.hp = data.hp * factor end
+		end
+	end
+	if stat.field == "rate" then
+		m.rate = m.rate / factor
+	else
+		(m :: any)[stat.field] = (m :: any)[stat.field] * factor
+	end
+
+	local text = string.format("We have improved %s %s by %d%%.",
+		UPGRADE_UNIT_NAME[unitType] or unitType, stat.name, pct)
+	local log = playerUpgradeLog[userId]
+	if not log then log = {}; playerUpgradeLog[userId] = log end
+	table.insert(log, text)
+	return text, log
+end
+
+function UnitManager.getUpgradeHistory(player: any): { string }
+	return playerUpgradeLog[player.UserId] or {}
 end
 
 function UnitManager.setBuildingManager(bm: any)
@@ -1068,70 +1026,6 @@ function UnitManager.init(resourceManager)
 
 			local isFoamer  = data.foamState ~= nil
 			local foamState = data.foamState or ""
-
-			-- ── Harvester: deploy → drain → recall state machine ──────────────
-			-- Harvesters never aggro or attack. This block only sets data.target /
-			-- data.harvestState; the shared movement block below actually moves them.
-			-- (aggroId/focusBldId/foamState are always nil for harvesters, so the
-			-- combat sections are skipped — plus explicit guards in §3 and §4.)
-			if data.unitType == "Harvester" then
-				local hpos  = data.part.Position
-				local field = data.harvestPoint
-
-				if data.harvestState == "toField" and field then
-					local dxf = field.X - hpos.X
-					local dzf = field.Z - hpos.Z
-					if dxf * dxf + dzf * dzf <= HARVEST_ARRIVE2 then
-						if mineralManagerRef and mineralManagerRef.hasResourcesNear(field, Config.MINE_EXTRACT_RANGE) then
-							data.harvestState = "draining"
-							data.gatherAccum  = 0
-							data.target = nil; data.path = nil; data.pathIdx = nil
-						else
-							showHarvesterBubble(data.part, "No resources here!")
-							recallHarvester(data)
-						end
-					end
-
-				elseif data.harvestState == "draining" then
-					data.target = nil  -- hold position while draining
-					data.gatherAccum = (data.gatherAccum or 0) + dt
-					if (data.gatherAccum :: number) >= Config.MINE_EXTRACT_INTERVAL then
-						data.gatherAccum = (data.gatherAccum :: number) - Config.MINE_EXTRACT_INTERVAL
-						local total, hits = 0, {}
-						if mineralManagerRef and field then
-							total, hits = mineralManagerRef.drainNear(field, Config.MINE_EXTRACT_RANGE, Config.MINE_INCOME_PER_DEPOSIT)
-						end
-						if total > 0 then
-							if resourceManagerRef then resourceManagerRef.add(data.owner, total) end
-							if data.owner.UserId > 0 and data.owner.Parent then
-								RemoteHandler.get(Config.REMOTES.MineIncome):FireClient(data.owner, id, total)
-							end
-							local emitterPos = hpos + Vector3.new(0, data.part.Size.Y / 2 + 2, 0)
-							RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(id, emitterPos, hits)
-						else
-							-- Field around the deploy point is dry → recall the harvester.
-							RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(id, hpos, {})
-							recallHarvester(data)
-						end
-					end
-
-				elseif data.harvestState == "toCC" then
-					local cc    = buildingManagerRef and buildingManagerRef.getCCPosition(data.owner)
-					local stash = false
-					if not cc then
-						stash = true   -- CC destroyed mid-trip: stash where it stands
-					else
-						local dxc = cc.X - hpos.X
-						local dzc = cc.Z - hpos.Z
-						if dxc * dxc + dzc * dzc <= HARVEST_CC_ARRIVE2 then stash = true end
-					end
-					if stash then
-						RemoteHandler.get(Config.REMOTES.MineBeams):FireAllClients(id, hpos, {})
-						setHarvesterStash(data.owner, (harvesterStash[data.owner.UserId] or 0) + 1)
-						table.insert(toRemove, id)
-					end
-				end
-			end
 
 			-- ── 1. Aggro: update chase target or resolve ───────────────────────
 			if data.aggroId then
@@ -1429,7 +1323,7 @@ function UnitManager.init(resourceManager)
 
 			-- ── 3. Aggro scan (idle + A-moving units only; Medics/frozen Foamers skip) ──
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
-				and data.unitType ~= "Core" and data.unitType ~= "Harvester"
+				and data.unitType ~= "Core"
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
@@ -1474,7 +1368,6 @@ function UnitManager.init(resourceManager)
 
 			-- ── 4. Combat ─────────────────────────────────────────────────────
 			if data.hp <= 0 then continue end
-			if data.unitType == "Harvester" then continue end  -- harvesters never attack
 
 			-- Foamer: foam attack when deployed; skip normal combat in all states
 			if isFoamer then

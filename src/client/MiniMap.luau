@@ -528,7 +528,7 @@ local function buildUI()
 	local border              = Instance.new("Frame")
 	border.Name               = "Border"
 	border.Size               = UDim2.fromOffset(MAP_SIZE + 4, MAP_SIZE + 4)
-	border.Position           = UDim2.new(1, -(MAP_SIZE + 4 + PADDING), 1, -(MAP_SIZE + 4 + PADDING))
+	border.Position           = UDim2.new(1, -(MAP_SIZE + 4 + PADDING), 0, PADDING)
 	border.BackgroundColor3   = C_BORDER
 	border.BorderSizePixel    = 0
 	border.Parent             = sg

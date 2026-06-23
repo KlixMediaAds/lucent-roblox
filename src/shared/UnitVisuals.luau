@@ -260,6 +260,8 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"    then return Vector3.new(9, 6, 9) end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
+	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
+	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -510,6 +512,181 @@ end
 	teamColor: accent colour for the ownership band.
 	withFX:    true to add a glow light (live building only).
 ]]
+-- Local-space (relative to the ground-centre CFrame) home poses of the Foundry's two
+-- rotating arms, at rotation angle 0. Each arm is a long strut whose inner foot sits low
+-- by the central hub and whose outer head rises up-and-out at ~45°. Shared by
+-- buildFoundryDecor (to build them) and the client FoundryRotor (to spin them around the
+-- centrepiece) so the live geometry and the animation never drift apart.
+function UnitVisuals.foundryArms(): { { cf: CFrame, size: Vector3 } }
+	local arms: { { cf: CFrame, size: Vector3 } } = {}
+	for _, theta in { 0, math.pi } do
+		local dir  = Vector3.new(math.cos(theta), 0, math.sin(theta))
+		local low  = dir * 2  + Vector3.new(0, 5,  0)   -- inner foot: near & low at the hub
+		local high = dir * 13 + Vector3.new(0, 16, 0)   -- outer head: up & out (~45°)
+		local mid  = (low + high) / 2
+		local len  = (high - low).Magnitude
+		table.insert(arms, {
+			cf   = CFrame.lookAt(mid, high),
+			size = Vector3.new(1.6, 1.6, len),
+		})
+	end
+	return arms
+end
+
+--[[
+	Builds the Foundry decoration set under `parent`: a wide armored deck, a central
+	molten crucible, a glowing hub, and TWO angled struts that the client FoundryRotor
+	slowly spins around the centrepiece. Shared by BuildingManager (live, withFX) and
+	buildBuildingPreview (thumbnail) so the two stay in sync.
+
+	groundCF:  CFrame at the ground-level centre of the 28×28 footprint (Y = 0 = ground).
+	teamColor: accent colour for the identity bands.
+	withFX:    true to add the molten glow light + looped ambient/harvest sounds (live only).
+]]
+function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local cGunmetal = Color3.fromRGB(35, 37, 41)
+	local cDarkSteel = Color3.fromRGB(52, 54, 58)
+	local cPlate    = Color3.fromRGB(70, 73, 78)
+	local cMolten   = Color3.fromRGB(255, 110, 30)
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+
+	-- Vertical cylinder (cylinder axis is X; roll 90° to stand it up)
+	local function vcyl(name: string, height: number, diameter: number, x: number, y: number, z: number, color: Color3, material: Enum.Material): Part
+		return dp(name, Vector3.new(height, diameter, diameter),
+			CFrame.new(x, y, z) * CFrame.Angles(0, 0, math.pi / 2),
+			color, material, Enum.PartType.Cylinder)
+	end
+
+	-- ── Deck ──────────────────────────────────────────────────────────────────
+	dp("Slab",     Vector3.new(28, 1.5, 28), CFrame.new(0, 0.75, 0), cGunmetal, Enum.Material.DiamondPlate)
+	dp("TeamTrim", Vector3.new(26, 0.4, 26), CFrame.new(0, 1.55, 0), teamColor.Color, Enum.Material.Neon)
+	dp("Deck",     Vector3.new(24, 1.2, 24), CFrame.new(0, 2.1, 0),  cPlate,    Enum.Material.DiamondPlate)
+
+	-- ── Central crucible (molten metal vat) ───────────────────────────────────
+	vcyl("Crucible",    10, 12.0, 0, 7.7,  0, cGunmetal,       Enum.Material.Metal)
+	vcyl("TeamBand",    0.5, 12.4, 0, 5.0, 0, teamColor.Color, Enum.Material.Neon)
+	vcyl("CrucibleRim", 0.6, 13.0, 0, 12.6, 0, cDarkSteel,     Enum.Material.Metal)
+	local molten = vcyl("Molten", 0.7, 11.0, 0, 12.9, 0, cMolten, Enum.Material.Neon)
+
+	-- ── Rotating hub + two angled struts ──────────────────────────────────────
+	-- The struts pivot around this hub (FoundryRotor drives "FoundryArm*" CFrames).
+	dp("FoundryHub", Vector3.new(3.2, 3.2, 3.2), CFrame.new(0, 13.2, 0), teamColor.Color, Enum.Material.Neon, Enum.PartType.Ball)
+	for i, a in UnitVisuals.foundryArms() do
+		dp("FoundryArm" .. i, a.size, a.cf, cDarkSteel, Enum.Material.Metal)
+	end
+
+	if withFX then
+		local glow      = Instance.new("PointLight")
+		glow.Color      = Color3.fromRGB(255, 130, 40)
+		glow.Brightness = 5
+		glow.Range      = 26
+		glow.Parent     = molten
+
+		-- Looped 3D ambient refinery hum.
+		local amb              = Instance.new("Sound")
+		amb.Name               = "_FoundryAmbient"
+		amb.SoundId            = "rbxassetid://9112839813"
+		amb.Looped             = true
+		amb.Volume             = 0.55
+		amb.RollOffMode        = Enum.RollOffMode.Linear
+		amb.RollOffMinDistance = 12
+		amb.RollOffMaxDistance = 150
+		amb.Playing            = true
+		amb.Parent             = molten
+
+		-- One-shot harvest sound, :Play()ed by the server each boosted income tick.
+		local harv              = Instance.new("Sound")
+		harv.Name               = "_FoundryHarvest"
+		harv.SoundId            = "rbxassetid://138571475125488"
+		harv.Volume             = 0.6
+		harv.RollOffMode        = Enum.RollOffMode.Linear
+		harv.RollOffMinDistance = 10
+		harv.RollOffMaxDistance = 120
+		harv.Parent             = molten
+	end
+end
+
+--[[
+	Builds the Engineering Post decoration set: an armored lab housing with a glowing
+	holographic data screen, a roof sensor dish on a mast, and team-coloured trim.
+	Shared by BuildingManager (live, withFX) and buildBuildingPreview (thumbnail).
+
+	groundCF:  CFrame at the ground-level centre of the footprint (Y = 0 = ground).
+	teamColor: accent colour for trim / screen.
+	withFX:    true to add a soft work light (live building only).
+]]
+function UnitVisuals.buildEngineeringPostDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local cGunmetal = Color3.fromRGB(38, 41, 47)
+	local cPlate    = Color3.fromRGB(70, 73, 78)
+	local cGlass    = teamColor.Color
+	local tc        = teamColor.Color
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+
+	-- Foundation + main housing
+	dp("Slab",    Vector3.new(12, 0.8, 12), CFrame.new(0, 0.4, 0),  cGunmetal, Enum.Material.DiamondPlate)
+	dp("Housing", Vector3.new(9, 5.5, 9),   CFrame.new(0, 3.25, 0), cPlate,    Enum.Material.Metal)
+	-- Sloped roof cap
+	dp("Roof",    Vector3.new(9.6, 0.6, 9.6), CFrame.new(0, 6.1, 0), cGunmetal, Enum.Material.Metal)
+	-- Team identity band around the housing
+	dp("Band",    Vector3.new(9.2, 0.4, 9.2), CFrame.new(0, 5.6, 0), tc, Enum.Material.Neon)
+
+	-- Glowing holographic data screen on the front face
+	dp("Screen",  Vector3.new(5.5, 3.2, 0.3), CFrame.new(0, 3.4, 4.6), cGlass, Enum.Material.Neon)
+	dp("ScreenFrame", Vector3.new(6.1, 3.8, 0.2), CFrame.new(0, 3.4, 4.5), cGunmetal, Enum.Material.Metal)
+
+	-- Corner support struts (dark)
+	for _, s in { {1, 1}, {1, -1}, {-1, 1}, {-1, -1} } do
+		dp("Strut", Vector3.new(0.7, 5.5, 0.7), CFrame.new(s[1] * 4.4, 3.25, s[2] * 4.4), cGunmetal, Enum.Material.Metal)
+	end
+
+	-- Roof sensor mast + dish (slightly tilted)
+	dp("Mast", Vector3.new(0.5, 3.0, 0.5), CFrame.new(0, 7.7, 0), cPlate, Enum.Material.Metal)
+	local dish = dp("Dish", Vector3.new(3.4, 0.5, 3.4),
+		CFrame.new(0, 9.1, 0) * CFrame.Angles(math.rad(28), 0, 0),
+		cPlate, Enum.Material.Metal, Enum.PartType.Cylinder)
+	dp("DishCore", Vector3.new(0.8, 0.8, 0.8), CFrame.new(0, 9.1, 0), tc, Enum.Material.Neon, Enum.PartType.Ball)
+	local _ = dish
+
+	if withFX then
+		local glow      = Instance.new("PointLight")
+		glow.Color      = tc
+		glow.Brightness = 1.6
+		glow.Range      = 16
+		local screen    = parent:FindFirstChild("Screen") :: BasePart?
+		glow.Parent     = screen or parent:FindFirstChild("Housing")
+	end
+end
+
 function UnitVisuals.buildLampreyNestDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
 	local GREEN  = Color3.fromRGB(120, 190, 60)
 	local EGGC   = Color3.fromRGB(120, 230, 90)
@@ -702,34 +879,15 @@ function UnitVisuals.buildBuildingPreview(
 		base.Material = Enum.Material.Metal
 		UnitVisuals.buildCommandCenterDecor(parent, CFrame.new(position), color, false)
 
-	elseif buildingType == "Mine" then
-		base.Size     = Vector3.new(10, 2, 10)
-		base.Position = position + Vector3.new(0, 1, 0)
-		base.Material = Enum.Material.Metal
-		base.BrickColor = BrickColor.new("Dark stone grey")
+	elseif buildingType == "Foundry" then
+		-- Foundry: team-coloured base stays as the invisible logic box; all decoration
+		-- comes from the shared builder so the thumbnail matches the live building.
+		base.Transparency = 1
+		UnitVisuals.buildFoundryDecor(parent, CFrame.new(position), color, false)
 
-		local shaft       = makePart(parent)
-		shaft.Name        = "Shaft"
-		shaft.Size        = Vector3.new(2, 9, 2)
-		shaft.Position    = position + Vector3.new(0, 6.5, 0)
-		shaft.BrickColor  = BrickColor.new("Dark stone grey")
-		shaft.Material    = Enum.Material.Metal
-
-		local ring        = makePart(parent)
-		ring.Name         = "EmitterRing"
-		ring.Shape        = Enum.PartType.Cylinder
-		ring.Size         = Vector3.new(0.4, 7, 7)
-		ring.CFrame       = CFrame.new(position + Vector3.new(0, 11.2, 0)) * CFrame.Angles(0, 0, math.pi / 2)
-		ring.BrickColor   = color
-		ring.Material     = Enum.Material.Neon
-
-		local emitter     = makePart(parent)
-		emitter.Name      = "Emitter"
-		emitter.Shape     = Enum.PartType.Ball
-		emitter.Size      = Vector3.new(2, 2, 2)
-		emitter.Position  = position + Vector3.new(0, 12.2, 0)
-		emitter.BrickColor = color
-		emitter.Material  = Enum.Material.Neon
+	elseif buildingType == "EngineeringPost" then
+		base.Transparency = 1
+		UnitVisuals.buildEngineeringPostDecor(parent, CFrame.new(position), color, false)
 
 	elseif buildingType == "Turret" then
 		-- Military tripod machine gun — matches BuildingManager's in-world geometry

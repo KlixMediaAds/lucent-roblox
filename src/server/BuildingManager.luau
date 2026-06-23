@@ -29,12 +29,19 @@ local turretTimers:      { [string]: number } = {}   -- attackTimer per turret i
 local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per deployer id
 local deployerUnitType:  { [string]: string } = {}   -- deployerId → unit type to spawn
 local deployerUpdateAcc: { [string]: number } = {}   -- accumulator for periodic client updates
+
+-- Engineering Post research state per building id.
+local engState:     { [string]: string } = {}   -- "idle" | "researching" | "ready"
+local engResearchEnd: { [string]: number } = {}  -- os.clock() when the active research finishes
+local engUpdateAcc:  { [string]: number } = {}   -- accumulator for periodic client progress pushes
+
 local onPlayerWonCb: ((number) -> ())?
 
 local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
 local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
 local monumentHeartbeatAccum = 0
 local ccIncomeAccum          = 0   -- accumulator for Command Center passive income
+local foundryIncomeAccum     = 0   -- accumulator for Foundry passive income
 
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
@@ -76,6 +83,8 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyWorm"    then return Vector3.new(8, 5, 8) end
 	if buildingType == "CreepyBlob"   then return Vector3.new(9, 6, 9) end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
+	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
+	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -564,6 +573,19 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		base.Transparency = 1
 		UnitVisuals.buildLampreyNestDecor(model, CFrame.new(position), player.TeamColor, true)
 
+	elseif buildingType == "Foundry" then
+		-- Foundry: the team-coloured base stays as the invisible collision/HP box; the
+		-- molten-crucible structure comes from the shared builder so the thumbnail
+		-- preview stays in sync. A floating "Boosted +X%" label is added below.
+		base.Transparency = 1
+		UnitVisuals.buildFoundryDecor(model, CFrame.new(position), player.TeamColor, true)
+
+	elseif buildingType == "EngineeringPost" then
+		-- Engineering Post: invisible logic box + shared lab decor; a hidden "research
+		-- ready" notifier billboard is added below and toggled when research completes.
+		base.Transparency = 1
+		UnitVisuals.buildEngineeringPostDecor(model, CFrame.new(position), player.TeamColor, true)
+
 	else
 		-- Barracks: open-top training facility.
 		-- base stays as the invisible 10×8×10 logic box (health-bar anchor, raycast target).
@@ -651,6 +673,49 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		if bb then bb.StudsOffset = Vector3.new(0, size.Y / 2 + 16, 0) end
 	end
 
+	if buildingType == "Foundry" then
+		-- Floating "Boosted +X%" readout, updated by the income tick. Server-created so
+		-- it replicates to every client; hidden until a deposit is actually boosting it.
+		local bl           = Instance.new("BillboardGui")
+		bl.Name            = "BoostLabel"
+		bl.Size            = UDim2.new(0, 75, 0, 15)
+		bl.StudsOffset     = Vector3.new(0, size.Y + 6, 0)
+		bl.AlwaysOnTop     = true
+		bl.Enabled         = false
+		bl.Parent          = base
+		local lbl                  = Instance.new("TextLabel")
+		lbl.Name                   = "Text"
+		lbl.Size                   = UDim2.new(1, 0, 1, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Font                   = Enum.Font.GothamBold
+		lbl.TextSize               = 9
+		lbl.TextColor3             = Color3.fromRGB(255, 190, 70)
+		lbl.TextStrokeTransparency = 0.3
+		lbl.Text                   = "Boosted +0%"
+		lbl.Parent                 = bl
+	end
+
+	if buildingType == "EngineeringPost" then
+		-- "Research ready" notifier, hidden until a research completes (toggled by the
+		-- research tick). Server-created so it replicates to every client.
+		local nb           = Instance.new("BillboardGui")
+		nb.Name            = "ResearchReady"
+		nb.Size            = UDim2.new(0, 46, 0, 46)
+		nb.StudsOffset     = Vector3.new(0, size.Y + 4, 0)
+		nb.AlwaysOnTop     = true
+		nb.Enabled         = false
+		nb.Parent          = base
+		local nlbl                  = Instance.new("TextLabel")
+		nlbl.Size                   = UDim2.new(1, 0, 1, 0)
+		nlbl.BackgroundTransparency = 1
+		nlbl.Font                   = Enum.Font.GothamBold
+		nlbl.TextScaled             = true
+		nlbl.TextColor3             = Color3.fromRGB(120, 255, 140)
+		nlbl.TextStrokeTransparency = 0.2
+		nlbl.Text                   = "💡"
+		nlbl.Parent                 = nb
+	end
+
 	local startHp = (buildTime > 0) and 1 or maxHp
 	buildingData[id] = {
 		hp             = startHp,
@@ -736,6 +801,19 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 				data.hp            = math.max(data.hp, maxHp)
 				data.isConstructing = false
 				applyHP(data)
+
+				-- Foundry: 3D "online" sound when it finishes building.
+				if buildingType == "Foundry" then
+					local snd              = Instance.new("Sound")
+					snd.SoundId            = "rbxassetid://87646813759701"
+					snd.Volume             = 0.7
+					snd.RollOffMode        = Enum.RollOffMode.Linear
+					snd.RollOffMinDistance = 12
+					snd.RollOffMaxDistance = 160
+					snd.Parent             = base
+					snd:Play()
+					game:GetService("Debris"):AddItem(snd, 6)
+				end
 
 				if buildingType == "CreepyWorm" then
 					-- Lunge skyward: rapid spiral rise then freeze briefly before eruption
@@ -1770,6 +1848,21 @@ function BuildingManager.hasCommandCenter(player: any): boolean
 	return playerHasCC[player.UserId] == true
 end
 
+-- Number of finished + in-progress buildings of `buildingType` owned by `player`.
+function BuildingManager.getBuildingCount(player: any, buildingType: string): number
+	return getPlayerBuildingCount(player, buildingType)
+end
+
+-- Count of buildings of `buildingType` owned by human players (UserId > 0). Lets the
+-- AI economy mirror how many Foundries the humans have running.
+function BuildingManager.getHumanBuildingCount(buildingType: string): number
+	local n = 0
+	for _, data in buildingData do
+		if data.buildingType == buildingType and data.owner and data.owner.UserId > 0 then n += 1 end
+	end
+	return n
+end
+
 function BuildingManager.resetAll()
 	for _, model in buildingsFolder:GetChildren() do model:Destroy() end
 	buildingData             = {}
@@ -1782,6 +1875,10 @@ function BuildingManager.resetAll()
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
 	ccIncomeAccum            = 0
+	foundryIncomeAccum       = 0
+	engState                 = {}
+	engResearchEnd           = {}
+	engUpdateAcc             = {}
 	blobCooldowns            = {}
 	ccMobileUnlocked         = {}
 	ccMobile                 = {}
@@ -1821,7 +1918,8 @@ end
 -- Fraction of a structure's build cost refunded when it is sold.
 local SELL_REFUND_FRAC = 0.5
 local SELL_COST: { [string]: number } = {
-	Mine        = Config.MINE_COST,
+	Foundry         = Config.FOUNDRY_COST,
+	EngineeringPost = Config.ENGINEERING_POST_COST,
 	Barracks    = Config.BUILDING_COST,
 	Deployer    = Config.DEPLOYER_COST,
 	Turret      = Config.TURRET_COST,
@@ -2493,6 +2591,9 @@ function BuildingManager.damage(id: string, amount: number)
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
 	nestEggs[id]          = nil
+	engState[id]          = nil
+	engResearchEnd[id]    = nil
+	engUpdateAcc[id]      = nil
 
 	local model      = buildingsFolder:FindFirstChild(id)
 	local destroyPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
@@ -2513,6 +2614,34 @@ function BuildingManager.damage(id: string, amount: number)
 		monumentWinTimer[id] = nil
 		RemoteHandler.get(Config.REMOTES.MonumentProgress):FireAllClients(owner.UserId, nil)
 	end
+end
+
+-- ── Engineering Post research helpers ───────────────────────────────────────────
+
+-- Toggle the "research ready" notifier billboard above a post.
+local function engNotifier(id: string, on: boolean)
+	local model = buildingsFolder and buildingsFolder:FindFirstChild(id)
+	local base  = model and model:FindFirstChild("Base") :: BasePart?
+	local nb    = base and base:FindFirstChild("ResearchReady") :: BillboardGui?
+	if nb then nb.Enabled = on end
+end
+
+-- Push a post's research state + the player's global discovery history to the owner.
+-- `discovery` (optional) is the freshly-collected line, used to play the typewriter popup.
+local function engSync(player: any, id: string, discovery: string?)
+	if not player or player.UserId <= 0 or not player.Parent then return end
+	local state     = engState[id] or "idle"
+	local remaining = 0
+	if state == "researching" then
+		remaining = math.max(0, (engResearchEnd[id] or 0) - os.clock())
+	end
+	local history = unitManagerRef and unitManagerRef.getUpgradeHistory(player) or {}
+	RemoteHandler.get(Config.REMOTES.EngineeringSync):FireClient(player, id, {
+		state     = state,
+		remaining = remaining,
+		history   = history,
+		discovery = discovery,
+	})
 end
 
 -- `canTarget` (optional): predicate `(targetPos) -> boolean` to gate eligibility
@@ -2544,6 +2673,9 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		deployerUpdateAcc[id] = nil
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
+		engState[id]          = nil
+		engResearchEnd[id]    = nil
+		engUpdateAcc[id]      = nil
 		local model = buildingsFolder:FindFirstChild(id)
 		if model then model:Destroy() end
 	end
@@ -2551,39 +2683,8 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 	monumentByOwner[player.UserId] = nil
 end
 
--- "Mine" is no longer a building — it's a deploy order. Charges MINE_COST (or consumes
--- a free stashed harvester), then sends a harvester unit out from the player's CC to
--- drain the deposit field at `point`. Income/recall/stash are handled by UnitManager.
-function BuildingManager.deployHarvester(player: any, point: Vector3): boolean
-	if not playerHasCC[player.UserId] then return false end
-	if not unitManagerRef then return false end
-
-	local fromStash = unitManagerRef.getHarvesterStash(player) > 0
-	if not fromStash then
-		if not resourceManagerRef or resourceManagerRef.get(player) < Config.MINE_COST then return false end
-	end
-
-	if not unitManagerRef.deployHarvester(player, point) then return false end
-
-	if fromStash then
-		unitManagerRef.takeHarvesterStash(player)
-	else
-		resourceManagerRef.spend(player, Config.MINE_COST)
-	end
-	-- Keep "Build N Mines"-style unlock conditions progressing on harvester deploys.
-	if researchManagerRef then
-		researchManagerRef.recordBuildingPlaced(player, "Mine")
-	end
-	return true
-end
-
 function BuildingManager.placeForPlayer(player: any, position: Vector3, buildingType: string): boolean
 	local snapped = snapGrid(position)
-
-	-- Mine = harvester deploy order (no structure, placeable anywhere reachable).
-	if buildingType == "Mine" then
-		return BuildingManager.deployHarvester(player, Vector3.new(snapped.X, 0, snapped.Z))
-	end
 
 	-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 	if isOccupied(snapped, buildingType) then return false end
@@ -2627,12 +2728,14 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if not inZone then return false end
 	end
 
-	-- Requirement check: Barracks needs a harvester; Turret/Deployer needs a Barracks; Relay needs research
-	-- AI bots (UserId < 0) bypass the harvester prerequisite — deposits may be outside their build zone.
+	-- Requirement check: Barracks needs a Foundry; Turret/Deployer needs a Barracks; Relay needs research
+	-- AI bots (UserId < 0) bypass the Foundry prerequisite — they build on their own pacing.
 	if buildingType == "Barracks" and player.UserId > 0
-		and (not unitManagerRef or unitManagerRef.getHarvesterTotal(player) < 1) then return false end
+		and getPlayerBuildingCount(player, "Foundry") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	if buildingType == "EngineeringPost" and player.UserId > 0
+		and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
 	-- LampreyNest normally needs a Barracks first; AI swarm bots (UserId < 0) skip
 	-- this so their entire army can come from nests + creepy structures.
 	if buildingType == "LampreyNest" and player.UserId > 0
@@ -2649,6 +2752,8 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		or buildingType == "Relay"      and Config.RELAY_COST
 		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 		or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
+		or buildingType == "Foundry"    and Config.FOUNDRY_COST
+		or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
 		or Config.BUILDING_COST
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
@@ -2873,6 +2978,85 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
+		-- ── Foundry passive income ─────────────────────────────────────────────
+		-- Each standing Foundry pays out FOUNDRY_BASE_INCOME, boosted +15% per active
+		-- mineral deposit within FOUNDRY_BOOST_RADIUS (uncapped). Boosting deposits are
+		-- drained a little each tick, and the floating "Boosted +X%" label is refreshed.
+		foundryIncomeAccum += dt
+		if foundryIncomeAccum >= Config.FOUNDRY_INCOME_INTERVAL then
+			foundryIncomeAccum -= Config.FOUNDRY_INCOME_INTERVAL
+			for _, data in buildingData do
+				if data.buildingType ~= "Foundry" or data.isConstructing then continue end
+				local pos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+
+				local depositCount = 0
+				if mineralManager then
+					depositCount = mineralManager.drainAllNear(
+						pos, Config.FOUNDRY_BOOST_RADIUS, Config.FOUNDRY_DRAIN_PER_DEPOSIT)
+				end
+
+				-- Income goes to every owner, including AI bots (UserId < 0) — unlike CC
+				-- passive income, the Foundry is the AI's economic engine just as it is the
+				-- player's, so the guard that excludes bots from CC income is not applied here.
+				local boostMult = 1 + depositCount * Config.FOUNDRY_BOOST_PER_DEPOSIT
+				local income    = math.floor(Config.FOUNDRY_BASE_INCOME * boostMult)
+				if resourceManagerRef and data.owner then
+					resourceManagerRef.add(data.owner, income)
+				end
+
+				local model = data.base.Parent :: Model?
+
+				-- Floating "+N" income popup over the owner's Foundry each tick.
+				if data.owner and data.owner.UserId > 0 and data.owner.Parent and model then
+					RemoteHandler.get(Config.REMOTES.FoundryIncome):FireClient(data.owner, model.Name, income)
+				end
+
+				-- Harvest sound on the crucible when deposits are actually being refined.
+				if depositCount > 0 and model then
+					local molten = model:FindFirstChild("Molten")
+					local harv   = molten and molten:FindFirstChild("_FoundryHarvest") :: Sound?
+					if harv then harv:Play() end
+				end
+
+				-- Refresh the floating boost readout (replicates to all clients).
+				local bl = data.base:FindFirstChild("BoostLabel") :: BillboardGui?
+				if bl then
+					if depositCount > 0 then
+						bl.Enabled = true
+						local lbl = bl:FindFirstChild("Text") :: TextLabel?
+						if lbl then
+							lbl.Text = string.format("Boosted +%d%%",
+								math.floor(depositCount * Config.FOUNDRY_BOOST_PER_DEPOSIT * 100 + 0.5))
+						end
+					else
+						bl.Enabled = false
+					end
+				end
+			end
+		end
+
+		-- ── Engineering Post research timers ───────────────────────────────────
+		for id, data in buildingData do
+			if data.buildingType ~= "EngineeringPost" then continue end
+			if engState[id] ~= "researching" then continue end
+			if not (data.owner and data.owner.UserId > 0) then continue end
+
+			if os.clock() >= (engResearchEnd[id] or 0) then
+				-- Research complete: light up the notifier, wait for the player to collect.
+				engState[id] = "ready"
+				engUpdateAcc[id] = nil
+				engNotifier(id, true)
+				engSync(data.owner, id)
+			else
+				-- Periodic progress push so an open panel's bar advances (~3×/sec).
+				engUpdateAcc[id] = (engUpdateAcc[id] or 0) + dt
+				if engUpdateAcc[id] >= 0.35 then
+					engUpdateAcc[id] = 0
+					engSync(data.owner, id)
+				end
+			end
+		end
+
 		-- ── Monument win timers ────────────────────────────────────────────────
 		monumentHeartbeatAccum += dt
 		local sendProgress = false
@@ -2994,14 +3178,6 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		-- so re-apply the client Y onto the grid-snapped XZ.
 		snapped = Vector3.new(snapped.X, pos.Y, snapped.Z)
 
-		-- Mine = harvester deploy order: no structure, placeable on any in-bounds spot
-		-- (deposits sit outside the build zone). Routed straight to the harvester path.
-		if buildingType == "Mine" then
-			if isOutOfMapBounds(snapped, "Mine") then return end
-			BuildingManager.deployHarvester(player, Vector3.new(snapped.X, 0, snapped.Z))
-			return
-		end
-
 		-- Reject if the footprint overlaps any existing building, terrain, or map boundary
 		if isOccupied(snapped, buildingType) then return end
 		if isTerrainBlocked(snapped, buildingType) then return end
@@ -3055,15 +3231,15 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		-- (Mine is intercepted above as a harvester deploy order)
-		local PLACEABLE = { CommandCenter=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true }
+		local PLACEABLE = { CommandCenter=true, Foundry=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Barracks needs a harvester; Turret/Deployer/Nest need a Barracks; Relay/Blob need research
+		-- Requirement check: Barracks needs a Foundry; Turret/Deployer/Nest/Post need a Barracks; Relay/Blob need research
 		if buildingType == "Barracks"
-			and (not unitManagerRef or unitManagerRef.getHarvesterTotal(player) < 1) then return end
+			and getPlayerBuildingCount(player, "Foundry") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
+		if buildingType == "EngineeringPost" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
@@ -3077,6 +3253,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			or buildingType == "Relay"     and Config.RELAY_COST
 			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
 			or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
+			or buildingType == "Foundry"   and Config.FOUNDRY_COST
+			or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
 			or Config.BUILDING_COST
 		if resourceManager.get(player) < cost then return end
 
@@ -3112,6 +3290,47 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 	end)
 
+	-- ── Engineering Post research remotes ───────────────────────────────────────
+	local function ownsPost(player: any, id: any): boolean
+		if type(id) ~= "string" then return false end
+		local data = buildingData[id]
+		return data ~= nil and data.buildingType == "EngineeringPost"
+			and data.owner == player and not data.isConstructing
+	end
+
+	-- Start a Light research (charges ENGINEERING_RESEARCH_COST). Heavy is client-side
+	-- "coming soon" and never reaches the server.
+	RemoteHandler.get(Config.REMOTES.EngineeringStart).OnServerEvent:Connect(function(player, id)
+		if not ownsPost(player, id) then return end
+		if (engState[id] or "idle") ~= "idle" then return end
+		if not resourceManagerRef or resourceManagerRef.get(player) < Config.ENGINEERING_RESEARCH_COST then return end
+		resourceManagerRef.spend(player, Config.ENGINEERING_RESEARCH_COST)
+		engState[id]       = "researching"
+		engResearchEnd[id] = os.clock() + Config.ENGINEERING_LIGHT_TIME
+		engUpdateAcc[id]   = 0
+		engSync(player, id)
+	end)
+
+	-- Collect a finished research: roll + apply a random upgrade, log it, reveal it.
+	RemoteHandler.get(Config.REMOTES.EngineeringCollect).OnServerEvent:Connect(function(player, id)
+		if not ownsPost(player, id) then return end
+		if engState[id] ~= "ready" then return end
+		engState[id]       = "idle"
+		engResearchEnd[id] = nil
+		engNotifier(id, false)
+		local discovery = nil
+		if unitManagerRef then
+			discovery = unitManagerRef.applyRandomUpgrade(player)
+		end
+		engSync(player, id, discovery)
+	end)
+
+	-- Panel opened: send the post's current state + the player's discovery history.
+	RemoteHandler.get(Config.REMOTES.EngineeringRequest).OnServerEvent:Connect(function(player, id)
+		if not ownsPost(player, id) then return end
+		engSync(player, id)
+	end)
+
 	-- ── SetDeployerType remote ─────────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.SetDeployerType).OnServerEvent:Connect(function(player, deployerId, unitType)
 		if type(deployerId) ~= "string" or type(unitType) ~= "string" then return end
@@ -3134,28 +3353,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.UpgradeTurret).OnServerEvent:Connect(
 		function(player, turretIds, upgradeType)
 			if type(upgradeType) ~= "string" then return end
-
-			local VALID = { Flamethrower = true, RocketLauncher = true, Artillery = true }
-			if not VALID[upgradeType] then return end
-
-			if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return end
-
 			local ids = type(turretIds) == "string" and {turretIds} or turretIds
 			if type(ids) ~= "table" then return end
-
 			for _, turretId in ids do
-				if type(turretId) ~= "string" then continue end
-				local data = buildingData[turretId]
-				if not data or data.buildingType ~= "Turret" then continue end
-				if data.owner ~= player then continue end
-				if data.isConstructing then continue end
-				if data.turretUpgrade then continue end
-
-				local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
-				if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then continue end
-
-				data.turretUpgrade = upgradeType
-				applyTurretUpgradeVisuals(turretId, upgradeType)
+				BuildingManager.upgradeTurretForPlayer(player, turretId, upgradeType)
 			end
 		end
 	)
@@ -3292,6 +3493,32 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 	)
+end
+
+-- ── Turret upgrade (server-callable) ───────────────────────────────────────────
+-- Applies one of the TurretUpgrades branches to a single owned turret. Shared by
+-- the UpgradeTurret remote (human players) and the AIManager (bots, which can't
+-- fire client remotes). Returns true if the upgrade was applied.
+function BuildingManager.upgradeTurretForPlayer(player: any, turretId: string, upgradeType: string): boolean
+	if type(turretId) ~= "string" or type(upgradeType) ~= "string" then return false end
+
+	local VALID = { Flamethrower = true, RocketLauncher = true, Artillery = true }
+	if not VALID[upgradeType] then return false end
+
+	if not researchManagerRef or not researchManagerRef.hasResearch(player, "TurretUpgrades") then return false end
+
+	local data = buildingData[turretId]
+	if not data or data.buildingType ~= "Turret" then return false end
+	if data.owner ~= player then return false end
+	if data.isConstructing then return false end
+	if data.turretUpgrade then return false end
+
+	local cost = (Config.TURRET_UPGRADE_COST :: any)[upgradeType] or 999
+	if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return false end
+
+	data.turretUpgrade = upgradeType
+	applyTurretUpgradeVisuals(turretId, upgradeType)
+	return true
 end
 
 -- ── Monument upgrade ──────────────────────────────────────────────────────────
