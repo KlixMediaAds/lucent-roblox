@@ -6,7 +6,21 @@ Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 -- Economy
 Config.STARTING_RESOURCES   = 400
 Config.BUILDING_COST         = 50   -- Barracks cost
-Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure)
+Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure; scales — see below)
+
+-- Buildings whose cost grows exponentially with how many the player already owns.
+-- The Nth (0-indexed by current active count) costs baseCost * growth^count, so the
+-- price climbs as you stack them and drops right back down if one is lost/sold.
+Config.EXPONENTIAL_BUILDING_COST = {
+	Foundry = 1.6,
+}
+
+-- Scaled cost for `buildingType` given how many the player currently owns.
+function Config.scaledBuildingCost(baseCost: number, buildingType: string, currentCount: number): number
+	local growth = Config.EXPONENTIAL_BUILDING_COST[buildingType]
+	if not growth then return baseCost end
+	return math.floor(baseCost * growth ^ math.max(0, currentCount) + 0.5)
+end
 Config.DEPLOYER_COST         = 100  -- Deployer building cost
 Config.DEPLOYER_MAX_UNITS    = 4    -- max simultaneous auto-deployed soldiers per Deployer
 Config.DEPLOYER_SPAWN_INTERVAL = 15 -- seconds between auto-spawn checks
@@ -21,13 +35,10 @@ Config.UNIT_TYPES = {
 	Foamer        = { cost = 80,  size = Vector3.new(6, 5, 7)  },
 	Lamprey       = { cost = 110, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
 	Hagfish       = { cost = 120, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
+	Broodmother   = { cost = 200, size = Vector3.new(13.2, 24, 13.2) }, -- towering anemone-bodied tripod (visuals drawn client-side; 1.2× the base 11×20×11)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
-	Core          = { cost = 0,   size = Vector3.new(5, 3, 6) },  -- mobile deploy seed: drops in, then transforms into the Command Center
 }
 
--- Command Center deploy: the Core (above) lands from a drop pod, the player drives
--- it to a chosen spot, then presses DEPLOY to transform it into the CC.
-Config.CORE_DEPLOY_TIME       = 3     -- seconds the Core takes to transform into the Command Center
 Config.CC_PASSIVE_INCOME      = 10    -- resources granted per tick to every standing Command Center
 Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-income ticks
 
@@ -42,8 +53,8 @@ Config.FOUNDRY_BOOST_PER_DEPOSIT = 0.15  -- +15% income per active nearby deposi
 Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting deposit per income tick
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, CreepySoldier = 24, Core = 42 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  CreepySoldier = 14, Core = 20 }
+Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -136,6 +147,24 @@ Config.HAGFISH_EGG_COST        = 120  -- cost per Hagfish egg (matches the Hagfi
 Config.HAGFISH_TENTACLES       = 6    -- tentacles erupting per attack (strikes split across foes)
 Config.HAGFISH_STRIKE_WINDOW   = 2.5  -- seconds across which the six tentacles strike, deviated
 Config.HAGFISH_ROOT_TIME       = 3.3  -- seconds the hagfish is head-down + rooted while attacking (slap + window + rear-up)
+
+-- Broodmother — the nest's heavy third unit. A towering creature that walks on
+-- three tentacle-legs with a swaying sea-anemone mass for a head, ringed in
+-- lamprey-like fangs. Instead of a normal attack it spits a swarm of glowing
+-- orbs that orbit it and deal weak-but-constant stacking aura damage to any enemy
+-- within range. On death it collapses, splits open along its ribcage and births
+-- three Lampreys from the wreckage. Hatches from the shared Lamprey Nest egg
+-- pipeline (its own egg cost, shared concurrent egg cap).
+Config.BROODMOTHER_EGG_COST       = 200  -- cost per egg / Broodmother (matches the unit cost)
+Config.BROODMOTHER_CHARGE_TIME    = 4.0  -- seconds the orb swarm takes to form (animation in)
+Config.BROODMOTHER_ACTIVE_TIME    = 5.0  -- seconds the swarm orbits + deals aura damage
+Config.BROODMOTHER_RECHARGE_TIME  = 3.0  -- seconds before the swarm can be summoned again
+Config.BROODMOTHER_AURA_TICK      = 0.5  -- seconds between aura damage ticks (uses attack damage per tick)
+Config.BROODMOTHER_ORB_COUNT      = 14   -- glowing orbs in the swarm (client visual)
+Config.BROODMOTHER_DEATH_DURATION = 10.2 -- total death sequence before final removal + brood hatch:
+                                         -- ~1s impact + ribcage/egg burst, 5s gored on the ground, ~1.2s sink, then 3s to hatch
+Config.BROODMOTHER_DEATH_EGGS     = 3    -- Lampreys born from the wreckage on death
+Config.BROODMOTHER_SHAKE_RADIUS   = 90   -- studs; nearby player cameras shake on a Broodmother's death
 
 -- Lamprey growth: each tree a Lamprey fells makes it 15% larger and tougher
 -- (size + max HP scale together), compounding up to a hard cap so a forest-fed
@@ -293,14 +322,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, CreepySoldier = 0, Core = 0 }
+Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, CreepySoldier = 55,  Core = 250 }
+Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55 }
 Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  CreepySoldier = 14,  Core = 0 }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  CreepySoldier = 13,  Core = 0 }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, CreepySoldier = 0.7, Core = 1.0 }
+Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14 }
+Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13 }
+Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -376,12 +405,13 @@ Config.REMOTES = {
 	DeployerUpdate          = "DeployerUpdate",
 	LampreyEgg              = "LampreyEgg",
 	HagfishStrike           = "HagfishStrike",
+	BroodmotherDeath        = "BroodmotherDeath",
 	UpgradeNest             = "UpgradeNest",
 	SetNestRally            = "SetNestRally",
 	ForfeitMatch            = "ForfeitMatch",
 	SellBuilding            = "SellBuilding",
-	CorePodLaunched         = "CorePodLaunched",
-	DeployCore              = "DeployCore",
+	ShowDefeatScreen        = "ShowDefeatScreen",
+	PlayAgain               = "PlayAgain",
 }
 
 return Config

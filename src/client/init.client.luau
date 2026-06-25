@@ -22,6 +22,7 @@ local CreepyLegs     = require(script:WaitForChild("CreepyLegs"))
 local WalkerLegs     = require(script:WaitForChild("WalkerLegs"))
 local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local HagfishBody    = require(script:WaitForChild("HagfishBody"))
+local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
@@ -74,6 +75,8 @@ local currentResources = 0
 
 -- The local player's own CC building id (needed to open WorkshopPanel via the HUD button)
 local ownCCId: string? = nil
+local placedFirstBarracks = false   -- upgrades button stays hidden until the first Barracks
+local returnBtnRevealed   = false   -- minimap "return to CC" button shown after camera first leaves the CC
 
 -- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
 local winOverlay: Frame?
@@ -129,8 +132,6 @@ local ccIsMobile = false
 
 -- Core deploy flow: the local player's Core unit id (pre-CC), and a guard so the
 -- DEPLOY button can only be pressed once per Core.
-local coreUnitId:    string? = nil
-local deployRequested        = false
 
 -- Transparent CC+legs preview shown at cursor while CC is in move mode
 local ccMoveGhost:  Model?   = nil
@@ -218,10 +219,14 @@ CreepyLegs.init(workspace.CurrentCamera)
 WalkerLegs.init(workspace.CurrentCamera)
 LampreyBody.init(workspace.CurrentCamera)
 HagfishBody.init(workspace.CurrentCamera)
+BroodmotherBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
+BuildingPlacer.setNotEnoughResourcesFn(function()
+	HUD.showNotification("⚠  Not enough resources", Color3.fromRGB(230, 60, 60))
+end)
 
 local dragFrame, ccBtn = HUD.create()
 if isLane then HUD.setLaneMode(true) end
@@ -281,6 +286,34 @@ MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 ScoutManager.init(Network, CameraModule, FogManager, MiniMap)
+
+-- ── Return-to-Command-Center button ───────────────────────────────────────────
+-- The minimap button flies the camera back to our CC (default rotation + zoom).
+-- It only appears after the camera first loses sight of the CC.
+local function ownCCBase(): BasePart?
+	if not ownCCId then return nil end
+	local bf = workspace:FindFirstChild("Buildings") :: Folder?
+	local model = bf and bf:FindFirstChild(ownCCId)
+	return model and model:FindFirstChild("Base") :: BasePart? or nil
+end
+
+MiniMap.onReturnClicked(function()
+	local base = ownCCBase()
+	if base then CameraModule.returnToBase(base.Position) end
+end)
+
+RunService.RenderStepped:Connect(function()
+	if returnBtnRevealed then return end
+	local base = ownCCBase()
+	if not base then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local _sp, onScreen = cam:WorldToViewportPoint(base.Position)
+	if not onScreen then
+		returnBtnRevealed = true
+		MiniMap.setReturnVisible(true)
+	end
+end)
 
 -- ── /xray chat command ────────────────────────────────────────────────────────
 do
@@ -452,10 +485,9 @@ local function enterCCMode()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ccIsMobile          = false
-	coreUnitId          = nil
-	deployRequested     = false
+	returnBtnRevealed   = false
+	MiniMap.setReturnVisible(false)
 	CameraModule.stopFollow()
-	HUD.setDeployVisible(false)
 	ownedBuildingCounts = {}
 	researchedTechs     = {}
 	localKillCount      = 0
@@ -475,6 +507,7 @@ local function enterCCMode()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
+	placedFirstBarracks = false
 	if winOverlay then winOverlay.Visible = false end
 	monumentBuildingId = {}
 	monumentBillboards = {}
@@ -484,78 +517,46 @@ Network.onNeedCommandCenter(function()
 	enterCCMode()
 end)
 
--- ── Core drop pod → Deploy flow ───────────────────────────────────────────────
--- A drop pod streaks in from the sky and deploys a mobile "Core" unit; the player
--- drives it to a chosen spot, then presses DEPLOY to transform it into the CC.
+-- Shared handling for "our Command Center is up": reveals the build/research tray
+-- and focuses the camera. Called from the BuildingPlaced event AND from a polling
+-- reconcile (below), since the event can fire during the lobby transition before
+-- this handler is connected and the queued delivery isn't guaranteed.
+local function onOwnCCPlaced(id: string, pos: Vector3)
+	if ownCCId == id then return end
+	ownCCId = id
+	updateIncomeReadout()
+	-- CC is up: reveal the build + research tray.
+	HUD.setCommandCenterMode(false)
+	Tutorial.notify("cc_placed")
+	CameraModule.setFocus(pos)
+	FogManager.forceRefresh()
+	-- Upgrades button stays hidden until the player places their first Barracks.
+end
 
--- DEPLOY button: ask the server to transform the Core into the Command Center.
-HUD.wireDeploy(function()
-	if deployRequested or not coreUnitId then return end
-	deployRequested = true
-	HUD.setDeployVisible(false)
-	CameraModule.stopFollow()
-	Network.deployCore()
-end)
-
--- Follow the incoming pod with the camera as it descends.
-Network.onCorePodLaunched(function(pod: Model, _targetPos: Vector3)
-	deployRequested = false
-	coreUnitId      = nil
-	HUD.setDeployVisible(false)
-	HUD.setCommandCenterMode(true)   -- keep the build/research tray hidden
-	task.spawn(function()
-		local anchor = pod.PrimaryPart
-			or pod:FindFirstChild("Anchor") :: BasePart?
-			or pod:WaitForChild("Anchor", 3) :: BasePart?
-		if anchor and anchor:IsA("BasePart") then
-			CameraModule.followPart(anchor)
+-- Recover a missed CommandCenter placement: scan the replicated workspace for our
+-- own CC and run the same setup. Retries briefly while the model replicates.
+task.spawn(function()
+	local bf = workspace:WaitForChild("Buildings", 20) :: Folder?
+	if not bf then return end
+	local myStr   = tostring(localUserId)
+	local deadline = os.clock() + 15
+	while os.clock() < deadline and not ownCCId do
+		for _, model in bf:GetChildren() do
+			local ov  = model:FindFirstChild("OwnerId")      :: StringValue?
+			local btv = model:FindFirstChild("BuildingType") :: StringValue?
+			if ov and btv and btv.Value == "CommandCenter" and ov.Value == myStr then
+				local base = model:FindFirstChild("Base") :: BasePart?
+				onOwnCCPlaced(model.Name, base and base.Position or Vector3.zero)
+				break
+			end
 		end
-	end)
-	HUD.showNotification("⬇  Core drop pod incoming…", Color3.fromRGB(0, 210, 220))
-end)
-
--- The Core has landed and deployed: hand control to the player.
-Network.onUnitSpawned(function(unitId: string, ownerId: number, pos: Vector3)
-	if ownerId ~= localUserId then return end
-	task.spawn(function()
-		local unitsFolder = workspace:WaitForChild("Units", 10) :: Folder?
-		if not unitsFolder then return end
-		local part = unitsFolder:WaitForChild(unitId, 10) :: BasePart?
-		if not part then return end
-		local tv = part:FindFirstChild("UnitType") :: StringValue?
-		if not (tv and tv.Value == "Core") then return end
-
-		coreUnitId      = unitId
-		deployRequested = false
-		CameraModule.stopFollow()
-		CameraModule.setFocus(part.Position)
-		HUD.setCommandCenterMode(true)   -- ensure the build tray stays hidden
-		HUD.setDeployVisible(true)
-		-- Auto-select the Core so the player can drive it immediately.
-		task.wait(0.15)
-		if coreUnitId == unitId then
-			UnitController.selectUnit(unitId)
-		end
-		HUD.showNotification("✦  Core deployed — drive it, then DEPLOY", Color3.fromRGB(120, 224, 255))
-	end)
+		if not ownCCId then task.wait(0.25) end
+	end
 end)
 
 Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, buildingType: string)
 	if buildingType == "CommandCenter" and ownerId == localUserId then
-		ownCCId = id
-		updateIncomeReadout()
-		-- Core has finished deploying into the CC: drop the deploy UI / camera lock
-		-- and reveal the build + research tray.
-		coreUnitId      = nil
-		deployRequested = false
-		CameraModule.stopFollow()
-		HUD.setDeployVisible(false)
-		HUD.setCommandCenterMode(false)
-		Tutorial.notify("cc_placed")
-		CameraModule.setFocus(pos)
-		FogManager.forceRefresh()
-		-- Research is now manual, so expose the upgrades button immediately.
-		HUD.setUpgradesVisible(true)
+		onOwnCCPlaced(id, pos)
 	end
 
 	if buildingType == "Monument" then
@@ -568,7 +569,14 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 		refreshRequirements()
 		updateIncomeReadout()
 		if buildingType == "Foundry"  then Tutorial.notify("mine_placed")     end
-		if buildingType == "Barracks" then Tutorial.notify("barracks_placed") end
+		if buildingType == "Barracks" then
+			Tutorial.notify("barracks_placed")
+			-- First Barracks unlocks the upgrades menu.
+			if not placedFirstBarracks then
+				placedFirstBarracks = true
+				HUD.setUpgradesVisible(true)
+			end
+		end
 
 		-- Decrement when the building is destroyed.
 		task.spawn(function()
@@ -1121,6 +1129,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			LampreyBody.attach(unitId, part)
 		elseif tv and tv.Value == "Hagfish" then
 			HagfishBody.attach(unitId, part)
+		elseif tv and tv.Value == "Broodmother" then
+			BroodmotherBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -1529,6 +1539,28 @@ do
 	returnLbl.ZIndex            = 102
 	returnLbl.Parent            = card
 
+	-- PLAY AGAIN button — shown only on the mid-match defeat screen (hidden for the
+	-- real endgame, which auto-returns to lobby). Respawns the player's base.
+	local playAgainBtn          = Instance.new("TextButton")
+	playAgainBtn.Name           = "PlayAgainBtn"
+	playAgainBtn.Size           = UDim2.new(1, -60, 0, 44)
+	playAgainBtn.Position       = UDim2.new(0, 30, 0, 462)
+	playAgainBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 70)
+	playAgainBtn.BorderSizePixel  = 0
+	playAgainBtn.AutoButtonColor  = true
+	playAgainBtn.Font           = Enum.Font.GothamBold
+	playAgainBtn.TextSize       = 18
+	playAgainBtn.TextColor3     = Color3.fromRGB(235, 255, 240)
+	playAgainBtn.Text           = "PLAY AGAIN"
+	playAgainBtn.ZIndex         = 103
+	playAgainBtn.Visible        = false
+	playAgainBtn.Parent         = card
+	local _pac = Instance.new("UICorner"); _pac.CornerRadius = UDim.new(0, 8); _pac.Parent = playAgainBtn
+	playAgainBtn.MouseButton1Click:Connect(function()
+		if winOverlay then winOverlay.Visible = false end
+		Network.playAgain()
+	end)
+
 	-- Tick sound played during stat counter animations
 	local tickSnd               = Instance.new("Sound")
 	tickSnd.Name                = "TickSound"
@@ -1576,7 +1608,10 @@ Network.onAttackAlert(function(worldPos: Vector3, category: string)
 	end
 end)
 
-Network.onShowEndScreen(function(winnerUserId: number, reason: string, statsTable: any, duration: number)
+-- Renders the end-of-match card. isDefeatRespawn = true is the mid-match defeat
+-- screen (shows PLAY AGAIN, no lobby countdown); false is the real endgame
+-- (auto-returns to lobby via the countdown).
+local function renderEndCard(winnerUserId: number, reason: string, statsTable: any, duration: number, isDefeatRespawn: boolean)
 	if not winOverlay then return end
 	local card = winOverlay:FindFirstChild("Card")
 	if not card then return end
@@ -1589,6 +1624,7 @@ Network.onShowEndScreen(function(winnerUserId: number, reason: string, statsTabl
 	local topBar  = card:FindFirstChild("TopBar")  :: Frame?
 	local durLbl  = card:FindFirstChild("DurationLabel") :: TextLabel?
 	local retLbl  = card:FindFirstChild("ReturnLabel")   :: TextLabel?
+	local playAgainBtn = card:FindFirstChild("PlayAgainBtn") :: TextButton?
 
 	if heading then
 		heading.Text       = isWinner and "VICTORY!" or "DEFEAT"
@@ -1780,15 +1816,32 @@ Network.onShowEndScreen(function(winnerUserId: number, reason: string, statsTabl
 
 	winOverlay.Visible = true
 
-	-- Countdown
-	task.spawn(function()
-		for i = 10, 1, -1 do
-			if not winOverlay or not winOverlay.Visible then return end
-			if retLbl then retLbl.Text = "Returning to lobby in " .. i .. "s..." end
-			task.wait(1)
-		end
-		if retLbl then retLbl.Text = "Returning to lobby..." end
-	end)
+	if isDefeatRespawn then
+		-- Mid-match defeat: offer PLAY AGAIN, no lobby countdown.
+		if playAgainBtn then playAgainBtn.Visible = true end
+		if retLbl       then retLbl.Visible       = false end
+	else
+		-- Real endgame: hide PLAY AGAIN, run the return-to-lobby countdown.
+		if playAgainBtn then playAgainBtn.Visible = false end
+		if retLbl       then retLbl.Visible       = true  end
+		task.spawn(function()
+			for i = 10, 1, -1 do
+				if not winOverlay or not winOverlay.Visible then return end
+				if retLbl then retLbl.Text = "Returning to lobby in " .. i .. "s..." end
+				task.wait(1)
+			end
+			if retLbl then retLbl.Text = "Returning to lobby..." end
+		end)
+	end
+end
+
+Network.onShowEndScreen(function(winnerUserId: number, reason: string, statsTable: any, duration: number)
+	renderEndCard(winnerUserId, reason, statsTable, duration, false)
+end)
+
+Network.onShowDefeatScreen(function(statsTable: any, duration: number)
+	-- winnerUserId = -1 → local player is never the winner → renders as DEFEAT.
+	renderEndCard(-1, "elimination", statsTable, duration, true)
 end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────
@@ -3147,6 +3200,17 @@ Network.onHagfishStrike(function(hagPos: Vector3, strikes: { Vector3 })
 	HagfishBody.spawnTentacles(strikes)
 end)
 
+-- Broodmother death: the nearest one collapses, splits along its ribcage and drops
+-- its egg sacs (drawn by the body module); a nearby camera gets a short shake.
+Network.onBroodmotherDeath(function(deathPos: Vector3)
+	BroodmotherBody.triggerDeathNear(deathPos)
+	local camFocus = CameraModule.getFocus()
+	local d = (Vector3.new(deathPos.X, 0, deathPos.Z) - camFocus).Magnitude
+	if d < Config.BROODMOTHER_SHAKE_RADIUS then
+		CameraModule.shake(1.7 * (1 - d / Config.BROODMOTHER_SHAKE_RADIUS))
+	end
+end)
+
 Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Elite" then
 		spawnEliteProjectile(fromPos, toPos)
@@ -3180,6 +3244,12 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Lamprey" then
 		LampreyBody.triggerAttackNear(fromPos)   -- mouth snaps open + head lunges
 		spawnLampreyBile(fromPos, toPos)
+		return
+	end
+
+	if unitType == "Broodmother" then
+		-- Tendrils glow + the orbiting glowing-orb swarm forms (all VFX on the body).
+		BroodmotherBody.triggerAttackNear(fromPos)
 		return
 	end
 

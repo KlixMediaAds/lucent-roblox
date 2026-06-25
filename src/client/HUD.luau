@@ -74,6 +74,13 @@ local selLabel:  TextLabel?
 local currentResources = 0
 local currentIncome    = 0
 local buildMenuOpen    = false
+
+-- Build-menu hint: if the player hasn't opened the build menu within 10 s of the
+-- tray appearing, a bouncing arrow points at the BUILD node.
+local buildMenuEverOpened = false
+local buildHintScheduled  = false
+local buildHint:      TextLabel? = nil
+local buildHintTween: Tween?     = nil
 local currentActivePlacing: string? = nil
 local isLaneModeActive = false
 local lanePanel:     Frame?
@@ -103,6 +110,14 @@ local DISPLAY_NAME: { [string]: string } = {
 
 local function dispName(btype: string): string
 	return (DISPLAY_NAME[btype] or btype):upper()
+end
+
+-- Current cost of the next `btype`, applying exponential scaling from how many the
+-- player already owns (mirrors the server's BuildingManager.costFor).
+local function costOf(btype: string): number
+	local info = BUILDING_INFO[btype]
+	local base = info and info.cost or 0
+	return Config.scaledBuildingCost(base, btype, playerCounts[btype] or 0)
 end
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
@@ -147,9 +162,6 @@ local cancelBtnRef:  TextButton?
 local ccBtnInternal: TextButton?
 local ccGlowRef:     UIStroke?
 local ccScaleRef:    UIScale?
-local deployBtnRef:    TextButton?
-local deployGlowRef:   UIStroke?
-local deployPulseOn  = false
 local upgradesBtnRef:     TextButton?
 local upgradesStroke:     UIStroke?
 local upgradesBtnWrapper: Frame?
@@ -229,6 +241,29 @@ local function isUnlocked(btype: string): boolean
 	return true
 end
 
+-- A build node is shown only once it is fully available — both its research gate
+-- (if any) and its building prerequisites are met. Locked structures are hidden
+-- entirely rather than shown greyed-out.
+local function isNodeVisible(btype: string): boolean
+	return isResearchVisible(btype) and isUnlocked(btype)
+end
+
+-- Re-packs the visible build nodes into consecutive slots along the bottom bar so
+-- there are no gaps where hidden (locked) nodes would have been. Updates each
+-- visible node's finalPos in place; callers handle the actual show/animate.
+local function relayoutNodes()
+	local slot = 0
+	for _, n in childNodes do
+		if isNodeVisible(n.btype) then
+			slot += 1
+			n.finalPos = UDim2.new(
+				n.startPos.X.Scale, n.startPos.X.Offset + slot * CHILD_SPACING,
+				n.startPos.Y.Scale, n.startPos.Y.Offset
+			)
+		end
+	end
+end
+
 -- ── Resource display ──────────────────────────────────────────────────────────
 local function refreshResDisplay()
 	if resLabel then resLabel.Text = tostring(currentResources) end
@@ -253,27 +288,18 @@ local function refreshLaneButtons()
 	end
 end
 
--- ── Build node visual state ───────────────────────────────────────────────────
+-- ── Expand / collapse animations ──────────────────────────────────────────────
+local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+-- ── Build node visual state (colour + label only; visibility handled by
+-- updateAllNodes). Only ever called for currently-visible nodes. ───────────────
 local function applyNodeState(node: ChildNode)
-	-- Hide completely if gated behind unfinished research
-	if not isResearchVisible(node.btype) then
-		node.wrapper.Visible = false
-		return
-	end
-
-	-- If the menu is open and this node just became research-visible, show it
-	if buildMenuOpen and not node.wrapper.Visible then
-		node.wrapper.Visible = true
-		node.wrapper.Position = node.finalPos
-	end
-
-	local locked  = not isUnlocked(node.btype)
 	local placing = currentActivePlacing == node.btype
-	local info    = BUILDING_INFO[node.btype]
-	local cost    = info and info.cost or 0
+	local cost    = costOf(node.btype)
 
-	-- New design: the node body stays dark glass; the building's colour lives in the
-	-- stroke + icon + label so the tray reads as a cohesive set of framed tiles.
+	-- The node body stays dark glass; the building's colour lives in the stroke +
+	-- icon + label so the tray reads as a cohesive set of framed tiles.
 	if placing then
 		node.btn.BackgroundColor3 = Color3.fromRGB(14, 26, 34)
 		node.stroke.Color         = C.ACCENT
@@ -281,21 +307,6 @@ local function applyNodeState(node: ChildNode)
 		node.btn.TextColor3       = C.ACCENT
 		node.label.Text           = dispName(node.btype) .. "\nPLACING…"
 		node.label.TextColor3     = C.ACCENT
-	elseif locked then
-		local lockReason = "LOCKED"
-		if info then
-			for req in info.requires do
-				if (playerCounts[req] or 0) < (info.requires[req] or 1) then
-					lockReason = "Needs " .. req; break
-				end
-			end
-		end
-		node.btn.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
-		node.stroke.Color         = C.BORDER_LO
-		node.stroke.Thickness     = 1.5
-		node.btn.TextColor3       = C.DIM
-		node.label.Text           = dispName(node.btype) .. "\n" .. lockReason
-		node.label.TextColor3     = C.DIM
 	else
 		local accent = ({ Foundry = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
 			or node.color
@@ -308,27 +319,52 @@ local function applyNodeState(node: ChildNode)
 	end
 end
 
+-- Re-packs the tray and shows/hides each node by availability. While the menu is
+-- open, visible nodes slide to their packed slot so prerequisites unlocking
+-- mid-game (e.g. placing a Foundry reveals Barracks) animate in with no gaps.
 local function updateAllNodes()
-	for _, n in childNodes do applyNodeState(n) end
+	relayoutNodes()
+	for _, n in childNodes do
+		local vis = isNodeVisible(n.btype)
+		if buildMenuOpen and vis then
+			if not n.wrapper.Visible then
+				-- Newly available: pop in from the root then slide to its slot.
+				n.wrapper.Visible            = true
+				n.wrapper.Position           = n.startPos
+				n.btn.BackgroundTransparency = 1
+			end
+			TweenService:Create(n.wrapper, EXPAND_TI, { Position = n.finalPos }):Play()
+			TweenService:Create(n.btn,     EXPAND_TI, { BackgroundTransparency = 0.12 }):Play()
+			applyNodeState(n)
+		else
+			n.wrapper.Visible = false
+		end
+	end
 end
 
--- ── Expand / collapse animations ──────────────────────────────────────────────
-local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- ── Build-menu hint arrow ───────────────────────────────────────────────────
+local function hideBuildHint()
+	if buildHintTween then buildHintTween:Cancel(); buildHintTween = nil end
+	if buildHint then buildHint.Visible = false end
+end
+
+local function showBuildHint()
+	if not buildHint or buildMenuEverOpened or buildMenuOpen then return end
+	buildHint.Visible  = true
+	buildHint.Position = UDim2.new(0, 88, 1, -186)
+	buildHintTween = TweenService:Create(buildHint,
+		TweenInfo.new(0.55, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Position = UDim2.new(0, 88, 1, -170) })
+	buildHintTween:Play()
+end
 
 local function expandMenu()
 	buildMenuOpen = true
+	buildMenuEverOpened = true
+	hideBuildHint()
 	if rootBtn    then rootBtn.Text = "X" end
 	if rootStroke then TweenService:Create(rootStroke, TweenInfo.new(0.12), { Thickness = 4 }):Play() end
-
-	for _, n in childNodes do
-		if not isResearchVisible(n.btype) then continue end
-		n.wrapper.Visible              = true
-		n.wrapper.Position             = n.startPos
-		n.btn.BackgroundTransparency   = 1
-		TweenService:Create(n.wrapper, EXPAND_TI, { Position = n.finalPos }):Play()
-		TweenService:Create(n.btn,     EXPAND_TI, { BackgroundTransparency = 0.12 }):Play()
-	end
+	updateAllNodes()
 end
 
 local function collapseMenu()
@@ -913,6 +949,27 @@ function HUD.create(): (Frame, TextButton)
 	ov.Parent                           = sg
 	buildOverlay = ov
 
+	-- Build-menu hint arrow — points at the BUILD node after 10 s of inactivity
+	do
+		local hint                  = Instance.new("TextLabel")
+		hint.Name                   = "BuildHint"
+		hint.AnchorPoint            = Vector2.new(0.5, 1)
+		hint.Size                   = UDim2.fromOffset(150, 44)
+		hint.Position               = UDim2.new(0, 88, 1, -186)
+		hint.BackgroundTransparency = 1
+		hint.Text                   = "BUILD HERE\n⬇"
+		hint.Font                   = Enum.Font.GothamBold
+		hint.TextSize               = 18
+		hint.TextColor3             = PM_GOLD
+		hint.TextStrokeColor3       = Color3.new(0, 0, 0)
+		hint.TextStrokeTransparency = 0.4
+		hint.LineHeight             = 1.1
+		hint.Visible                = false
+		hint.ZIndex                 = 7
+		hint.Parent                 = ov
+		buildHint = hint
+	end
+
 	-- Root "BUILD" node — bottom-left, always visible when overlay is visible
 	local rootPos                       = UDim2.new(0, 88, 1, -120)
 	local rootWrapper, rBtn             = buildNode(ov, "BUILD", "⚒", C.ACCENT, rootPos, 96, 4)
@@ -1196,94 +1253,6 @@ function HUD.create(): (Frame, TextButton)
 		lanePanel = panel
 	end
 
-	-- ── DEPLOY button (bottom-left, shown while the Core awaits deployment) ────
-	-- Occupies the build/research corner: the build + upgrade tray stays hidden
-	-- until the Core transforms into the Command Center.
-	do
-		local dBtn                       = Instance.new("TextButton")
-		dBtn.Name                        = "DeployButton"
-		dBtn.Size                        = UDim2.fromOffset(330, 92)
-		dBtn.AnchorPoint                 = Vector2.new(0, 1)
-		dBtn.Position                    = UDim2.new(0, 22, 1, -22)
-		dBtn.BackgroundColor3            = Color3.fromRGB(4, 20, 28)
-		dBtn.BorderSizePixel             = 0
-		dBtn.AutoButtonColor             = false
-		dBtn.Text                        = ""
-		dBtn.ZIndex                      = 6
-		dBtn.Visible                     = false
-		dBtn.Parent                      = sg
-		UILib.corner(dBtn, 14)
-
-		local dGrad                      = Instance.new("UIGradient")
-		dGrad.Color                      = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 38, 52)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(2, 18, 30)),
-		})
-		dGrad.Rotation                   = 90
-		dGrad.Parent                     = dBtn
-
-		local dGlow                      = Instance.new("UIStroke")
-		dGlow.Color                      = Color3.fromRGB(0, 210, 220)
-		dGlow.Thickness                  = 2
-		dGlow.ApplyStrokeMode            = Enum.ApplyStrokeMode.Border
-		dGlow.Parent                     = dBtn
-		deployGlowRef                    = dGlow
-		cornerBrackets(dBtn, PM_GOLD, 14, 2, 8)
-
-		local dIcon                      = Instance.new("Frame")
-		dIcon.Size                       = UDim2.fromOffset(58, 58)
-		dIcon.Position                   = UDim2.fromOffset(14, 17)
-		dIcon.BackgroundColor3           = Color3.fromRGB(0, 160, 180)
-		dIcon.BackgroundTransparency     = 0.25
-		dIcon.BorderSizePixel            = 0
-		dIcon.ZIndex                     = 7
-		dIcon.Parent                     = dBtn
-		UILib.corner(dIcon, 29)
-		local dIconLbl                   = Instance.new("TextLabel")
-		dIconLbl.Size                    = UDim2.new(1, 0, 1, 0)
-		dIconLbl.BackgroundTransparency  = 1
-		dIconLbl.Font                    = Enum.Font.GothamBold
-		dIconLbl.TextSize                = 30
-		dIconLbl.TextColor3              = Color3.fromRGB(180, 255, 255)
-		dIconLbl.Text                    = "⌂"
-		dIconLbl.ZIndex                  = 8
-		dIconLbl.Parent                  = dIcon
-
-		local dTitle                     = Instance.new("TextLabel")
-		dTitle.Size                      = UDim2.fromOffset(244, 34)
-		dTitle.Position                  = UDim2.fromOffset(82, 14)
-		dTitle.BackgroundTransparency    = 1
-		dTitle.Font                      = Enum.Font.GothamBold
-		dTitle.TextSize                  = 24
-		dTitle.TextColor3                = Color3.fromRGB(180, 255, 255)
-		dTitle.TextXAlignment            = Enum.TextXAlignment.Left
-		dTitle.Text                      = "DEPLOY"
-		dTitle.ZIndex                    = 7
-		dTitle.Parent                    = dBtn
-
-		local dSub                       = Instance.new("TextLabel")
-		dSub.Size                        = UDim2.fromOffset(244, 24)
-		dSub.Position                    = UDim2.fromOffset(82, 50)
-		dSub.BackgroundTransparency      = 1
-		dSub.Font                        = Enum.Font.Gotham
-		dSub.TextSize                    = 13
-		dSub.TextColor3                  = Color3.fromRGB(100, 190, 200)
-		dSub.TextXAlignment              = Enum.TextXAlignment.Left
-		dSub.Text                        = "Transform Core → Command Center"
-		dSub.ZIndex                      = 7
-		dSub.Parent                      = dBtn
-
-		dBtn.MouseEnter:Connect(function()
-			TweenService:Create(dBtn,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(0, 35, 48) }):Play()
-			TweenService:Create(dGlow, TweenInfo.new(0.12), { Thickness = 3.5 }):Play()
-		end)
-		dBtn.MouseLeave:Connect(function()
-			TweenService:Create(dBtn,  TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(4, 20, 28) }):Play()
-			TweenService:Create(dGlow, TweenInfo.new(0.12), { Thickness = 2 }):Play()
-		end)
-		deployBtnRef = dBtn
-	end
-
 	-- Top-right system / pause menu (own ScreenGui)
 	createSystemMenu()
 
@@ -1396,13 +1365,28 @@ local ccPulseActive = false
 
 function HUD.setCommandCenterMode(isCC: boolean)
 	-- isCC = "no Command Center yet" → hide the build/research tray. The legacy
-	-- "PLACE COMMAND CENTER" button is retired (players deploy via the Core drop
-	-- pod + bottom-left DEPLOY button), so it stays hidden either way.
+	-- "PLACE COMMAND CENTER" button is retired (CCs are auto-placed), so it stays
+	-- hidden either way.
 	if buildOverlay  then buildOverlay.Visible  = not isCC and not isLaneModeActive end
 	if ccBtnInternal then ccBtnInternal.Visible = false end
 	if lanePanel     then lanePanel.Visible     = not isCC and isLaneModeActive     end
 	if isCC and buildMenuOpen then collapseMenu() end
 	ccPulseActive = false
+
+	if isCC then
+		-- Tray hidden (no CC / round reset): clear the hint state for next time.
+		hideBuildHint()
+		buildHintScheduled  = false
+		buildMenuEverOpened = false
+	elseif not isLaneModeActive and not buildHintScheduled then
+		-- Build tray just appeared: arm the 10 s "open the build menu" hint.
+		buildHintScheduled = true
+		task.delay(10, function()
+			if not buildMenuEverOpened and not buildMenuOpen then
+				showBuildHint()
+			end
+		end)
+	end
 end
 
 function HUD.refreshTrayState(counts: { [string]: number })
@@ -1419,45 +1403,6 @@ function HUD.setUpgradesVisible(visible: boolean)
 	local w = upgradesBtnWrapper
 	if not w then return end
 	w.Visible = visible
-end
-
--- Shows/hides the bottom-left DEPLOY button (the Core-awaiting-deployment state).
--- While visible it gently pulses its border to draw the eye.
-function HUD.setDeployVisible(visible: boolean)
-	local btn = deployBtnRef
-	if not btn then return end
-	btn.Visible = visible
-	if visible then
-		local sc = (btn:FindFirstChildWhichIsA("UIScale") or Instance.new("UIScale")) :: UIScale
-		sc.Parent = btn
-		sc.Scale  = 0.82
-		TweenService:Create(sc, TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-		if not deployPulseOn then
-			deployPulseOn = true
-			task.spawn(function()
-				while deployPulseOn and deployGlowRef and deployBtnRef and deployBtnRef.Visible do
-					TweenService:Create(deployGlowRef, TweenInfo.new(0.85, Enum.EasingStyle.Sine), { Thickness = 4.5 }):Play()
-					task.wait(0.9)
-					if not deployPulseOn then break end
-					TweenService:Create(deployGlowRef, TweenInfo.new(0.85, Enum.EasingStyle.Sine), { Thickness = 2 }):Play()
-					task.wait(0.9)
-				end
-				deployPulseOn = false
-			end)
-		end
-	else
-		deployPulseOn = false
-		if deployGlowRef then
-			TweenService:Create(deployGlowRef, TweenInfo.new(0.15), { Thickness = 2 }):Play()
-		end
-	end
-end
-
--- Wires the DEPLOY button click to the supplied callback.
-function HUD.wireDeploy(onDeploy: () -> ())
-	if deployBtnRef then
-		deployBtnRef.MouseButton1Click:Connect(onDeploy)
-	end
 end
 
 function HUD.setLaneMode(enabled: boolean)
@@ -1520,10 +1465,10 @@ function HUD.wire(
 		local n = node  -- capture
 		n.btn.MouseButton1Click:Connect(function()
 			if not isUnlocked(n.btype) then return end
-			local info = BUILDING_INFO[n.btype]
-			if info and currentResources < info.cost then
+			local cost = costOf(n.btype)
+			if currentResources < cost then
 				playErrorSound()
-				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. info.cost, C.RED)
+				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
 				return
 			end
 			hidePanelsFn()
@@ -1592,10 +1537,10 @@ function HUD.wire(
 				if not node then return end
 				if not isResearchVisible(node.btype) then return end
 				if not isUnlocked(node.btype) then return end
-				local info = BUILDING_INFO[node.btype]
-				if info and currentResources < info.cost then
+				local cost = costOf(node.btype)
+				if currentResources < cost then
 					playErrorSound()
-				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. info.cost, C.RED)
+				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
 					return
 				end
 				hidePanelsFn()

@@ -52,6 +52,12 @@ type UnitData = {
 	foamDotAccum    : number?,    -- accumulated dt for 1-s DoT tick
 	-- Hagfish
 	attackLockUntil : number?,    -- tick() until which a hagfish stays rooted mid-attack
+	-- Broodmother glowing-orb aura
+	broodAuraState     : string?,  -- nil = idle; "charging" | "active"
+	broodAuraStart     : number?,  -- tick() the current aura phase began
+	broodDotAccum      : number?,  -- accumulated dt for the aura DoT tick
+	broodRechargeUntil : number?,  -- tick() before which the swarm cannot re-form
+	dying              : boolean?, -- Broodmother is mid death-collapse (frozen, awaiting final removal)
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -66,6 +72,7 @@ local mineralManagerRef:   any
 local forestManagerRef:    any
 local terrainManagerRef:   any
 local navGridRef:          any
+local broodDeathRemote:    any   -- RemoteEvent fired (to all clients) when a Broodmother begins dying
 
 -- Units big enough to bulldoze trees as they move (basic 4×4 infantry can't).
 local FELLS_TREES: { [string]: boolean } = {}
@@ -129,10 +136,11 @@ local playerStatMult:  { [number]: { [string]: StatMult } } = {}
 local playerUpgradeLog: { [number]: { string } } = {}
 
 -- Unit types a Light research may roll, with player-facing plural names.
-local UPGRADE_UNITS: { string } = { "Soldier", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish" }
+local UPGRADE_UNITS: { string } = { "Soldier", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish", "Broodmother" }
 local UPGRADE_UNIT_NAME: { [string]: string } = {
 	Soldier = "Soldiers", Tank = "Tanks", Howitzer = "Howitzers", Foamer = "Foamers",
 	Elite = "Elites", Medic = "Medics", Lamprey = "Lampreys", Hagfish = "Hagfish",
+	Broodmother = "Broodmothers",
 }
 -- Stats a Light research may roll: { field key, player-facing name }.
 local UPGRADE_STATS: { { field: string, name: string } } = {
@@ -441,6 +449,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 2.0, 0) end  -- just above the reared head
 	end
+	if unitType == "Broodmother" then
+		-- The whole creature is drawn client-side (BroodmotherBody); the body part is
+		-- an invisible, ground-snapped pivot (centre sits size.Y/2 above the terrain).
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 10.0, 0) end  -- above the anemone mass + crown tendrils
+	end
 	units[id] = {
 		part        = part,
 		owner       = player,
@@ -641,8 +656,8 @@ end
 function UnitManager.trainFromBarracks(barrackId: string, unitType: string, player: any): boolean
 	local typeDef = Config.UNIT_TYPES[unitType]
 	if not typeDef then return false end
-	-- Lampreys and Hagfish are born at the Lamprey Nest, never trained at a Barracks.
-	if unitType == "Lamprey" or unitType == "Hagfish" then return false end
+	-- Lampreys, Hagfish and Broodmothers are born at the Lamprey Nest, never trained at a Barracks.
+	if unitType == "Lamprey" or unitType == "Hagfish" or unitType == "Broodmother" then return false end
 
 	if typeDef.researchReq then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, typeDef.researchReq) then
@@ -763,36 +778,6 @@ function UnitManager.getPlayerUnitData(player: any): { { id: string, part: BaseP
 	return result
 end
 
--- Returns the ground-XZ position of the player's Core deploy unit (Y zeroed), or
--- nil if they have no Core. Used by the Deploy flow to know where the CC goes.
-function UnitManager.getCorePosition(player: any): Vector3?
-	for _, data in units do
-		if data.owner == player and data.unitType == "Core" then
-			local p = data.part.Position
-			return Vector3.new(p.X, 0, p.Z)
-		end
-	end
-	return nil
-end
-
--- Removes the player's Core deploy unit (if any), properly freeing its unit-count
--- slot and decorator tracking. Called the instant the CC begins deploying.
-function UnitManager.removeCoreFor(player: any)
-	local toRemove: { string } = {}
-	for id, data in units do
-		if data.owner == player and data.unitType == "Core" then table.insert(toRemove, id) end
-	end
-	for _, id in toRemove do
-		local data = units[id]
-		if data then
-			playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
-			unitDecorators[id] = nil
-			if data.part and data.part.Parent then data.part:Destroy() end
-			units[id] = nil
-		end
-	end
-end
-
 function UnitManager.removeAllUnitsFor(player: any)
 	local toRemove = {}
 	for id, data in units do
@@ -902,6 +887,58 @@ function UnitManager.getOwnerUnitPositions(ownerStr: string): { Vector3 }
 	return out
 end
 
+-- A Broodmother does not vanish when killed: it freezes, the client plays the
+-- collapse/ribcage-split animation, and after BROODMOTHER_DEATH_DURATION the body
+-- is removed and BROODMOTHER_DEATH_EGGS Lampreys are born from the wreckage. This
+-- is called from every removal path in place of the normal destroy; the unit stays
+-- in `units` (flagged `dying`) so the loops skip it until the timer fires.
+local function beginBroodmotherDeath(id: string, data: UnitData)
+	if data.dying then return end
+	data.dying          = true
+	data.target         = nil
+	data.path           = nil
+	data.pathIdx        = nil
+	data.velocity       = Vector3.zero
+	data.aggroId        = nil
+	data.aggroHome      = nil
+	data.focusBldId     = nil
+	data.broodAuraState = nil
+
+	local owner    = data.owner
+	local deathPos = data.part.Position
+	if broodDeathRemote then broodDeathRemote:FireAllClients(deathPos) end
+
+	task.delay(Config.BROODMOTHER_DEATH_DURATION, function()
+		-- If the Broodmother is already gone (match reset, owner cleanup, etc.) do
+		-- nothing — don't birth a phantom brood into a torn-down match.
+		local d = units[id]
+		if not d then return end
+
+		-- Final removal of the spent Broodmother body.
+		unitDecorators[id] = nil
+		playerUnitCount[owner.UserId] = math.max(0, (playerUnitCount[owner.UserId] or 1) - 1)
+		d.part:Destroy()
+		units[id] = nil
+		local dep = unitToDeployer[id]
+		if dep then
+			unitToDeployer[id] = nil
+			if deployerUnits[dep] then deployerUnits[dep][id] = nil end
+		end
+
+		-- Birth the brood from the wreckage (only if the owner is still playing;
+		-- ground Y is resolved inside spawnUnit).
+		if owner.Parent then
+			local eggs = Config.BROODMOTHER_DEATH_EGGS
+			for k = 1, eggs do
+				local ang = (k / eggs) * math.pi * 2
+				local px  = deathPos.X + math.cos(ang) * 4.5
+				local pz  = deathPos.Z + math.sin(ang) * 4.5
+				spawnUnit(owner, Vector3.new(px, 0, pz), "Lamprey")
+			end
+		end
+	end)
+end
+
 -- `canTarget` (optional): predicate `(targetPos) -> boolean`. When supplied, only
 -- enemies it approves are eligible (Artillery uses it to require a spotter).
 function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: string, range: number, damage: number, canTarget: ((Vector3) -> boolean)?): (boolean, Vector3?)
@@ -939,6 +976,11 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 		if researchManagerRef and data.owner.UserId ~= tonumber(attackerOwnerIdStr) then
 			researchManagerRef.recordEnemyKilled(attackerOwnerIdStr)
 		end
+		-- Broodmother: collapse + birth its brood instead of vanishing.
+		if data.unitType == "Broodmother" then
+			beginBroodmotherDeath(bestId, data)
+			return true, hitPos
+		end
 		unitDecorators[bestId] = nil
 		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
 		data.part:Destroy()
@@ -966,6 +1008,7 @@ function UnitManager.init(resourceManager)
 	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
 	local healBeamRemote = RemoteHandler.get(Config.REMOTES.HealBeam)
 	local hagfishStrikeRemote = RemoteHandler.get(Config.REMOTES.HagfishStrike)
+	broodDeathRemote          = RemoteHandler.get(Config.REMOTES.BroodmotherDeath)
 
 	-- Terrain-height snapping: cast straight down to find the surface Y at any XZ.
 	-- Filters to Terrain only so buildings/units don't interfere.
@@ -1020,6 +1063,10 @@ function UnitManager.init(resourceManager)
 		local doAggro  = aggroScanFrame == 0
 
 		for id, data in units do
+			-- A dying Broodmother is frozen mid-collapse; skip all AI until the
+			-- death timer (beginBroodmotherDeath) removes it.
+			if data.dying then continue end
+
 			local isRoller  = data.unitType == "Soldier" and researchManagerRef ~= nil
 				and researchManagerRef.hasResearch(data.owner, "Rollers")
 			if isRoller then data.attackRange = Config.ROLLER_ATTACK_RANGE end
@@ -1323,7 +1370,6 @@ function UnitManager.init(resourceManager)
 
 			-- ── 3. Aggro scan (idle + A-moving units only; Medics/frozen Foamers skip) ──
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
-				and data.unitType ~= "Core"
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
@@ -1415,6 +1461,68 @@ function UnitManager.init(resourceManager)
 					end
 				end
 				continue  -- Foamers skip all standard combat paths
+			end
+
+			-- ── Broodmother: glowing-orb damage aura (charge 4s → orbit 5s → recharge) ──
+			-- No standard attack: when an enemy is in range and the swarm has recharged,
+			-- the tendrils glow and spit a swarm of orbs that orbit the creature. After
+			-- a charge window the orbs deal weak, constant aura damage to every enemy in
+			-- range each tick (multiple Broodmothers stack naturally). Movement, aggro and
+			-- separation still run for it via the earlier sections.
+			if data.unitType == "Broodmother" then
+				local bt     = tick()
+				local bPos   = data.part.Position
+				local bStr   = tostring(data.owner.UserId)
+				local auraR  = data.attackRange
+				local st     = data.broodAuraState
+
+				if st == nil then
+					if not data.broodRechargeUntil or bt >= (data.broodRechargeUntil :: number) then
+						local hasEnemy = false
+						fillGridScratch(bPos, auraR)
+						for gi = 1, gridScratchN do
+							local other = units[gridScratch[gi]]
+							if other and other.hp > 0 and tostring(other.owner.UserId) ~= bStr
+								and (other.part.Position - bPos).Magnitude <= auraR then
+								hasEnemy = true; break
+							end
+						end
+						if hasEnemy then
+							data.broodAuraState = "charging"
+							data.broodAuraStart = bt
+							data.broodDotAccum  = 0
+							-- Tendrils glow + spit the orb swarm (client matches the nearest Broodmother).
+							unitHitRemote:FireAllClients(bPos, bPos, "Broodmother")
+						end
+					end
+				elseif st == "charging" then
+					if bt - (data.broodAuraStart :: number) >= Config.BROODMOTHER_CHARGE_TIME then
+						data.broodAuraState = "active"
+						data.broodAuraStart = bt
+						data.broodDotAccum  = 0
+					end
+				elseif st == "active" then
+					data.broodDotAccum = (data.broodDotAccum or 0) + dt
+					if (data.broodDotAccum :: number) >= Config.BROODMOTHER_AURA_TICK then
+						data.broodDotAccum = (data.broodDotAccum :: number) - Config.BROODMOTHER_AURA_TICK
+						fillGridScratch(bPos, auraR)
+						for gi = 1, gridScratchN do
+							local oid   = gridScratch[gi]
+							local other = units[oid]
+							if not other or other.hp <= 0 then continue end
+							if tostring(other.owner.UserId) == bStr then continue end
+							if (other.part.Position - bPos).Magnitude > auraR then continue end
+							other.hp -= calcDamage(other, data.attackDmg)
+							applyHP(other, true)
+							if other.hp <= 0 then table.insert(toRemove, oid) end
+						end
+					end
+					if bt - (data.broodAuraStart :: number) >= Config.BROODMOTHER_ACTIVE_TIME then
+						data.broodAuraState     = nil
+						data.broodRechargeUntil = bt + Config.BROODMOTHER_RECHARGE_TIME
+					end
+				end
+				continue  -- Broodmother deals damage only through its aura
 			end
 
 			data.attackTimer += dt
@@ -1909,6 +2017,7 @@ function UnitManager.init(resourceManager)
 
 		-- ── Separation pass ────────────────────────────────────────────────────
 		for id, data in units do
+			if data.dying then continue end   -- a collapsing Broodmother stays put
 			local myPos = data.part.Position
 			local myStr = tostring(data.owner.UserId)
 			local pushX, pushZ = 0, 0
@@ -1975,6 +2084,12 @@ function UnitManager.init(resourceManager)
 						end
 					end
 				end
+				-- Broodmother: enter the collapse/birth sequence instead of vanishing
+				-- (idempotent — duplicate toRemove entries while dying are ignored).
+				if d.unitType == "Broodmother" then
+					beginBroodmotherDeath(id, d)
+					continue
+				end
 				if (d.unitType == "Tank" or d.unitType == "Soldier")
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
@@ -1997,8 +2112,8 @@ function UnitManager.init(resourceManager)
 		if type(unitType) ~= "string" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
-		-- Lampreys and Hagfish are born at the Lamprey Nest, never trained at a Barracks.
-		if unitType == "Lamprey" or unitType == "Hagfish" then return end
+		-- Lampreys, Hagfish and Broodmothers are born at the Lamprey Nest, never trained at a Barracks.
+		if unitType == "Lamprey" or unitType == "Hagfish" or unitType == "Broodmother" then return end
 
 		-- Research gate: if this unit type requires a tech, verify the player has it
 		if typeDef.researchReq then

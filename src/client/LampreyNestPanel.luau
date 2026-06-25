@@ -36,6 +36,7 @@ local overlay: Frame?
 local NEST_COL    = Color3.fromRGB(90, 130, 50)
 local LAMPREY_GRN = Color3.fromRGB(120, 190, 60)
 local HAGFISH_PUR = Color3.fromRGB(170, 70, 130)
+local BROOD_VIO   = Color3.fromRGB(150, 90, 230)
 
 local RADIUS   = 155
 local ROOT_POS = UDim2.new(0.5, 0, 0.68, 0)
@@ -271,13 +272,14 @@ function LampreyNestPanel.init(network: any, getResourcesFn: () -> number, getMu
 		})
 	end
 
-	buildProduct("Lamprey", Config.LAMPREY_EGG_COST, LAMPREY_GRN, "🪱", -130)
-	buildProduct("Hagfish", Config.HAGFISH_EGG_COST, HAGFISH_PUR, "🐍", -50)
+	buildProduct("Lamprey",     Config.LAMPREY_EGG_COST,     LAMPREY_GRN, "🪱", -150)
+	buildProduct("Hagfish",     Config.HAGFISH_EGG_COST,     HAGFISH_PUR, "🐍", -110)
+	buildProduct("Broodmother", Config.BROODMOTHER_EGG_COST, BROOD_VIO,   "🦑", -70)
 
 	-- Rally launcher upgrade node (top centre). Buying it lets the nest LAUNCH eggs
 	-- to a right-click rally point instead of dropping them around its footprint.
 	do
-		local angle    = -90
+		local angle    = -30
 		local rad      = math.rad(angle)
 		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + math.cos(rad) * RADIUS, ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + math.sin(rad) * RADIUS)
 

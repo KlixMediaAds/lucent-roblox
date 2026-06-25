@@ -297,6 +297,11 @@ local function enlistScout(id: string, part: BasePart)
 end
 
 local function scoutPass()
+	-- Enlist any newly-spawned units not yet scouting (so new units join the scout
+	-- without the player re-clicking the army control).
+	for id, part in ownUnits do
+		if part.Parent and not scouts[id] then enlistScout(id, part) end
+	end
 	for id, s in scouts do
 		if not s.part.Parent then scouts[id] = nil; continue end
 		local now      = os.clock()
@@ -424,6 +429,20 @@ end
 
 local function defendPass()
 	local now = os.clock()
+	-- Pick up any newly-spawned units not yet assigned a post (so new units defend
+	-- without the player re-clicking the army control).
+	if #defendPosts > 0 then
+		for id, part in ownUnits do
+			if part.Parent and not defendAssign[id] then
+				local bestIdx, bestD = 1, math.huge
+				for i, post in defendPosts do
+					local d = (part.Position - post).Magnitude
+					if d < bestD then bestD = d; bestIdx = i end
+				end
+				assignDefend(id, bestIdx, false)
+			end
+		end
+	end
 	for id, a in defendAssign do
 		local part = ownUnits[id]
 		if not part or not part.Parent then defendAssign[id] = nil; continue end

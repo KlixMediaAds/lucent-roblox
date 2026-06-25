@@ -48,6 +48,11 @@ local canvas:      Frame
 local cameraRef:   any
 local localUserId: number
 
+-- "Return to Command Center" button (shown only after the camera first loses
+-- sight of the CC). Wired from init.client via MiniMap.onReturnClicked.
+local returnBtn:     TextButton?   = nil
+local returnClickFn: (() -> ())?   = nil
+
 local unitMarkers: { [string]: TextLabel } = {}
 local buildingDots:{ [string]: Frame } = {}
 local minerDots:   { [string]: Frame } = {}
@@ -501,6 +506,16 @@ local function hookInput(clickArea: GuiButton)
 		tryPan()
 	end)
 
+	-- The minimap sits in the top-right corner, inside the camera's edge-pan
+	-- threshold. Suppress edge panning whenever the cursor is over it so
+	-- click/drag-to-pan centres on the chosen point instead of drifting.
+	clickArea.MouseEnter:Connect(function()
+		cameraRef.setEdgePanSuppressed(true)
+	end)
+	clickArea.MouseLeave:Connect(function()
+		cameraRef.setEdgePanSuppressed(false)
+	end)
+
 	UserInputService.InputChanged:Connect(function(input)
 		if pressing and input.UserInputType == Enum.UserInputType.MouseMovement then
 			tryPan()
@@ -580,6 +595,57 @@ local function buildUI()
 	lbl.TextColor3            = C_BORDER
 	lbl.TextXAlignment        = Enum.TextXAlignment.Center
 	lbl.Parent                = border
+
+	-- ── Return-to-CC button (just left of the minimap) ────────────────────────
+	local rBtn                = Instance.new("TextButton")
+	rBtn.Name                 = "ReturnToCCBtn"
+	rBtn.Size                 = UDim2.fromOffset(46, 46)
+	rBtn.AnchorPoint          = Vector2.new(1, 0)
+	rBtn.Position             = UDim2.new(1, -(MAP_SIZE + 4 + PADDING) - 8, 0, PADDING)
+	rBtn.BackgroundColor3     = Color3.fromRGB(7, 9, 14)
+	rBtn.BackgroundTransparency = 0.06
+	rBtn.AutoButtonColor      = false
+	rBtn.Text                 = "⌂"
+	rBtn.Font                 = Enum.Font.GothamBold
+	rBtn.TextSize             = 26
+	rBtn.TextColor3           = C_CC_OWN
+	rBtn.BorderSizePixel      = 0
+	rBtn.Visible              = false
+	rBtn.ZIndex               = 6
+	rBtn.Parent               = sg
+	Instance.new("UICorner", rBtn).CornerRadius = UDim.new(0, 9)
+	local rStroke             = Instance.new("UIStroke")
+	rStroke.Color             = C_CC_OWN
+	rStroke.Thickness         = 1
+	rStroke.Transparency      = 0.3
+	rStroke.Parent            = rBtn
+
+	-- Small "R" key badge in the corner
+	local rBadge              = Instance.new("TextLabel")
+	rBadge.Size               = UDim2.fromOffset(16, 14)
+	rBadge.AnchorPoint        = Vector2.new(1, 1)
+	rBadge.Position           = UDim2.new(1, -3, 1, -2)
+	rBadge.BackgroundTransparency = 1
+	rBadge.Text               = "R"
+	rBadge.Font               = Enum.Font.GothamBold
+	rBadge.TextSize           = 11
+	rBadge.TextColor3         = Color3.fromRGB(150, 170, 200)
+	rBadge.TextXAlignment     = Enum.TextXAlignment.Right
+	rBadge.ZIndex             = 7
+	rBadge.Parent             = rBtn
+
+	rBtn.MouseEnter:Connect(function()
+		TweenService:Create(rBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(20, 26, 38) }):Play()
+		TweenService:Create(rStroke, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.8 }):Play()
+	end)
+	rBtn.MouseLeave:Connect(function()
+		TweenService:Create(rBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(7, 9, 14) }):Play()
+		TweenService:Create(rStroke, TweenInfo.new(0.12), { Transparency = 0.3, Thickness = 1 }):Play()
+	end)
+	rBtn.MouseButton1Click:Connect(function()
+		if returnClickFn then returnClickFn() end
+	end)
+	returnBtn = rBtn
 
 	return inner, clickArea
 end
@@ -706,6 +772,19 @@ function MiniMap.clearEnemyStructures()
 		if m.Parent then m:Destroy() end
 	end
 	enemyMarks = {}
+end
+
+-- ── Return-to-CC button API ───────────────────────────────────────────────────
+
+-- Register the callback fired when the player clicks the return-to-CC button.
+function MiniMap.onReturnClicked(fn: () -> ())
+	returnClickFn = fn
+end
+
+-- Show or hide the return-to-CC button (revealed once the camera first loses
+-- sight of the Command Center).
+function MiniMap.setReturnVisible(v: boolean)
+	if returnBtn then returnBtn.Visible = v end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

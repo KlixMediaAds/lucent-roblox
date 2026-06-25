@@ -2,10 +2,13 @@ local Players           = game:GetService("Players")
 local UserInputService  = game:GetService("UserInputService")
 local RunService        = game:GetService("RunService")
 local SoundService      = game:GetService("SoundService")
+local TweenService      = game:GetService("TweenService")
+local Lighting          = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RangeRing         = require(script.Parent:WaitForChild("RangeRing"))
+local BuildField        = require(script.Parent:WaitForChild("BuildField"))
 
 local BuildingPlacer = {}
 local localPlayer    = Players.LocalPlayer
@@ -22,7 +25,7 @@ local ownCcPosition: Vector3?     = nil    -- local player's own CC position
 local ownRelayPositions: {Vector3} = {}    -- local player's own Relay positions
 local ghost:          Part?
 local rangeRing:      Model?               -- mine extract-range ring (follows ghost)
-local buildZoneRing:  Model?               -- union build-zone ring (shown during placement)
+local prevOutOfZone   = false              -- for edge-crossing flare detection
 local modeCb: ((boolean, string?) -> ())?
 local networkRef: any
 local cameraRef:  any
@@ -34,6 +37,8 @@ local isLineDragging = false
 local lineDragStart:  Vector3?  = nil
 local lineGhosts:     { Part }  = {}
 local getResources:   (() -> number)? = nil
+local notEnoughCb:    (() -> ())? = nil   -- shows the "not enough resources" toast
+local flashUntil      = 0                 -- os.clock() until which the ghost flashes red
 
 local GRID = Config.BUILDING_GRID
 
@@ -57,6 +62,32 @@ local function playPlaceSound()
 	placeSound:Play()
 end
 
+-- Placement-mode dim: a dedicated ColorCorrectionEffect that desaturates and
+-- darkens the world slightly so the neon Construction Field (deck/wall/stamp)
+-- reads as the brightest thing on screen — an "inverse spotlight" on the build
+-- zone. Separate instance so it stacks cleanly on top of ShaderManager's CCE.
+local dimCC: ColorCorrectionEffect? = nil
+local function setPlacementDim(on: boolean)
+	if on then
+		if not dimCC then
+			dimCC        = Instance.new("ColorCorrectionEffect")
+			dimCC.Name   = "_BuildFieldDim"
+			dimCC.Parent = Lighting
+		end
+		TweenService:Create(dimCC, TweenInfo.new(0.25), {
+			Brightness = -0.06, Saturation = -0.35, Contrast = 0.06,
+		}):Play()
+	elseif dimCC then
+		local cc = dimCC
+		dimCC = nil
+		local t = TweenService:Create(cc, TweenInfo.new(0.2), {
+			Brightness = 0, Saturation = 0, Contrast = 0,
+		})
+		t.Completed:Connect(function() cc:Destroy() end)
+		t:Play()
+	end
+end
+
 -- Returns true if pos is within any owned build zone (CC or Relay).
 local function isInBuildZone(pos: Vector3): boolean
 	if ownCcPosition then
@@ -70,11 +101,12 @@ local function isInBuildZone(pos: Vector3): boolean
 	return false
 end
 
--- Rebuilds the build-zone ring from all current CC + Relay positions.
+-- Rebuilds the Construction Field (deck + wall) from all current CC + Relay
+-- positions. BuildField.show fires a one-shot radar sweep, so calling this when a
+-- Relay is placed automatically announces the extended reach.
 local function rebuildBuildZoneRing()
-	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
-	if currentType == "CommandCenter" then return end
-	if ccIsMobileRef then return end   -- CC is walking; its old position would be misleading
+	if currentType == "CommandCenter" then BuildField.hide(); return end
+	if ccIsMobileRef then BuildField.hide(); return end   -- CC is walking; its old position would be misleading
 	local zones: { { cx: number, cz: number, radius: number } } = {}
 	if ownCcPosition then
 		table.insert(zones, { cx = ownCcPosition.X, cz = ownCcPosition.Z, radius = Config.BUILD_RADIUS })
@@ -83,9 +115,9 @@ local function rebuildBuildZoneRing()
 		table.insert(zones, { cx = rp.X, cz = rp.Z, radius = Config.RELAY_RADIUS })
 	end
 	if #zones > 0 then
-		-- Lift the ring onto the CC's tier so it isn't buried under a raised plateau.
-		local baseY = ownCcPosition and terrainHeightAt(ownCcPosition.X, ownCcPosition.Z) or 0
-		buildZoneRing = RangeRing.createBuildZone(zones, baseY)
+		BuildField.show(zones, localPlayer.TeamColor.Color)
+	else
+		BuildField.hide()
 	end
 end
 
@@ -314,6 +346,25 @@ local function checkTerrainOverlap(pos: Vector3, buildType: string): boolean
 	return false
 end
 
+-- True if the footprint at `pos` overlaps an existing building's Base. Without
+-- this the ghost stayed valid (blue) when hovering over another structure.
+local function checkBuildingOverlap(pos: Vector3, buildType: string): boolean
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return false end
+	local size = ghostSize(buildType)
+	local nhw  = size.X / 2
+	local nhd  = size.Z / 2
+	for _, model in folder:GetChildren() do
+		local base = model:FindFirstChild("Base")
+		if not base or not base:IsA("BasePart") then continue end
+		if math.abs(pos.X - base.Position.X) < nhw + base.Size.X / 2
+			and math.abs(pos.Z - base.Position.Z) < nhd + base.Size.Z / 2 then
+			return true
+		end
+	end
+	return false
+end
+
 local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
 	local size = ghostSize(buildType)
 	return math.abs(pos.X) + size.X / 2 > 432 or math.abs(pos.Z) + size.Z / 2 > 432
@@ -396,6 +447,7 @@ local function confirmLineDrag()
 		local valid = isInBuildZone(lpos)
 			and not checkTerrainOverlap(lpos, currentType)
 			and not isOutOfMapBounds(lpos, currentType)
+			and not checkBuildingOverlap(lpos, currentType)
 		if valid then
 			networkRef.placeBuilding(placePos(lpos), currentType)
 			resources -= cost
@@ -471,6 +523,12 @@ function BuildingPlacer.init(network, cameraModule)
 					lineDragStart  = snap(pos)
 					return
 				end
+				-- Insufficient funds: flash red + toast, keep placement mode open.
+				if getResources and getResources() < buildingCost(currentType) then
+					flashUntil = os.clock() + 0.4
+					if notEnoughCb then notEnoughCb() end
+					return
+				end
 				network.placeBuilding(placePos(pos), currentType)
 				playPlaceSound()
 				task.defer(BuildingPlacer.exitPlacementMode)
@@ -497,6 +555,7 @@ function BuildingPlacer.init(network, cameraModule)
 
 		-- Line drag mode: pool of ghosts along the drag line
 		if isLineDragging and lineDragStart then
+			BuildField.hideStamp()   -- single-cell stamp is irrelevant while dragging a line
 			if ghost then ghost.Transparency = 1 end
 			local pos = cameraModule.getPositionAtHeight(ghostSize(currentType).Y / 2)
 			if pos then
@@ -530,6 +589,7 @@ function BuildingPlacer.init(network, cameraModule)
 					local valid = isInBuildZone(lpos)
 						and not checkTerrainOverlap(lpos, currentType)
 						and not isOutOfMapBounds(lpos, currentType)
+						and not checkBuildingOverlap(lpos, currentType)
 						and isFootprintFlat(lpos, currentType)
 					local affordable = i <= canAffordN
 					g.BrickColor   = not valid       and BrickColor.new("Bright red")
@@ -551,6 +611,7 @@ function BuildingPlacer.init(network, cameraModule)
 				local snapped  = snapToSurface(pos, halfH)
 				ccTooClose     = isCCTooClose(snapped)
 				onTerrain      = checkTerrainOverlap(snapped, "CommandCenter") or isOutOfMapBounds(snapped, "CommandCenter")
+					or checkBuildingOverlap(snapped, "CommandCenter")
 					or not isFootprintFlat(snapped, "CommandCenter")
 				ghost.Position = snapped
 				local blocked  = ccTooClose or onTerrain
@@ -565,12 +626,35 @@ function BuildingPlacer.init(network, cameraModule)
 				ghost.Position = snapped
 
 				onTerrain      = checkTerrainOverlap(snapped, currentType) or isOutOfMapBounds(snapped, currentType)
+					or checkBuildingOverlap(snapped, currentType)
 					or not isFootprintFlat(snapped, currentType)
 				outOfBuildZone = not onTerrain and not isInBuildZone(snapped)
 
-				local blocked  = onTerrain or outOfBuildZone
+				local flashing = os.clock() < flashUntil
+				local blocked  = onTerrain or outOfBuildZone or flashing
 				ghost.BrickColor   = blocked and BrickColor.new("Bright red") or localPlayer.TeamColor
 				ghost.Transparency = blocked and 0.65 or 0.5
+
+				-- Footprint stamp: green = placeable, gray = in-zone but unaffordable,
+				-- red = outside the zone or on illegal terrain.
+				local size   = ghostSize(currentType)
+				local groundY = (terrainHeightAt(snapped.X, snapped.Z) or 0) + 0.32
+				local state: string
+				if onTerrain or outOfBuildZone then
+					state = "illegal"
+				elseif (getResources and getResources() or math.huge) < buildingCost(currentType) then
+					state = "blocked"
+				else
+					state = "valid"
+				end
+				BuildField.setStamp(snapped.X, snapped.Z, groundY, size.X, size.Z, state)
+
+				-- Force-field flare: fire once at the moment the cursor crosses out of
+				-- the zone (rising edge), so the wall reacts where you hit it.
+				if outOfBuildZone and not prevOutOfZone then
+					BuildField.flareAt(snapped.X, snapped.Z)
+				end
+				prevOutOfZone = outOfBuildZone
 
 				-- Keep range ring (turret attack range / Foundry boost radius) centred
 				-- under the ghost on its tier.
@@ -590,10 +674,12 @@ function BuildingPlacer.enterPlacementMode(buildingType: string?)
 	currentSnapTarget = nil
 	ccTooClose       = false
 	outOfBuildZone   = false
+	prevOutOfZone    = false
 	isPlacing        = true
 	makeGhost()
+	setPlacementDim(true)
 
-	-- Build-zone ring: shown for all non-CC placements
+	-- Construction Field (deck + wall + power-on sweep): shown for all non-CC placements
 	rebuildBuildZoneRing()
 
 	if currentType == "Foundry" then
@@ -621,7 +707,8 @@ function BuildingPlacer.exitPlacementMode()
 	onTerrain         = false
 	if ghost        then ghost:Destroy();              ghost        = nil end
 	if rangeRing    then RangeRing.destroy(rangeRing); rangeRing    = nil end
-	if buildZoneRing then RangeRing.destroy(buildZoneRing); buildZoneRing = nil end
+	BuildField.hide()
+	setPlacementDim(false)
 	destroyDepositMarkers()
 	if modeCb then modeCb(false, nil) end
 end
@@ -664,14 +751,18 @@ function BuildingPlacer.setResourceGetter(fn: () -> number)
 	getResources = fn
 end
 
+-- Called when the player tries to place a building they can't afford.
+function BuildingPlacer.setNotEnoughResourcesFn(fn: () -> ())
+	notEnoughCb = fn
+end
+
 -- Called when the local player's CC enters or leaves mobile (walking) state.
 -- While mobile the CC is moving so its cached position is stale — hide the ring.
 function BuildingPlacer.setCCMobile(isMobile: boolean)
 	ccIsMobileRef = isMobile
-	if isMobile and buildZoneRing then
-		RangeRing.destroy(buildZoneRing)
-		buildZoneRing = nil
-	elseif not isMobile and isPlacing then
+	if isMobile then
+		BuildField.hide()
+	elseif isPlacing then
 		rebuildBuildZoneRing()
 	end
 end

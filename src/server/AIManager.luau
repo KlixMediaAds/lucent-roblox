@@ -62,12 +62,14 @@ type Level = {
 	competence: number,
 }
 
+-- Caps tuned so even mid difficulties build a real, defended, spread-out base
+-- (more turrets + relays so a cleared army doesn't leave the base wide open).
 local LEVELS: { Level } = {
-	{ maxUnits = 8,   hcap = 2, bcap = 1, tcap = 1, rcap = 0, reserve = 30, strat = 9.5, react = 2.2, vision = 46, mem = 12,  minAtk = 4, techTier = 0, competence = 0.40 },
-	{ maxUnits = 15,  hcap = 3, bcap = 2, tcap = 2, rcap = 1, reserve = 40, strat = 8.0, react = 1.8, vision = 55, mem = 25,  minAtk = 4, techTier = 1, competence = 0.55 },
-	{ maxUnits = 24,  hcap = 4, bcap = 2, tcap = 3, rcap = 1, reserve = 50, strat = 6.5, react = 1.4, vision = 63, mem = 45,  minAtk = 5, techTier = 2, competence = 0.70 },
-	{ maxUnits = 36,  hcap = 5, bcap = 3, tcap = 4, rcap = 2, reserve = 65, strat = 5.0, react = 1.1, vision = 70, mem = 75,  minAtk = 5, techTier = 3, competence = 0.85 },
-	{ maxUnits = 999, hcap = 6, bcap = 4, tcap = 5, rcap = 2, reserve = 75, strat = 4.0, react = 0.8, vision = 78, mem = 999, minAtk = 6, techTier = 4, competence = 1.00 },
+	{ maxUnits = 8,   hcap = 2, bcap = 1, tcap = 2, rcap = 1, reserve = 30, strat = 9.5, react = 2.2, vision = 46, mem = 12,  minAtk = 4, techTier = 0, competence = 0.40 },
+	{ maxUnits = 15,  hcap = 3, bcap = 2, tcap = 3, rcap = 1, reserve = 40, strat = 8.0, react = 1.8, vision = 55, mem = 25,  minAtk = 4, techTier = 1, competence = 0.55 },
+	{ maxUnits = 24,  hcap = 4, bcap = 3, tcap = 5, rcap = 2, reserve = 50, strat = 6.5, react = 1.4, vision = 63, mem = 45,  minAtk = 5, techTier = 2, competence = 0.70 },
+	{ maxUnits = 36,  hcap = 6, bcap = 3, tcap = 6, rcap = 3, reserve = 65, strat = 5.0, react = 1.1, vision = 70, mem = 75,  minAtk = 5, techTier = 3, competence = 0.85 },
+	{ maxUnits = 999, hcap = 7, bcap = 4, tcap = 8, rcap = 3, reserve = 75, strat = 4.0, react = 0.8, vision = 78, mem = 999, minAtk = 6, techTier = 4, competence = 1.00 },
 }
 
 -- ── Strategic archetypes ───────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ type Archetype = {
 local ARCHETYPES: { [string]: Archetype } = {
 	Aggressor = {
 		label = "Aggressor",
-		desired = { harvesters = 2, barracks = 2, turrets = 1, relays = 0, deployers = 0 },
+		desired = { harvesters = 3, barracks = 2, turrets = 3, relays = 1, deployers = 0 },
 		comp = {
 			opening = { Soldier = 4 },
 			expand  = { Soldier = 4, Elite = 2 },
@@ -106,11 +108,11 @@ local ARCHETYPES: { [string]: Archetype } = {
 		techPlan = { "EliteUnits", "CombatStims", "HardenedArmor", "Rollers" },
 		turret = "Flamethrower",
 		engageRatio = 0.85, harass = true, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.12, reserveMult = 0.6, stageMin = 3, stageMax = 8,
+		garrison = 0.22, reserveMult = 0.6, stageMin = 3, stageMax = 8,
 	},
 	Mechanized = {
 		label = "Mechanized",
-		desired = { harvesters = 4, barracks = 3, turrets = 2, relays = 1, deployers = 0 },
+		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 1 },
 		comp = {
 			opening = { Soldier = 3 },
 			expand  = { Soldier = 2, Tank = 3 },
@@ -120,11 +122,11 @@ local ARCHETYPES: { [string]: Archetype } = {
 		techPlan = { "ConcussionShells", "EliteUnits", "RocketBarrage", "MedicUnit" },
 		turret = "Artillery",
 		engageRatio = 1.20, harass = false, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.20, reserveMult = 1.2, stageMin = 8, stageMax = 18,
+		garrison = 0.30, reserveMult = 1.2, stageMin = 8, stageMax = 18,
 	},
 	Economist = {
 		label = "Economist",
-		desired = { harvesters = 5, barracks = 2, turrets = 2, relays = 2, deployers = 1 },
+		desired = { harvesters = 6, barracks = 3, turrets = 4, relays = 3, deployers = 1 },
 		comp = {
 			opening = { Soldier = 3 },
 			expand  = { Soldier = 3, Tank = 1 },
@@ -134,11 +136,11 @@ local ARCHETYPES: { [string]: Archetype } = {
 		techPlan = { "EliteUnits", "MedicUnit", "ConcussionShells", "TurretUpgrades" },
 		turret = "RocketLauncher",
 		engageRatio = 1.05, harass = true, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.22, reserveMult = 1.0, stageMin = 6, stageMax = 14,
+		garrison = 0.30, reserveMult = 1.0, stageMin = 6, stageMax = 14,
 	},
 	Defender = {
 		label = "Defender",
-		desired = { harvesters = 4, barracks = 2, turrets = 5, relays = 2, deployers = 1 },
+		desired = { harvesters = 5, barracks = 3, turrets = 8, relays = 3, deployers = 1 },
 		comp = {
 			opening = { Soldier = 3 },
 			expand  = { Soldier = 3, Foamer = 1 },
@@ -148,11 +150,11 @@ local ARCHETYPES: { [string]: Archetype } = {
 		techPlan = { "TurretUpgrades", "EliteUnits", "ConcussionShells", "MedicUnit" },
 		turret = "Artillery",
 		engageRatio = 1.40, harass = false, waveMode = false, turtle = true, noCounter = false,
-		garrison = 0.38, reserveMult = 1.3, stageMin = 10, stageMax = 20,
+		garrison = 0.45, reserveMult = 1.3, stageMin = 10, stageMax = 20,
 	},
 	Waves = {
 		label = "Waves",
-		desired = { harvesters = 4, barracks = 3, turrets = 2, relays = 1, deployers = 0 },
+		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 0 },
 		comp = {
 			opening = { Soldier = 4 },
 			expand  = { Soldier = 3, Tank = 1 },
@@ -162,7 +164,7 @@ local ARCHETYPES: { [string]: Archetype } = {
 		techPlan = { "EliteUnits", "ConcussionShells", "TurretUpgrades", "RocketBarrage" },
 		turret = "RocketLauncher",
 		engageRatio = 0.90, harass = false, waveMode = true, turtle = false, noCounter = false,
-		garrison = 0.25, reserveMult = 1.0, stageMin = 4, stageMax = 10,
+		garrison = 0.32, reserveMult = 1.0, stageMin = 4, stageMax = 10,
 	},
 	-- Teaching opponent: simple comp, no counters, no deep tech.
 	Trainer = {
@@ -461,7 +463,7 @@ local THREAT_BUILDING = {
 	Turret = 30, CreepyBlob = 35, Deployer = 30, Relay = 15,
 }
 local THREAT_UNIT = {
-	Howitzer = 38, Elite = 35, Lamprey = 32, Tank = 30, Soldier = 20,
+	Broodmother = 46, Howitzer = 38, Elite = 35, Lamprey = 32, Tank = 30, Soldier = 20,
 	Foamer = 18, CreepySoldier = 15, Hagfish = 14, Medic = 10, Harvester = 8,
 }
 
@@ -858,6 +860,15 @@ local function planEconomy(ai: any)
 	if ai.baseUnderAttack         then wantTur = math.min(ai.caps.t, wantTur + 1) end
 	if ai.enemyUnitCount >= 5      then wantTur = math.min(ai.caps.t, wantTur + 1) end
 
+	-- Defensive floor: every base keeps a turret line that grows through the game,
+	-- so losing the field army never leaves the base wide open — even for aggressive
+	-- archetypes whose `desired.turrets` is low.
+	local turretFloor = (phase == "opening" and 1)
+		or (phase == "expand" and 2)
+		or (phase == "mid" and 3)
+		or 4
+	wantTur = math.min(ai.caps.t, math.max(wantTur, turretFloor))
+
 	-- Priority-scored shopping list.
 	local items: { { prio: number, cost: number, fn: () -> any } } = {}
 	local function add(prio: number, cost: number, fn: () -> any)
@@ -878,7 +889,9 @@ local function planEconomy(ai: any)
 		end)
 	end
 	if liveFound < wantFound then
-		add(90, Config.FOUNDRY_COST, function()
+		-- Foundry cost scales with how many we already own (matches BuildingManager).
+		local foundryCost = Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveFound)
+		add(90, foundryCost, function()
 			-- Place the Foundry near base so its boost radius covers the seeded deposits.
 			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then
 				ai.builtMines += 1; return true
@@ -902,7 +915,7 @@ local function planEconomy(ai: any)
 		end)
 	end
 	if liveTurrets < wantTur then
-		add(arche.turtle and 78 or 55, Config.TURRET_COST, function()
+		add(arche.turtle and 84 or 70, Config.TURRET_COST, function()
 			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 20, 45) then
 				ai.builtTurrets = math.max(ai.builtTurrets, liveTurrets + 1); return true
 			end
@@ -1256,7 +1269,8 @@ local function swarmStrategyTree(ai: any)
 	if ai.isNightmare then maxNests += 2; maxBlobs += 2 end
 
 	local liveMines = countOwnedBuildings(ai.ownerStr, "Foundry")
-	if liveMines < maxMines and canAfford(ai.player, Config.FOUNDRY_COST, ai.reserve) then
+	local foundryCost = Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveMines)
+	if liveMines < maxMines and canAfford(ai.player, foundryCost, ai.reserve) then
 		if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then
 			ai.builtMines += 1
 		end
@@ -1283,9 +1297,18 @@ local function btProduceSwarm(ai: any)
 	if unitManager.getUnitCount(ai.player) >= ai.maxUnits then return end
 
 	for _, nestId in getOwnedBuildingIds(ai.ownerStr, "LampreyNest") do
-		ai.swarmEggToggle = not ai.swarmEggToggle
-		local kind = if ai.swarmEggToggle then "Lamprey" else "Hagfish"
-		local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
+		-- Once the swarm can afford one, occasionally commit to a heavy Broodmother;
+		-- otherwise keep alternating the cheap Lamprey/Hagfish swarm.
+		local kind: string
+		if canAfford(ai.player, Config.BROODMOTHER_EGG_COST, ai.reserve) and math.random() < 0.18 then
+			kind = "Broodmother"
+		else
+			ai.swarmEggToggle = not ai.swarmEggToggle
+			kind = if ai.swarmEggToggle then "Lamprey" else "Hagfish"
+		end
+		local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST
+			elseif kind == "Broodmother" then Config.BROODMOTHER_EGG_COST
+			else Config.LAMPREY_EGG_COST
 		if canAfford(ai.player, cost, ai.reserve) then
 			buildingManager.requestNestEgg(ai.player, nestId, kind)
 		end

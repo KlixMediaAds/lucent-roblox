@@ -161,6 +161,11 @@ function Network.onHagfishStrike(fn: (Vector3, {Vector3}) -> ())
 	RemoteHandler.get(Config.REMOTES.HagfishStrike).OnClientEvent:Connect(fn)
 end
 
+-- deathPos: a Broodmother was killed — play its collapse/birth VFX + nearby camera shake
+function Network.onBroodmotherDeath(fn: (Vector3) -> ())
+	RemoteHandler.get(Config.REMOTES.BroodmotherDeath).OnClientEvent:Connect(fn)
+end
+
 -- nestIds array — unlock the rally launcher upgrade on each Lamprey Nest
 function Network.upgradeNest(nestIds: {string})
 	RemoteHandler.get(Config.REMOTES.UpgradeNest):FireServer(nestIds)
@@ -184,6 +189,17 @@ end
 -- winnerUserId, reason, statsTable, duration
 function Network.onShowEndScreen(fn: (number, string, any, number) -> ())
 	RemoteHandler.get(Config.REMOTES.ShowEndScreen).OnClientEvent:Connect(fn)
+end
+
+-- Fired by server to the local player when their CC is destroyed mid-match
+-- (not the final 1v1). stats = this player's stats, duration = seconds.
+function Network.onShowDefeatScreen(fn: (any, number) -> ())
+	RemoteHandler.get(Config.REMOTES.ShowDefeatScreen).OnClientEvent:Connect(fn)
+end
+
+-- Request the server respawn the local player's base into the running match.
+function Network.playAgain()
+	RemoteHandler.get(Config.REMOTES.PlayAgain):FireServer()
 end
 
 -- Fired by server when the local player's CC takes damage (throttled ~5 s)
@@ -234,16 +250,6 @@ end
 -- Sell the given structures for a partial refund (server validates ownership).
 function Network.sellBuildings(ids: { string })
 	RemoteHandler.get(Config.REMOTES.SellBuilding):FireServer(ids)
-end
-
--- pod (Model), targetPos: the player's Core drop pod has launched — follow it in.
-function Network.onCorePodLaunched(fn: (Model, Vector3) -> ())
-	RemoteHandler.get(Config.REMOTES.CorePodLaunched).OnClientEvent:Connect(fn)
-end
-
--- Request the server transform the player's deployed Core into the Command Center.
-function Network.deployCore()
-	RemoteHandler.get(Config.REMOTES.DeployCore):FireServer()
 end
 
 function Network.setDeployerType(deployerId: string, unitType: string)

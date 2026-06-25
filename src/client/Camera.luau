@@ -9,16 +9,34 @@ local Camera    = {}
 local cam       = workspace.CurrentCamera
 local mouse     = Players.LocalPlayer:GetMouse()
 
+local DEFAULT_ZOOM = 80
+local DEFAULT_YAW  = 0
+
 local focus     = Vector3.new(0, 0, 0)
-local zoom      = 80
-local yaw       = 0   -- degrees
+local zoom      = DEFAULT_ZOOM
+local yaw       = DEFAULT_YAW   -- degrees
+
+-- While true, the camera is animating back to base; WASD/edge panning is paused
+-- and the animation coroutine drives focus/zoom/yaw each frame.
+local returning = false
 
 local midDrag   = false
 local lastMouse = Vector2.zero
 
+-- When true, screen-edge panning is suppressed (e.g. while the cursor is over the
+-- minimap, whose top-right corner sits inside the edge-pan threshold and would
+-- otherwise drag the camera away from a click-to-pan target). WASD still works.
+local edgePanSuppressed = false
+
 -- When set, the camera locks its focus onto this part each frame (used to follow
 -- the incoming Core drop pod). WASD panning is suspended while following.
 local followTarget: BasePart? = nil
+
+-- Screen shake: a single decaying amplitude jittered into the camera position each
+-- frame. Camera.shake(amp) tops it up (strongest concurrent shake wins); it bleeds
+-- off on its own. Used for nearby heavy impacts (e.g. a Broodmother's death).
+local shakeAmp        = 0
+local lastShakeClock  = os.clock()
 
 local function apply()
 	local yr = math.rad(yaw)
@@ -28,7 +46,27 @@ local function apply()
 		math.sin(pr) * zoom,
 		math.cos(yr) * math.cos(pr) * zoom
 	)
-	cam.CFrame = CFrame.new(focus + offset, focus)
+	local camPos = focus + offset
+	if shakeAmp > 0.01 then
+		local now = os.clock()
+		local sdt = math.clamp(now - lastShakeClock, 0, 0.1)
+		lastShakeClock = now
+		shakeAmp = math.max(0, shakeAmp - shakeAmp * math.min(1, sdt * 7) - sdt * 0.4)
+		camPos += Vector3.new(
+			(math.random() - 0.5),
+			(math.random() - 0.5),
+			(math.random() - 0.5)
+		) * (2 * shakeAmp)
+	else
+		lastShakeClock = os.clock()
+	end
+	cam.CFrame = CFrame.new(camPos, focus)
+end
+
+-- Add a screen shake of the given amplitude (in studs of camera jitter). Decays on
+-- its own; repeated calls keep whichever is strongest.
+function Camera.shake(amplitude: number)
+	shakeAmp = math.max(shakeAmp, amplitude)
 end
 
 function Camera.init()
@@ -88,6 +126,19 @@ function Camera.init()
 			end
 		end
 
+		-- Return-to-base animation drives the camera; a manual pan/rotate cancels it.
+		if returning then
+			if midDrag
+				or UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.S)
+				or UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.D)
+				or UserInputService:IsKeyDown(Enum.KeyCode.Q) or UserInputService:IsKeyDown(Enum.KeyCode.E) then
+				returning = false
+			else
+				apply()
+				return
+			end
+		end
+
 		local yr  = math.rad(yaw)
 		local fwd = Vector3.new(-math.sin(yr), 0, -math.cos(yr))
 		local rgt = Vector3.new( math.cos(yr), 0, -math.sin(yr))
@@ -97,10 +148,11 @@ function Camera.init()
 		local thr = Config.CAMERA_EDGE_THRESHOLD
 		local move = Vector3.zero
 
-		if UserInputService:IsKeyDown(Enum.KeyCode.W) or mp.Y < thr            then move += fwd end
-		if UserInputService:IsKeyDown(Enum.KeyCode.S) or mp.Y > vp.Y - thr     then move -= fwd end
-		if UserInputService:IsKeyDown(Enum.KeyCode.A) or mp.X < thr            then move -= rgt end
-		if UserInputService:IsKeyDown(Enum.KeyCode.D) or mp.X > vp.X - thr     then move += rgt end
+		local edge = not edgePanSuppressed
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) or (edge and mp.Y < thr)        then move += fwd end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) or (edge and mp.Y > vp.Y - thr) then move -= fwd end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) or (edge and mp.X < thr)        then move -= rgt end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) or (edge and mp.X > vp.X - thr) then move += rgt end
 		if UserInputService:IsKeyDown(Enum.KeyCode.Q) then yaw += Config.CAMERA_ROTATE_SPEED * dt end
 		if UserInputService:IsKeyDown(Enum.KeyCode.E) then yaw -= Config.CAMERA_ROTATE_SPEED * dt end
 
@@ -126,6 +178,40 @@ end
 function Camera.setFocus(pos: Vector3)
 	focus = Vector3.new(pos.X, 0, pos.Z)
 	apply()
+end
+
+-- Smoothly fly the camera back to `pos` (the Command Center), restoring the
+-- default rotation and zoom. Cancels follow mode; a manual pan/rotate aborts it.
+function Camera.returnToBase(pos: Vector3)
+	followTarget = nil
+	local targetFocus = Vector3.new(pos.X, 0, pos.Z)
+	local startFocus, startZoom, startYaw = focus, zoom, yaw
+	-- Rotate the short way to the default heading (nearest multiple of 360).
+	local targetYaw = math.floor((startYaw - DEFAULT_YAW) / 360 + 0.5) * 360 + DEFAULT_YAW
+
+	returning = true
+	local DUR = 0.6
+	local t0  = os.clock()
+	task.spawn(function()
+		while returning do
+			local a = math.clamp((os.clock() - t0) / DUR, 0, 1)
+			local e = 1 - (1 - a) * (1 - a) * (1 - a)  -- cubic ease-out
+			focus = startFocus:Lerp(targetFocus, e)
+			zoom  = startZoom + (DEFAULT_ZOOM - startZoom) * e
+			yaw   = startYaw  + (targetYaw  - startYaw)  * e
+			if a >= 1 then
+				returning = false
+				break
+			end
+			RunService.RenderStepped:Wait()
+		end
+	end)
+end
+
+-- Toggles screen-edge panning. The minimap suppresses it while hovered/dragged so
+-- click-to-pan lands on the clicked point instead of drifting via edge-scroll.
+function Camera.setEdgePanSuppressed(v: boolean)
+	edgePanSuppressed = v
 end
 
 -- Lock the camera onto a moving part (the camera keeps it centred each frame and

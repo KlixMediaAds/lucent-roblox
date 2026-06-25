@@ -54,6 +54,18 @@ local CONTENT_H  = MAP_BORDER + ROSTER_GAP + ROW2_H      -- 692
 local CONTENT_X  = math.floor((DESIGN_W - CONTENT_W) / 2)
 local CONTENT_Y  = HEADER_H + 14
 
+-- Collapsible settings: the map + roster + ready live in `rightGroup`, which
+-- slides between a centered "settings collapsed" position and a shifted-right
+-- "settings expanded" position. The settings panel itself drops open downward.
+local SETTINGS_HEADER_H = 54
+local SETTINGS_COLLAPSED_W = 150                                      -- compact pill when collapsed
+local MAP_X_OPEN        = CONTENT_X + SETTINGS_W + GAP                 -- 380
+local MAP_X_CLOSED      = math.floor((DESIGN_W - MAP_BORDER) / 2)      -- 218 (clears the collapsed pill)
+
+-- Game-start sounds
+local SND_COUNTDOWN = "rbxassetid://131999546232546"
+local SND_START     = "rbxassetid://137938748294875"
+
 -- Minimap constants — must match MiniMap.luau (used by the game-start slide)
 local MINIMAP_SIZE = 180
 local MINIMAP_PAD  = 10
@@ -91,19 +103,28 @@ local DIFF_COLORS = {
 -- ── Module refs ───────────────────────────────────────────────────────────────
 local sg:            ScreenGui
 local bg:            Frame
-local redWash:       Frame   -- full-screen red overlay that fades in as the game starts
+local glow:          Frame   -- the blue backdrop glow (turns purple as the game starts)
+local silhouetteLayer: Frame -- black silhouette horde during the ready transition
 local container:     Frame
 local uiScaleObj:    UIScale
 local mapBorder:     Frame
 local mapCanvas:     Frame
+local rightGroup:    Frame   -- map + roster + ready (slides aside when settings open)
 local settingsPanel: Frame
+local settingsChevron: TextLabel
+local settingsTitleLbl: TextLabel
 local rosterPanel:   Frame
 local rosterContent: Frame
 local readyBtn:      TextButton
+local readyGrad:     UIGradient
+local readyStroke:   UIStroke
 local statusLbl:     TextLabel
 local titleLbl:      TextLabel
 local titleDeco:     Frame
 local mapLabelRef:   TextLabel
+
+local sndCountdown:  Sound
+local sndStart:      Sound
 
 local aiCountBtn:    TextButton
 local aiDiffBtn:     TextButton
@@ -112,9 +133,15 @@ local gamemodeBtn:   TextButton
 local depositDots: { Frame } = {}
 local terrainDots: { Frame } = {}
 local isReady             = false
+local settingsExpanded    = false
 local lobbyTerrainEnabled = false
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
+
+-- Bright "ready up" palette — pronounced yellow→white gradient
+local C_READY_TOP   = Color3.fromRGB(255, 248, 196)  -- near-white top
+local C_READY_BOT   = Color3.fromRGB(255, 204,  56)  -- saturated yellow bottom
+local C_READY_GLOW  = Color3.fromRGB(255, 226, 120)
 
 -- ── UIScale update ────────────────────────────────────────────────────────────
 local function updateScale()
@@ -372,9 +399,18 @@ end
 -- ── Ready button display ───────────────────────────────────────────────────────
 local function applyReadyState(ready: boolean)
 	isReady = ready
-	readyBtn.BackgroundColor3 = ready and C_READY_ON or C_READY_OFF
-	readyBtn.TextColor3 = ready and Color3.fromRGB(20, 24, 32) or Color3.fromRGB(238, 240, 245)
-	readyBtn.Text = ready and "✓\nCANCEL" or "READY\nUP"
+	if ready then
+		-- Locked in: shift the bright button to a confident green→white.
+		readyGrad.Color = ColorSequence.new(Color3.fromRGB(216, 255, 208), Color3.fromRGB(96, 214, 130))
+		readyStroke.Color = Color3.fromRGB(128, 240, 158)
+		readyBtn.TextColor3 = Color3.fromRGB(14, 42, 22)
+		readyBtn.Text = "✓\nLOCKED IN"
+	else
+		readyGrad.Color = ColorSequence.new(C_READY_TOP, C_READY_BOT)
+		readyStroke.Color = C_READY_GLOW
+		readyBtn.TextColor3 = Color3.fromRGB(54, 38, 6)
+		readyBtn.Text = "READY\nUP"
+	end
 end
 
 -- ── Player ready sync ──────────────────────────────────────────────────────────
@@ -405,22 +441,99 @@ local function fadeFrame(frame: Instance, info: TweenInfo)
 	end
 end
 
+-- A rising horde of black silhouettes that surges up from the bottom edge as the
+-- match begins — the dramatic foreground of the ready transition.
+local function spawnSilhouettes()
+	silhouetteLayer = Instance.new("Frame")
+	silhouetteLayer.Name = "Silhouettes"
+	silhouetteLayer.Size = UDim2.new(1, 0, 1, 0)
+	silhouetteLayer.BackgroundTransparency = 1
+	silhouetteLayer.ClipsDescendants = true
+	silhouetteLayer.ZIndex = 3
+	silhouetteLayer.Parent = bg
+
+	local COUNT = 16
+	for i = 1, COUNT do
+		local depth = math.random()                       -- 0 far · 1 near
+		local h     = 90 + depth * 170
+		local w     = h * (0.62 + math.random() * 0.30)
+		local xScl  = (i - 0.5) / COUNT + (math.random() - 0.5) * 0.05
+		local zi    = 3 + math.floor(depth * 6)
+		local tr    = 0.04 + (1 - depth) * 0.34
+
+		-- Creature body (rounded hump)
+		local fig = Instance.new("Frame")
+		fig.AnchorPoint = Vector2.new(0.5, 1)
+		fig.Size = UDim2.fromOffset(w, h)
+		fig.Position = UDim2.new(xScl, 0, 1.45, 0)        -- start below the screen
+		fig.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		fig.BackgroundTransparency = tr
+		fig.BorderSizePixel = 0
+		fig.ZIndex = zi
+		fig.Parent = silhouetteLayer
+		corner(fig, math.floor(w * 0.45))
+
+		-- Head
+		local head = Instance.new("Frame")
+		head.AnchorPoint = Vector2.new(0.5, 0.5)
+		head.Size = UDim2.fromOffset(w * 0.5, w * 0.5)
+		head.Position = UDim2.new(0.5, 0, 0, 0)
+		head.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		head.BackgroundTransparency = tr
+		head.BorderSizePixel = 0
+		head.ZIndex = zi
+		head.Parent = fig
+		corner(head, math.floor(w * 0.25))
+
+		-- Spikes / legs to break the silhouette
+		for s = -1, 1, 2 do
+			local spike = Instance.new("Frame")
+			spike.AnchorPoint = Vector2.new(0.5, 1)
+			spike.Size = UDim2.fromOffset(w * 0.16, h * 0.45)
+			spike.Position = UDim2.new(0.5, s * w * 0.28, 1, 0)
+			spike.Rotation = s * 12
+			spike.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			spike.BackgroundTransparency = tr
+			spike.BorderSizePixel = 0
+			spike.ZIndex = zi
+			spike.Parent = fig
+		end
+
+		local targetY = 1.05 + (1 - depth) * 0.05
+		local rise = TweenInfo.new(0.85 + math.random() * 0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		task.delay(math.random() * 0.55, function()
+			if not fig.Parent then return end
+			TweenService:Create(fig, rise, { Position = UDim2.new(xScl, 0, targetY, 0) }):Play()
+			-- Idle bob once landed
+			task.delay(0.85, function()
+				if not fig.Parent then return end
+				TweenService:Create(fig,
+					TweenInfo.new(1.3 + math.random() * 0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+					{ Position = UDim2.new(xScl, 0, targetY - 0.018, 0) }
+				):Play()
+			end)
+		end)
+	end
+end
+
 local function playGameStartTransition(onComplete: (string) -> ())
 	readyBtn.Active = false
 
-	-- Bleed the backdrop to red through the countdown, so the lobby is fully red
-	-- before the match begins.
-	if redWash then
-		TweenService:Create(redWash,
-			TweenInfo.new(1.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ BackgroundTransparency = 0 }
+	-- Recolor the blue backdrop glow to a foreboding purple as the match begins,
+	-- and surge the black silhouette horde up from the bottom.
+	if glow then
+		TweenService:Create(glow,
+			TweenInfo.new(1.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ BackgroundColor3 = Color3.fromRGB(128, 44, 172), BackgroundTransparency = 0.32 }
 		):Play()
 	end
+	spawnSilhouettes()
 
 	task.spawn(function()
 		for _, txt in { "3", "2", "1" } do
 			statusLbl.Text = "Game starting in  " .. txt
 			statusLbl.TextColor3 = C_TEXT; statusLbl.TextSize = 18
+			if sndCountdown then sndCountdown:Play() end
 			TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 24 }):Play()
 			task.delay(0.12, function()
 				TweenService:Create(statusLbl, TweenInfo.new(0.22), { TextSize = 17 }):Play()
@@ -428,6 +541,7 @@ local function playGameStartTransition(onComplete: (string) -> ())
 			task.wait(0.65)
 		end
 		statusLbl.Text = "GO!"; statusLbl.TextColor3 = C_READY_DOT; statusLbl.TextSize = 18
+		if sndCountdown then sndCountdown:Play() end  -- final tick; the big start sound plays with the reveal
 		TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 30 }):Play()
 		task.delay(0.14, function()
 			TweenService:Create(statusLbl, TweenInfo.new(0.30), { TextSize = 18 }):Play()
@@ -472,7 +586,7 @@ local function playGameStartTransition(onComplete: (string) -> ())
 		end)
 
 		local mmBorder  = MINIMAP_SIZE + 4
-		local slideInfo = TweenInfo.new(0.70, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
+		local slideInfo = TweenInfo.new(0.92, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 
 		-- Land on the live minimap's corner. MiniMap.luau anchors its border at
 		-- UDim2.new(1, -(MAP_SIZE+4+PADDING), 0, PADDING) — top-right — so target that
@@ -487,28 +601,66 @@ local function playGameStartTransition(onComplete: (string) -> ())
 			Position = UDim2.fromOffset(canvasFinal, canvasFinal),
 		}):Play()
 
-		task.delay(0.72, function()
-			TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = Color3.fromRGB(255, 255, 255) }):Play()
-			task.delay(0.10, function()
-				TweenService:Create(mapBorder, TweenInfo.new(0.30), { BackgroundColor3 = C_BORDER }):Play()
+		task.delay(0.94, function()
+			-- Gentle "arrival" pulse as the card docks (no harsh snap).
+			TweenService:Create(mapBorder, TweenInfo.new(0.16), { BackgroundColor3 = Color3.fromRGB(236, 240, 248) }):Play()
+			task.delay(0.18, function()
+				TweenService:Create(mapBorder, TweenInfo.new(0.40), { BackgroundColor3 = C_BORDER }):Play()
 			end)
-			task.delay(0.40, function()
-				local finalFade = TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-				TweenService:Create(mapBorder, finalFade, { BackgroundTransparency = 1 }):Play()
-				TweenService:Create(mapCanvas, finalFade, { BackgroundTransparency = 1 }):Play()
+
+			-- Let the docked card settle for a beat before anything fades.
+			task.delay(0.55, function()
+				-- Soft dissolve of the docked map card into the live minimap.
+				local mapFade = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+				TweenService:Create(mapBorder, mapFade, { BackgroundTransparency = 1 }):Play()
+				TweenService:Create(mapCanvas, mapFade, { BackgroundTransparency = 1 }):Play()
 				for _, child in mapCanvas:GetDescendants() do
 					if child:IsA("GuiObject") then
-						pcall(function() TweenService:Create(child, finalFade, { BackgroundTransparency = 1 }):Play() end)
+						pcall(function() TweenService:Create(child, mapFade, { BackgroundTransparency = 1 }):Play() end)
 					end
 				end
-				task.delay(0.28, function()
+
+				task.delay(0.34, function()
+					-- Hand off to gameplay so the world starts loading behind the
+					-- still-opaque backdrop — this stretch doubles as the loading
+					-- screen, so we deliberately take our time here.
 					onComplete(lobbyGamemode)
-					local bgFade = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-					TweenService:Create(bg, bgFade, { BackgroundTransparency = 1 }):Play()
-					if redWash then
-						TweenService:Create(redWash, bgFade, { BackgroundTransparency = 1 }):Play()
-					end
-					task.delay(0.27, function() sg:Destroy() end)
+
+					-- Hold on the purple silhouette scene for a beat while the game
+					-- builds, then sweep the black horde UP and off the top of the
+					-- screen, uncovering the world as it goes, over a long dissolve.
+					task.delay(1.0, function()
+						-- The big game-start sound fires here, in lockstep with the
+						-- silhouette horde rising to uncover the world.
+						if sndStart then sndStart:Play() end
+
+						local reveal = TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+						TweenService:Create(bg, reveal, { BackgroundTransparency = 1 }):Play()
+						if glow then
+							TweenService:Create(glow, reveal,
+								{ BackgroundTransparency = 1, BackgroundColor3 = Color3.fromRGB(170, 100, 212) }
+							):Play()
+						end
+						if silhouetteLayer then
+							-- Bigger/nearer figures lead the rise for a parallax wipe.
+							-- Slow, even Sine motion so it tracks the start sound's swell.
+							for _, fig in silhouetteLayer:GetChildren() do
+								if fig:IsA("Frame") then
+									local xs = fig.Position.X.Scale
+									local lead = math.clamp(fig.AbsoluteSize.Y / 260, 0, 1)
+									task.delay((1 - lead) * 0.5, function()
+										if not fig.Parent then return end
+										TweenService:Create(fig,
+											TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+											{ Position = UDim2.new(xs, 0, -0.8, 0) }   -- rise off the top
+										):Play()
+									end)
+								end
+							end
+							fadeFrame(silhouetteLayer, TweenInfo.new(2.7, Enum.EasingStyle.Sine, Enum.EasingDirection.Out))
+						end
+						task.delay(3.1, function() sg:Destroy() end)
+					end)
 				end)
 			end)
 		end)
@@ -521,17 +673,6 @@ local function buildBackdrop()
 	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C_BG
 	bg.BorderSizePixel = 0; bg.Parent = sg
 	gradient(bg, C_BG, C_BG2, 90)
-
-	-- Red wash that fades in over the backdrop as the match begins (sits above the
-	-- backdrop decoration but below the panels, so the lobby reddens before the game).
-	redWash = Instance.new("Frame")
-	redWash.Name = "RedWash"
-	redWash.Size = UDim2.new(1, 0, 1, 0)
-	redWash.BackgroundColor3 = Color3.fromRGB(130, 18, 18)
-	redWash.BackgroundTransparency = 1
-	redWash.BorderSizePixel = 0
-	redWash.ZIndex = 2
-	redWash.Parent = bg
 
 	local deco = Instance.new("Frame")
 	deco.Name = "Deco"; deco.Size = UDim2.new(1, 0, 1, 0)
@@ -553,7 +694,7 @@ local function buildBackdrop()
 	bigDia.BackgroundTransparency = 1; bigDia.Parent = deco
 	local bd = stroke(bigDia, C_BORDER, 1); bd.Transparency = 0.9
 
-	local glow = Instance.new("Frame")
+	glow = Instance.new("Frame")
 	glow.Name = "Glow"; glow.Size = UDim2.new(1, 0, 1, 0)
 	glow.BackgroundColor3 = Color3.fromRGB(42, 122, 152); glow.BackgroundTransparency = 0.5
 	glow.BorderSizePixel = 0; glow.ZIndex = 0; glow.Parent = bg
@@ -668,29 +809,71 @@ local function settingRow(parent: Instance, y: number, caption: string,
 	return btn
 end
 
+-- Expand/collapse the settings drop-menu. Collapsing shrinks the panel to just
+-- its header (rows clip away) and slides the map group back to center, so the
+-- lobby reads clean by default; expanding drops the rows open and shifts the
+-- map aside to make room.
+local function setSettingsExpanded(expanded: boolean, instant: boolean?)
+	settingsExpanded = expanded
+	local targetW    = expanded and SETTINGS_W or SETTINGS_COLLAPSED_W
+	local targetH    = expanded and CONTENT_H or SETTINGS_HEADER_H
+	local targetMapX = expanded and MAP_X_OPEN or MAP_X_CLOSED
+
+	local panelInfo = instant and TweenInfo.new(0)
+		or TweenInfo.new(0.42, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	local slideInfo = instant and TweenInfo.new(0)
+		or TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+	TweenService:Create(settingsPanel, panelInfo, { Size = UDim2.fromOffset(targetW, targetH) }):Play()
+	TweenService:Create(rightGroup,    slideInfo, { Position = UDim2.fromOffset(targetMapX, CONTENT_Y) }):Play()
+	if settingsChevron then
+		TweenService:Create(settingsChevron, TweenInfo.new(0.3), { Rotation = expanded and 180 or 0 }):Play()
+	end
+	if settingsTitleLbl then
+		settingsTitleLbl.Text = expanded and "⚙  GAME SETTINGS" or "⚙  SETTINGS"
+	end
+end
+
 local function buildSettingsColumn()
 	settingsPanel = Instance.new("Frame")
 	settingsPanel.Name = "Settings"
-	settingsPanel.Size = UDim2.fromOffset(SETTINGS_W, MAP_BORDER)
+	settingsPanel.Size = UDim2.fromOffset(SETTINGS_COLLAPSED_W, SETTINGS_HEADER_H)  -- collapsed by default
 	settingsPanel.Position = UDim2.fromOffset(CONTENT_X, CONTENT_Y)
 	settingsPanel.BackgroundColor3 = C_PANEL
 	settingsPanel.BackgroundTransparency = 0.04
 	settingsPanel.BorderSizePixel = 0
+	settingsPanel.ClipsDescendants = true  -- rows below the header clip away when collapsed
 	settingsPanel.Parent = container
 	corner(settingsPanel, 8)
 	local ps = stroke(settingsPanel, C_BORDER, 1); ps.Transparency = 0.15
 	gradient(settingsPanel, C_PANEL_HI, C_PANEL, 90)
 	cornerBrackets(settingsPanel, C_GOLD, 14, 2, 9)
 
-	label(settingsPanel, "◆  MATCH SETUP", 14, C_GOLD, Enum.Font.GothamBold,
-		UDim2.new(1, -32, 0, 22), UDim2.fromOffset(16, 16), Enum.TextXAlignment.Left)
+	-- Header doubles as the toggle button (the whole bar is clickable).
+	local header = Instance.new("TextButton")
+	header.Name = "SettingsToggle"
+	header.Size = UDim2.new(1, 0, 0, SETTINGS_HEADER_H)
+	header.Position = UDim2.fromOffset(0, 0)
+	header.BackgroundTransparency = 1
+	header.AutoButtonColor = false
+	header.Text = ""
+	header.ZIndex = 4
+	header.Parent = settingsPanel
+
+	settingsTitleLbl = label(header, "⚙  SETTINGS", 14, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -44, 1, 0), UDim2.fromOffset(14, 0), Enum.TextXAlignment.Left)
+	settingsTitleLbl.ZIndex = 4
+
+	settingsChevron = label(header, "▼", 16, C_GOLD, Enum.Font.GothamBold,
+		UDim2.fromOffset(24, 24), UDim2.new(1, -38, 0.5, -12))
+	settingsChevron.ZIndex = 4
 
 	local div = Instance.new("Frame")
-	div.Size = UDim2.new(1, -32, 0, 1); div.Position = UDim2.fromOffset(16, 46)
+	div.Size = UDim2.new(1, -32, 0, 1); div.Position = UDim2.fromOffset(16, SETTINGS_HEADER_H - 2)
 	div.BackgroundColor3 = C_BORDER; div.BackgroundTransparency = 0.5
 	div.BorderSizePixel = 0; div.Parent = settingsPanel
 
-	local rowY = 62
+	local rowY = SETTINGS_HEADER_H + 14
 	local ROW_STEP = 92
 
 	-- Gamemode (cycles Default ↔ Swarm)
@@ -709,20 +892,24 @@ local function buildSettingsColumn()
 	-- Teams (coming soon — FFA for now)
 	local teamsBtn = settingRow(settingsPanel, rowY, "TEAMS", "FFA · COMING SOON", C_SUBTEXT, false)
 	teamsBtn.TextSize = 13
+
+	header.MouseButton1Click:Connect(function()
+		setSettingsExpanded(not settingsExpanded)
+	end)
 end
 
 -- ── Build: map preview ──────────────────────────────────────────────────────────
+-- Map, roster and ready all live inside `rightGroup` (relative coordinates) so the
+-- whole block can slide aside as a unit when the settings drop-menu opens.
 local function buildMap()
-	local mapX = CONTENT_X + SETTINGS_W + GAP
-
-	mapLabelRef = label(container, "◆  TACTICAL MAP", 13, C_GOLD, Enum.Font.GothamBold,
-		UDim2.fromOffset(MAP_BORDER, 22), UDim2.fromOffset(mapX, CONTENT_Y - 26), Enum.TextXAlignment.Left)
+	mapLabelRef = label(rightGroup, "◆  TACTICAL MAP", 13, C_GOLD, Enum.Font.GothamBold,
+		UDim2.fromOffset(MAP_BORDER, 22), UDim2.fromOffset(0, -26), Enum.TextXAlignment.Left)
 
 	mapBorder = Instance.new("Frame")
 	mapBorder.Size = UDim2.fromOffset(MAP_BORDER, MAP_BORDER)
-	mapBorder.Position = UDim2.fromOffset(mapX, CONTENT_Y)
+	mapBorder.Position = UDim2.fromOffset(0, 0)
 	mapBorder.BackgroundColor3 = C_BORDER; mapBorder.BorderSizePixel = 0
-	mapBorder.Parent = container
+	mapBorder.Parent = rightGroup
 	corner(mapBorder, 4)
 
 	mapCanvas = Instance.new("Frame")
@@ -755,20 +942,19 @@ end
 
 -- ── Build: roster + ready ───────────────────────────────────────────────────────
 local function buildRosterAndReady()
-	local rowY     = CONTENT_Y + MAP_BORDER + ROSTER_GAP
-	-- The bottom row spans the full content width: roster on the left (extending
-	-- under the settings column too) and the large READY button at the far right,
-	-- aligned with the map's right edge.
-	local rosterW  = CONTENT_W - READY_W - READY_GAP
+	-- Bottom row sits beneath the map inside `rightGroup`: roster on the left, the
+	-- large READY button at the far right (aligned with the map's right edge).
+	local rowY     = MAP_BORDER + ROSTER_GAP
+	local rosterW  = MAP_BORDER - READY_W - READY_GAP
 
 	rosterPanel = Instance.new("Frame")
 	rosterPanel.Name = "Roster"
 	rosterPanel.Size = UDim2.fromOffset(rosterW, ROW2_H)
-	rosterPanel.Position = UDim2.fromOffset(CONTENT_X, rowY)
+	rosterPanel.Position = UDim2.fromOffset(0, rowY)
 	rosterPanel.BackgroundColor3 = C_PANEL
 	rosterPanel.BackgroundTransparency = 0.04
 	rosterPanel.BorderSizePixel = 0
-	rosterPanel.Parent = container
+	rosterPanel.Parent = rightGroup
 	corner(rosterPanel, 8)
 	local rs = stroke(rosterPanel, C_BORDER, 1); rs.Transparency = 0.15
 	gradient(rosterPanel, C_PANEL_HI, C_PANEL, 90)
@@ -793,13 +979,40 @@ local function buildRosterAndReady()
 	layout.VerticalAlignment = Enum.VerticalAlignment.Center
 	layout.Parent = rosterContent
 
-	-- Large READY button, bottom-right (aligned with the map's right edge)
-	readyBtn = makeBtn(container, "READY\nUP",
-		UDim2.fromOffset(READY_W, ROW2_H),
-		UDim2.fromOffset(CONTENT_X + rosterW + READY_GAP, rowY),
-		C_READY_OFF, Color3.fromRGB(238, 240, 245), 26)
+	-- Large READY button, bottom-right (aligned with the map's right edge).
+	-- Pronounced bright yellow→white gradient with a pulsing glow so it pops out
+	-- as the clear call-to-action.
+	readyBtn = Instance.new("TextButton")
+	readyBtn.Name = "ReadyButton"
+	readyBtn.Size = UDim2.fromOffset(READY_W, ROW2_H)
+	readyBtn.Position = UDim2.fromOffset(rosterW + READY_GAP, rowY)
+	readyBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	readyBtn.BorderSizePixel = 0
+	readyBtn.AutoButtonColor = false
+	readyBtn.Font = Enum.Font.GothamBlack
+	readyBtn.TextSize = 28
+	readyBtn.TextColor3 = Color3.fromRGB(54, 38, 6)
+	readyBtn.Text = "READY\nUP"
 	readyBtn.TextYAlignment = Enum.TextYAlignment.Center
-	cornerBrackets(readyBtn, C_GOLD, 14, 2, 9)
+	readyBtn.Parent = rightGroup
+	corner(readyBtn, 6)
+	readyGrad = gradient(readyBtn, C_READY_TOP, C_READY_BOT, 90)
+	readyStroke = stroke(readyBtn, C_READY_GLOW, 2)
+	readyStroke.Transparency = 0.45
+	cornerBrackets(readyBtn, Color3.fromRGB(255, 255, 255), 16, 2, 9)
+
+	-- Steady attention pulse on the glow.
+	TweenService:Create(readyStroke,
+		TweenInfo.new(1.0, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Transparency = 0.05, Thickness = 3 }
+	):Play()
+
+	readyBtn.MouseEnter:Connect(function()
+		TweenService:Create(readyBtn, TweenInfo.new(0.12), { TextSize = 30 }):Play()
+	end)
+	readyBtn.MouseLeave:Connect(function()
+		TweenService:Create(readyBtn, TweenInfo.new(0.12), { TextSize = 28 }):Play()
+	end)
 end
 
 -- ── Build UI ────────────────────────────────────────────────────────────────────
@@ -819,6 +1032,21 @@ local function buildUI()
 	container.Parent = sg
 
 	uiScaleObj = Instance.new("UIScale"); uiScaleObj.Scale = 1; uiScaleObj.Parent = container
+
+	-- Map + roster + ready group. Starts at the centered (settings-collapsed) spot.
+	rightGroup = Instance.new("Frame")
+	rightGroup.Name = "RightGroup"
+	rightGroup.Size = UDim2.fromOffset(MAP_BORDER, CONTENT_H)
+	rightGroup.Position = UDim2.fromOffset(MAP_X_CLOSED, CONTENT_Y)
+	rightGroup.BackgroundTransparency = 1
+	rightGroup.ClipsDescendants = false
+	rightGroup.Parent = container
+
+	-- Game-start sounds
+	sndCountdown = Instance.new("Sound")
+	sndCountdown.SoundId = SND_COUNTDOWN; sndCountdown.Volume = 0.6; sndCountdown.Parent = sg
+	sndStart = Instance.new("Sound")
+	sndStart.SoundId = SND_START; sndStart.Volume = 0.8; sndStart.Parent = sg
 
 	buildTitle()
 	buildSettingsColumn()

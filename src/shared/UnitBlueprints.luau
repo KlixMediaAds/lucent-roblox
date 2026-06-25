@@ -154,32 +154,6 @@ local FOAMER: Blueprint = {
 	},
 }
 
--- ── Core: compact deploy rover ─────────────────────────────────────────────────
--- The mobile "seed" that drops in and later transforms into the Command Center.
--- Body root (5×3×6) is the visible chassis; a glowing reactor orb rides on top so
--- it reads as a miniature Fabricator Core. −Z is forward.
-local CORE: Blueprint = {
-	healthBarY = 4,
-	parts = {
-		-- Lower hull skirt (dark metal) wrapping the team-coloured chassis
-		{ size = Vector3.new(5.4, 1.1, 6.2), cf = CFrame.new(0, -0.9, 0),     color = GREY,  material = METAL  },
-		-- Angled front prow
-		{ size = Vector3.new(4.2, 1.2, 1.6), cf = CFrame.new(0, -0.3, -3),    color = GREY,  material = METAL  },
-		-- Reactor housing disc (team colour) + neon core orb on top
-		{ size = Vector3.new(1.0, 2.6, 2.6), cf = CFrame.new(0, 1.7, 0.2) * CFrame.Angles(0, 0, math.pi / 2), color = nil, material = METAL, shape = CYL },
-		{ size = Vector3.new(1.7, 1.7, 1.7), cf = CFrame.new(0, 2.6, 0.2),    color = nil,   material = NEON,   shape = BALL },
-		-- Forward sensor antenna + tip light
-		{ size = Vector3.new(0.25, 2.2, 0.25), cf = CFrame.new(1.4, 2.4, -2), color = GREY,  material = METAL  },
-		{ size = Vector3.new(0.55, 0.55, 0.55), cf = CFrame.new(1.4, 3.4, -2), color = nil,  material = NEON,   shape = BALL },
-		-- Four stubby wheels — an unrotated Cylinder's axle already runs along local
-		-- X (left/right), so they read as wheels rolling in the −Z forward direction.
-		{ size = Vector3.new(1.0, 1.8, 1.8), cf = CFrame.new(-2.5, -1.1, -1.9), color = BLACK, material = SMOOTH, shape = CYL },
-		{ size = Vector3.new(1.0, 1.8, 1.8), cf = CFrame.new( 2.5, -1.1, -1.9), color = BLACK, material = SMOOTH, shape = CYL },
-		{ size = Vector3.new(1.0, 1.8, 1.8), cf = CFrame.new(-2.5, -1.1,  1.9), color = BLACK, material = SMOOTH, shape = CYL },
-		{ size = Vector3.new(1.0, 1.8, 1.8), cf = CFrame.new( 2.5, -1.1,  1.9), color = BLACK, material = SMOOTH, shape = CYL },
-	},
-}
-
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 --[[
@@ -193,7 +167,6 @@ function UnitBlueprints.get(unitType: string, bodySize: Vector3): Blueprint?
 	if unitType == "Tank"     then return tankBlueprint(bodySize)  end
 	if unitType == "Medic"    then return medicBlueprint(bodySize) end
 	if unitType == "Foamer"   then return FOAMER   end
-	if unitType == "Core"     then return CORE     end
 	return nil
 end
 

@@ -41,6 +41,21 @@ local function clearBuildingPanels()
 	if onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
 end
 
+-- Like clearBuildingPanels but skips the panel for `exceptType` — used when
+-- selecting a building so we don't hide-then-immediately-reshow the same panel.
+-- (Hiding runs a delayed collapse that would otherwise fire ~0.18 s later and
+-- hide the freshly-opened panel — the "nodes appear then vanish" bug.)
+local function clearBuildingPanelsExcept(exceptType: string?)
+	if exceptType ~= "Barracks"        and onBarracksSelectedCb    then onBarracksSelectedCb(nil)    end
+	if exceptType ~= "Foundry"         and onMineSelectedCb        then onMineSelectedCb(nil)        end
+	if exceptType ~= "CommandCenter"   and onCCSelectedCb          then onCCSelectedCb(nil)          end
+	if exceptType ~= "Turret"          and onTurretSelectedCb      then onTurretSelectedCb(nil)      end
+	if exceptType ~= "CreepyBlob"      and onBlobSelectedCb        then onBlobSelectedCb(nil)        end
+	if exceptType ~= "Deployer"        and onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
+	if exceptType ~= "LampreyNest"     and onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
+	if exceptType ~= "EngineeringPost" and onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
+end
+
 -- ── Building hover + selection highlight ──────────────────────────────────────
 local hoverBuildingId:     string?      = nil
 local hoverBox:            SelectionBox? = nil
@@ -936,7 +951,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					end
 					local info = knownBuildings[bid]
 					local owned = info ~= nil and info.ownerId == localPlayer.UserId
-					clearBuildingPanels()
+					clearBuildingPanelsExcept(owned and info.buildingType or nil)
 					if owned and info.buildingType == "Barracks" then
 						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
 					elseif owned and info.buildingType == "Foundry" then

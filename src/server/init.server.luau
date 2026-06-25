@@ -111,7 +111,7 @@ local currentGamemode = "Default"
 -- Default-mode base delivery (defined later; forward-declared so the reset /
 -- elimination handlers above its definition can call it).
 local playerBasePos: { [number]: Vector3 } = {}
-local deliverCoreForPlayer: (Player) -> ()
+local deliverBaseForPlayer: (Player) -> ()
 
 local function triggerEndGame(winnerUserId: number, reason: string)
 	if gameResetInProgress then return end
@@ -161,17 +161,16 @@ local function triggerEndGame(winnerUserId: number, reason: string)
 			setupLanePlayerBase(player)
 		end
 	else
-		-- Default mode: re-deliver a fresh Core drop pod to every player.
+		-- Default mode: place a fresh Command Center for every player.
 		nextBaseIndex = 0
 		playerBasePos = {}
 		task.wait(0.1)  -- let NeedCommandCenter reset client state first
 		for _, player in Players:GetPlayers() do
-			deliverCoreForPlayer(player)
+			deliverBaseForPlayer(player)
 		end
 	end
 
-	-- Regrow the forest for the new round (default-mode CCs carve their own
-	-- clearing when players re-place them).
+	-- Regrow the forest for the new round (CCs carve their own clearing).
 	ForestManager.generate()
 
 	gameResetInProgress = false
@@ -197,17 +196,26 @@ BuildingManager.setOnCCDestroyed(function(player)
 			-- Don't reset stats yet — triggerEndGame collects them first
 			triggerEndGame(remainingWithCC[1].UserId, "elimination")
 		else
+			-- Not the final 1v1: show this player a DEFEAT screen with PLAY AGAIN
+			-- instead of silently respawning. Gather their stats before resetting.
+			local rs    = ResearchManager.getStats(player)
+			local stats = {
+				[tostring(player.UserId)] = {
+					kills           = rs.kills,
+					unitsTrained    = rs.unitsTrained,
+					buildingsBuilt  = rs.buildingsBuilt,
+					resourcesEarned = ResourceManager.getTotalEarned(player),
+				},
+			}
+			local duration = math.max(0, math.floor(os.clock() - gameStartTime))
+
 			ResourceManager.reset(player)
 			ResearchManager.resetPlayer(player)
+			playerBasePos[player.UserId] = nil
+			-- NeedCommandCenter resets the client HUD (it hides the win overlay);
+			-- fire it first so the defeat screen shows on top of a clean state.
 			RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-			-- Default mode: redeliver a Core drop pod so they can rebuild their base.
-			-- (Lane mode auto-replaces CCs through the lobby flow instead.)
-			if currentGamemode ~= "Lane" then
-				playerBasePos[player.UserId] = nil
-				task.delay(0.3, function()
-					if player.Parent then deliverCoreForPlayer(player) end
-				end)
-			end
+			RemoteHandler.get(Config.REMOTES.ShowDefeatScreen):FireClient(player, stats, duration)
 		end
 	else
 		ResourceManager.reset(player)
@@ -352,14 +360,12 @@ local function setupLanePlayerBase(player: Player)
 	if ccId then seatAvatarOnCC(player, ccId) end
 end
 
--- ── Core-pod base delivery (default mode) ─────────────────────────────────────
--- Default mode no longer pre-places a CC + mines. Instead each player's base
--- arrives as a drop pod that deploys a mobile "Core" unit; the player drives it
--- where they want and presses DEPLOY to transform it into the Command Center.
-function deliverCoreForPlayer(player: Player)
-	-- Idempotent: never deliver a second Core or stomp an existing CC.
+-- ── Base delivery (default mode) ──────────────────────────────────────────────
+-- Default mode places the player's Command Center instantly at their base spot
+-- (and seeds nearby deposits). Lane mode uses setupLanePlayerBase instead.
+function deliverBaseForPlayer(player: Player)
+	-- Idempotent: never place a second CC.
 	if BuildingManager.hasCommandCenter(player) then return end
-	if UnitManager.getCorePosition(player) ~= nil then return end
 
 	local uid  = player.UserId
 	local base = playerBasePos[uid]
@@ -369,22 +375,26 @@ function deliverCoreForPlayer(player: Player)
 		local ccHalf  = Config.COMMAND_CENTER_SIZE.X / 2
 		base = findFlatSpot(desired, ccHalf, ccHalf)
 		playerBasePos[uid] = base
-		-- Seed deposits near the chosen base so there's ore to mine once the CC is up.
+		-- Seed deposits near the chosen base so there's ore to mine.
 		MineralManager.spawnDepositsForBase(base, 5)
 	end
 
-	BuildingManager.launchCorePod(player, base)
+	local _, ccId = BuildingManager.placeForPlayer(player, base, "CommandCenter")
+	if ccId then seatAvatarOnCC(player, ccId) end
 end
 
--- ── Deploy: Core → Command Center ─────────────────────────────────────────────
-RemoteHandler.get(Config.REMOTES.DeployCore).OnServerEvent:Connect(function(player)
+-- ── Play Again (clicked PLAY AGAIN on the defeat screen) ──────────────────────
+-- Respawns the player's base into the still-running match. Defined after the base
+-- helpers so they're in lexical scope.
+RemoteHandler.get(Config.REMOTES.PlayAgain).OnServerEvent:Connect(function(player)
+	if player.UserId <= 0 then return end
 	if BuildingManager.hasCommandCenter(player) then return end
-	local corePos = UnitManager.getCorePosition(player)
-	if not corePos then return end
-	UnitManager.removeCoreFor(player)
-	BuildingManager.deployCommandCenter(player, corePos, function(ccId)
-		seatAvatarOnCC(player, ccId)
-	end)
+	playerBasePos[player.UserId] = nil
+	if currentGamemode == "Lane" then
+		setupLanePlayerBase(player)
+	else
+		deliverBaseForPlayer(player)
+	end
 end)
 
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
@@ -407,27 +417,27 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	-- cliffs and up ramps.
 	NavGrid.rebuild()
 
-	-- Auto-place every human player's base. Lane mode pre-places the CC; default
-	-- mode delivers a Core drop pod the player deploys into a CC themselves.
+	-- Auto-place every human player's base: an instant Command Center at their
+	-- base spot (lane mode adds extra resources via setupLanePlayerBase).
 	for _, player in Players:GetPlayers() do
 		if isLane then
 			setupLanePlayerBase(player)
 		else
-			deliverCoreForPlayer(player)
+			deliverBaseForPlayer(player)
 		end
 	end
 
 	-- Grow the forest now that bases/deposits exist (it avoids both).
 	ForestManager.generate()
 
-	-- Late joiners also get auto-placed bases / Core deliveries
+	-- Late joiners also get auto-placed bases
 	Players.PlayerAdded:Connect(function(player)
 		task.delay(1, function()
 			if player.Parent and not BuildingManager.hasCommandCenter(player) then
 				if isLane then
 					setupLanePlayerBase(player)
 				else
-					deliverCoreForPlayer(player)
+					deliverBaseForPlayer(player)
 				end
 			end
 		end)

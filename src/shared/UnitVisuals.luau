@@ -251,6 +251,109 @@ local function addHagfishPreview(parent: Instance, body: BasePart)
 	end
 end
 
+-- Preview-only static Broodmother: a towering tripod standing on three tentacle
+-- legs, crowned with a lumpy sea-anemone mass ringed in lamprey-like fang clusters
+-- (each facing its own way) and topped with a fan of swaying tendrils. The live
+-- unit's whole body is drawn + animated by the client BroodmotherBody module, so
+-- none of this lives in the blueprint. Built in pivot-local space (ground at
+-- y = -10, matching the 20-tall pivot). The tendril tips glow yellow (matching the
+-- live unit's attack orbs); eyes are a fixed mint glow.
+local function addBroodmotherPreview(parent: Instance, body: BasePart)
+	local C_BODY  = Color3.fromRGB(46, 40, 60)    -- deep purple-slate flesh
+	local C_LEG   = Color3.fromRGB(38, 33, 50)
+	local C_TOOTH = Color3.fromRGB(228, 222, 232)
+	local C_MAW   = Color3.fromRGB(120, 24, 60)
+	local C_EYE   = Color3.fromRGB(150, 240, 200)
+	local C_ORB   = Color3.fromRGB(255, 224, 90)  -- glowing yellow tendril tips
+
+	local function ap(sz: Vector3, cf: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Size     = sz
+		p.CFrame   = cf
+		p.Color    = color
+		p.Material = material
+		return p
+	end
+
+	local GROUND  = -10.0
+	local MASS_Y  = 3.0
+	local MASS_R  = 4.2
+	local massPos = Vector3.new(0, MASS_Y, 0)
+
+	-- ── Three tentacle legs, splayed 120° apart ──────────────────────────────────
+	for L = 0, 2 do
+		local ang  = (L / 3) * math.pi * 2 + math.pi / 6
+		local dir  = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		local hip  = massPos + dir * (MASS_R * 0.5) + Vector3.new(0, -1.5, 0)
+		local knee = massPos + dir * (MASS_R + 2.5) + Vector3.new(0, (GROUND + MASS_Y) * 0.45, 0)
+		local foot = Vector3.new(dir.X * (MASS_R + 3.0), GROUND, dir.Z * (MASS_R + 3.0))
+		local pts  = { hip, knee, foot }
+		local thk  = { 1.7, 1.2, 0.7 }
+		for i = 1, #pts - 1 do
+			local seg = ap(Vector3.new(1, 1, 1), CFrame.new(), C_LEG, Enum.Material.SmoothPlastic)
+			UnitVisuals.orientYBetween(seg, pts[i], pts[i + 1], thk[i])
+			ap(Vector3.new(thk[i], thk[i], thk[i]), CFrame.new(pts[i + 1]), C_LEG, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		end
+		-- Splayed foot pad
+		ap(Vector3.new(1.6, 0.7, 1.6), CFrame.new(foot + Vector3.new(0, 0.3, 0)), C_LEG, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	end
+
+	-- ── Anemone mass: a lumpy cluster of overlapping balls ───────────────────────
+	ap(Vector3.new(MASS_R * 2, MASS_R * 1.8, MASS_R * 2), CFrame.new(massPos), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	for _, lump in {
+		Vector3.new( 2.2, 1.4,  1.6), Vector3.new(-2.4, 0.6, -1.2),
+		Vector3.new( 0.6, 2.4, -2.2), Vector3.new(-1.4, -1.6, 2.0),
+	} do
+		ap(Vector3.new(3.4, 3.0, 3.4), CFrame.new(massPos + lump), C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	end
+
+	-- ── Fang clusters facing several directions (lamprey-like sucker maws) ───────
+	local mawDirs = {
+		Vector3.new( 1, 0.15,  0.3), Vector3.new(-0.8, 0.1,  0.7),
+		Vector3.new( 0.2, 0.2, -1),  Vector3.new(-0.5, -0.4, -0.6),
+		Vector3.new( 0.7, -0.3, 0.6),
+	}
+	for _, d in mawDirs do
+		local dir = d.Unit
+		local mawC = massPos + dir * (MASS_R * 0.92)
+		-- Maw socket
+		ap(Vector3.new(1.6, 1.6, 1.0), CFrame.lookAt(mawC, mawC + dir), C_MAW, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		-- Basis perpendicular to the maw direction for the fang ring
+		local u = dir:Cross(Vector3.yAxis)
+		u = if u.Magnitude > 0.01 then u.Unit else Vector3.xAxis
+		local v = dir:Cross(u).Unit
+		for k = 0, 5 do
+			local a    = (k / 6) * math.pi * 2
+			local rad  = u * math.cos(a) + v * math.sin(a)
+			local base = mawC + rad * 0.95
+			local tip  = mawC + dir * 1.1 + rad * 0.4
+			local tooth = ap(Vector3.new(1, 1, 1), CFrame.new(), C_TOOTH, Enum.Material.SmoothPlastic)
+			UnitVisuals.orientYBetween(tooth, base, tip, 0.3)
+		end
+	end
+
+	-- ── Crown of swaying tendrils (static curl in the preview) ───────────────────
+	for k = 0, 7 do
+		local ang  = (k / 8) * math.pi * 2
+		local out  = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		local base = massPos + Vector3.new(0, MASS_R * 0.8, 0) + out * 1.2
+		local mid  = base + out * 1.4 + Vector3.new(0, 2.2, 0)
+		local tip  = mid + out * 1.8 + Vector3.new(0, 1.6, 0)
+		local seg1 = ap(Vector3.new(1, 1, 1), CFrame.new(), C_BODY, Enum.Material.SmoothPlastic)
+		local seg2 = ap(Vector3.new(1, 1, 1), CFrame.new(), C_BODY, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(seg1, base, mid, 0.34)
+		UnitVisuals.orientYBetween(seg2, mid,  tip, 0.24)
+		-- Glowing yellow bulb on the tip
+		ap(Vector3.new(0.7, 0.7, 0.7), CFrame.new(tip), C_ORB, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- ── Two glowing eyes on the front of the mass ────────────────────────────────
+	for _, s in { -1, 1 } do
+		ap(Vector3.new(0.9, 0.9, 0.9), CFrame.new(massPos + Vector3.new(s * 1.6, 0.8, -MASS_R * 0.85)), C_EYE, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+end
+
 -- ── Building helpers ──────────────────────────────────────────────────────────
 
 local function buildingSize(buildingType: string): Vector3
@@ -842,6 +945,10 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		body.Transparency = 1   -- live unit + preview draw the hagfish, not the pivot block
 		addHagfishPreview(parent, body)
 	end
+	if unitType == "Broodmother" then
+		body.Transparency = 1   -- live unit + preview draw the creature, not the pivot block
+		addBroodmotherPreview(parent, body)
+	end
 
 	return body
 end
@@ -1195,6 +1302,9 @@ function UnitVisuals.getUnitPreviewBottomOffset(unitType: string): number
 	end
 	if unitType == "Lamprey" then
 		return 3.7   -- distance from origin pivot down to the dirt mound's base
+	end
+	if unitType == "Broodmother" then
+		return 10.0  -- pivot centre sits 10 studs above the feet (ground at y = -10)
 	end
 	local typeDef = (Config.UNIT_TYPES :: any)[unitType]
 	if typeDef then

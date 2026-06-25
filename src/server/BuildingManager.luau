@@ -108,6 +108,25 @@ local function getPlayerBuildingCount(player: any, buildingType: string): number
 	return n
 end
 
+-- Base (unscaled) resource cost for a placeable building type.
+local function baseCostFor(buildingType: string): number
+	return buildingType == "Turret"          and Config.TURRET_COST
+		or buildingType == "Deployer"        and Config.DEPLOYER_COST
+		or buildingType == "Relay"           and Config.RELAY_COST
+		or buildingType == "CreepyBlob"      and Config.CREEPY_BLOB_COST
+		or buildingType == "LampreyNest"     and Config.LAMPREY_NEST_COST
+		or buildingType == "Foundry"         and Config.FOUNDRY_COST
+		or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
+		or Config.BUILDING_COST
+end
+
+-- Cost for `player` to place the next `buildingType`, applying exponential
+-- scaling for stacked buildings (e.g. Foundry) from their current active count.
+local function costFor(player: any, buildingType: string): number
+	return Config.scaledBuildingCost(
+		baseCostFor(buildingType), buildingType, getPlayerBuildingCount(player, buildingType))
+end
+
 -- Returns true if the proposed footprint overlaps any existing building (AABB check).
 -- pos is the snapped Y=0 centre; buildingType determines footprint size.
 local function isOccupied(pos: Vector3, newType: string): boolean
@@ -1688,159 +1707,6 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 	end)
 end
 
--- ── Core deploy pod ────────────────────────────────────────────────────────────
--- At match start (and on respawn) a player's base arrives as a drop pod that
--- streaks in from the sky and deploys a mobile "Core" unit on impact. The player
--- drives the Core to a chosen spot and presses DEPLOY (deployCommandCenter), which
--- transforms it into the Command Center using the same on-site weld animation.
-local function launchCorePod(player: any, targetPos: Vector3)
-	local pod      = createDropPodModel()
-	pod.Name       = "_CorePod_" .. tostring(player.UserId)
-
-	local startPos = targetPos + Vector3.new(-70, 250, -70)
-	local endPos   = targetPos + Vector3.new(0, 4, 0)
-	local apexPos  = Vector3.new(
-		(startPos.X + endPos.X) * 0.5,
-		startPos.Y + 30,
-		(startPos.Z + endPos.Z) * 0.5
-	)
-
-	pod:PivotTo(CFrame.new(startPos))
-	pod.Parent = workspace
-
-	-- Tell the owning client to track the pod with its camera as it descends.
-	if player.UserId > 0 then
-		RemoteHandler.get(Config.REMOTES.CorePodLaunched):FireClient(player, pod, targetPos)
-	end
-
-	-- Launch sound
-	do
-		local sp  = Instance.new("Part")
-		sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(startPos)
-		sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
-		sp.Parent = workspace
-		local snd = Instance.new("Sound")
-		snd.SoundId = "rbxassetid://78110429907701"
-		snd.Volume  = 1
-		snd.Parent  = sp
-		snd:Play()
-		Debris:AddItem(sp, 14)
-	end
-
-	-- Smoke contrail
-	do
-		local anchor = pod.PrimaryPart
-		local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(-1.1, 0, 0); a0.Parent = anchor
-		local a1 = Instance.new("Attachment"); a1.Position = Vector3.new( 1.1, 0, 0); a1.Parent = anchor
-		local tr          = Instance.new("Trail")
-		tr.Attachment0    = a0
-		tr.Attachment1    = a1
-		tr.Color          = ColorSequence.new({
-			ColorSequenceKeypoint.new(0,   Color3.fromRGB(225, 222, 215)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(155, 150, 145)),
-			ColorSequenceKeypoint.new(1,   Color3.fromRGB(60,  58,  55)),
-		})
-		tr.Transparency   = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1.0),
-		})
-		tr.WidthScale     = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 1.0), NumberSequenceKeypoint.new(1, 0.06),
-		})
-		tr.Lifetime       = 2.0
-		tr.LightEmission  = 0.04
-		tr.LightInfluence = 0.85
-		tr.Parent         = anchor
-	end
-
-	local FLIGHT  = 2.8
-	local elapsed = 0
-	local conn: RBXScriptConnection
-	conn = RunService.Heartbeat:Connect(function(dt)
-		if not pod or not pod.Parent then conn:Disconnect(); return end
-		elapsed += dt
-		local t    = math.min(elapsed / FLIGHT, 1)
-		local ease = t * t * (3 - 2 * t)
-		local u    = 1 - ease
-		local pos  = startPos * (u * u) + apexPos * (2 * u * ease) + endPos * (ease * ease)
-		local tangent = (apexPos - startPos) * (2 * (1 - ease)) + (endPos - apexPos) * (2 * ease)
-		if tangent.Magnitude > 0.5 then
-			pod:PivotTo(CFrame.new(pos, pos + tangent) * CFrame.Angles(-math.pi / 2, 0, 0))
-		else
-			pod:PivotTo(CFrame.new(pos))
-		end
-
-		if t < 1 then return end
-		conn:Disconnect()
-
-		-- Landing sound + dirt burst
-		do
-			local sp  = Instance.new("Part")
-			sp.Size   = Vector3.one * 0.1; sp.CFrame = CFrame.new(targetPos)
-			sp.Anchored = true; sp.CanCollide = false; sp.Transparency = 1
-			sp.Parent = workspace
-			local snd = Instance.new("Sound")
-			snd.SoundId = "rbxassetid://76696468542735"
-			snd.Volume  = 0.35
-			snd.Parent  = sp
-			snd:Play()
-			Debris:AddItem(sp, 8)
-		end
-		local rng2 = Random.new()
-		for _ = 1, 8 do
-			local d      = Instance.new("Part")
-			d.Shape      = Enum.PartType.Ball
-			d.Size       = Vector3.one * rng2:NextNumber(0.12, 0.38)
-			d.Color      = Color3.fromRGB(rng2:NextInteger(78, 112), rng2:NextInteger(52, 76), rng2:NextInteger(22, 42))
-			d.Material   = Enum.Material.SmoothPlastic
-			d.Position   = targetPos + Vector3.new(rng2:NextNumber(-2, 2), rng2:NextNumber(0.2, 0.8), rng2:NextNumber(-2, 2))
-			d.Anchored   = false; d.CanCollide = false; d.CastShadow = false
-			d.Parent     = workspace
-			local bv     = Instance.new("BodyVelocity")
-			bv.Velocity  = Vector3.new(rng2:NextNumber(-9, 9), rng2:NextNumber(5, 12), rng2:NextNumber(-9, 9))
-			bv.MaxForce  = Vector3.new(1e5, 1e5, 1e5)
-			bv.Parent    = d
-			Debris:AddItem(d, 1.2)
-		end
-
-		-- Open the fins, deploy the Core, then lift the spent pod away and fade it.
-		task.spawn(function()
-			openPodFins(pod)
-			if unitManagerRef then
-				unitManagerRef.spawnUnitNow(player, targetPos, "Core")
-			end
-			task.wait(0.5)
-			local fadeParts: { BasePart } = {}
-			for _, p in pod:GetDescendants() do
-				if p:IsA("BasePart") then table.insert(fadeParts, p) end
-			end
-			local liftBase = pod:GetPivot()
-			for i = 1, 16 do
-				task.wait(0.04)
-				if not pod.Parent then return end
-				pod:PivotTo(liftBase + Vector3.new(0, i * 0.9, 0))
-				for _, p in fadeParts do
-					if p.Parent then p.Transparency = math.min(1, p.Transparency + 0.07) end
-				end
-			end
-			if pod.Parent then pod:Destroy() end
-		end)
-	end)
-end
-
--- Transforms a deployed Core (at groundPos) into the player's Command Center using
--- the on-site weld animation, timed to Config.CORE_DEPLOY_TIME. onBuilt(ccId) fires
--- when the CC instance is created (used to seat the avatar on its pulpit).
-local function deployCommandCenter(player: any, groundPos: Vector3, onBuilt: ((string) -> ())?)
-	if playerHasCC[player.UserId] then return end
-	local snapped  = snapGrid(groundPos)
-	local groundY  = terrainManagerRef and terrainManagerRef.surfaceHeightAt(snapped.X, snapped.Z) or 0
-	local pos      = Vector3.new(snapped.X, groundY, snapped.Z)
-	local assembly = math.max(Config.CORE_DEPLOY_TIME - CONSTRUCT_RISE_TIME, 1.2)
-	runConstruction(player, pos, "CommandCenter", nil, false, assembly, onBuilt)
-end
-
-BuildingManager.launchCorePod        = launchCorePod
-BuildingManager.deployCommandCenter  = deployCommandCenter
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
@@ -1936,7 +1802,12 @@ function BuildingManager.sellBuilding(player: any, id: string): boolean
 	if tostring(data.owner.UserId) ~= tostring(player.UserId) then return false end
 	if data.buildingType == "CommandCenter" or data.buildingType == "Monument" then return false end
 
-	local refund = math.floor((SELL_COST[data.buildingType] or 0) * SELL_REFUND_FRAC)
+	-- Refund reflects the (possibly scaled) price of the most recently-built one of
+	-- this type, so selling an expensive stacked Foundry refunds proportionally.
+	local owned    = getPlayerBuildingCount(player, data.buildingType)
+	local scaledCost = Config.scaledBuildingCost(
+		SELL_COST[data.buildingType] or 0, data.buildingType, math.max(0, owned - 1))
+	local refund = math.floor(scaledCost * SELL_REFUND_FRAC)
 	if refund > 0 and resourceManagerRef then
 		resourceManagerRef.add(player, refund)
 	end
@@ -2328,7 +2199,15 @@ end
 -- "Hagfish"). Lamprey eggs glow green; Hagfish eggs glow reddish-purple. The
 -- caller must already have reserved a slot (incremented nestEggs[nestId]).
 produceLampreyEgg = function(nestId: string, player: any, unitType: string)
-	local isHagfish = unitType == "Hagfish"
+	-- Per-creature egg glow: Lamprey green, Hagfish reddish-purple, Broodmother violet.
+	local eggColor, eggLightColor
+	if unitType == "Hagfish" then
+		eggColor, eggLightColor = Color3.fromRGB(150, 60, 120), Color3.fromRGB(150, 50, 120)
+	elseif unitType == "Broodmother" then
+		eggColor, eggLightColor = Color3.fromRGB(140, 90, 230), Color3.fromRGB(120, 70, 235)
+	else
+		eggColor, eggLightColor = Color3.fromRGB(150, 230, 90), Color3.fromRGB(120, 230, 70)
+	end
 	local data = buildingData[nestId]
 	if not data then
 		if nestEggs[nestId] then nestEggs[nestId] = math.max(0, nestEggs[nestId] - 1) end
@@ -2346,7 +2225,13 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 
 	local halfX    = buildingSize("LampreyNest").X / 2
 	local EGG_FULL = Vector3.new(3, 3.8, 3)
-	local settleY  = EGG_FULL.Y / 2
+	-- Eggs must rest on whichever terrain tier they land on — a fixed world Y left
+	-- them buried below a raised nest (looking like nothing spawned). Resolve the
+	-- settle height per-XZ from the real terrain surface.
+	local function settleYAt(x: number, z: number): number
+		local surf = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z) or 0
+		return surf + EGG_FULL.Y / 2
+	end
 
 	-- Where the egg settles. With the rally upgrade the nest LAUNCHES the egg to the
 	-- player's rally point (scattered within a spread radius); otherwise it settles
@@ -2381,7 +2266,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 			px, pz  = centerX + math.cos(a) * r, centerZ + math.sin(a) * r
 			if not overlapsEgg(px, pz) then break end
 		end
-		target = Vector3.new(px, settleY, pz)
+		target = Vector3.new(px, settleYAt(px, pz), pz)
 	end
 
 	-- Egg (parented to the nest model so it replicates and the panel can count it)
@@ -2391,7 +2276,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	egg.Shape           = Enum.PartType.Ball
 	egg.Size            = EGG_FULL * 0.4
 	egg.Position        = startPos
-	egg.Color           = if isHagfish then Color3.fromRGB(150, 60, 120) else Color3.fromRGB(150, 230, 90)
+	egg.Color           = eggColor
 	egg.Material        = Enum.Material.Neon
 	egg.Anchored        = true
 	egg.CanCollide      = false
@@ -2400,7 +2285,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	egg.Transparency    = 0.1
 	egg.Parent          = model
 	local eggLight      = Instance.new("PointLight")
-	eggLight.Color      = if isHagfish then Color3.fromRGB(150, 50, 120) else Color3.fromRGB(120, 230, 70)
+	eggLight.Color      = eggLightColor
 	eggLight.Brightness = 2
 	eggLight.Range      = 10
 	eggLight.Parent     = egg
@@ -2511,8 +2396,12 @@ end
 -- Births one egg from `player`'s Lamprey Nest. Returns true if a slot was
 -- reserved and production started. Safe for AI (fake) players — uses FireAllClients.
 function BuildingManager.requestNestEgg(player: any, nestId: string, unitType: string): boolean
-	local kind = if unitType == "Hagfish" then "Hagfish" else "Lamprey"
-	local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST else Config.LAMPREY_EGG_COST
+	local kind = if unitType == "Hagfish" then "Hagfish"
+		elseif unitType == "Broodmother" then "Broodmother"
+		else "Lamprey"
+	local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST
+		elseif kind == "Broodmother" then Config.BROODMOTHER_EGG_COST
+		else Config.LAMPREY_EGG_COST
 	local data = buildingData[nestId]
 	if not data or data.buildingType ~= "LampreyNest" then return false end
 	if data.owner ~= player then return false end
@@ -2747,14 +2636,7 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return false end
 	end
 
-	local cost = buildingType == "Turret"     and Config.TURRET_COST
-		or buildingType == "Deployer"   and Config.DEPLOYER_COST
-		or buildingType == "Relay"      and Config.RELAY_COST
-		or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
-		or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
-		or buildingType == "Foundry"    and Config.FOUNDRY_COST
-		or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
-		or Config.BUILDING_COST
+	local cost = costFor(player, buildingType)
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 
 	resourceManagerRef.spend(player, cost)
@@ -3248,14 +3130,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return end
 		end
 
-		local cost = buildingType == "Turret"    and Config.TURRET_COST
-			or buildingType == "Deployer"  and Config.DEPLOYER_COST
-			or buildingType == "Relay"     and Config.RELAY_COST
-			or buildingType == "CreepyBlob" and Config.CREEPY_BLOB_COST
-			or buildingType == "LampreyNest" and Config.LAMPREY_NEST_COST
-			or buildingType == "Foundry"   and Config.FOUNDRY_COST
-			or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
-			or Config.BUILDING_COST
+		local cost = costFor(player, buildingType)
 		if resourceManager.get(player) < cost then return end
 
 		resourceManager.spend(player, cost)
