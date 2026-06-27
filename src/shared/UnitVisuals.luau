@@ -63,8 +63,9 @@ end
 local function applyBlueprint(parent: Instance, body: BasePart, bp: UnitBlueprints.Blueprint)
 	if bp.rootTransparent then body.Transparency = 1 end
 	local teamColor = body.Color
+	local skinColor = UnitBlueprints.randomSkinTone()  -- one tone per preview (head + arms match)
 	for _, spec in bp.parts do
-		local p  = UnitBlueprints.instantiate(spec, body.CFrame, teamColor)
+		local p  = UnitBlueprints.instantiate(spec, body.CFrame, teamColor, skinColor)
 		p.Parent = parent
 	end
 end
@@ -700,17 +701,22 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 		glow.Range      = 26
 		glow.Parent     = molten
 
-		-- Looped 3D ambient refinery hum.
+		-- Looped 3D ambient refinery hum. Loud "spin-up" on the first pass, then
+		-- drops 60% (to 40% volume) for every loop after — settles into a quiet bed.
+		local AMB_VOLUME       = 0.55
 		local amb              = Instance.new("Sound")
 		amb.Name               = "_FoundryAmbient"
 		amb.SoundId            = "rbxassetid://9112839813"
 		amb.Looped             = true
-		amb.Volume             = 0.55
+		amb.Volume             = AMB_VOLUME
 		amb.RollOffMode        = Enum.RollOffMode.Linear
 		amb.RollOffMinDistance = 12
 		amb.RollOffMaxDistance = 150
 		amb.Playing            = true
 		amb.Parent             = molten
+		amb.DidLoop:Once(function()
+			amb.Volume = AMB_VOLUME * 0.4
+		end)
 
 		-- One-shot harvest sound, :Play()ed by the server each boosted income tick.
 		local harv              = Instance.new("Sound")

@@ -14,16 +14,17 @@
 
 local Players      = game:GetService("Players")
 local RunService   = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
+local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
 
 local DeployerPanel = {}
 local localPlayer   = Players.LocalPlayer
 local C             = UILib.C
+local OWNER         = "deployer"
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeDeployerId: string? = nil
@@ -56,93 +57,8 @@ local UNIT_COLOR: { [string]: Color3 } = {
 	Foamer   = FOAM_BLUE,
 }
 
--- ── Radial overlay ────────────────────────────────────────────────────────────
-local RADIUS   = 155
-local ROOT_POS = UDim2.new(0.5, 0, 0.68, 0)
-
-type ChildNode = {
-	wrapper:  Frame,
-	btn:      TextButton,
-	line:     Frame,
-	stroke:   UIStroke,
-	label:    TextLabel,
-	key:      string,
-	finalPos: UDim2,
-	startPos: UDim2,
-}
-local childNodes: { ChildNode } = {}
-local overlay:    Frame?
-local rootLbl:    TextLabel?
-
-local EXPAND_TI   = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local COLLAPSE_TI = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-
-local function expandNodes()
-	for _, c in childNodes do
-		c.wrapper.Visible             = true
-		c.wrapper.Position            = c.startPos
-		c.btn.BackgroundTransparency  = 1
-		c.line.BackgroundTransparency = 1
-		TweenService:Create(c.wrapper, EXPAND_TI, { Position = c.finalPos }):Play()
-		TweenService:Create(c.btn,     EXPAND_TI, { BackgroundTransparency = 0.35 }):Play()
-		TweenService:Create(c.line,    EXPAND_TI, { BackgroundTransparency = 0.65 }):Play()
-	end
-end
-
-local function collapseNodes(then_: (() -> ())?)
-	for _, c in childNodes do
-		TweenService:Create(c.wrapper, COLLAPSE_TI, { Position = c.startPos }):Play()
-		TweenService:Create(c.btn,     COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
-		TweenService:Create(c.line,    COLLAPSE_TI, { BackgroundTransparency = 1 }):Play()
-	end
-	task.delay(COLLAPSE_TI.Time, function()
-		for _, c in childNodes do c.wrapper.Visible = false end
-		if then_ then then_() end
-	end)
-end
-
-local function refreshResearchNodes()
-	for _, c in childNodes do
-		if c.key == "Elite" then
-			local unlocked = hasResearchFn and hasResearchFn("EliteUnits") or false
-			if unlocked then
-				c.btn.BackgroundColor3       = PURPLE
-				c.btn.BackgroundTransparency = 0.35
-				c.stroke.Color               = PURPLE
-				c.stroke.Thickness           = 2
-				c.label.TextColor3           = C.TEXT
-			else
-				c.btn.BackgroundColor3       = C.BG_LOCKED
-				c.btn.BackgroundTransparency = 0.3
-				c.stroke.Color               = C.BORDER_LO
-				c.stroke.Thickness           = 1.5
-				c.label.Text                 = "Elite\nLocked"
-				c.label.TextColor3           = C.DIM
-			end
-		elseif c.key == "Medic" then
-			local unlocked = hasResearchFn and hasResearchFn("MedicUnit") or false
-			if unlocked then
-				c.btn.BackgroundColor3       = MEDIC_TEAL
-				c.btn.BackgroundTransparency = 0.35
-				c.stroke.Color               = MEDIC_TEAL
-				c.stroke.Thickness           = 2
-				c.label.TextColor3           = C.TEXT
-			else
-				c.btn.BackgroundColor3       = C.BG_LOCKED
-				c.btn.BackgroundTransparency = 0.3
-				c.stroke.Color               = C.BORDER_LO
-				c.stroke.Thickness           = 1.5
-				c.label.Text                 = "Medic\nLocked"
-				c.label.TextColor3           = C.DIM
-			end
-		end
-	end
-end
-
-local function updateRootLabel(unitType: string)
-	if not rootLbl then return end
-	rootLbl.Text = "DEPLOYER\n" .. unitType
-end
+-- ── Research gate per unit key ──────────────────────────────────────────────────
+local RESEARCH_GATE: { [string]: string } = { Elite = "EliteUnits", Medic = "MedicUnit" }
 
 -- ── World display (Signal Flare method) ───────────────────────────────────────
 -- Each deployer gets:
@@ -196,13 +112,14 @@ local function ensureDisplay(deployerId: string, unitType: string)
 		-- Slim progress bar at the bottom (y = 46, matching signal flare position)
 		local track                    = Instance.new("Frame")
 		track.Name                     = "ProgTrack"
-		track.Size                     = UDim2.new(1, 0, 0, 5)
+		track.Size                     = UDim2.new(1, 0, 0, 3)
 		track.Position                 = UDim2.fromOffset(0, 46)
 		track.BackgroundColor3         = Color3.fromRGB(20, 22, 28)
 		track.BackgroundTransparency   = 0.3
 		track.BorderSizePixel          = 0
 		track.Parent                   = bb
 		local ptc = Instance.new("UICorner"); ptc.CornerRadius = UDim.new(1, 0); ptc.Parent = track
+		local pts = Instance.new("UIStroke"); pts.Color = Color3.fromRGB(0, 0, 0); pts.Thickness = 1; pts.Transparency = 0.35; pts.Parent = track
 
 		local fill                 = Instance.new("Frame")
 		fill.Name                  = "Fill"
@@ -257,6 +174,40 @@ local function updateWorldDisplay(deployerId: string, unitType: string, progress
 	end
 end
 
+-- ── Command-card page ───────────────────────────────────────────────────────────
+local function buildPage(): CommandCard.Page
+	local current = activeDeployerId and deployerCurrentTypes[activeDeployerId] or "Soldier"
+	local slots: { CommandCard.Slot } = {}
+	for i, def in UNIT_DEFS do
+		local key    = def.key
+		local gate   = RESEARCH_GATE[key]
+		local locked = gate ~= nil and not (hasResearchFn and hasResearchFn(gate))
+		table.insert(slots, {
+			index           = i,
+			name            = key:upper(),
+			color           = def.color,
+			locked          = locked,
+			icon            = def.icon,
+			viewportKey     = "unit:" .. key,
+			viewportFactory = function() return ViewportPreview.forUnit(key, Vector2.new(64, 64)) end,
+			badge           = (key == current) and "✓" or nil,
+			desc            = locked and "Locked — research required" or ("Free-spawn " .. key),
+			onClick         = function()
+				if not activeDeployerId or locked then return end
+				networkRef.setDeployerType(activeDeployerId, key)
+				if CommandCard.isOwner(OWNER) then CommandCard.update(OWNER, buildPage()) end
+			end,
+		})
+	end
+	return { header = "DEPLOYER", slots = slots }
+end
+
+local function renderIfActive()
+	if activeDeployerId and CommandCard.isOwner(OWNER) then
+		CommandCard.update(OWNER, buildPage())
+	end
+end
+
 -- ── Init ──────────────────────────────────────────────────────────────────────
 function DeployerPanel.init(network, hasResearch)
 	networkRef    = network
@@ -293,67 +244,11 @@ function DeployerPanel.init(network, hasResearch)
 		end
 	end)
 
-	-- Build the radial overlay on RTSHUD
-	local sg = localPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
-
-	local ov                         = Instance.new("Frame")
-	ov.Name                          = "DeployerOverlay"
-	ov.Size                          = UDim2.new(1, 0, 1, 0)
-	ov.BackgroundTransparency        = 1
-	ov.BorderSizePixel               = 0
-	ov.ZIndex                        = 10
-	ov.Visible                       = false
-	ov.Parent                        = sg
-	overlay = ov
-
-	local rootWrapper, rBtn = UILib.radialNode(ov, "DEPLOYER", "🚀", C.DEPLOYER, ROOT_POS, 70, 11)
-	rootLbl = rootWrapper:FindFirstChild("NodeLabel") :: TextLabel?
-
-	rBtn.MouseButton1Click:Connect(function() DeployerPanel.hide() end)
-
-	for _, def in UNIT_DEFS do
-		local rad      = math.rad(def.angle)
-		local dx       = math.cos(rad) * RADIUS
-		local dy       = math.sin(rad) * RADIUS
-		local finalPos = UDim2.new(ROOT_POS.X.Scale, ROOT_POS.X.Offset + dx,
-		                           ROOT_POS.Y.Scale, ROOT_POS.Y.Offset + dy)
-
-		local line         = UILib.connectorLine(ov, ROOT_POS, def.angle, RADIUS, 10)
-		local wrapper, btn = UILib.radialNode(ov, def.label, def.icon, def.color, ROOT_POS, 70, 11)
-		wrapper.Visible    = false
-
-		UILib.setNodeViewport(btn, ViewportPreview.forUnit(def.key, Vector2.new(70, 70)))
-
-		local stroke = btn:FindFirstChildWhichIsA("UIStroke") :: UIStroke
-		local label  = wrapper:FindFirstChild("NodeLabel")    :: TextLabel
-
-		local key = def.key
-		btn.MouseButton1Click:Connect(function()
-			if not activeDeployerId then return end
-			if key == "Elite" and not (hasResearchFn and hasResearchFn("EliteUnits")) then return end
-			if key == "Medic" and not (hasResearchFn and hasResearchFn("MedicUnit"))  then return end
-			networkRef.setDeployerType(activeDeployerId, key)
-			updateRootLabel(key)
-			DeployerPanel.hide()
-		end)
-
-		table.insert(childNodes, {
-			wrapper  = wrapper,
-			btn      = btn,
-			line     = line,
-			stroke   = stroke,
-			label    = label,
-			key      = key,
-			finalPos = finalPos,
-			startPos = ROOT_POS,
-		})
-	end
-
 	-- Listen for server updates → drive world display
 	network.onDeployerUpdate(function(deployerId: string, unitType: string, progress: number)
 		updateWorldDisplay(deployerId, unitType, progress)
 		if deployerId == activeDeployerId then
-			updateRootLabel(unitType)
+			renderIfActive()
 		end
 	end)
 end
@@ -362,27 +257,20 @@ end
 
 function DeployerPanel.show(deployerId: string)
 	activeDeployerId = deployerId
-	if overlay then overlay.Visible = true end
-	refreshResearchNodes()
-	expandNodes()
-	local currentType = deployerCurrentTypes[deployerId] or "Soldier"
-	updateRootLabel(currentType)
+	CommandCard.show(OWNER, buildPage())
 end
 
 function DeployerPanel.hide()
 	activeDeployerId = nil
-	if rootLbl then rootLbl.Text = "DEPLOYER" end
-	collapseNodes(function()
-		if overlay then overlay.Visible = false end
-	end)
+	CommandCard.hide(OWNER)
 end
 
 function DeployerPanel.refreshIfVisible()
-	if overlay and (overlay :: Frame).Visible then refreshResearchNodes() end
+	renderIfActive()
 end
 
 function DeployerPanel.isVisible(): boolean
-	return overlay ~= nil and (overlay :: Frame).Visible
+	return activeDeployerId ~= nil and CommandCard.isOwner(OWNER)
 end
 
 return DeployerPanel

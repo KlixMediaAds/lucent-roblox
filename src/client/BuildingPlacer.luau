@@ -38,6 +38,8 @@ local lineDragStart:  Vector3?  = nil
 local lineGhosts:     { Part }  = {}
 local getResources:   (() -> number)? = nil
 local notEnoughCb:    (() -> ())? = nil   -- shows the "not enough resources" toast
+local placeSentFn:    ((string) -> ())? = nil   -- fired when a (non-CC) placement is sent
+local costGetterFn:   ((string) -> number)? = nil   -- live scaled cost for a building type
 local flashUntil      = 0                 -- os.clock() until which the ghost flashes red
 
 local GRID = Config.BUILDING_GRID
@@ -393,6 +395,9 @@ local function isFootprintFlat(pos: Vector3, buildType: string): boolean
 end
 
 local function buildingCost(btype: string): number
+	-- Prefer the HUD's live cost (scaled by built + in-flight count, first-free
+	-- aware) so affordability checks match the displayed/charged price exactly.
+	if costGetterFn then return costGetterFn(btype) end
 	if btype == "Foundry"    then return Config.FOUNDRY_COST end
 	if btype == "Turret"     then return Config.TURRET_COST end
 	if btype == "Relay"      then return Config.RELAY_COST end
@@ -440,9 +445,11 @@ local function confirmLineDrag()
 	local endPos = curPos and snap(curPos) or lineDragStart
 	local positions = getLinePositions(lineDragStart, endPos, lineSpacing(currentType))
 	local resources = getResources and getResources() or 0
-	local cost      = buildingCost(currentType)
 	local placed    = 0
 	for _, lpos in positions do
+		-- Recompute each step: placing one bumps the in-flight count, so the next
+		-- in the line costs more (and the first may be free).
+		local cost = buildingCost(currentType)
 		if resources < cost then break end
 		local valid = isInBuildZone(lpos)
 			and not checkTerrainOverlap(lpos, currentType)
@@ -450,6 +457,7 @@ local function confirmLineDrag()
 			and not checkBuildingOverlap(lpos, currentType)
 		if valid then
 			networkRef.placeBuilding(placePos(lpos), currentType)
+			if placeSentFn and currentType then placeSentFn(currentType) end
 			resources -= cost
 			placed    += 1
 		end
@@ -530,6 +538,7 @@ function BuildingPlacer.init(network, cameraModule)
 					return
 				end
 				network.placeBuilding(placePos(pos), currentType)
+				if placeSentFn and currentType then placeSentFn(currentType) end
 				playPlaceSound()
 				task.defer(BuildingPlacer.exitPlacementMode)
 			end
@@ -754,6 +763,17 @@ end
 -- Called when the player tries to place a building they can't afford.
 function BuildingPlacer.setNotEnoughResourcesFn(fn: () -> ())
 	notEnoughCb = fn
+end
+
+-- Called (with the building type) each time a non-CC placement is sent to the
+-- server, so the HUD can count in-flight placements for live cost scaling.
+function BuildingPlacer.onPlaceSent(fn: (string) -> ())
+	placeSentFn = fn
+end
+
+-- Supplies the live (scaled, in-flight & first-free aware) cost for a building type.
+function BuildingPlacer.setCostGetter(fn: (string) -> number)
+	costGetterFn = fn
 end
 
 -- Called when the local player's CC enters or leaves mobile (walking) state.

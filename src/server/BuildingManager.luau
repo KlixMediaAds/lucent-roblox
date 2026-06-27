@@ -24,6 +24,12 @@ local onCCDestroyedCb: ((any) -> ())?
 
 type BuildingData = { hp: number, maxHp: number, base: BasePart, owner: any, buildingType: string, head: BasePart?, barrel: BasePart?, barrels: { BasePart }?, isConstructing: boolean, turretUpgrade: string?, hpBarHideAt: number?, rallyUpgrade: boolean?, rallyPoint: Vector3? }
 local buildingData: { [string]: BuildingData } = {}
+-- In-flight placements: buildings paid for via PlaceBuilding but not yet landed/
+-- added to buildingData (drop-pod is still flying / constructing). Counted in
+-- costFor so the exponential price rises at PURCHASE time, not on completion —
+-- otherwise a player can spam several at the base price before any finish.
+-- Keyed by player UserId → buildingType → count.
+local pendingBuildings: { [number]: { [string]: number } } = {}
 local playerHasCC:  { [number]: boolean }      = {}
 local turretTimers:      { [string]: number } = {}   -- attackTimer per turret id
 local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per deployer id
@@ -120,11 +126,25 @@ local function baseCostFor(buildingType: string): number
 		or Config.BUILDING_COST
 end
 
--- Cost for `player` to place the next `buildingType`, applying exponential
--- scaling for stacked buildings (e.g. Foundry) from their current active count.
+-- Count of this player's in-flight (paid, not-yet-landed) placements of a type.
+local function pendingCountFor(player: any, buildingType: string): number
+	local t = pendingBuildings[player.UserId]
+	return (t and t[buildingType]) or 0
+end
+
+local function addPending(player: any, buildingType: string, delta: number)
+	local uid = player.UserId
+	local t   = pendingBuildings[uid]
+	if not t then t = {}; pendingBuildings[uid] = t end
+	t[buildingType] = math.max(0, (t[buildingType] or 0) + delta)
+end
+
+-- Cost for `player` to place the next `buildingType`, applying exponential scaling
+-- from their current count — INCLUDING in-flight placements — so the price climbs
+-- the moment a building is purchased, not when it finishes building.
 local function costFor(player: any, buildingType: string): number
-	return Config.scaledBuildingCost(
-		baseCostFor(buildingType), buildingType, getPlayerBuildingCount(player, buildingType))
+	local count = getPlayerBuildingCount(player, buildingType) + pendingCountFor(player, buildingType)
+	return Config.scaledBuildingCost(baseCostFor(buildingType), buildingType, count)
 end
 
 -- Returns true if the proposed footprint overlaps any existing building (AABB check).
@@ -169,10 +189,15 @@ end
 
 -- ── Health bar ────────────────────────────────────────────────────────────────
 
-local function addHealthBar(part: BasePart)
+-- Bar length scales with max HP (tougher structures get longer bars), within bounds.
+local function hpBarWidth(maxHp: number): number
+	return math.clamp(math.floor(50 + maxHp * 0.06 + 0.5), 56, 150)
+end
+
+local function addHealthBar(part: BasePart, maxHp: number)
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "HealthBar"
-	bb.Size             = UDim2.new(0, 80, 0, 9)
+	bb.Size             = UDim2.new(0, hpBarWidth(maxHp), 0, 5)
 	bb.StudsOffset      = Vector3.new(0, part.Size.Y / 2 + 2.5, 0)
 	bb.AlwaysOnTop      = false
 	bb.Enabled          = false
@@ -183,6 +208,14 @@ local function addHealthBar(part: BasePart)
 	bg.BackgroundColor3 = Color3.fromRGB(40, 0, 0)
 	bg.BorderSizePixel  = 0
 	bg.Parent           = bb
+	local bgCorner      = Instance.new("UICorner")
+	bgCorner.CornerRadius = UDim.new(1, 0)
+	bgCorner.Parent     = bg
+	local bgStroke      = Instance.new("UIStroke")
+	bgStroke.Color      = Color3.fromRGB(0, 0, 0)
+	bgStroke.Thickness  = 1
+	bgStroke.Transparency = 0.35
+	bgStroke.Parent     = bg
 
 	local fill          = Instance.new("Frame")
 	fill.Name           = "Fill"
@@ -190,6 +223,9 @@ local function addHealthBar(part: BasePart)
 	fill.BackgroundColor3 = Color3.fromRGB(0, 200, 50)
 	fill.BorderSizePixel  = 0
 	fill.Parent         = bg
+	local fillCorner    = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent   = fill
 end
 
 local HP_BAR_SHOW_SECS = 3
@@ -685,7 +721,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		buildTime = (Config.BUILD_TIME :: any)[buildingType] or 0
 	end
 
-	addHealthBar(base)
+	addHealthBar(base, maxHp)
 	if buildingType == "CommandCenter" then
 		-- Lift the bar clear of the fabrication arms (~19 studs tall)
 		local bb = base:FindFirstChild("HealthBar") :: BillboardGui?
@@ -1476,6 +1512,11 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 				-- around, so the finished structure lines up with them instead of
 				-- being re-snapped to a separately-computed height.
 				local id = createBuilding(player, targetPos, buildingType, targetPos.Y)
+				-- Building is now in buildingData; release its in-flight reservation so
+				-- built + pending stays consistent (only for player-placed buildings).
+				if player and pendingBuildings[player.UserId] then
+					addPending(player, buildingType, -1)
+				end
 				if researchManagerRef and buildingType ~= "CommandCenter" then
 					researchManagerRef.recordBuildingPlaced(player, buildingType)
 				end
@@ -1719,6 +1760,17 @@ function BuildingManager.getBuildingCount(player: any, buildingType: string): nu
 	return getPlayerBuildingCount(player, buildingType)
 end
 
+-- How many of `player`'s buildings are still being assembled (not yet finished).
+-- The AI uses this to build one structure at a time, matching a human's pacing
+-- instead of slapping down a whole base in a single strategy tick.
+function BuildingManager.countConstructing(player: any): number
+	local n = 0
+	for _, data in buildingData do
+		if data.owner == player and data.isConstructing then n += 1 end
+	end
+	return n
+end
+
 -- Count of buildings of `buildingType` owned by human players (UserId > 0). Lets the
 -- AI economy mirror how many Foundries the humans have running.
 function BuildingManager.getHumanBuildingCount(buildingType: string): number
@@ -1732,6 +1784,7 @@ end
 function BuildingManager.resetAll()
 	for _, model in buildingsFolder:GetChildren() do model:Destroy() end
 	buildingData             = {}
+	pendingBuildings         = {}
 	playerHasCC              = {}
 	turretTimers             = {}
 	deployerTimers           = {}
@@ -3145,6 +3198,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 		if ccPos then
+			-- Reserve this placement so the next one of the same type already costs
+			-- more (released when the pod lands and the building enters buildingData).
+			addPending(player, buildingType, 1)
 			local ccTopY     = Config.COMMAND_CENTER_SIZE.Y + 2
 			local launchPos  = ccPos + Vector3.new(0, ccTopY, 0)
 			local relayChain = findRelayChain(player, ccPos, snapped)

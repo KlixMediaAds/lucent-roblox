@@ -15,8 +15,14 @@ Config.EXPONENTIAL_BUILDING_COST = {
 	Foundry = 1.6,
 }
 
+-- Buildings whose FIRST one (current count 0) is free; later ones cost as normal.
+Config.FIRST_FREE_BUILDING = {
+	Foundry = true,
+}
+
 -- Scaled cost for `buildingType` given how many the player currently owns.
 function Config.scaledBuildingCost(baseCost: number, buildingType: string, currentCount: number): number
+	if Config.FIRST_FREE_BUILDING[buildingType] and currentCount <= 0 then return 0 end
 	local growth = Config.EXPONENTIAL_BUILDING_COST[buildingType]
 	if not growth then return baseCost end
 	return math.floor(baseCost * growth ^ math.max(0, currentCount) + 0.5)
@@ -169,7 +175,7 @@ Config.BROODMOTHER_SHAKE_RADIUS   = 90   -- studs; nearby player cameras shake o
 -- Lamprey growth: each tree a Lamprey fells makes it 15% larger and tougher
 -- (size + max HP scale together), compounding up to a hard cap so a forest-fed
 -- Lamprey becomes a genuine threat without growing without bound.
-Config.LAMPREY_GROWTH_PER_TREE  = 0.15  -- size & HP multiplier gained per tree felled
+Config.LAMPREY_GROWTH_PER_TREE  = 0.05  -- size & HP multiplier gained per tree felled
 Config.LAMPREY_GROWTH_MAX_SCALE = 2.5   -- cap on cumulative size/HP scale (vs. base)
 
 -- Monument (win condition — upgrade from Command Center)
@@ -212,6 +218,11 @@ Config.UNLOCKS = {
 		vp = { kind = "unit", name = "Tank" },
 		desc = "Tank shells slow enemy units on impact.",
 		condText = "Kill 5 enemies",   cond = { type = "kill", count = 5 } },
+	-- Soldier upgrades disabled for now (HardenedArmor / CombatStims / Rollers).
+	-- Removing them from UNLOCKS hides them from the upgrade UI, blocks player +
+	-- AI research, and makes hasResearch() always false so the runtime behaviors
+	-- never activate. Re-enable by uncommenting these blocks.
+	--[[
 	HardenedArmor    = { icon = "🛡", title = "Hardened Armor", category = "Army",
 		vp = { kind = "unit", name = "Soldier" },
 		desc = "Soldiers absorb a flat amount of damage per hit.",
@@ -220,6 +231,7 @@ Config.UNLOCKS = {
 		vp = { kind = "unit", name = "Soldier" },
 		desc = "Soldiers auto-boost speed and attack rate when engaging enemies.",
 		condText = "Kill 10 enemies",  cond = { type = "kill", count = 10 } },
+	--]]
 	RocketBarrage    = { icon = "🚀", title = "Rocket Barrage", category = "Army",
 		vp = { kind = "unit", name = "Tank" },
 		desc = "Tanks fire 3 spiraling rockets, each dealing AoE splash damage.",
@@ -230,11 +242,14 @@ Config.UNLOCKS = {
 		desc = "Tanks launch harpoons that slow enemies by 90% for 7 s.",
 		condText = "Build 5 Turrets",  cond = { type = "building", name = "Turret", count = 5 },
 		requires = "ConcussionShells", group = "TankSpec" },
+	-- Soldier upgrade disabled for now (see HardenedArmor/CombatStims note above).
+	--[[
 	Rollers          = { icon = "🔄", title = "Rollers", category = "Army",
 		vp = { kind = "unit", name = "Soldier" },
 		desc = "Soldiers become Rollers: rolling melee charge, 20% faster movement.",
 		condText = "Kill 20 enemies",  cond = { type = "kill", count = 20 },
 		requires = "CombatStims" },
+	--]]
 	CreepyBlob       = { icon = "🫧", title = "Creepy Blob", category = "Infra",
 		vp = { kind = "building", name = "CreepyBlob" },
 		desc = "Unlocks the Creepy Blob, which evolves into soldiers, a worm, or a turret.",
@@ -282,6 +297,22 @@ Config.SOLDIER_STIM_RATE      = 0.55 -- attack-rate period multiplier while stim
 
 -- Soldier: Hardened Armor
 Config.SOLDIER_ARMOR          = 6    -- flat damage absorbed per incoming hit
+
+-- ── Wounded soldiers: immobilization, rescue-dragging & field healing ──────────
+-- At/below IMMOBILIZE_THRESHOLD HP, a soldier may collapse (prone, can still shoot
+-- but can't move). The chance is rolled every CHECK_INTERVAL seconds and scales
+-- from MIN_CHANCE (at the threshold) up to MAX_CHANCE (near death). Downed soldiers
+-- are dragged back to the Command Center by available comrades and slowly healed.
+Config.SOLDIER_IMMOBILIZE_THRESHOLD    = 0.25  -- HP ratio at/below which collapse can happen
+Config.SOLDIER_IMMOBILIZE_CHECK_EVERY  = 0.75  -- seconds between collapse rolls
+Config.SOLDIER_IMMOBILIZE_MIN_CHANCE   = 0.10  -- per-roll chance right at the threshold
+Config.SOLDIER_IMMOBILIZE_MAX_CHANCE   = 0.85  -- per-roll chance as HP nears zero
+Config.SOLDIER_PRONE_PITCH             = math.rad(72)  -- recline angle of a downed soldier (head up)
+Config.SOLDIER_DRAG_SPEED              = 7     -- studs/s per dragging soldier (2 draggers = 2×)
+Config.SOLDIER_DRAG_SLOTS              = 2     -- max comrades that can haul one casualty
+Config.SOLDIER_HEAL_RADIUS             = 30    -- studs from the CC counted as "back at base"
+Config.SOLDIER_HEAL_RATE               = 4     -- HP/s regained while healing at the CC
+Config.SOLDIER_RECOVER_RATIO           = 0.6   -- HP ratio at which a soldier gets back up
 
 -- Soldier: Rollers upgrade
 Config.ROLLER_ATTACK_RANGE  = 14   -- studs; approach/engage range (wider for tracking)

@@ -39,15 +39,20 @@ local RAMP_D      = 28    -- horizontal depth (run) of each ramp
 local L1_TOP = GROUND_TOP + STEP          -- natural plateau top
 local L2_TOP = GROUND_TOP + STEP * 2      -- main plateau top
 
+-- Materials: grass floor + cap, rock cliff bodies. (No biomes — fixed look.)
+local GROUND_MAT = Enum.Material.Grass
+local CLIFF_MAT  = Enum.Material.Rock
+local CAP_MAT    = Enum.Material.Grass
+
 -- ── Base ground ───────────────────────────────────────────────────────────────
 -- Mirrors the fill in init.server.luau.  Called after Terrain:Clear() to restore
 -- the flat grass floor so the rest of the game is unaffected.
 
-local function fillBaseGround()
+local function fillBaseGround(mat: Enum.Material?)
 	Terrain:FillBlock(
 		CFrame.new(0, -8, 0),
 		Vector3.new(960, 8, 960),
-		Enum.Material.Grass
+		mat or Enum.Material.Grass
 	)
 end
 
@@ -83,10 +88,16 @@ function TerrainManager.generate(seed: number?)
 		return base + rng:NextNumber(-spread, spread)
 	end
 
-	-- Mirror across either the world X axis (reflect Z) or the world Z axis
-	-- (reflect X). We author the layout in plan coords (a = cross axis,
-	-- b = symmetry axis) and map them to world depending on the chosen axis.
+	-- Axis: lay the tiers across either the world X or Z axis. We author the layout
+	-- in plan coords (a = cross axis, b = symmetry/depth axis) and map them to world.
 	local mirrorZ = rng:NextInteger(1, 2) == 1
+	-- Symmetry: "mirror" reflects the +b half straight across to −b (both mains on
+	-- the same side); "rotate" is 180° point-symmetry (a flips too → the two mains
+	-- sit on opposite flanks, a diagonal map). Both are perfectly fair.
+	local symMode = rng:NextInteger(1, 2) == 1 and "mirror" or "rotate"
+	local function aSign(half: number): number
+		return symMode == "rotate" and half or 1
+	end
 
 	local function worldPos(a: number, b: number, y: number): Vector3
 		if mirrorZ then return Vector3.new(a, y, b) else return Vector3.new(b, y, a) end
@@ -100,23 +111,24 @@ function TerrainManager.generate(seed: number?)
 		return u * half
 	end
 
-	-- A raised plateau: rock column with a thin grass cap on top.
+	-- A raised plateau: rock cliff column with a thin grass cap on top.
 	local function fillTier(a: number, b: number, sa: number, sb: number, topY: number)
 		local bodyTop = topY - CAP
 		Terrain:FillBlock(
 			CFrame.new(worldPos(a, b, (BODY_BOTTOM + bodyTop) / 2)),
 			planSize(sa, sb, bodyTop - BODY_BOTTOM),
-			Enum.Material.Rock
+			CLIFF_MAT
 		)
 		Terrain:FillBlock(
 			CFrame.new(worldPos(a, b, topY - CAP / 2)),
 			planSize(sa, sb, CAP),
-			Enum.Material.Grass
+			CAP_MAT
 		)
 	end
 
-	-- A grass ramp leaning on a plateau's front cliff, descending RAMP_D studs
-	-- toward map centre from the cliff edge (faceB) to the lower level.
+	-- A grass ramp leaning on a plateau's front cliff, descending RAMP_D studs toward
+	-- map centre from the cliff edge (faceB) to the lower level. `a` is already world-
+	-- signed by the caller.
 	local function fillRamp(a: number, faceB: number, w: number, half: number, lowTopY: number, highTopY: number)
 		local bCenter = (faceB - RAMP_D / 2) * half
 		local yCenter = (lowTopY + highTopY) / 2
@@ -127,55 +139,69 @@ function TerrainManager.generate(seed: number?)
 		Terrain:FillWedge(
 			CFrame.fromMatrix(pos, vX, vY, vZ),
 			Vector3.new(w, highTopY - lowTopY, RAMP_D),
-			Enum.Material.Grass
+			CAP_MAT
 		)
 	end
 
-	-- Randomised ramp offsets along a plateau's width (1 or 2 ramps, centred).
-	local function rampOffsets(sa: number): { number }
-		if rng:NextInteger(1, 2) == 1 then
-			return { r(0, sa * 0.16) }
+	-- Randomised ramp offsets along a plateau's width, centred on `center`:
+	-- sometimes a single ramp, sometimes a flanking pair, sometimes a wide trio.
+	local function rampOffsets(center: number, sa: number): { number }
+		local roll = rng:NextInteger(1, 5)
+		if roll <= 2 then
+			return { center + r(0, sa * 0.18) }
+		elseif roll <= 4 then
+			local d = r(sa * 0.30, sa * 0.06)
+			return { center - d, center + d }
 		else
-			local d = r(sa * 0.28, sa * 0.05)
-			return { -d, d }
+			local d = r(sa * 0.34, sa * 0.05)
+			return { center - d, center + r(0, sa * 0.08), center + d }
 		end
 	end
 
-	-- ── Layout (authored for the +b half, mirrored to −b) ──────────────────────
-	-- Level 1: wide natural plateau spanning most of the map width. Made deep
-	-- enough that its back edge clears the L2 plateau so L2 sits fully on it.
-	local l1b, l1sa, l1sb = r(235, 12), r(560, 25), r(330, 18)
-	-- Level 2: smaller main plateau on the back of L1.
-	local l2b, l2sa, l2sb = r(305, 12), r(360, 25), r(150, 15)
+	-- ── Layout (authored for the +b half) ──────────────────────────────────────
+	-- Level 1: wide natural plateau, centred. Deep enough that its back edge clears
+	-- the L2 plateau so L2 sits fully on it. Wider size jitter than before.
+	local l1b, l1sa, l1sb = r(235, 16), r(560, 55), r(330, 30)
+	-- Level 2: smaller main plateau on the back of L1, now allowed to slide left or
+	-- right (l2a) instead of always sitting dead centre.
+	local l2sa, l2sb = r(360, 55), r(150, 22)
+	local l2b        = r(305, 16)
+	-- Keep the offset main inside L1's width with a margin for its ramps.
+	local l2aMax     = math.max(0, (l1sa - l2sa) / 2 - 30)
+	local l2a        = rng:NextNumber(-l2aMax, l2aMax)
 
-	local l1RampW, l2RampW = r(42, 4), r(40, 4)
-	local l1Ramps = rampOffsets(l1sa)
-	local l2Ramps = rampOffsets(l2sa)
+	local l1RampW, l2RampW = r(42, 6), r(40, 6)
+	local l1Ramps = rampOffsets(0,   l1sa)   -- L1 is centred
+	local l2Ramps = rampOffsets(l2a, l2sa)   -- L2 ramps track its offset
 
 	local l1Face = l1b - l1sb / 2   -- L1 front cliff (faces centre)
 	local l2Face = l2b - l2sb / 2   -- L2 front cliff (sits on the L1 surface)
 
 	-- Remember the layout so heightAt() can place things on the right level.
 	terrainPlan = {
-		mirrorZ = mirrorZ,
+		mirrorZ = mirrorZ, symMode = symMode,
 		l1b = l1b, l1sa = l1sa, l1sb = l1sb,
-		l2b = l2b, l2sa = l2sa, l2sb = l2sb,
+		l2b = l2b, l2sa = l2sa, l2sb = l2sb, l2a = l2a,
 		l1Ramps = l1Ramps, l2Ramps = l2Ramps,
 		l1RampW = l1RampW, l2RampW = l2RampW,
 		l1Face = l1Face, l2Face = l2Face,
 	}
 
 	for _, half in { 1, -1 } do
-		fillTier(0, l1b * half, l1sa, l1sb, L1_TOP)
-		fillTier(0, l2b * half, l2sa, l2sb, L2_TOP)
+		local sA = aSign(half)
+		fillTier(0,          l1b * half, l1sa, l1sb, L1_TOP)
+		fillTier(l2a * sA,   l2b * half, l2sa, l2sb, L2_TOP)
 
 		for _, off in l1Ramps do
-			fillRamp(off, l1Face, l1RampW, half, GROUND_TOP, L1_TOP)
+			fillRamp(off * sA, l1Face, l1RampW, half, GROUND_TOP, L1_TOP)
 		end
 		for _, off in l2Ramps do
-			fillRamp(off, l2Face, l2RampW, half, L1_TOP, L2_TOP)
+			fillRamp(off * sA, l2Face, l2RampW, half, L1_TOP, L2_TOP)
 		end
 	end
+
+	print(string.format("[TerrainManager] grass map — %s symmetry, main offset %d",
+		symMode, math.floor(l2a)))
 end
 
 -- ── Lane mode terrain ─────────────────────────────────────────────────────────
@@ -234,33 +260,37 @@ function TerrainManager.heightAt(x: number, z: number): number
 	local plan = terrainPlan
 	if not plan then return GROUND_TOP end
 
-	-- Convert to plan coords (a = cross axis, b = symmetry axis); the layout is
-	-- symmetric in b, so test against |b|.
+	-- Convert to plan coords (a = cross axis, b = symmetry/depth axis). The two
+	-- halves are related by either a straight reflection in b (mirror) or a 180°
+	-- point reflection (rotate, which flips a too). Fold the query into the authored
+	-- +b half: bb = |b|, and aQ flips sign with b only in rotate mode.
 	local a, b
 	if plan.mirrorZ then a, b = x, z else a, b = z, x end
-	local bb = math.abs(b)
+	local s  = (b >= 0) and 1 or -1
+	local aQ = (plan.symMode == "rotate") and (a * s) or a
+	local bb = b * s   -- = |b|
 
-	-- Main plateau (highest) — checked first since it sits inside L1.
-	if math.abs(a) <= plan.l2sa / 2
+	-- Main plateau (highest) — checked first since it sits inside L1. Offset by l2a.
+	if math.abs(aQ - plan.l2a) <= plan.l2sa / 2
 		and bb >= plan.l2b - plan.l2sb / 2 and bb <= plan.l2b + plan.l2sb / 2 then
 		return L2_TOP
 	end
 	-- L1 → L2 ramps (in front of the main plateau, on the L1 surface).
 	for _, off in plan.l2Ramps do
-		if math.abs(a - off) <= plan.l2RampW / 2
+		if math.abs(aQ - off) <= plan.l2RampW / 2
 			and bb >= plan.l2Face - RAMP_D and bb <= plan.l2Face then
 			local t = (bb - (plan.l2Face - RAMP_D)) / RAMP_D
 			return L1_TOP + t * STEP
 		end
 	end
-	-- Natural plateau.
-	if math.abs(a) <= plan.l1sa / 2
+	-- Natural plateau (centred).
+	if math.abs(aQ) <= plan.l1sa / 2
 		and bb >= plan.l1b - plan.l1sb / 2 and bb <= plan.l1b + plan.l1sb / 2 then
 		return L1_TOP
 	end
 	-- L0 → L1 ramps.
 	for _, off in plan.l1Ramps do
-		if math.abs(a - off) <= plan.l1RampW / 2
+		if math.abs(aQ - off) <= plan.l1RampW / 2
 			and bb >= plan.l1Face - RAMP_D and bb <= plan.l1Face then
 			local t = (bb - (plan.l1Face - RAMP_D)) / RAMP_D
 			return GROUND_TOP + t * STEP

@@ -304,7 +304,7 @@ local function buildRow(techName: string)
 
     -- Progress bar (visible only while upgrading)
     local barBg                   = Instance.new("Frame")
-    barBg.Size                    = UDim2.new(1, -(ROW_H + 16), 0, 4)
+    barBg.Size                    = UDim2.new(1, -(ROW_H + 16), 0, 2)
     barBg.AnchorPoint             = Vector2.new(0, 1)
     barBg.Position                = UDim2.new(0, ROW_H + 2, 1, -7)
     barBg.BackgroundColor3        = Color3.fromRGB(12, 14, 26)
@@ -313,7 +313,9 @@ local function buildRow(techName: string)
     barBg.Visible                 = false
     barBg.ZIndex                  = 53
     barBg.Parent                  = row
-    UILib.corner(barBg, 2)
+    UILib.corner(barBg, 1)
+    local barBgStroke             = UILib.stroke(barBg, Color3.fromRGB(0, 0, 0), 1)
+    barBgStroke.Transparency      = 0.4
 
     local barFill                 = Instance.new("Frame")
     barFill.Size                  = UDim2.new(0, 0, 1, 0)
@@ -321,7 +323,7 @@ local function buildRow(techName: string)
     barFill.BorderSizePixel       = 0
     barFill.ZIndex                = 54
     barFill.Parent                = barBg
-    UILib.corner(barFill, 2)
+    UILib.corner(barFill, 1)
 
     row.MouseButton1Click:Connect(function() selectTech(techName) end)
 

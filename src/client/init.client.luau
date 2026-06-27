@@ -31,6 +31,7 @@ local LampreyNestPanel = require(script:WaitForChild("LampreyNestPanel"))
 local EngineeringPanel = require(script:WaitForChild("EngineeringPanel"))
 local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
+local CommandCard    = require(script:WaitForChild("CommandCard"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local ScoutManager   = require(script:WaitForChild("ScoutManager"))
@@ -62,6 +63,25 @@ task.spawn(function()
 	end
 end)
 
+-- Global UI click sound: every GuiButton (anywhere in PlayerGui, lobby or in-game)
+-- plays this on activation. Hooking PlayerGui descendants covers buttons made by
+-- any module, including ones created later, without touching each call site.
+do
+	local clickSound       = Instance.new("Sound")
+	clickSound.Name        = "UIClick"
+	clickSound.SoundId     = "rbxassetid://139804904213958"
+	clickSound.Volume      = 0.5
+	clickSound.Parent      = SoundService
+	local playerGui        = Players.LocalPlayer:WaitForChild("PlayerGui")
+	local function hook(inst: Instance)
+		if inst:IsA("GuiButton") then
+			inst.Activated:Connect(function() clickSound:Play() end)
+		end
+	end
+	for _, d in playerGui:GetDescendants() do hook(d) end
+	playerGui.DescendantAdded:Connect(hook)
+end
+
 local localUserId = Players.LocalPlayer.UserId
 
 -- Client-side deposit resource tracking for hover health bars (posKey → remaining)
@@ -76,7 +96,6 @@ local currentResources = 0
 -- The local player's own CC building id (needed to open WorkshopPanel via the HUD button)
 local ownCCId: string? = nil
 local placedFirstBarracks = false   -- upgrades button stays hidden until the first Barracks
-local returnBtnRevealed   = false   -- minimap "return to CC" button shown after camera first leaves the CC
 
 -- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
 local winOverlay: Frame?
@@ -228,7 +247,78 @@ BuildingPlacer.setNotEnoughResourcesFn(function()
 	HUD.showNotification("⚠  Not enough resources", Color3.fromRGB(230, 60, 60))
 end)
 
+-- ── Horror ambience ───────────────────────────────────────────────────────────
+-- A continuous eerie bed under the whole match, plus a one-shot "song" the FIRST
+-- time the player is ever attacked. Both are 2D (parented to SoundService) so they
+-- play at full volume regardless of where the camera is.
+local AMBIENCE_VOLUME    = 0.245   -- eerie bed, -30%
+local FIRST_ATTACK_VOLUME = 0.49   -- first-attack song, -30%
+
+-- Clear any leftover audio from a previous match in the same session before
+-- (re)creating it, so replays don't stack duplicate loops.
+for _, leftoverName in { "HorrorAmbience", "FirstAttackStinger" } do
+	local old = SoundService:FindFirstChild(leftoverName)
+	if old then old:Destroy() end
+end
+
+local horrorAmbience      = Instance.new("Sound")
+horrorAmbience.Name       = "HorrorAmbience"
+horrorAmbience.SoundId    = "rbxassetid://9112775414"
+horrorAmbience.Looped     = true
+horrorAmbience.Volume     = AMBIENCE_VOLUME
+horrorAmbience.Parent     = SoundService
+horrorAmbience:Play()
+
+local firstAttackSongPlayed = false
+
+-- ── In-flight placement tracking (live cost scaling) ──────────────────────────
+-- A placed building doesn't enter the count until its drop pod lands (BuildingPlaced
+-- fires). To make the displayed price climb the instant you place one, we track
+-- per-type "pending" tokens here: pushed when a placement is sent, popped when the
+-- matching BuildingPlaced arrives, and expiring on a TTL so a server-rejected
+-- placement self-heals. These feed the HUD's COST only (not requirement gating).
+local PENDING_TTL = 14   -- seconds (generous: max pod flight + construction)
+local pendingPlace: { [string]: { number } } = {}
+
+local function buildPendingCounts(): { [string]: number }
+	local now = os.clock()
+	local out: { [string]: number } = {}
+	for btype, list in pendingPlace do
+		local i = 1
+		while i <= #list do
+			if list[i] <= now then table.remove(list, i) else i += 1 end
+		end
+		if #list > 0 then out[btype] = #list else pendingPlace[btype] = nil end
+	end
+	return out
+end
+
+local function pushPending(btype: string)
+	local list = pendingPlace[btype]
+	if not list then list = {}; pendingPlace[btype] = list end
+	table.insert(list, os.clock() + PENDING_TTL)
+	HUD.setPendingCounts(buildPendingCounts())
+end
+
+local function popPending(btype: string)
+	local list = pendingPlace[btype]
+	if list and #list > 0 then table.remove(list, 1) end   -- the matching build landed
+	HUD.setPendingCounts(buildPendingCounts())
+end
+
+BuildingPlacer.onPlaceSent(function(btype: string) pushPending(btype) end)
+BuildingPlacer.setCostGetter(function(btype: string) return HUD.getBuildCost(btype) end)
+
+-- Periodic sweep so expired (rejected) tokens drop and the price corrects on its own.
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if next(pendingPlace) then HUD.setPendingCounts(buildPendingCounts()) end
+	end
+end)
+
 local dragFrame, ccBtn = HUD.create()
+CommandCard.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 if isLane then HUD.setLaneMode(true) end
 Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
@@ -302,17 +392,21 @@ MiniMap.onReturnClicked(function()
 	if base then CameraModule.returnToBase(base.Position) end
 end)
 
+-- The [R] camera button dims while the view is already "home" — near the CC and at
+-- default rotation (returning would do nothing) — and brightens once you pan/rotate.
 RunService.RenderStepped:Connect(function()
-	if returnBtnRevealed then return end
 	local base = ownCCBase()
-	if not base then return end
-	local cam = workspace.CurrentCamera
-	if not cam then return end
-	local _sp, onScreen = cam:WorldToViewportPoint(base.Position)
-	if not onScreen then
-		returnBtnRevealed = true
-		MiniMap.setReturnVisible(true)
+	if not base then
+		MiniMap.setReturnDimmed(true)
+		return
 	end
+	local focus    = CameraModule.getFocus()
+	local d        = (Vector3.new(focus.X, 0, focus.Z)
+		- Vector3.new(base.Position.X, 0, base.Position.Z)).Magnitude
+	local nearBase = d < 55
+	local yawNorm  = ((CameraModule.getYaw() + 180) % 360) - 180
+	local noRot    = math.abs(yawNorm) < 6
+	MiniMap.setReturnDimmed(nearBase and noRot)
 end)
 
 -- ── /xray chat command ────────────────────────────────────────────────────────
@@ -348,7 +442,7 @@ do
 
 	local bar                      = Instance.new("Frame")
 	bar.Name                       = "DepositHealthBar"
-	bar.Size                       = UDim2.fromOffset(80, 10)
+	bar.Size                       = UDim2.fromOffset(80, 5)
 	bar.AnchorPoint                = Vector2.new(0.5, 1)
 	bar.BackgroundColor3           = Color3.fromRGB(15, 15, 18)
 	bar.BackgroundTransparency     = 0.22
@@ -357,8 +451,13 @@ do
 	bar.ZIndex                     = 25
 	bar.Parent                     = sg
 	local _bc                      = Instance.new("UICorner")
-	_bc.CornerRadius               = UDim.new(0, 3)
+	_bc.CornerRadius               = UDim.new(1, 0)
 	_bc.Parent                     = bar
+	local _bs                      = Instance.new("UIStroke")
+	_bs.Color                      = Color3.fromRGB(0, 0, 0)
+	_bs.Thickness                  = 1
+	_bs.Transparency               = 0.35
+	_bs.Parent                     = bar
 
 	local fill                     = Instance.new("Frame")
 	fill.Name                      = "Fill"
@@ -368,7 +467,7 @@ do
 	fill.BorderSizePixel           = 0
 	fill.Parent                    = bar
 	local _fc                      = Instance.new("UICorner")
-	_fc.CornerRadius               = UDim.new(0, 3)
+	_fc.CornerRadius               = UDim.new(1, 0)
 	_fc.Parent                     = fill
 
 	RunService.RenderStepped:Connect(function()
@@ -454,24 +553,40 @@ if isLane then
 	end)
 end
 
--- R shortcut: open/close workshop panel (mirrors the HUD upgrades button)
+-- ── Command Center build page (command-card grid) ─────────────────────────────
+-- Build options live on the CC's command-card page, shown when the player selects
+-- their CC or presses [Space]. (CC mobility action is disabled for now.)
+local ccPageId: string? = nil
+
+local function showCCBuildPage(ccId: string?)
+	if not ownCCId then return end
+	ccPageId = ccId or ownCCId
+	HUD.showBuildPage()
+end
+
+local function hideCCBuildPage()
+	ccPageId = nil
+	HUD.hideBuildPage()
+end
+
+-- [Space]: toggle the Command Center build options on the command card.
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.KeyCode ~= Enum.KeyCode.Space then return end
+	if HUD.isBuildPageShown() then
+		hideCCBuildPage()
+	else
+		hideBuildingPanels()
+		showCCBuildPage(ownCCId)
+	end
+end)
+
+-- [R] shortcut: recenter the camera on the Command Center (the map's [R] button).
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.KeyCode ~= Enum.KeyCode.R then return end
-	if not ownCCId then return end
-	if workshopBtnOpen then
-		workshopBtnOpen = false
-		WorkshopPanel.hide()
-	else
-		workshopBtnOpen = true
-		BarracksPanel.hide()
-		MinePanel.hide()
-		TurretPanel.hide()
-		BlobPanel.hide()
-		LampreyNestPanel.hide()
-		CCMobilePanel.hide()
-		WorkshopPanel.show(ownCCId)
-	end
+	local base = ownCCBase()
+	if base then CameraModule.returnToBase(base.Position) end
 end)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
@@ -485,8 +600,8 @@ local function enterCCMode()
 	ownCCId             = nil
 	workshopBtnOpen     = false
 	ccIsMobile          = false
-	returnBtnRevealed   = false
-	MiniMap.setReturnVisible(false)
+	pendingPlace        = {}
+	HUD.setPendingCounts({})
 	CameraModule.stopFollow()
 	ownedBuildingCounts = {}
 	researchedTechs     = {}
@@ -566,6 +681,7 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 	-- Track this player's non-CC buildings for the requirement system
 	if ownerId == localUserId and buildingType ~= "CommandCenter" then
 		ownedBuildingCounts[buildingType] = (ownedBuildingCounts[buildingType] or 0) + 1
+		popPending(buildingType)   -- this placement landed; release its in-flight token
 		refreshRequirements()
 		updateIncomeReadout()
 		if buildingType == "Foundry"  then Tutorial.notify("mine_placed")     end
@@ -645,11 +761,14 @@ UnitController.onCCSelected(function(ccId: string?)
 		MinePanel.hide()
 		TurretPanel.hide()
 		BlobPanel.hide()
+		LampreyNestPanel.hide()
+		DeployerPanel.hide()
 		WorkshopPanel.hide()
-		CCMobilePanel.show(ccId)
+		-- Selecting the CC shows its build options on the command-card grid.
+		showCCBuildPage(ccId)
 		Tutorial.notify("cc_selected")
 	else
-		CCMobilePanel.hide()
+		hideCCBuildPage()
 	end
 end)
 
@@ -718,6 +837,21 @@ UnitController.onEngineeringSelected(function(postId: string?)
 		EngineeringPanel.show(postId)
 	else
 		EngineeringPanel.hide()
+	end
+end)
+
+-- ── Generic structure card ────────────────────────────────────────────────────
+-- Selecting any owned building that has no dedicated panel still pops the command
+-- card, with a friendly "upgrades coming soon" message.
+local OTHER_STRUCT_NAME: { [string]: string } = {
+	Relay = "RELAY", Monument = "MONUMENT",
+}
+UnitController.onOtherBuildingSelected(function(bid: string?, btype: string?)
+	if bid then
+		local name = (btype and (OTHER_STRUCT_NAME[btype] or btype) or "STRUCTURE"):upper()
+		CommandCard.showMessage("other", name, "Upgrades coming soon!")
+	else
+		CommandCard.hide("other")
 	end
 end)
 
@@ -1151,9 +1285,15 @@ end)
 
 Network.onResourceSync(function(amount: number)
 	currentResources = amount
+	-- Re-render every command-card page whose tiles/tooltip depend on affordability,
+	-- so purchasable/insufficient states update live (not only on next interaction).
 	MinePanel.refreshIfVisible()
 	BlobPanel.refreshIfVisible()
 	CCMobilePanel.refreshIfVisible()
+	TurretPanel.refreshIfVisible()
+	LampreyNestPanel.refreshIfVisible()
+	BarracksPanel.refreshIfVisible()
+	DeployerPanel.refreshIfVisible()
 end)
 
 -- Floating "+N" income popup over your own Foundry each income tick.
@@ -1584,6 +1724,23 @@ local lastAlertSound       = 0
 local ALERT_SOUND_THROTTLE = 2.5   -- seconds between alert sounds (any category)
 Network.onAttackAlert(function(worldPos: Vector3, category: string)
 	MiniMap.ping(worldPos, category)
+
+	-- First time we're ever attacked: drop the dread "song" over the ambience,
+	-- ducking the bed underneath it and restoring once the track finishes.
+	if not firstAttackSongPlayed then
+		firstAttackSongPlayed = true
+		local stinger   = Instance.new("Sound")
+		stinger.Name    = "FirstAttackStinger"
+		stinger.SoundId = "rbxassetid://138112098699544"
+		stinger.Volume  = FIRST_ATTACK_VOLUME
+		stinger.Parent  = SoundService
+		stinger:Play()
+		horrorAmbience.Volume = AMBIENCE_VOLUME * 0.3
+		stinger.Ended:Once(function()
+			stinger:Destroy()
+			horrorAmbience.Volume = AMBIENCE_VOLUME
+		end)
+	end
 
 	local now = os.clock()
 

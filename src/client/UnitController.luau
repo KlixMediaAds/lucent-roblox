@@ -24,6 +24,9 @@ local onBlobSelectedCb:      ((string?) -> ())?
 local onDeployerSelectedCb:  ((string?) -> ())?
 local onLampreyNestSelectedCb: ((string?) -> ())?
 local onEngineeringSelectedCb: ((string?) -> ())?
+-- Fires for an owned building that has no dedicated panel (so init.client can show
+-- a generic "upgrades coming soon" command card). (buildingId, buildingType) or nil.
+local onOtherBuildingSelectedCb: ((string?, string?) -> ())?
 local onMoveIssuedCb:        (() -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
@@ -39,6 +42,7 @@ local function clearBuildingPanels()
 	if onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
 	if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
 	if onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
+	if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(nil, nil) end
 end
 
 -- Like clearBuildingPanels but skips the panel for `exceptType` — used when
@@ -54,6 +58,9 @@ local function clearBuildingPanelsExcept(exceptType: string?)
 	if exceptType ~= "Deployer"        and onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
 	if exceptType ~= "LampreyNest"     and onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
 	if exceptType ~= "EngineeringPost" and onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
+	-- Always clear the generic "other" structure card; the click handler re-shows it
+	-- afterwards if the newly-selected building has no dedicated panel.
+	if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(nil, nil) end
 end
 
 -- ── Building hover + selection highlight ──────────────────────────────────────
@@ -431,7 +438,7 @@ local function hitBuilding(): string?
 			-- Match the base itself OR any part that shares the same model parent
 			-- (handles multi-part buildings like the new mine with pillars/crystal/beams)
 			local model = info.base.Parent
-			if inst == info.base or (model and inst.Parent == model) then
+			if inst == info.base or (model and inst:IsDescendantOf(model)) then
 				return id
 			end
 		end
@@ -774,6 +781,20 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		end
 	end)
 
+	-- Register a building for click detection + auto-cleanup on destroy.
+	local function trackBuilding(id: string, base: BasePart, ownerId: number, buildingType: string)
+		if knownBuildings[id] then return end
+		knownBuildings[id] = { base = base, ownerId = ownerId, buildingType = buildingType }
+		base.Destroying:Connect(function()
+			knownBuildings[id] = nil
+			if hoverBuildingId == id then
+				if hoverBox  then hoverBox:Destroy();  hoverBox  = nil end
+				if hoverRing then hoverRing:Destroy(); hoverRing = nil end
+				hoverBuildingId = nil
+			end
+		end)
+	end
+
 	-- Track all replicated buildings for click detection
 	network.onBuildingPlaced(function(id: string, ownerId: number, _pos: Vector3, buildingType: string)
 		task.spawn(function()
@@ -783,15 +804,31 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if not model then return end
 			local base = model:WaitForChild("Base", 5) :: BasePart
 			if not base then return end
-			knownBuildings[id] = { base = base, ownerId = ownerId, buildingType = buildingType or "Barracks" }
+			trackBuilding(id, base, ownerId, buildingType or "Barracks")
+		end)
+	end)
 
-			base.Destroying:Connect(function()
-				knownBuildings[id] = nil
-				if hoverBuildingId == id then
-					if hoverBox  then hoverBox:Destroy();  hoverBox  = nil end
-					if hoverRing then hoverRing:Destroy(); hoverRing = nil end
-					hoverBuildingId = nil
-				end
+	-- Reconcile buildings that were placed before this handler connected — notably
+	-- the Command Center, whose BuildingPlaced event fires during the ~4-7s lobby
+	-- transition. We read OwnerId / BuildingType straight off the replicated model so
+	-- the CC becomes clickable exactly like a player-built Barracks.
+	task.spawn(function()
+		local folder = workspace:WaitForChild("Buildings", 20) :: Folder?
+		if not folder then return end
+		local function tryTrack(model: Instance)
+			if knownBuildings[model.Name] then return end
+			local base = model:FindFirstChild("Base")
+			local ov   = model:FindFirstChild("OwnerId")      :: StringValue?
+			local btv  = model:FindFirstChild("BuildingType") :: StringValue?
+			if not (base and base:IsA("BasePart") and ov) then return end
+			trackBuilding(model.Name, base :: BasePart, tonumber(ov.Value) or 0, (btv and btv.Value) or "Barracks")
+		end
+		for _, m in folder:GetChildren() do tryTrack(m) end
+		folder.ChildAdded:Connect(function(m: Instance)
+			task.spawn(function()
+				m:WaitForChild("Base", 10)
+				m:WaitForChild("OwnerId", 5)
+				tryTrack(m)
 			end)
 		end)
 	end)
@@ -827,12 +864,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			end
 			notify()
 			selectBuilding(nil)
-			if onBarracksSelectedCb then onBarracksSelectedCb(nil) end
-			if onMineSelectedCb     then onMineSelectedCb(nil)     end
-			if onCCSelectedCb       then onCCSelectedCb(nil)       end
-			if onTurretSelectedCb   then onTurretSelectedCb(nil)   end
-			if onBlobSelectedCb     then onBlobSelectedCb(nil)     end
-			if onDeployerSelectedCb then onDeployerSelectedCb(nil) end
+			clearBuildingPanels()
 			return
 		end
 
@@ -915,10 +947,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
-			if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-			if onMineSelectedCb      then onMineSelectedCb(nil)      end
-			if onCCSelectedCb        then onCCSelectedCb(nil)        end
-			if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
+			clearBuildingPanels()
 		else
 			-- Single / double click — check unit first, then buildings
 			local now = os.clock()
@@ -934,10 +963,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					addToSelection(uid)
 				end
 				selectBuilding(nil)
-				if onBarracksSelectedCb  then onBarracksSelectedCb(nil)  end
-				if onMineSelectedCb      then onMineSelectedCb(nil)      end
-				if onCCSelectedCb        then onCCSelectedCb(nil)        end
-				if onTurretSelectedCb    then onTurretSelectedCb(nil)    end
+				clearBuildingPanels()
 			else
 				local bid = hitBuilding()
 				if bid then
@@ -968,6 +994,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(bid) end
 					elseif owned and info.buildingType == "EngineeringPost" then
 						if onEngineeringSelectedCb then onEngineeringSelectedCb(bid) end
+					elseif owned then
+						-- Owned building with no dedicated panel → generic command card.
+						if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(bid, info.buildingType) end
 					end
 				else
 					lastClickTime   = 0
@@ -1026,6 +1055,12 @@ end
 
 function UnitController.onEngineeringSelected(fn: (string?) -> ())
 	onEngineeringSelectedCb = fn
+end
+
+-- Fires (buildingId, buildingType) for an owned building with no dedicated panel,
+-- or (nil, nil) on deselect.
+function UnitController.onOtherBuildingSelected(fn: (string?, string?) -> ())
+	onOtherBuildingSelectedCb = fn
 end
 
 -- Returns the primary selected building ID plus all secondary double-click selected IDs.

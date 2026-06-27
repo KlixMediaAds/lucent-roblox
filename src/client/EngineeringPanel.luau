@@ -180,7 +180,7 @@ function EngineeringPanel.init(network)
 		{ size = 11, color = C.SUBTEXT, wrap = true, zIndex = 32 })
 
 	-- Progress bar (shown while researching)
-	local pb = UILib.progressBar(pn, UDim2.new(1, -24, 0, 8), UDim2.fromOffset(12, 138), ACCENT)
+	local pb = UILib.progressBar(pn, UDim2.new(1, -24, 0, 4), UDim2.fromOffset(12, 138), ACCENT)
 	progTrack = pb.track
 	progFill  = pb.fill
 	pb.track.ZIndex = 32

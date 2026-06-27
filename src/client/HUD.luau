@@ -22,6 +22,7 @@ local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 local Network           = require(script.Parent:WaitForChild("Network"))
+local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
 
 -- ── UI scaling ────────────────────────────────────────────────────────────────
 -- Pixel offsets are authored against this reference resolution; a UIScale adjusts
@@ -75,6 +76,20 @@ local currentResources = 0
 local currentIncome    = 0
 local buildMenuOpen    = false
 
+-- ── Command-card build/lane page state ──────────────────────────────────────────
+-- The new StarCraft-style grid (CommandCard) shows build options when the player's
+-- CC is selected or [Space] is pressed (selection-driven, wired from init.client).
+local hasCC            = false
+local buildExtraSlots: { any }? = nil   -- e.g. CC mobility slot appended by init.client
+local laneSpawnFn:      ((string) -> ())? = nil
+local buildingPlacerRef: any   = nil
+local upgradeMapBtn:    TextButton? = nil
+
+-- Forward-declared renderers (assigned in the public-API section, near the bottom),
+-- so early helpers like updateAllNodes / refreshLaneButtons can trigger a re-render.
+local renderBuildPage: ((extra: { any }?) -> ())? = nil
+local renderLanePage:  (() -> ())?                = nil
+
 -- Build-menu hint: if the player hasn't opened the build menu within 10 s of the
 -- tray appearing, a bouncing arrow points at the BUILD node.
 local buildMenuEverOpened = false
@@ -87,6 +102,9 @@ local lanePanel:     Frame?
 local laneUnitBtns:  { [string]: TextButton } = {}
 
 local playerCounts: { [string]: number } = {}
+-- In-flight placements the player has sent but that haven't landed yet. Counted in
+-- the displayed COST (so the price scales immediately) but NOT in requirement gating.
+local pendingCounts: { [string]: number } = {}
 local hasResearchFn: ((string) -> boolean)?
 
 -- ── Building metadata ─────────────────────────────────────────────────────────
@@ -117,7 +135,10 @@ end
 local function costOf(btype: string): number
 	local info = BUILDING_INFO[btype]
 	local base = info and info.cost or 0
-	return Config.scaledBuildingCost(base, btype, playerCounts[btype] or 0)
+	-- Include in-flight placements so the price climbs the instant one is purchased,
+	-- before its drop pod lands (mirrors the server's costFor with pending).
+	local count = (playerCounts[btype] or 0) + (pendingCounts[btype] or 0)
+	return Config.scaledBuildingCost(base, btype, count)
 end
 
 -- Horizontal layout: each child slides right from the root along the bottom bar.
@@ -269,7 +290,7 @@ local function refreshResDisplay()
 	if resLabel then resLabel.Text = tostring(currentResources) end
 	if incLabel then
 		incLabel.Text = currentIncome > 0
-			and string.format("↑ %.0f / min", currentIncome)
+			and string.format("+%.0f / min", currentIncome)
 			or  ""
 	end
 end
@@ -277,15 +298,9 @@ end
 -- ── Lane panel affordability ──────────────────────────────────────────────────
 local function refreshLaneButtons()
 	if not isLaneModeActive then return end
-	for utype, btn in laneUnitBtns do
-		local typeDef = (Config.UNIT_TYPES :: any)[utype]
-		local cost    = typeDef and typeDef.cost or 0
-		local costLbl = btn:FindFirstChild("CostLabel") :: TextLabel?
-		if costLbl then
-			costLbl.TextColor3 = currentResources >= cost and C.GOLD or C.RED
-		end
-		btn.BackgroundTransparency = currentResources >= cost and 0.35 or 0.62
-	end
+	-- Lane unit spawning now lives in the command-card grid; re-render it for
+	-- affordability colours when resources change.
+	if CommandCard.isOwner("lane") and renderLanePage then renderLanePage() end
 end
 
 -- ── Expand / collapse animations ──────────────────────────────────────────────
@@ -322,24 +337,13 @@ end
 -- Re-packs the tray and shows/hides each node by availability. While the menu is
 -- open, visible nodes slide to their packed slot so prerequisites unlocking
 -- mid-game (e.g. placing a Foundry reveals Barracks) animate in with no gaps.
+-- Re-render the live command-card build page (if it is currently the shown page),
+-- so prerequisites/research unlocking mid-game, affordability, and placing-state
+-- highlights all update in place. The legacy radial nodes are dormant (never shown).
 local function updateAllNodes()
-	relayoutNodes()
-	for _, n in childNodes do
-		local vis = isNodeVisible(n.btype)
-		if buildMenuOpen and vis then
-			if not n.wrapper.Visible then
-				-- Newly available: pop in from the root then slide to its slot.
-				n.wrapper.Visible            = true
-				n.wrapper.Position           = n.startPos
-				n.btn.BackgroundTransparency = 1
-			end
-			TweenService:Create(n.wrapper, EXPAND_TI, { Position = n.finalPos }):Play()
-			TweenService:Create(n.btn,     EXPAND_TI, { BackgroundTransparency = 0.12 }):Play()
-			applyNodeState(n)
-		else
-			n.wrapper.Visible = false
-		end
-	end
+	-- Only re-render if the build page actually still owns the grid (another panel
+	-- may have taken it over via selection).
+	if CommandCard.isOwner("build") and renderBuildPage then renderBuildPage(buildExtraSlots) end
 end
 
 -- ── Build-menu hint arrow ───────────────────────────────────────────────────
@@ -717,81 +721,152 @@ function HUD.create(): (Frame, TextButton)
 	sg.Parent                   = localPlayer.PlayerGui
 	setupScaling(sg)
 
-	-- ── Resource bar (top-left) ───────────────────────────────────────────────
-	local resBar                    = Instance.new("Frame")
-	resBar.Name                     = "ResourceBar"
-	resBar.Size                     = UDim2.fromOffset(190, 64)
-	resBar.Position                 = UDim2.fromOffset(12, 12)
-	resBar.BackgroundColor3         = C.BG_PANEL
-	resBar.BackgroundTransparency   = 0.04
-	resBar.BorderSizePixel          = 0
-	resBar.ZIndex                   = 4
-	resBar.Parent                   = sg
-	UILib.corner(resBar, 10)
+	-- Bottom-left map cluster (resource counter + upgrades button) lives in its own
+	-- UNSCALED, inset-ignoring ScreenGui so it shares the minimap's coordinate space.
+	-- (The main RTSHUD has a UIScale; the minimap does not — mixing them made the
+	-- resource bar drift into / behind the map at non-1.0 UI scales.)
+	local mapSg                 = Instance.new("ScreenGui")
+	mapSg.Name                  = "RTSMapHUD"
+	mapSg.ResetOnSpawn          = false
+	mapSg.IgnoreGuiInset        = true
+	mapSg.DisplayOrder          = 3
+	mapSg.ZIndexBehavior        = Enum.ZIndexBehavior.Sibling
+	mapSg.Parent                = localPlayer.PlayerGui
 
-	-- Gold stroke to tie into the icon colour
-	local resStroke                 = Instance.new("UIStroke")
-	resStroke.Color                 = Color3.fromRGB(120, 85, 10)
-	resStroke.Thickness             = 1
-	resStroke.ApplyStrokeMode       = Enum.ApplyStrokeMode.Border
-	resStroke.Parent                = resBar
+	-- ── Resource count — designed crystal icon + the number (no frame) ────────
+	local MAP_W = 148   -- minimap border width (MAP_SIZE 144 + 4)
+	local ROW_Y = -(MAP_W + 10 + 6)   -- bottom edge of the resource row (above the map)
 
-	-- Subtle gradient: slightly lighter top-left, darker bottom-right
-	local resGrad                   = Instance.new("UIGradient")
-	resGrad.Color                   = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 26, 50)),
-		ColorSequenceKeypoint.new(1, Color3.fromRGB( 7, 11, 22)),
-	})
-	resGrad.Rotation                = 130
-	resGrad.Parent                  = resBar
+	-- Designed resource crystal: a faceted purple gem with a smaller cluster shard,
+	-- a lavender rim, a gradient body and a bright inner facet + highlight glint.
+	do
+		local CX, CY = 22, ROW_Y - 15   -- gem centre (row is 30px tall, anchored bottom)
 
-	-- Gold left-edge accent stripe
-	local resAccent                 = Instance.new("Frame")
-	resAccent.Size                  = UDim2.new(0, 3, 1, -16)
-	resAccent.Position              = UDim2.fromOffset(7, 8)
-	resAccent.BackgroundColor3      = C.GOLD
-	resAccent.BorderSizePixel       = 0
-	resAccent.ZIndex                = 5
-	resAccent.Parent                = resBar
-	UILib.corner(resAccent, 2)
+		-- Soft outer glow
+		local glow                      = Instance.new("Frame")
+		glow.Name                       = "ResGlow"
+		glow.Size                       = UDim2.fromOffset(30, 30)
+		glow.AnchorPoint                = Vector2.new(0.5, 0.5)
+		glow.Position                   = UDim2.new(0, CX, 1, CY)
+		glow.Rotation                   = 45
+		glow.BackgroundColor3           = Color3.fromRGB(150, 70, 230)
+		glow.BackgroundTransparency     = 0.72
+		glow.BorderSizePixel            = 0
+		glow.ZIndex                     = 4
+		glow.Parent                     = mapSg
+		UILib.corner(glow, 8)
 
-	-- Icon circle (amber-tinted background, gold ring)
-	local resIconBg                 = Instance.new("Frame")
-	resIconBg.Size                  = UDim2.fromOffset(38, 38)
-	resIconBg.Position              = UDim2.fromOffset(17, 13)
-	resIconBg.BackgroundColor3      = Color3.fromRGB(50, 35, 5)
-	resIconBg.BackgroundTransparency = 0.1
-	resIconBg.BorderSizePixel       = 0
-	resIconBg.ZIndex                = 5
-	resIconBg.Parent                = resBar
-	UILib.corner(resIconBg, 19)
-	UILib.stroke(resIconBg, C.GOLD, 1)
+		-- Small cluster shard (behind, upper-left)
+		local shard                     = Instance.new("Frame")
+		shard.Name                      = "ResShard"
+		shard.Size                      = UDim2.fromOffset(9, 9)
+		shard.AnchorPoint               = Vector2.new(0.5, 0.5)
+		shard.Position                  = UDim2.new(0, CX - 7, 1, CY - 5)
+		shard.Rotation                  = 45
+		shard.BackgroundColor3          = Color3.fromRGB(170, 96, 235)
+		shard.BorderSizePixel           = 0
+		shard.ZIndex                    = 5
+		shard.Parent                    = mapSg
+		UILib.corner(shard, 2)
+		UILib.stroke(shard, Color3.fromRGB(220, 165, 255), 1)
 
-	local resIconLbl                = Instance.new("TextLabel")
-	resIconLbl.Size                 = UDim2.new(1, 0, 1, 0)
-	resIconLbl.BackgroundTransparency = 1
-	resIconLbl.Text                 = "◆"
-	resIconLbl.TextSize             = 19
-	resIconLbl.TextColor3           = C.GOLD
-	resIconLbl.Font                 = Enum.Font.GothamBold
-	resIconLbl.TextXAlignment       = Enum.TextXAlignment.Center
-	resIconLbl.TextYAlignment       = Enum.TextYAlignment.Center
-	resIconLbl.ZIndex               = 6
-	resIconLbl.Parent               = resIconBg
+		-- Main gem body
+		local gem                       = Instance.new("Frame")
+		gem.Name                        = "ResGem"
+		gem.Size                        = UDim2.fromOffset(20, 20)
+		gem.AnchorPoint                 = Vector2.new(0.5, 0.5)
+		gem.Position                    = UDim2.new(0, CX, 1, CY)
+		gem.Rotation                    = 45
+		gem.BackgroundColor3            = Color3.fromRGB(190, 95, 245)
+		gem.BorderSizePixel             = 0
+		gem.ZIndex                      = 6
+		gem.Parent                      = mapSg
+		UILib.corner(gem, 4)
+		local gemStroke                 = UILib.stroke(gem, Color3.fromRGB(232, 180, 255), 1.25)
+		gemStroke.Transparency          = 0.1
+		local gemGrad                   = Instance.new("UIGradient")
+		gemGrad.Rotation                = 55
+		gemGrad.Color                   = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,    Color3.fromRGB(236, 170, 255)),
+			ColorSequenceKeypoint.new(0.5,  Color3.fromRGB(176, 78, 236)),
+			ColorSequenceKeypoint.new(1,    Color3.fromRGB(120, 44, 190)),
+		})
+		gemGrad.Parent                  = gem
 
-	-- Resource count — large, prominent
-	local rLbl = UILib.lbl(resBar, "0",
-		UDim2.fromOffset(126, 30), UDim2.fromOffset(62, 6),
-		{ bold = true, size = 26, color = C.TEXT, align = Enum.TextXAlignment.Left, zIndex = 5 })
-	rLbl.Name = "ResLabel"
-	resLabel   = rLbl
+		-- Inner facet (bright core)
+		local facet                     = Instance.new("Frame")
+		facet.Size                      = UDim2.fromOffset(8, 8)
+		facet.AnchorPoint               = Vector2.new(0.5, 0.5)
+		facet.Position                  = UDim2.fromScale(0.5, 0.5)
+		facet.BackgroundColor3          = Color3.fromRGB(248, 222, 255)
+		facet.BackgroundTransparency    = 0.15
+		facet.BorderSizePixel           = 0
+		facet.ZIndex                    = 7
+		facet.Parent                    = gem
+		UILib.corner(facet, 2)
 
-	-- Income row — small, subordinate
-	local iLbl = UILib.lbl(resBar, "",
-		UDim2.fromOffset(126, 18), UDim2.fromOffset(63, 38),
-		{ size = 12, color = C.GREEN, align = Enum.TextXAlignment.Left, zIndex = 5 })
-	iLbl.Name = "IncLabel"
-	incLabel   = iLbl
+		-- Highlight glint (top-left)
+		local glint                     = Instance.new("Frame")
+		glint.Size                      = UDim2.fromOffset(3, 3)
+		glint.AnchorPoint               = Vector2.new(0.5, 0.5)
+		glint.Position                  = UDim2.fromScale(0.3, 0.3)
+		glint.BackgroundColor3          = Color3.new(1, 1, 1)
+		glint.BorderSizePixel           = 0
+		glint.ZIndex                    = 8
+		glint.Parent                    = gem
+		UILib.corner(glint, 1)
+	end
+
+	local rLbl                      = Instance.new("TextLabel")
+	rLbl.Name                       = "ResLabel"
+	rLbl.Size                       = UDim2.fromOffset(86, 30)
+	rLbl.AnchorPoint                = Vector2.new(0, 1)
+	rLbl.Position                   = UDim2.new(0, 40, 1, ROW_Y)
+	rLbl.BackgroundTransparency     = 1
+	rLbl.Text                       = "0"
+	rLbl.Font                       = Enum.Font.GothamBlack
+	rLbl.TextSize                   = 24
+	rLbl.TextColor3                 = Color3.fromRGB(238, 242, 250)
+	rLbl.TextStrokeTransparency     = 0.4
+	rLbl.TextStrokeColor3           = Color3.new(0, 0, 0)
+	rLbl.TextXAlignment             = Enum.TextXAlignment.Left
+	rLbl.TextYAlignment             = Enum.TextYAlignment.Center
+	rLbl.ZIndex                     = 5
+	rLbl.Parent                     = mapSg
+	resLabel = rLbl
+
+	-- ── Upgrades — small icon button at the top-right of the minimap ──────────
+	-- Opens the Workshop research panel. Hidden until the player earns/places the
+	-- prerequisites (driven by HUD.setUpgradesVisible).
+	do
+		local upg                       = Instance.new("TextButton")
+		upg.Name                        = "UpgradesBtn"
+		upg.Size                        = UDim2.fromOffset(30, 30)
+		upg.AnchorPoint                 = Vector2.new(1, 1)
+		upg.Position                    = UDim2.new(0, 10 + MAP_W, 1, -(MAP_W + 10 + 5))
+		upg.BackgroundColor3            = Color3.fromRGB(16, 20, 30)
+		upg.BackgroundTransparency      = 0.06
+		upg.AutoButtonColor             = false
+		upg.Font                        = Enum.Font.GothamBold
+		upg.TextSize                    = 17
+		upg.TextColor3                  = UPGRADES_COLOR
+		upg.Text                        = "⚗"
+		upg.BorderSizePixel             = 0
+		upg.ZIndex                      = 5
+		upg.Visible                     = false
+		upg.Parent                      = mapSg
+		UILib.corner(upg, 6)
+		local upgStroke                 = UILib.stroke(upg, UPGRADES_COLOR, 1.25)
+		upg.MouseEnter:Connect(function()
+			TweenService:Create(upg,       TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(26, 32, 46) }):Play()
+			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 2 }):Play()
+		end)
+		upg.MouseLeave:Connect(function()
+			TweenService:Create(upg,       TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(16, 20, 30) }):Play()
+			TweenService:Create(upgStroke, TweenInfo.new(0.12), { Thickness = 1.25 }):Play()
+		end)
+		upgradeMapBtn = upg
+	end
 
 	-- ── Selection label (top-centre) ──────────────────────────────────────────
 	local sLbl                      = Instance.new("TextLabel")
@@ -1354,6 +1429,9 @@ function HUD.setResources(n: number)
 	currentResources = n
 	refreshResDisplay()
 	refreshLaneButtons()
+	-- Live-refresh the build page so building affordability (and its tooltip) update
+	-- the moment resources change, not just on the next interaction.
+	updateAllNodes()
 end
 
 function HUD.setIncome(perMin: number)
@@ -1364,28 +1442,23 @@ end
 local ccPulseActive = false
 
 function HUD.setCommandCenterMode(isCC: boolean)
-	-- isCC = "no Command Center yet" → hide the build/research tray. The legacy
-	-- "PLACE COMMAND CENTER" button is retired (CCs are auto-placed), so it stays
-	-- hidden either way.
-	if buildOverlay  then buildOverlay.Visible  = not isCC and not isLaneModeActive end
+	-- isCC = "no Command Center yet". The build options are now selection-driven
+	-- (shown on the command-card grid when the CC is selected or [Space] is pressed),
+	-- so all we do here is track whether a CC exists and tear the grid down on reset.
+	hasCC = not isCC
 	if ccBtnInternal then ccBtnInternal.Visible = false end
-	if lanePanel     then lanePanel.Visible     = not isCC and isLaneModeActive     end
-	if isCC and buildMenuOpen then collapseMenu() end
+	if buildOverlay  then buildOverlay.Visible  = false end   -- legacy radial stays dormant
+	if lanePanel     then lanePanel.Visible     = false end
 	ccPulseActive = false
 
 	if isCC then
-		-- Tray hidden (no CC / round reset): clear the hint state for next time.
-		hideBuildHint()
-		buildHintScheduled  = false
-		buildMenuEverOpened = false
-	elseif not isLaneModeActive and not buildHintScheduled then
-		-- Build tray just appeared: arm the 10 s "open the build menu" hint.
-		buildHintScheduled = true
-		task.delay(10, function()
-			if not buildMenuEverOpened and not buildMenuOpen then
-				showBuildHint()
-			end
-		end)
+		-- No CC (round reset): clear any shown grid page.
+		CommandCard.hide("build")
+		CommandCard.hide("lane")
+		buildExtraSlots = nil
+	elseif isLaneModeActive and renderLanePage then
+		-- Lane gamemode: unit spawning lives persistently in the command-card grid.
+		renderLanePage()
 	end
 end
 
@@ -1394,37 +1467,145 @@ function HUD.refreshTrayState(counts: { [string]: number })
 	updateAllNodes()
 end
 
+-- In-flight placement counts (per building type) — affects displayed cost only.
+function HUD.setPendingCounts(counts: { [string]: number })
+	pendingCounts = counts
+	updateAllNodes()
+end
+
+-- Current scaled cost to place the next `btype` (built + in-flight, first-free aware).
+-- Used by BuildingPlacer so its affordability checks match what's displayed/charged.
+function HUD.getBuildCost(btype: string): number
+	return costOf(btype)
+end
+
 function HUD.setHasResearch(fn: (string) -> boolean)
 	hasResearchFn = fn
 	updateAllNodes()
 end
 
-function HUD.setUpgradesVisible(visible: boolean)
-	local w = upgradesBtnWrapper
-	if not w then return end
-	w.Visible = visible
+function HUD.setUpgradesVisible(_visible: boolean)
+	-- Upgrades button is hidden for now (its spot is used by the camera [R] button).
+	if upgradeMapBtn then upgradeMapBtn.Visible = false end
 end
 
 function HUD.setLaneMode(enabled: boolean)
 	isLaneModeActive = enabled
-	if lanePanel then lanePanel.Visible = false end  -- shown by setCommandCenterMode(false)
+	if lanePanel then lanePanel.Visible = false end
 end
 
 function HUD.wireLane(onSpawnFn: (string) -> ())
-	for utype, btn in laneUnitBtns do
-		local ut = utype
-		btn.MouseButton1Click:Connect(function()
-			local typeDef = (Config.UNIT_TYPES :: any)[ut]
-			local cost    = typeDef and typeDef.cost or 0
-			if currentResources < cost then
-				playErrorSound()
-				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
-				return
-			end
-			onSpawnFn(ut)
-		end)
-	end
+	laneSpawnFn = onSpawnFn
+	if CommandCard.isOwner("lane") and renderLanePage then renderLanePage() end
 end
+
+-- ── Command-card build page ────────────────────────────────────────────────────
+-- Accent colours for the three "starter" buildings (mirrors the old node styling).
+local BUILD_ACCENT: { [string]: Color3 } = {
+	Foundry = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET,
+}
+
+local function visibleBuildDefs(): { { btype: string, icon: string, color: Color3, desc: string } }
+	local out = {}
+	for _, def in CHILD_DEFS do
+		if isNodeVisible(def.btype) then table.insert(out, def) end
+	end
+	return out
+end
+
+local function buildBuildSlots(): { CommandCard.Slot }
+	local slots: { CommandCard.Slot } = {}
+	for i, def in visibleBuildDefs() do
+		local btype   = def.btype
+		local cost    = costOf(btype)
+		local placing = currentActivePlacing == btype
+		local accent  = placing and C.ACCENT or (BUILD_ACCENT[btype] or def.color)
+		table.insert(slots, {
+			index           = i,
+			name            = dispName(btype),
+			cost            = cost,
+			color           = accent,
+			enabled         = currentResources >= cost,
+			icon            = def.icon,
+			viewportKey     = "bld:" .. btype,
+			viewportFactory = function() return ViewportPreview.forBuilding(btype, Vector2.new(64, 64)) end,
+			badge           = placing and "▸" or nil,
+			desc            = def.desc,
+			hotkey          = i <= 5 and tostring(i) or nil,
+			onClick         = function()
+				if not isUnlocked(btype) then return end
+				local c = costOf(btype)
+				if currentResources < c then
+					playErrorSound()
+					HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. c, C.RED)
+					return
+				end
+				if buildingPlacerRef then buildingPlacerRef.enterPlacementMode(btype) end
+			end,
+		})
+	end
+	return slots
+end
+
+function HUD.showBuildPage(extra: { any }?)
+	if not hasCC then return end
+	buildExtraSlots = extra
+	local slots = buildBuildSlots()
+	if extra then
+		local n = #slots
+		for j, s in extra do
+			s.index = n + j
+			table.insert(slots, s)
+		end
+	end
+	CommandCard.show("build", { header = "COMMAND CENTER", slots = slots })
+end
+renderBuildPage = HUD.showBuildPage
+
+function HUD.hideBuildPage()
+	if not CommandCard.isOwner("build") then return end
+	buildExtraSlots = nil
+	CommandCard.hide("build")
+end
+
+function HUD.isBuildPageShown(): boolean
+	return CommandCard.isOwner("build")
+end
+
+-- ── Command-card lane spawn page (Lane gamemode) ───────────────────────────────
+local function buildLaneSlots(): { CommandCard.Slot }
+	local slots: { CommandCard.Slot } = {}
+	for i, def in LANE_UNIT_DEFS do
+		local ut      = def.utype
+		local typeDef = (Config.UNIT_TYPES :: any)[ut]
+		local cost    = typeDef and typeDef.cost or 0
+		table.insert(slots, {
+			index           = i,
+			name            = ut:upper(),
+			cost            = cost,
+			color           = def.color,
+			enabled         = currentResources >= cost,
+			viewportKey     = "unit:" .. ut,
+			viewportFactory = function() return ViewportPreview.forUnit(ut, Vector2.new(64, 64)) end,
+			desc            = "Spawn a " .. ut .. " down your lane",
+			hotkey          = i <= 5 and tostring(i) or nil,
+			onClick         = function()
+				if currentResources < cost then
+					playErrorSound()
+					HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
+					return
+				end
+				if laneSpawnFn then laneSpawnFn(ut) end
+			end,
+		})
+	end
+	return slots
+end
+
+function HUD.showLanePage()
+	CommandCard.show("lane", { header = "SPAWN UNIT", slots = buildLaneSlots() })
+end
+renderLanePage = HUD.showLanePage
 
 -- ── HUD.wire ──────────────────────────────────────────────────────────────────
 function HUD.wire(
@@ -1434,6 +1615,8 @@ function HUD.wire(
 	hidePanelsFn: () -> (),
 	upgradesFn:  (() -> ())?
 )
+	buildingPlacerRef = buildingPlacer
+
 	-- Resource sync
 	network.onResourceSync(function(n: number)
 		HUD.setResources(n)
@@ -1483,10 +1666,10 @@ function HUD.wire(
 		end)
 	end
 
-	-- Upgrades button — upgradesFn owns its own show/hide logic; don't call
-	-- hidePanelsFn first or it resets the toggle flag before upgradesFn checks it.
-	if upgradesBtnRef and upgradesFn then
-		upgradesBtnRef.MouseButton1Click:Connect(upgradesFn)
+	-- Upgrades button (on top of the map) — upgradesFn owns its own show/hide logic;
+	-- don't call hidePanelsFn first or it resets the toggle flag before upgradesFn checks it.
+	if upgradeMapBtn and upgradesFn then
+		upgradeMapBtn.MouseButton1Click:Connect(upgradesFn)
 	end
 
 	-- Sell button — only present while a sellable structure is selected.
@@ -1529,22 +1712,23 @@ function HUD.wire(
 		Enum.KeyCode.Four,
 		Enum.KeyCode.Five,
 	}
+	-- Hotkeys map to the visible build slots — only while the build page is shown
+	-- (selection-driven: select the CC or press [Space] first).
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
+		if not CommandCard.isOwner("build") then return end
 		for i, kc in KEY_CODES do
 			if input.KeyCode == kc then
-				local node = childNodes[i]
-				if not node then return end
-				if not isResearchVisible(node.btype) then return end
-				if not isUnlocked(node.btype) then return end
-				local cost = costOf(node.btype)
+				local defs = visibleBuildDefs()
+				local def  = defs[i]
+				if not def then return end
+				local cost = costOf(def.btype)
 				if currentResources < cost then
 					playErrorSound()
-				HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
+					HUD.showNotification("⚠ Not enough resources  ◆ " .. currentResources .. " / " .. cost, C.RED)
 					return
 				end
-				hidePanelsFn()
-				buildingPlacer.enterPlacementMode(node.btype)
+				buildingPlacer.enterPlacementMode(def.btype)
 				return
 			end
 		end

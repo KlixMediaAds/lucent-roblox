@@ -61,6 +61,17 @@ local localUserId: number
 local fogFolder:   Folder
 local xrayEnabled  = false
 
+-- Sets a BillboardGui's visibility for fog. The HealthBar is special: its Enabled
+-- state is owned by the server's damage logic (it only shows after a unit/building
+-- takes damage), so fog must NEVER force it on — it may only hide it while in fog.
+local function setBB(bb: BillboardGui, on: boolean)
+	if bb.Name == "HealthBar" then
+		if not on then bb.Enabled = false end
+	else
+		bb.Enabled = on
+	end
+end
+
 -- Fog tile layers
 local blackLayer:  { { Part } } = {}
 local shroudLayer: { { Part } } = {}
@@ -346,15 +357,15 @@ local function applyXray()
 				(child :: BasePart).LocalTransparencyModifier = 0
 				for _, desc in child:GetDescendants() do
 					if desc:IsA("BasePart") then (desc :: BasePart).LocalTransparencyModifier = 0 end
-					if desc:IsA("BillboardGui") then (desc :: BillboardGui).Enabled = true end
+					if desc:IsA("BillboardGui") then setBB(desc :: BillboardGui, true) end
 				end
 				for _, gc in child:GetChildren() do
-					if gc:IsA("BillboardGui") then (gc :: BillboardGui).Enabled = true end
+					if gc:IsA("BillboardGui") then setBB(gc :: BillboardGui, true) end
 				end
 			elseif child:IsA("Model") then
 				for _, desc in child:GetDescendants() do
 					if desc:IsA("BasePart") then (desc :: BasePart).LocalTransparencyModifier = 0 end
-					if desc:IsA("BillboardGui") then (desc :: BillboardGui).Enabled = true end
+					if desc:IsA("BillboardGui") then setBB(desc :: BillboardGui, true) end
 				end
 			end
 		end
@@ -475,7 +486,7 @@ local function updateFog()
 			-- BillboardGuis hard-cut (no benefit tweening UI opacity)
 			for _, gc in bp:GetChildren() do
 				if gc:IsA("BillboardGui") then
-					(gc :: BillboardGui).Enabled = vis
+					setBB(gc :: BillboardGui, vis)
 				end
 			end
 		end
@@ -502,7 +513,7 @@ local function updateFog()
 					if desc:IsA("BasePart") then
 						(desc :: BasePart).LocalTransparencyModifier = 0
 					elseif desc:IsA("BillboardGui") then
-						(desc :: BillboardGui).Enabled = true
+						setBB(desc :: BillboardGui, true)
 					end
 				end
 				continue
@@ -540,7 +551,7 @@ local function updateFog()
 				if desc:IsA("BasePart") then
 					(desc :: BasePart).LocalTransparencyModifier = modifier
 				elseif desc:IsA("BillboardGui") then
-					(desc :: BillboardGui).Enabled = bbEnabled
+					setBB(desc :: BillboardGui, bbEnabled)
 				end
 			end
 		end
@@ -565,7 +576,7 @@ local function updateFog()
 					if desc:IsA("BasePart") then
 						(desc :: BasePart).LocalTransparencyModifier = modifier
 					elseif desc:IsA("BillboardGui") then
-						(desc :: BillboardGui).Enabled = vis
+						setBB(desc :: BillboardGui, vis)
 					end
 				end
 			end

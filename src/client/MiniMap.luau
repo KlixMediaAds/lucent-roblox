@@ -8,7 +8,7 @@ local localPlayer = Players.LocalPlayer
 
 -- ── Constants ────────────────────────────────────────────────────────────────
 
-local MAP_SIZE   = 180    -- minimap square pixel size
+local MAP_SIZE   = 144    -- minimap square pixel size (reduced 20% from 180)
 local WORLD_HALF = 432    -- studs from center to edge (matches FogManager: 72×12/2)
 local PADDING    = 10     -- px gap from screen edge
 
@@ -48,10 +48,13 @@ local canvas:      Frame
 local cameraRef:   any
 local localUserId: number
 
--- "Return to Command Center" button (shown only after the camera first loses
--- sight of the CC). Wired from init.client via MiniMap.onReturnClicked.
+-- "Return to Command Center" camera button. Always visible; dims when the view is
+-- already home (near the CC / no rotation). Wired via MiniMap.onReturnClicked.
 local returnBtn:     TextButton?   = nil
+local returnStroke:  UIStroke?     = nil
+local returnBadge:   TextLabel?    = nil
 local returnClickFn: (() -> ())?   = nil
+local returnDimmed   = false
 
 local unitMarkers: { [string]: TextLabel } = {}
 local buildingDots:{ [string]: Frame } = {}
@@ -543,7 +546,8 @@ local function buildUI()
 	local border              = Instance.new("Frame")
 	border.Name               = "Border"
 	border.Size               = UDim2.fromOffset(MAP_SIZE + 4, MAP_SIZE + 4)
-	border.Position           = UDim2.new(1, -(MAP_SIZE + 4 + PADDING), 0, PADDING)
+	border.AnchorPoint        = Vector2.new(0, 1)
+	border.Position           = UDim2.new(0, PADDING, 1, -PADDING)
 	border.BackgroundColor3   = C_BORDER
 	border.BorderSizePixel    = 0
 	border.Parent             = sg
@@ -587,9 +591,9 @@ local function buildUI()
 	-- "MAP" label pinned to bottom of the border frame
 	local lbl                 = Instance.new("TextLabel")
 	lbl.Size                  = UDim2.fromOffset(MAP_SIZE + 4, 14)
-	lbl.Position              = UDim2.new(0, 0, 1, 2)
+	lbl.Position              = UDim2.new(0, 0, 0, -15)
 	lbl.BackgroundTransparency= 1
-	lbl.Text                  = "MAP"
+	lbl.Text                  = ""
 	lbl.Font                  = Enum.Font.GothamBold
 	lbl.TextSize              = 10
 	lbl.TextColor3            = C_BORDER
@@ -599,40 +603,42 @@ local function buildUI()
 	-- ── Return-to-CC button (just left of the minimap) ────────────────────────
 	local rBtn                = Instance.new("TextButton")
 	rBtn.Name                 = "ReturnToCCBtn"
-	rBtn.Size                 = UDim2.fromOffset(46, 46)
-	rBtn.AnchorPoint          = Vector2.new(1, 0)
-	rBtn.Position             = UDim2.new(1, -(MAP_SIZE + 4 + PADDING) - 8, 0, PADDING)
+	rBtn.Size                 = UDim2.fromOffset(28, 28)
+	rBtn.AnchorPoint          = Vector2.new(1, 1)
+	rBtn.Position             = UDim2.new(0, MAP_SIZE + 4 + PADDING, 1, -(MAP_SIZE + 4 + PADDING) - 5)
 	rBtn.BackgroundColor3     = Color3.fromRGB(7, 9, 14)
 	rBtn.BackgroundTransparency = 0.06
 	rBtn.AutoButtonColor      = false
 	rBtn.Text                 = "⌂"
 	rBtn.Font                 = Enum.Font.GothamBold
-	rBtn.TextSize             = 26
+	rBtn.TextSize             = 18
 	rBtn.TextColor3           = C_CC_OWN
 	rBtn.BorderSizePixel      = 0
-	rBtn.Visible              = false
+	rBtn.Visible              = true
 	rBtn.ZIndex               = 6
 	rBtn.Parent               = sg
-	Instance.new("UICorner", rBtn).CornerRadius = UDim.new(0, 9)
+	Instance.new("UICorner", rBtn).CornerRadius = UDim.new(0, 6)
 	local rStroke             = Instance.new("UIStroke")
 	rStroke.Color             = C_CC_OWN
 	rStroke.Thickness         = 1
 	rStroke.Transparency      = 0.3
 	rStroke.Parent            = rBtn
+	returnStroke              = rStroke
 
 	-- Small "R" key badge in the corner
 	local rBadge              = Instance.new("TextLabel")
-	rBadge.Size               = UDim2.fromOffset(16, 14)
+	rBadge.Size               = UDim2.fromOffset(11, 9)
 	rBadge.AnchorPoint        = Vector2.new(1, 1)
-	rBadge.Position           = UDim2.new(1, -3, 1, -2)
+	rBadge.Position           = UDim2.new(1, -2, 1, -1)
 	rBadge.BackgroundTransparency = 1
 	rBadge.Text               = "R"
 	rBadge.Font               = Enum.Font.GothamBold
-	rBadge.TextSize           = 11
+	rBadge.TextSize           = 9
 	rBadge.TextColor3         = Color3.fromRGB(150, 170, 200)
 	rBadge.TextXAlignment     = Enum.TextXAlignment.Right
 	rBadge.ZIndex             = 7
 	rBadge.Parent             = rBtn
+	returnBadge               = rBadge
 
 	rBtn.MouseEnter:Connect(function()
 		TweenService:Create(rBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(20, 26, 38) }):Play()
@@ -781,10 +787,21 @@ function MiniMap.onReturnClicked(fn: () -> ())
 	returnClickFn = fn
 end
 
--- Show or hide the return-to-CC button (revealed once the camera first loses
--- sight of the Command Center).
+-- Show or hide the return-to-CC button.
 function MiniMap.setReturnVisible(v: boolean)
 	if returnBtn then returnBtn.Visible = v end
+end
+
+-- Dim the [R] camera button when the view is already "home" (return is redundant),
+-- brighten it once the player has panned / rotated away. Applies only on a state
+-- change so it doesn't fight the hover tweens each frame.
+function MiniMap.setReturnDimmed(dimmed: boolean)
+	if dimmed == returnDimmed then return end
+	returnDimmed = dimmed
+	if returnBtn    then returnBtn.BackgroundTransparency = dimmed and 0.7 or 0.06 end
+	if returnBtn    then (returnBtn :: TextButton).TextTransparency = dimmed and 0.55 or 0 end
+	if returnStroke then returnStroke.Transparency = dimmed and 0.75 or 0.3 end
+	if returnBadge  then returnBadge.TextTransparency = dimmed and 0.55 or 0 end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

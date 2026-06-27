@@ -65,6 +65,13 @@ local DEATH_DUR    = DEATH_IMPACT + DEATH_HOLD + DEATH_SINK + DEATH_HATCH
 local FULL_SPEED = 8.0     -- matches Config.UNIT_MOVE_SPEED.Broodmother
 local SWAY_FREQ  = 0.7
 
+-- ── Sounds (3D, parented to the mass so they track the creature) ───────────────
+local SND_ATTACK     = "rbxassetid://100002175919278"  -- attack swarm; fades 0 → ATTACK_VOL with the glow
+local SND_IMPACT     = "rbxassetid://9114110819"        -- corpse slamming into the ground
+local SND_EGG_BURST  = "rbxassetid://81874368063553"    -- body bursting open to release the eggs
+local ATTACK_VOL     = 0.5
+local IMPACT_VOL     = 2.0
+
 local CULL_SQ = 320 * 320
 
 -- ── Colours ─────────────────────────────────────────────────────────────────--
@@ -128,6 +135,12 @@ type Entry = {
 	halves:      { BasePart },   -- 2 mass halves
 	ribs:        { BasePart },   -- 6 rib arcs
 	eggs:        { BasePart },   -- 3 egg sacs
+	-- sounds
+	sndAttack:   Sound,
+	sndImpact:   Sound,
+	sndEggBurst: Sound,
+	impactPlayed: boolean,
+	eggPlayed:   boolean,
 	-- animation state
 	walkClock:   number,
 	swayClock:   number,
@@ -244,6 +257,22 @@ function BroodmotherBody.attach(unitId: string, body: BasePart)
 		table.insert(eggs, e)
 	end
 
+	-- 3D sounds ride on the mass so they track the creature
+	local sndAttack    = Instance.new("Sound")
+	sndAttack.SoundId  = SND_ATTACK
+	sndAttack.Volume   = 0
+	sndAttack.Looped   = true
+	sndAttack.Parent   = mass
+
+	local sndImpact    = Instance.new("Sound")
+	sndImpact.SoundId  = SND_IMPACT
+	sndImpact.Volume   = IMPACT_VOL
+	sndImpact.Parent   = mass
+
+	local sndEggBurst    = Instance.new("Sound")
+	sndEggBurst.SoundId  = SND_EGG_BURST
+	sndEggBurst.Parent   = mass
+
 	local n     = tonumber(unitId:match("%d+")) or 0
 	local phase = n * 0.6180339887
 
@@ -270,6 +299,11 @@ function BroodmotherBody.attach(unitId: string, body: BasePart)
 		halves       = halves,
 		ribs         = ribs,
 		eggs         = eggs,
+		sndAttack    = sndAttack,
+		sndImpact    = sndImpact,
+		sndEggBurst  = sndEggBurst,
+		impactPlayed = false,
+		eggPlayed    = false,
 		walkClock    = phase,
 		swayClock    = phase * 1.7,
 		lastPos      = nil,
@@ -310,6 +344,8 @@ function BroodmotherBody.triggerAttackNear(pos: Vector3)
 		local e = active[bestId]
 		e.attackActive = true
 		e.attackT      = 0
+		e.sndAttack.Volume = 0
+		e.sndAttack:Play()
 	end
 end
 
@@ -327,6 +363,7 @@ function BroodmotherBody.triggerDeathNear(pos: Vector3)
 		e.dying        = true
 		e.deathT       = 0
 		e.attackActive = false
+		e.sndAttack:Stop()
 		-- Hide the orb swarm immediately
 		for _, o in e.orbs do o.Transparency = 1 end
 	end
@@ -360,6 +397,7 @@ local function layout(e: Entry, dt: number, speedF: number)
 		if t < ORB_CHARGE then glow = t / ORB_CHARGE
 		elseif t < ORB_CHARGE + ORB_ACTIVE then glow = 1
 		else glow = math.max(0, 1 - (t - ORB_CHARGE - ORB_ACTIVE) / ORB_SCATTER) end
+		e.sndAttack.Volume = glow * ATTACK_VOL
 	end
 
 	-- ── Mass + lumps ───────────────────────────────────────────────────────────
@@ -501,6 +539,16 @@ local function layoutDeath(e: Entry, dt: number)
 	local collapse = smoothstep(math.min(t / (DEATH_IMPACT * 0.45), 1))                -- mass slams down
 	local split    = smoothstep(math.clamp((t - DEATH_IMPACT * 0.30) / (DEATH_IMPACT * 0.70), 0, 1))  -- mass tears open
 	local sink     = smoothstep(math.clamp((t - holdEnd) / DEATH_SINK, 0, 1))          -- corpse sinks after the hold
+
+	-- One-shot death audio: a thud as the corpse bottoms out, a burst as the eggs erupt
+	if not e.impactPlayed and t >= DEATH_IMPACT * 0.45 then
+		e.impactPlayed = true
+		e.sndImpact:Play()
+	end
+	if not e.eggPlayed and t >= DEATH_IMPACT * 0.35 then
+		e.eggPlayed = true
+		e.sndEggBurst:Play()
+	end
 
 	local massY    = lerp(MASS_H, 2.6, collapse) * sc - sink * (7 * sc)
 	local massPos  = centre + Vector3.new(0, massY, 0)
@@ -653,6 +701,8 @@ function BroodmotherBody.init(cam: Camera)
 				e.attackT += dt
 				if e.attackT >= ORB_TOTAL then
 					e.attackActive = false
+					e.sndAttack.Volume = 0
+					e.sndAttack:Stop()
 					for _, o in e.orbs do o.Transparency = 1 end
 				end
 			end

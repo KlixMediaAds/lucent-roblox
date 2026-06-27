@@ -1,11 +1,13 @@
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
+local Debris            = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local UnitBlueprints    = require(Shared:WaitForChild("UnitBlueprints"))
 local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
+local GoreManager       = require(script.Parent:WaitForChild("GoreManager"))
 
 local UnitManager = {}
 
@@ -58,6 +60,12 @@ type UnitData = {
 	broodDotAccum      : number?,  -- accumulated dt for the aura DoT tick
 	broodRechargeUntil : number?,  -- tick() before which the swarm cannot re-form
 	dying              : boolean?, -- Broodmother is mid death-collapse (frozen, awaiting final removal)
+	-- Wounded-soldier system (see Config.SOLDIER_IMMOBILIZE_*)
+	immobilized   : boolean?,        -- collapsed at low HP: prone, can shoot, can't move
+	immobCheckAt  : number?,         -- tick() throttle for the collapse roll
+	draggedBy     : { string }?,     -- (casualty) unit ids currently hauling this soldier (≤ DRAG_SLOTS)
+	draggingId    : string?,         -- (rescuer) the casualty unit id this soldier is hauling
+	healingAtCC   : boolean?,        -- casualty has been brought home and is regenerating
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -213,9 +221,10 @@ end
 local function buildFromBlueprint(id: string, body: BasePart, bp: UnitBlueprints.Blueprint)
 	if bp.rootTransparent then body.Transparency = 1 end
 	local teamColor = body.Color
+	local skinColor = UnitBlueprints.randomSkinTone()  -- one tone per unit (head + arms match)
 	local decs      = unitDecorators[id]
 	for _, spec in bp.parts do
-		local p   = UnitBlueprints.instantiate(spec, body.CFrame, teamColor)
+		local p   = UnitBlueprints.instantiate(spec, body.CFrame, teamColor, skinColor)
 		p.Parent  = body
 		decs[#decs + 1] = { part = p, localCF = spec.cf }
 	end
@@ -269,10 +278,15 @@ local function attachHowitzerSmoke(body: BasePart)
 	end
 end
 
-local function addHealthBar(part: BasePart)
+-- Bar length scales with max HP (tougher units get longer bars), within bounds.
+local function hpBarWidth(maxHp: number): number
+	return math.clamp(math.floor(40 + maxHp * 0.18 + 0.5), 40, 110)
+end
+
+local function addHealthBar(part: BasePart, maxHp: number)
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "HealthBar"
-	bb.Size             = UDim2.new(0, 60, 0, 7)
+	bb.Size             = UDim2.new(0, hpBarWidth(maxHp), 0, 4)
 	bb.StudsOffset      = Vector3.new(0, part.Size.Y / 2 + 1.5, 0)
 	bb.AlwaysOnTop      = false
 	bb.Enabled          = false
@@ -283,6 +297,14 @@ local function addHealthBar(part: BasePart)
 	bg.BackgroundColor3 = Color3.fromRGB(40, 0, 0)
 	bg.BorderSizePixel  = 0
 	bg.Parent           = bb
+	local bgCorner      = Instance.new("UICorner")
+	bgCorner.CornerRadius = UDim.new(1, 0)
+	bgCorner.Parent     = bg
+	local bgStroke      = Instance.new("UIStroke")
+	bgStroke.Color      = Color3.fromRGB(0, 0, 0)
+	bgStroke.Thickness  = 1
+	bgStroke.Transparency = 0.35
+	bgStroke.Parent     = bg
 
 	local fill          = Instance.new("Frame")
 	fill.Name           = "Fill"
@@ -290,6 +312,9 @@ local function addHealthBar(part: BasePart)
 	fill.BackgroundColor3 = Color3.fromRGB(0, 200, 50)
 	fill.BorderSizePixel  = 0
 	fill.Parent         = bg
+	local fillCorner    = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent   = fill
 end
 
 local function applyHP(data: UnitData, tookDamage: boolean?)
@@ -343,6 +368,9 @@ local function growLamprey(data: UnitData, treeCount: number)
 		data.maxHp = data.maxHp * g
 		data.hp    = data.hp * g
 	end
+	-- Grow the health bar's length to match the new (larger) max HP.
+	local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
+	if bb then bb.Size = UDim2.new(0, hpBarWidth(data.maxHp), 0, 4) end
 	applyHP(data)
 end
 
@@ -416,7 +444,7 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		spd      = spd      * pm.speed
 		atkRange = atkRange * pm.range
 	end
-	addHealthBar(part)
+	addHealthBar(part, maxHp)
 
 	-- Static body geometry comes from the shared blueprint (single source of
 	-- truth, also used by the ViewportFrame previews in UnitVisuals).
@@ -512,6 +540,94 @@ local function orderMove(data: UnitData, slot: Vector3)
 	end
 end
 
+-- ── Wounded-soldier rescue links ───────────────────────────────────────────────
+
+local function getOwnerCC(owner: any): Vector3?
+	if not buildingManagerRef then return nil end
+	return buildingManagerRef.getCCPosition(owner)
+end
+
+-- Sever any drag links touching `id` (call before a unit is removed so its rescuer
+-- or casualty doesn't keep a dangling reference). processRescues also self-heals,
+-- so this is a fast best-effort cleanup, not the only safety net.
+local function releaseDragLinks(id: string)
+	local d = units[id]
+	if not d then return end
+	if d.draggedBy then
+		for _, rid in d.draggedBy do
+			local r = units[rid]
+			if r and r.draggingId == id then r.draggingId = nil end
+		end
+		d.draggedBy = nil
+	end
+	if d.draggingId then
+		local cas = units[d.draggingId]
+		if cas and cas.draggedBy then
+			local i = table.find(cas.draggedBy, id)
+			if i then table.remove(cas.draggedBy, i) end
+		end
+		d.draggingId = nil
+	end
+end
+
+-- A command was issued to `candidates`: peel off the nearest healthy soldiers to
+-- haul any of the owner's casualties home (filling each casualty's free drag
+-- slots). Casualties already crewed or already healing are skipped. No-op if the
+-- owner has no Command Center to carry them to.
+local function assignRescues(owner: any, candidates: { string })
+	if not getOwnerCC(owner) then return end
+
+	local casualties: { string } = {}
+	for id, d in units do
+		if d.owner == owner and d.immobilized and not d.healingAtCC then
+			local crew = d.draggedBy and #d.draggedBy or 0
+			if crew < Config.SOLDIER_DRAG_SLOTS then table.insert(casualties, id) end
+		end
+	end
+	if #casualties == 0 then return end
+
+	-- Available rescuers: healthy, mobile soldiers from the commanded group.
+	local pool: { string } = {}
+	for _, id in candidates do
+		local d = units[id]
+		if d and d.owner == owner and d.unitType == "Soldier"
+			and not d.immobilized and not d.draggingId and d.hp > 0 then
+			table.insert(pool, id)
+		end
+	end
+
+	for _, cid in casualties do
+		if #pool == 0 then break end
+		local cas = units[cid]
+		if cas then
+			cas.draggedBy = cas.draggedBy or {}
+			local cp = cas.part.Position
+			while #cas.draggedBy < Config.SOLDIER_DRAG_SLOTS and #pool > 0 do
+				-- Grab the nearest available rescuer.
+				local bestIdx, bestD = nil :: number?, math.huge
+				for i, rid in pool do
+					local r = units[rid]
+					if r then
+						local dd = (r.part.Position - cp).Magnitude
+						if dd < bestD then bestD = dd; bestIdx = i end
+					end
+				end
+				if not bestIdx then break end
+				local rid = table.remove(pool, bestIdx) :: string
+				local r   = units[rid]
+				if r then
+					r.draggingId = cid
+					r.target, r.path, r.pathIdx = nil, nil, nil
+					r.aggroId, r.aggroHome, r.focusBldId, r.atkMoveDest = nil, nil, nil, nil
+					r.rollerCharging, r.rollerChargingOut = nil, nil
+					r.velocity = Vector3.zero
+					table.insert(cas.draggedBy, rid)
+				end
+			end
+		end
+	end
+end
+
 local function applyFormation(valid: { string }, targetPos: Vector3)
 	local cols = math.max(1, math.ceil(math.sqrt(#valid)))
 	for i, id in valid do
@@ -533,13 +649,16 @@ end
 local function moveUnits(player: Player, ids: { string }, targetPos: Vector3)
 	local valid = {}
 	for _, id in ids do
-		if units[id] and units[id].owner == player then
+		local d = units[id]
+		-- Downed soldiers can't march, and active rescuers are busy hauling.
+		if d and d.owner == player and not d.immobilized and not d.draggingId then
 			table.insert(valid, id)
 		end
 	end
 	applyFormation(valid, targetPos)
 	for _, id in valid do units[id].atkMoveDest = nil end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
+	assignRescues(player, valid)
 end
 
 -- Drag-formation move: each unit gets its own destination slot (parallel arrays).
@@ -556,6 +675,7 @@ local function formationMove(player: Player, ids: { string }, positions: { Vecto
 		if type(id) ~= "string" or typeof(pos) ~= "Vector3" then continue end
 		local data = units[id]
 		if not data or data.owner ~= player then continue end
+		if data.immobilized or data.draggingId then continue end
 		local slot       = Vector3.new(pos.X, 0, pos.Z)
 		data.aggroId     = nil
 		data.aggroHome   = nil
@@ -567,12 +687,14 @@ local function formationMove(player: Player, ids: { string }, positions: { Vecto
 	if #valid > 0 then
 		RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, positions[1])
 	end
+	assignRescues(player, valid)
 end
 
 local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vector3)
 	local valid = {}
 	for _, id in ids do
-		if units[id] and units[id].owner == player then
+		local d = units[id]
+		if d and d.owner == player and not d.immobilized and not d.draggingId then
 			table.insert(valid, id)
 		end
 	end
@@ -593,6 +715,7 @@ local function attackMoveUnits(player: Player, ids: { string }, targetPos: Vecto
 		orderMove(data, formPos)
 	end
 	RemoteHandler.get(Config.REMOTES.UnitsOrderedMove):FireAllClients(valid, targetPos)
+	assignRescues(player, valid)
 end
 
 -- ── Barracks queue ────────────────────────────────────────────────────────────
@@ -803,6 +926,7 @@ function UnitManager.resetAll()
 	playerUnitCount  = {}
 	playerStatMult   = {}
 	playerUpgradeLog = {}
+	GoreManager.clear()
 end
 
 -- Rolls one random Light-research upgrade for `player`: a random stat on a random unit
@@ -887,6 +1011,79 @@ function UnitManager.getOwnerUnitPositions(ownerStr: string): { Vector3 }
 	return out
 end
 
+-- ── Biological death sounds ────────────────────────────────────────────────────
+-- Flesh-and-blood units (troopers + nest creatures) play a wet "blood" splat when
+-- they die. Mechanical units (Tank / Howitzer / Foamer / Harvester) are excluded —
+-- they read as wreckage, not gore. Each death rolls a random clip AND a random
+-- pitch so a crowd of dying units never sounds like the same sample on repeat.
+local BLOOD_DEATH_SOUNDS = {
+	"rbxassetid://135417409504018",
+	"rbxassetid://140325083438865",
+	"rbxassetid://135417409504018",
+	"rbxassetid://136038559178753",
+	"rbxassetid://106771269229569",
+}
+local BIOLOGICAL_UNIT: { [string]: boolean } = {
+	Soldier = true, Elite = true, Medic = true, CreepySoldier = true,
+	Lamprey = true, Hagfish = true, Broodmother = true,
+}
+
+-- 1-in-N chance a dying soldier is decapitated instead of a normal gore burst.
+local SOLDIER_DECAP_CHANCE = 0.1
+
+-- 1-in-15 chance a dying soldier lets out a death scream (layered over the blood).
+local SOLDIER_SCREAM_CHANCE = 1 / 15
+local SOLDIER_SCREAM_ID     = "rbxassetid://136401198004658"
+
+-- Death FX for a biological unit: a pitch-varied blood sound plus gore. Most
+-- deaths get the standard spray/gibs/pool; ~1 soldier in 10 instead loses its
+-- head in a geyser of blood and ragdolls to the ground (reuses its live parts as
+-- the corpse, so MUST run before the body root is destroyed).
+local function spawnDeathFX(unitType: string, part: BasePart)
+	if not BIOLOGICAL_UNIT[unitType] then return end
+	local pos = part.Position
+
+	local anchor        = Instance.new("Part")
+	anchor.Anchored     = true
+	anchor.CanCollide   = false
+	anchor.CanTouch     = false
+	anchor.CanQuery     = false
+	anchor.CastShadow   = false
+	anchor.Transparency = 1
+	anchor.Size         = Vector3.one * 0.1
+	anchor.Position     = pos
+	anchor.Parent       = workspace
+
+	local s                = Instance.new("Sound")
+	s.SoundId              = BLOOD_DEATH_SOUNDS[math.random(1, #BLOOD_DEATH_SOUNDS)]
+	s.Volume               = 0.5625   -- gore SFX, -25%
+	s.PlaybackSpeed        = 0.85 + math.random() * 0.4   -- ~0.85×–1.25× pitch jitter
+	s.RollOffMode          = Enum.RollOffMode.Linear
+	s.RollOffMinDistance   = 10
+	s.RollOffMaxDistance   = 120
+	s.Parent               = anchor
+	s:Play()
+
+	-- Soldiers occasionally scream as they die.
+	if unitType == "Soldier" and math.random() < SOLDIER_SCREAM_CHANCE then
+		local scream              = Instance.new("Sound")
+		scream.SoundId            = SOLDIER_SCREAM_ID
+		scream.Volume             = 0.85
+		scream.RollOffMode        = Enum.RollOffMode.Linear
+		scream.RollOffMinDistance = 14
+		scream.RollOffMaxDistance = 160
+		scream.Parent             = anchor
+		scream:Play()
+	end
+	Debris:AddItem(anchor, 6)
+
+	if unitType == "Soldier" and math.random() < SOLDIER_DECAP_CHANCE then
+		GoreManager.decapitate(part)
+	else
+		GoreManager.spawn(unitType, pos)
+	end
+end
+
 -- A Broodmother does not vanish when killed: it freezes, the client plays the
 -- collapse/ribcage-split animation, and after BROODMOTHER_DEATH_DURATION the body
 -- is removed and BROODMOTHER_DEATH_EGGS Lampreys are born from the wreckage. This
@@ -894,6 +1091,7 @@ end
 -- in `units` (flagged `dying`) so the loops skip it until the timer fires.
 local function beginBroodmotherDeath(id: string, data: UnitData)
 	if data.dying then return end
+	spawnDeathFX(data.unitType, data.part)
 	data.dying          = true
 	data.target         = nil
 	data.path           = nil
@@ -959,6 +1157,10 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 	local hitPos = data.part.Position + Vector3.new(0, data.part.Size.Y * 0.5, 0)
 	data.hp -= calcDamage(data, damage)
 	applyHP(data, true)
+	-- Non-fatal hit on flesh: a small blood spurt (cheap, particle-only, throttled).
+	if data.hp > 0 and BIOLOGICAL_UNIT[data.unitType] and math.random() < 0.55 then
+		GoreManager.spurt(data.unitType, hitPos)
+	end
 	if data.hp <= 0 then
 		if data.trapperHarpooned then
 			for tId, _ in data.trapperHarpooned do
@@ -981,6 +1183,8 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 			beginBroodmotherDeath(bestId, data)
 			return true, hitPos
 		end
+		spawnDeathFX(data.unitType, data.part)
+		releaseDragLinks(bestId)
 		unitDecorators[bestId] = nil
 		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
 		data.part:Destroy()
@@ -1056,6 +1260,122 @@ function UnitManager.init(resourceManager)
 		return pos
 	end
 
+	-- ── Wounded-soldier pose + rescue movement ─────────────────────────────────
+
+	-- Lay a downed soldier on the ground, head up, preserving its facing yaw.
+	local PRONE_DROP = 0.28   -- fraction of body height the reclined body sinks
+	local function applyPronePose(data: UnitData, yaw: number?)
+		local p   = data.part
+		local pos = p.Position
+		local y   = yaw
+		if not y then local _, yy, _ = p.CFrame:ToOrientation(); y = yy end
+		local groundY = getGroundY(pos.X, pos.Z, p.Size.Y / 2)
+		local proneY  = groundY - p.Size.Y * PRONE_DROP
+		p.CFrame = CFrame.new(pos.X, proneY, pos.Z)
+			* CFrame.Angles(0, y :: number, 0)
+			* CFrame.Angles(-Config.SOLDIER_PRONE_PITCH, 0, 0)
+	end
+
+	-- Per-frame rescue logic for every downed soldier: recover if healed, haul home
+	-- if crewed, heal at base on arrival, else just lie prone awaiting rescue.
+	local function processRescues(dt: number)
+		for cid, cas in units do
+			if not cas.immobilized then continue end
+
+			-- Recovered enough (CC heal or a Medic patched them up) → get back up.
+			if cas.hp / cas.maxHp >= Config.SOLDIER_RECOVER_RATIO then
+				if cas.draggedBy then
+					for _, rid in cas.draggedBy do
+						local r = units[rid]
+						if r and r.draggingId == cid then r.draggingId = nil end
+					end
+					cas.draggedBy = nil
+				end
+				cas.immobilized = false
+				cas.healingAtCC = false
+				cas.velocity    = Vector3.zero
+				local p = cas.part
+				local _, yaw, _ = p.CFrame:ToOrientation()
+				p.CFrame  = CFrame.new(p.Position.X, getGroundY(p.Position.X, p.Position.Z, p.Size.Y / 2), p.Position.Z)
+					* CFrame.Angles(0, yaw, 0)
+				cas.home  = p.Position
+				continue
+			end
+
+			-- Drop rescuers that died, went down themselves, or got reassigned.
+			if cas.draggedBy then
+				local i = 1
+				while i <= #cas.draggedBy do
+					local r = units[cas.draggedBy[i]]
+					if not r or r.hp <= 0 or r.immobilized or r.draggingId ~= cid then
+						if r and r.draggingId == cid then r.draggingId = nil end
+						table.remove(cas.draggedBy, i)
+					else
+						i += 1
+					end
+				end
+				if #cas.draggedBy == 0 then cas.draggedBy = nil end
+			end
+
+			-- Already home: regenerate slowly until RECOVER_RATIO (handled above).
+			if cas.healingAtCC then
+				cas.hp = math.min(cas.maxHp, cas.hp + Config.SOLDIER_HEAL_RATE * dt)
+				applyHP(cas)
+				applyPronePose(cas)
+				continue
+			end
+
+			local ccPos = getOwnerCC(cas.owner)
+			local crew  = cas.draggedBy and #cas.draggedBy or 0
+			if crew == 0 or not ccPos then
+				applyPronePose(cas)   -- no rescuers (or no base): lie where they fell
+				continue
+			end
+
+			local cp   = cas.part.Position
+			local flat = Vector3.new(ccPos.X - cp.X, 0, ccPos.Z - cp.Z)
+			local dist = flat.Magnitude
+			if dist <= Config.SOLDIER_HEAL_RADIUS then
+				-- Arrived home: release rescuers and begin healing.
+				for _, rid in cas.draggedBy do
+					local r = units[rid]
+					if r and r.draggingId == cid then
+						r.draggingId = nil
+						r.home       = r.part.Position
+						r.target     = nil
+						r.velocity   = Vector3.zero
+					end
+				end
+				cas.draggedBy   = nil
+				cas.healingAtCC = true
+				applyPronePose(cas)
+				continue
+			end
+
+			-- Haul toward the CC; each rescuer adds DRAG_SPEED (2 = twice as fast).
+			local dir   = Vector3.new(flat.X / dist, 0, flat.Z / dist)
+			local speed = Config.SOLDIER_DRAG_SPEED * math.min(crew, Config.SOLDIER_DRAG_SLOTS)
+			local step  = math.min(speed * dt, dist)
+			local nx, nz = cp.X + dir.X * step, cp.Z + dir.Z * step
+			local yaw    = math.atan2(-dir.X, -dir.Z)   -- face travel direction
+			cas.part.CFrame = CFrame.new(nx, cas.part.Position.Y, nz)  -- XZ first; pose fixes Y/tilt
+			applyPronePose(cas, yaw)
+
+			-- Position rescuers just ahead, flanking, facing the CC.
+			local perp = Vector3.new(-dir.Z, 0, dir.X)
+			for k, rid in cas.draggedBy do
+				local r = units[rid]
+				if not r then continue end
+				local side = (k == 1) and -1 or 1
+				local rx = nx + dir.X * 2.2 + perp.X * 1.6 * side
+				local rz = nz + dir.Z * 2.2 + perp.Z * 1.6 * side
+				local ry = getGroundY(rx, rz, r.part.Size.Y / 2)
+				r.part.CFrame = CFrame.lookAt(Vector3.new(rx, ry, rz), Vector3.new(rx + dir.X, ry, rz + dir.Z))
+				r.velocity = Vector3.zero
+			end
+		end
+	end
+
 	RunService.Heartbeat:Connect(function(dt)
 		local toRemove: { string } = {}
 		rebuildSpatialGrid()
@@ -1066,6 +1386,31 @@ function UnitManager.init(resourceManager)
 			-- A dying Broodmother is frozen mid-collapse; skip all AI until the
 			-- death timer (beginBroodmotherDeath) removes it.
 			if data.dying then continue end
+
+			-- ── Wounded-soldier collapse roll ─────────────────────────────────
+			-- A badly-hurt soldier may go down: prone, still able to shoot but
+			-- unable to move. Chance rises the closer to death they are. Posing,
+			-- dragging and healing of downed soldiers run in the rescue pass below.
+			if data.unitType == "Soldier" and not data.immobilized and data.hp > 0 then
+				local ratio = data.hp / data.maxHp
+				if ratio <= Config.SOLDIER_IMMOBILIZE_THRESHOLD then
+					local nowT = tick()
+					if not data.immobCheckAt or nowT >= (data.immobCheckAt :: number) then
+						data.immobCheckAt = nowT + Config.SOLDIER_IMMOBILIZE_CHECK_EVERY
+						local frac   = 1 - (ratio / Config.SOLDIER_IMMOBILIZE_THRESHOLD)  -- 0 at threshold → 1 near death
+						local chance = Config.SOLDIER_IMMOBILIZE_MIN_CHANCE
+							+ frac * (Config.SOLDIER_IMMOBILIZE_MAX_CHANCE - Config.SOLDIER_IMMOBILIZE_MIN_CHANCE)
+						if math.random() < chance then
+							data.immobilized = true
+							data.target, data.path, data.pathIdx = nil, nil, nil
+							data.aggroId, data.aggroHome, data.focusBldId, data.atkMoveDest = nil, nil, nil, nil
+							data.rollerCharging, data.rollerChargingOut = nil, nil
+							data.velocity = Vector3.zero
+							if data.draggingId then releaseDragLinks(id) end  -- a rescuer that just went down
+						end
+					end
+				end
+			end
 
 			local isRoller  = data.unitType == "Soldier" and researchManagerRef ~= nil
 				and researchManagerRef.hasResearch(data.owner, "Rollers")
@@ -1369,7 +1714,10 @@ function UnitManager.init(resourceManager)
 			end
 
 			-- ── 3. Aggro scan (idle + A-moving units only; Medics/frozen Foamers skip) ──
+			-- Downed soldiers hold position (they still shoot via the combat scan below,
+			-- just never chase); active rescuers are busy hauling.
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
+				and not data.immobilized and not data.draggingId
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
@@ -1414,6 +1762,8 @@ function UnitManager.init(resourceManager)
 
 			-- ── 4. Combat ─────────────────────────────────────────────────────
 			if data.hp <= 0 then continue end
+			-- Rescuers carrying a casualty can't fire (downed soldiers still can).
+			if data.draggingId then continue end
 
 			-- Foamer: foam attack when deployed; skip normal combat in all states
 			if isFoamer then
@@ -2018,6 +2368,7 @@ function UnitManager.init(resourceManager)
 		-- ── Separation pass ────────────────────────────────────────────────────
 		for id, data in units do
 			if data.dying then continue end   -- a collapsing Broodmother stays put
+			if data.immobilized or data.draggingId then continue end  -- rescue pass owns these
 			local myPos = data.part.Position
 			local myStr = tostring(data.owner.UserId)
 			local pushX, pushZ = 0, 0
@@ -2060,6 +2411,10 @@ function UnitManager.init(resourceManager)
 			end
 		end
 
+		-- Wounded soldiers: collapse pose, drag-home movement and base healing. Runs
+		-- before the decorator sync so the prone/carry CFrames propagate this frame.
+		processRescues(dt)
+
 		-- Update anchored decorator parts (treads, pill body, eyes, etc.) to match body CFrame.
 		-- This replaces the old WeldConstraint physics pass for all decorated units.
 		for id, data in units do
@@ -2094,6 +2449,8 @@ function UnitManager.init(resourceManager)
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
 				end
+				spawnDeathFX(d.unitType, d.part)
+				releaseDragLinks(id)
 				unitDecorators[id] = nil
 				playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
 				d.part:Destroy()
@@ -2183,6 +2540,7 @@ function UnitManager.init(resourceManager)
 		for _, id in ids do
 			local data = units[id]
 			if not data or data.owner ~= player then continue end
+			if data.immobilized or data.draggingId then continue end  -- downed/hauling: can't take orders
 			data.atkMoveDest = nil
 			data.target      = nil
 			if targetType == "unit" then

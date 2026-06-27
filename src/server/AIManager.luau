@@ -51,6 +51,10 @@ local RUNNING = 3
 -- caps:  h=harvesters  b=barracks  t=turrets  r=relays
 -- techTier: how deep into an archetype's tech plan this level reaches (0 = none)
 -- competence: 0..1, gates scouting / flanking / micro polish
+-- firstStrike: seconds of opening "peace" before the bot launches its FIRST
+--   committed assault. During this window it only ECONOMIES, SCOUTS and lurks at
+--   the edge of the player's vision — it does not march the main army in. Lower
+--   difficulties stalk longer; higher ones strike sooner (but never instantly).
 type Level = {
 	maxUnits: number,
 	hcap: number, bcap: number, tcap: number, rcap: number,
@@ -60,16 +64,17 @@ type Level = {
 	minAtk: number,
 	techTier: number,
 	competence: number,
+	firstStrike: number,
 }
 
 -- Caps tuned so even mid difficulties build a real, defended, spread-out base
 -- (more turrets + relays so a cleared army doesn't leave the base wide open).
 local LEVELS: { Level } = {
-	{ maxUnits = 8,   hcap = 2, bcap = 1, tcap = 2, rcap = 1, reserve = 30, strat = 9.5, react = 2.2, vision = 46, mem = 12,  minAtk = 4, techTier = 0, competence = 0.40 },
-	{ maxUnits = 15,  hcap = 3, bcap = 2, tcap = 3, rcap = 1, reserve = 40, strat = 8.0, react = 1.8, vision = 55, mem = 25,  minAtk = 4, techTier = 1, competence = 0.55 },
-	{ maxUnits = 24,  hcap = 4, bcap = 3, tcap = 5, rcap = 2, reserve = 50, strat = 6.5, react = 1.4, vision = 63, mem = 45,  minAtk = 5, techTier = 2, competence = 0.70 },
-	{ maxUnits = 36,  hcap = 6, bcap = 3, tcap = 6, rcap = 3, reserve = 65, strat = 5.0, react = 1.1, vision = 70, mem = 75,  minAtk = 5, techTier = 3, competence = 0.85 },
-	{ maxUnits = 999, hcap = 7, bcap = 4, tcap = 8, rcap = 3, reserve = 75, strat = 4.0, react = 0.8, vision = 78, mem = 999, minAtk = 6, techTier = 4, competence = 1.00 },
+	{ maxUnits = 8,   hcap = 2, bcap = 1, tcap = 2, rcap = 1, reserve = 30, strat = 9.5, react = 2.2, vision = 46, mem = 12,  minAtk = 4, techTier = 0, competence = 0.40, firstStrike = 210 },
+	{ maxUnits = 15,  hcap = 3, bcap = 2, tcap = 3, rcap = 1, reserve = 40, strat = 8.0, react = 1.8, vision = 55, mem = 25,  minAtk = 4, techTier = 1, competence = 0.55, firstStrike = 175 },
+	{ maxUnits = 24,  hcap = 4, bcap = 3, tcap = 5, rcap = 2, reserve = 50, strat = 6.5, react = 1.4, vision = 63, mem = 45,  minAtk = 5, techTier = 2, competence = 0.70, firstStrike = 145 },
+	{ maxUnits = 36,  hcap = 6, bcap = 3, tcap = 6, rcap = 3, reserve = 65, strat = 5.0, react = 1.1, vision = 70, mem = 75,  minAtk = 5, techTier = 3, competence = 0.85, firstStrike = 115 },
+	{ maxUnits = 999, hcap = 7, bcap = 4, tcap = 8, rcap = 3, reserve = 75, strat = 4.0, react = 0.8, vision = 78, mem = 999, minAtk = 6, techTier = 4, competence = 1.00, firstStrike = 90 },
 }
 
 -- ── Strategic archetypes ───────────────────────────────────────────────────────
@@ -690,19 +695,129 @@ local function commitAttack(ai: any, data: any, target: Vector3)
 	end
 end
 
+-- ── Scout / stalker behavior ──────────────────────────────────────────────────
+-- The scout is not a map-reconner — it is a lurker. It creeps to the EDGE of the
+-- player's vision near their base or last-seen position and then behaves
+-- unpredictably: it WATCHES (stands dead still, just out of the fog, staring),
+-- WANDERS (drifts along the perimeter), or VANISHES (slips back into the fog,
+-- then reappears from a new angle). Random dwell times and transitions make it
+-- impossible to read — that flicker of a unit at the fog line is the scare.
+
+-- A "fog-edge" ring distance: far enough to stay mostly hidden, close enough that
+-- a building/unit at the rim of its vision catches a glimpse. (Player units reveal
+-- ~65 studs, the CC ~75.)
+local LURK_MIN, LURK_MAX = 72, 96
+
+local function lurkAnchor(ai: any): Vector3?
+	-- Prefer the live threat, then last-known enemy position, then a discovered
+	-- enemy CC; fall back to the far edge of our explore ring (toward the enemy).
+	return ai.priorityTarget
+		or ai.lastKnownEnemyPos
+		or findEnemyBuilding(ai.ownerStr, "CommandCenter")
+		or findEnemyBuilding(ai.ownerStr, "Barracks")
+end
+
 local function updateScouts(ai: any, pts: { Vector3 })
-	if #ai.scouts == 0 then return end
-	ai.scoutTimer += ai.reactionInterval
-	if ai.scoutTimer >= 10 then
-		ai.scoutTimer = 0
-		ai.scoutIdx   = math.random(math.max(1, math.floor(#pts * 0.6)), #pts)
+	if #ai.scouts == 0 then ai.scoutState = nil; return end
+
+	ai.scoutTimer = (ai.scoutTimer or 0) + ai.reactionInterval
+	local anchor  = lurkAnchor(ai)
+
+	-- No idea where the enemy is yet → patrol the far explore points to FIND them,
+	-- biasing toward fresh angles so the search itself looks restless.
+	if not anchor then
+		ai.scoutState = "search"
+		if ai.scoutTimer >= 9 then
+			ai.scoutTimer = 0
+			ai.scoutIdx   = math.random(math.max(1, math.floor(#pts * 0.55)), #pts)
+		end
+		unitManager.sendUnitsTo(ai.player, ai.scouts, pts[ai.scoutIdx])
+		return
 	end
-	unitManager.sendUnitsTo(ai.player, ai.scouts, pts[ai.scoutIdx])
+
+	-- Found something to haunt. Run a little state machine with random dwell times.
+	if not ai.scoutState or ai.scoutState == "search" then
+		ai.scoutState   = "approach"
+		ai.scoutTimer   = 0
+		ai.scoutDwell   = 0
+		ai.scoutAngle   = math.random() * math.pi * 2
+	end
+
+	if ai.scoutTimer < (ai.scoutDwell or 0) then
+		-- Still holding the current behavior; only "wander" keeps nudging the target.
+		if ai.scoutState == "wander" and ai.scoutPoint then
+			unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
+		end
+		return
+	end
+
+	-- Dwell elapsed → pick the next state. Weighted for unpredictability.
+	ai.scoutTimer = 0
+	local prev = ai.scoutState
+	local r    = math.random()
+
+	if prev == "approach" then
+		-- Arrived at the fog edge → mostly stop and watch, sometimes immediately drift.
+		ai.scoutState = (r < 0.7) and "watch" or "wander"
+	elseif prev == "watch" then
+		-- After staring a while: drift along the rim, or melt back into the fog.
+		ai.scoutState = (r < 0.45) and "wander" or (r < 0.8) and "vanish" or "watch"
+	elseif prev == "wander" then
+		ai.scoutState = (r < 0.4) and "watch" or (r < 0.7) and "vanish" or "approach"
+	else -- "vanish" → reappear from a brand-new angle
+		ai.scoutState = "approach"
+		ai.scoutAngle = math.random() * math.pi * 2
+	end
+
+	local dist = LURK_MIN + math.random() * (LURK_MAX - LURK_MIN)
+
+	if ai.scoutState == "approach" then
+		ai.scoutDwell = math.random(3, 5)
+		ai.scoutPoint = approachPoint(anchor, ai.scoutAngle, dist)
+		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
+
+	elseif ai.scoutState == "watch" then
+		-- Stand dead still and stare. Long, varied hold = the unsettling part.
+		ai.scoutDwell = math.random(4, 9)
+		ai.scoutPoint = ai.scoutPoint or approachPoint(anchor, ai.scoutAngle, dist)
+		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
+
+	elseif ai.scoutState == "wander" then
+		-- Creep sideways around the perimeter to a neighbouring angle.
+		ai.scoutDwell = math.random(2, 4)
+		ai.scoutAngle = (ai.scoutAngle or 0) + (math.random() < 0.5 and -1 or 1) * (0.5 + math.random() * 0.7)
+		ai.scoutPoint = approachPoint(anchor, ai.scoutAngle, dist)
+		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
+
+	else -- "vanish": retreat deep into the fog, then it'll re-approach from elsewhere.
+		ai.scoutDwell = math.random(4, 8)
+		local hideAngle = ai.scoutAngle or 0
+		unitManager.sendUnitsTo(ai.player, ai.scouts, approachPoint(anchor, hideAngle, dist + 70))
+	end
 end
 
 -- Harassment squad hunts enemy economy (Harvesters first), then soft buildings.
+-- Held back during the opening peace window so the first thing the player ever
+-- sees the bot do is lurk, not kill harvesters.
 local function updateHarass(ai: any)
 	if #ai.harass == 0 then return end
+	if ai.harassUnlockTime and tick() < ai.harassUnlockTime then
+		-- Not yet allowed to harass: shadow the enemy economy from a distance
+		-- instead, so the squad reads as a second creeping scout, not an attacker.
+		-- Re-pick a standoff point only every few seconds so it drifts, not twitches.
+		ai.harassTimer += ai.reactionInterval
+		if ai.harassTimer >= 6 or not ai.harassTarget then
+			ai.harassTimer = 0
+			if ai.lastKnownEnemyPos then
+				local a = math.random() * math.pi * 2
+				ai.harassTarget = approachPoint(ai.lastKnownEnemyPos, a, 80 + math.random(0, 35))
+			else
+				ai.harassTarget = ai.base
+			end
+		end
+		if ai.harassTarget then sendSpread(ai.player, ai.harass, ai.harassTarget) end
+		return
+	end
 	ai.harassTimer += ai.reactionInterval
 	if ai.harassTimer >= 4 or not ai.harassTarget then
 		ai.harassTimer = 0
@@ -729,7 +844,11 @@ local function rebuildSquads(ai: any)
 	ai.scouts, ai.harass, ai.mainForce, ai.garrison = {}, {}, {}, {}
 	if total == 0 then return end
 
-	local scoutN  = (ai.competence >= 0.7 and total >= 6) and 1 or 0
+	-- Always peel off a lurker once there's an army to spare — the stalker at the
+	-- fog edge is core atmosphere, not a competence perk. Skilled bots field two.
+	-- (Trainer keeps its own careful loop and never lurks.)
+	local scoutN  = (total >= 4 and ai.personality ~= "trainer") and 1 or 0
+	if ai.competence >= 0.85 and total >= 10 and ai.personality ~= "trainer" then scoutN = 2 end
 	local harassN = 0
 	if ai.archetype.harass and total >= 8 then
 		harassN = math.min(3, math.floor(total * 0.2))
@@ -930,10 +1049,24 @@ local function planEconomy(ai: any)
 
 	table.sort(items, function(a, b) return a.prio > b.prio end)
 
-	-- Buy top-down; multiple purchases per tick when flush, always keep the reserve.
+	-- Nightmare is deliberately unbound — buy everything affordable, top-down.
+	if ai.isNightmare then
+		for _, it in items do
+			if resourceManager.get(ai.player) >= it.cost + reserve then it.fn() end
+		end
+		return
+	end
+
+	-- Everyone else builds like a human: only ONE structure under construction at a
+	-- time, and at most one purchase per planning tick. Combined with the strategy
+	-- cadence + each building's assembly time, this paces AI expansion to roughly
+	-- the player's own build speed instead of a whole base appearing at once.
+	if buildingManager.countConstructing and buildingManager.countConstructing(ai.player) > 0 then
+		return
+	end
 	for _, it in items do
 		if resourceManager.get(ai.player) >= it.cost + reserve then
-			it.fn()
+			if it.fn() then break end
 		end
 	end
 end
@@ -1073,7 +1206,8 @@ local function waveCombat(ai: any, data: any, pts: { Vector3 })
 		local near = {}
 		for i = 1, math.min(10, #pts) do near[i] = pts[i] end
 		if #ai.mainForce > 0 then fanAcrossMap(ai, ai.mainForce, near, 4) end
-		if ai.waveTimer >= interval and #data >= ai.minAtk and ai.priorityTarget then
+		local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
+		if pastPeace and ai.waveTimer >= interval and #data >= ai.minAtk and ai.priorityTarget then
 			local target = pickAttackTarget(ai)
 			if target then
 				ai.attackTarget   = target
@@ -1141,13 +1275,25 @@ local function btCommandArmy(ai: any)
 
 	if ai.archetype.waveMode then return waveCombat(ai, data, pts) end
 
+	local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
+
 	if ai.combatPhase == "gather" then
 		if #ai.mainForce > 0 then
-			fanAcrossMap(ai, ai.mainForce, pts, 3)
-			ai.exploreTimer += ai.reactionInterval
-			if ai.exploreTimer >= 8 then ai.exploreTimer = 0; ai.exploreIdx = (ai.exploreIdx % #pts) + 1 end
+			if pastPeace then
+				-- Roam the full map, probing toward the enemy while looking for an opening.
+				fanAcrossMap(ai, ai.mainForce, pts, 3)
+				ai.exploreTimer += ai.reactionInterval
+				if ai.exploreTimer >= 8 then ai.exploreTimer = 0; ai.exploreIdx = (ai.exploreIdx % #pts) + 1 end
+			else
+				-- Opening peace: the army stays home and patrols its OWN perimeter.
+				-- Only the lone scout (and the shadowing harass squad) ranges out, so
+				-- all the player sees is something lurking — never a column marching in.
+				local home: { Vector3 } = {}
+				for i = 1, math.min(8, #pts) do table.insert(home, pts[i]) end
+				if #home > 0 then fanAcrossMap(ai, ai.mainForce, home, 4) end
+			end
 		end
-		if ai.priorityTarget and armySize >= ai.minAtk then
+		if pastPeace and ai.priorityTarget and armySize >= ai.minAtk then
 			local target = pickAttackTarget(ai)
 			if target then
 				local enemyVal = enemyValueNear(ai.ownerStr, target, 70)
@@ -1560,6 +1706,18 @@ local function applyLevel(ai: any, level: number)
 	ai.minAtk          = L.minAtk
 	ai.techTier        = L.techTier
 	ai.competence      = L.competence
+	ai.firstStrike     = L.firstStrike
+end
+
+-- When the bot is first allowed to commit its main army, and when the harassment
+-- squad may begin hunting. Re-anchored to `startTime` so resets pace fresh. The
+-- opening before this is deliberately quiet: scouts lurk, the army holds home.
+local function applyAggressionWindow(ai: any)
+	local fs = ai.firstStrike or 140
+	-- ±15% jitter so the first push never lands on a predictable clock.
+	fs = fs * (0.85 + math.random() * 0.30)
+	ai.aggressionUnlockTime = ai.startTime + fs
+	ai.harassUnlockTime     = ai.startTime + fs * 0.55
 end
 
 local function assignArchetype(ai: any)
@@ -1630,6 +1788,10 @@ function AIManager.resetBot(userId: number)
 	ai.exploreTimer      = 0
 	ai.scoutIdx          = math.floor(#ai.explorePoints * 0.6) + 1
 	ai.scoutTimer        = 0
+	ai.scoutState        = nil
+	ai.scoutDwell        = 0
+	ai.scoutAngle        = 0
+	ai.scoutPoint        = nil
 	ai.harassTimer       = 0
 	ai.harassTarget      = nil
 	ai.lastSquadCount    = 0
@@ -1647,6 +1809,7 @@ function AIManager.resetBot(userId: number)
 	ai.strategyTimer     = ai.strategyInterval
 	ai.reactionTimer     = ai.reactionInterval
 	ai.startTime         = tick()
+	applyAggressionWindow(ai)
 	ai.trainerMode            = "shadow"
 	ai.trainerWaveTimer       = 0
 	ai.trainerWaveInterval    = 60
@@ -1792,6 +1955,10 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 
 		scoutIdx   = 0,
 		scoutTimer = 0,
+		scoutState = nil,
+		scoutDwell = 0,
+		scoutAngle = 0,
+		scoutPoint = nil,
 
 		harassTimer  = 0,
 		harassTarget = nil,
@@ -1826,6 +1993,7 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 
 	applyLevel(ai, ai.level)
 	assignArchetype(ai)
+	applyAggressionWindow(ai)
 
 	ai.strategyTimer = ai.strategyInterval
 	ai.reactionTimer = ai.reactionInterval
