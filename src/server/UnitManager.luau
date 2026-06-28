@@ -839,11 +839,20 @@ function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnP
 	local spawnType = unitType or "Soldier"
 	local uid = spawnUnit(player, spawnPos, spawnType)
 	if uid then
+		-- Bonfire summons count as "trained" so train-gated unlocks (e.g. EliteUnits)
+		-- still progress now that the Barracks is gone.
+		if researchManagerRef and player.UserId > 0 then
+			researchManagerRef.recordUnitTrained(player, spawnType)
+		end
 		if not deployerUnits[deployerId] then deployerUnits[deployerId] = {} end
 		deployerUnits[deployerId][uid] = true
 		unitToDeployer[uid] = deployerId
 		local data = units[uid]
-		if data then
+		-- Human bonfires auto-attack-move toward the far side of the map (set-and-forget
+		-- aggression). AI bonfires must NOT: their units stay idle near the bonfire (the
+		-- spawnUnit defaults: target=nil, home=spawnPos) so the AI brain controls them and
+		-- respects its peace window — otherwise the AI would charge the player from t=0.
+		if data and player.UserId > 0 then
 			-- March toward the opposite corner of the map from the spawn point.
 			-- atkMoveDest keeps the aggro scan active so the unit fights enemies it
 			-- passes; when a kill clears aggroId the unit resumes the march.

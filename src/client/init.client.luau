@@ -11,7 +11,6 @@ local Network        = require(script:WaitForChild("Network"))
 local CameraModule   = require(script:WaitForChild("Camera"))
 local BuildingPlacer = require(script:WaitForChild("BuildingPlacer"))
 local UnitController = require(script:WaitForChild("UnitController"))
-local BarracksPanel  = require(script:WaitForChild("BarracksPanel"))
 local MinePanel      = require(script:WaitForChild("MinePanel"))
 local WorkshopPanel          = require(script:WaitForChild("WorkshopPanel"))
 local UnlockNotification     = require(script:WaitForChild("UnlockNotification"))
@@ -95,7 +94,7 @@ local currentResources = 0
 
 -- The local player's own CC building id (needed to open WorkshopPanel via the HUD button)
 local ownCCId: string? = nil
-local placedFirstBarracks = false   -- upgrades button stays hidden until the first Barracks
+local placedFirstBonfire = false   -- upgrades button stays hidden until the first Bonfire
 
 -- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
 local winOverlay: Frame?
@@ -277,7 +276,10 @@ local firstAttackSongPlayed = false
 -- per-type "pending" tokens here: pushed when a placement is sent, popped when the
 -- matching BuildingPlaced arrives, and expiring on a TTL so a server-rejected
 -- placement self-heals. These feed the HUD's COST only (not requirement gating).
-local PENDING_TTL = 14   -- seconds (generous: max pod flight + construction)
+-- Must safely outlast the slowest placement: pod flight + the longest Config.BUILD_TIME
+-- (Foundry = 20s). If this expires before BuildingPlaced lands, the scaled price sags
+-- back down mid-construction (the Foundry-price bug) until the build finishes.
+local PENDING_TTL = 30   -- seconds (pod flight + max build time, with margin)
 local pendingPlace: { [string]: { number } } = {}
 
 local function buildPendingCounts(): { [string]: number }
@@ -324,9 +326,6 @@ Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
 UnitController.onMoveIssued(function() Tutorial.notify("move_issued") end)
-BarracksPanel.init(Network,
-	function(techName) return researchedTechs[techName] == true end,
-	function() return UnitController.getSelectedBuildingIds() end)
 MinePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
@@ -371,7 +370,9 @@ CCMobilePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
 DeployerPanel.init(Network,
-	function(techName) return researchedTechs[techName] == true end)
+	function(techName) return researchedTechs[techName] == true end,
+	function() return currentResources end,
+	function() return UnitController.getSelectedBuildingIds() end)
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
@@ -520,7 +521,6 @@ local workshopBtnOpen = false  -- tracks whether the HUD upgrades button opened 
 
 local function hideBuildingPanels()
 	workshopBtnOpen = false
-	BarracksPanel.hide()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
@@ -536,7 +536,6 @@ HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
 		WorkshopPanel.hide()
 	else
 		workshopBtnOpen = true
-		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
 		BlobPanel.hide()
@@ -611,8 +610,6 @@ local function enterCCMode()
 	refreshRequirements()
 	updateIncomeReadout()
 	HUD.setCommandCenterMode(true)
-	BarracksPanel.hide()
-	BarracksPanel.cleanupAllTrainingModels()
 	MinePanel.hide()
 	WorkshopPanel.hide()
 	TurretPanel.hide()
@@ -622,7 +619,7 @@ local function enterCCMode()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
-	placedFirstBarracks = false
+	placedFirstBonfire = false
 	if winOverlay then winOverlay.Visible = false end
 	monumentBuildingId = {}
 	monumentBillboards = {}
@@ -685,11 +682,11 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 		refreshRequirements()
 		updateIncomeReadout()
 		if buildingType == "Foundry"  then Tutorial.notify("mine_placed")     end
-		if buildingType == "Barracks" then
+		if buildingType == "Deployer" then
 			Tutorial.notify("barracks_placed")
-			-- First Barracks unlocks the upgrades menu.
-			if not placedFirstBarracks then
-				placedFirstBarracks = true
+			-- First Bonfire unlocks the upgrades menu.
+			if not placedFirstBonfire then
+				placedFirstBonfire = true
 				HUD.setUpgradesVisible(true)
 			end
 		end
@@ -715,22 +712,9 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 	end
 end)
 
--- ── Barracks panel ────────────────────────────────────────────────────────────
-UnitController.onBarracksSelected(function(barrackId: string?)
-	if barrackId then
-		MinePanel.hide()
-		WorkshopPanel.hide()
-		DeployerPanel.hide()
-		BarracksPanel.show(barrackId)
-	else
-		BarracksPanel.hide()
-	end
-end)
-
--- ── Deployer panel ────────────────────────────────────────────────────────────
+-- ── Bonfire panel ──────────────────────────────────────────────────────────────
 UnitController.onDeployerSelected(function(deployerId: string?)
 	if deployerId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
 		TurretPanel.hide()
@@ -745,7 +729,6 @@ end)
 -- ── Mine panel ────────────────────────────────────────────────────────────────
 UnitController.onMineSelected(function(mineId: string?)
 	if mineId then
-		BarracksPanel.hide()
 		DeployerPanel.hide()
 		WorkshopPanel.hide()
 		MinePanel.show(mineId)
@@ -757,7 +740,6 @@ end)
 -- ── Command Center mobility panel ─────────────────────────────────────────────
 UnitController.onCCSelected(function(ccId: string?)
 	if ccId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		TurretPanel.hide()
 		BlobPanel.hide()
@@ -775,7 +757,6 @@ end)
 -- ── Turret upgrade panel ──────────────────────────────────────────────────────
 UnitController.onTurretSelected(function(turretId: string?)
 	if turretId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
 		BlobPanel.hide()
@@ -788,7 +769,6 @@ end)
 -- ── Blob evolution panel ──────────────────────────────────────────────────────
 UnitController.onBlobSelected(function(blobId: string?)
 	if blobId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
 		TurretPanel.hide()
@@ -810,7 +790,6 @@ end
 UnitController.onLampreyNestSelected(function(nestId: string?)
 	selectedNestId = nestId
 	if nestId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
 		TurretPanel.hide()
@@ -826,7 +805,6 @@ end)
 
 UnitController.onEngineeringSelected(function(postId: string?)
 	if postId then
-		BarracksPanel.hide()
 		MinePanel.hide()
 		WorkshopPanel.hide()
 		TurretPanel.hide()
@@ -1292,7 +1270,6 @@ Network.onResourceSync(function(amount: number)
 	CCMobilePanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
 	LampreyNestPanel.refreshIfVisible()
-	BarracksPanel.refreshIfVisible()
 	DeployerPanel.refreshIfVisible()
 end)
 
@@ -1379,7 +1356,7 @@ Network.onUnlockGranted(function(techName: string)
 	if isFirst then HUD.setUpgradesVisible(true) end
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
-	BarracksPanel.refreshIfVisible()
+	DeployerPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
 	BlobPanel.refreshIfVisible()
 	CCMobilePanel.refreshIfVisible()

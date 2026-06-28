@@ -256,8 +256,14 @@ function Network.setDeployerType(deployerId: string, unitType: string)
 	RemoteHandler.get(Config.REMOTES.SetDeployerType):FireServer(deployerId, unitType)
 end
 
--- deployerId, unitType, progress (0–1)
-function Network.onDeployerUpdate(fn: (string, string, number) -> ())
+-- Empower one or more bonfires: +capacity and faster summon (scaling price per
+-- purchase). Pass a list to upgrade a multi-selection (server upgrades the lowest levels).
+function Network.upgradeDeployer(deployerIds: { string } | string)
+	RemoteHandler.get(Config.REMOTES.UpgradeDeployer):FireServer(deployerIds)
+end
+
+-- deployerId, unitType, progress (0–1), level, capacity, nextCost, justUpgraded
+function Network.onDeployerUpdate(fn: (string, string, number, number?, number?, number?, boolean?) -> ())
 	RemoteHandler.get(Config.REMOTES.DeployerUpdate).OnClientEvent:Connect(fn)
 end
 

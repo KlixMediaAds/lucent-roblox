@@ -1,22 +1,25 @@
 --!strict
 --[[
-    DeployerPanel — Radial identity selector for Deployer buildings.
+    DeployerPanel — command-card menu for the Bonfire (internal building type "Deployer").
 
-    Clicking a Deployer opens a radial menu identical in style to BarracksPanel.
-    Selecting a unit type sends SetDeployerType to the server; the deployer will
-    free-spawn that unit every DEPLOYER_SPAWN_INTERVAL seconds.
+    Selecting a Bonfire opens a grid: pick which unit type it summons (sends
+    SetDeployerType), plus an EMPOWER upgrade slot that raises capacity and shortens the
+    summon interval for a scaling price (sends UpgradeDeployer). The bonfire free-summons
+    its chosen unit up to its (upgradeable) capacity.
 
     World display (matches Signal Flare method):
-      • BillboardGui on the deployer base  — slim progress bar (spawn countdown).
-      • ScreenGui overlay entry per deployer — ViewportFrame unit preview icon,
+      • BillboardGui on the bonfire base  — slim progress bar (summon countdown).
+      • ScreenGui overlay entry per bonfire — ViewportFrame unit preview icon,
         repositioned each frame via WorldToViewportPoint (same as FlareIconOverlay).
 ]]
 
 local Players      = game:GetService("Players")
 local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
@@ -30,6 +33,14 @@ local OWNER         = "deployer"
 local activeDeployerId: string? = nil
 local networkRef:       any
 local hasResearchFn:    ((string) -> boolean)?
+local resourcesFn:      (() -> number)?
+local getMultiIdsFn:    (() -> { string })?
+
+-- Per-bonfire Empower state, fed by DeployerUpdate (level, capacity, next upgrade cost).
+local deployerLevels:    { [string]: number } = {}
+local deployerCaps:      { [string]: number } = {}
+local deployerNextCosts: { [string]: number } = {}
+local UPGRADE_COLOR = Color3.fromRGB(232, 196, 120)  -- gold (matches other upgrade buttons)
 
 -- ── Unit definitions ──────────────────────────────────────────────────────────
 local PURPLE       = Color3.fromRGB(160,  80, 230)
@@ -79,6 +90,95 @@ local function getDeployerBase(deployerId: string): BasePart?
 	return model and model:FindFirstChild("Base") :: BasePart?
 end
 
+-- All currently-selected buildings that are actually bonfires (so the Empower button
+-- and its cost/level readout reflect the whole multi-selection, not just the active one).
+local function selectedBonfireIds(): { string }
+	local sel  = (getMultiIdsFn and getMultiIdsFn()) or {}
+	local bf   = workspace:FindFirstChild("Buildings") :: Folder?
+	local out: { string } = {}
+	local seen: { [string]: boolean } = {}
+	for _, id in sel do
+		if seen[id] then continue end
+		local m  = bf and bf:FindFirstChild(id)
+		local bt = m and m:FindFirstChild("BuildingType") :: StringValue?
+		if bt and bt.Value == "Deployer" then
+			seen[id] = true
+			table.insert(out, id)
+		end
+	end
+	if #out == 0 and activeDeployerId then table.insert(out, activeDeployerId) end
+	return out
+end
+
+-- ── Empower animation ─────────────────────────────────────────────────────────
+-- A short violet flare when a bonfire is Empowered: a ground shock-ring expands out,
+-- a column of fire flashes up, and a few embers spit skyward. World parts (parented to
+-- workspace, self-destructing) so model rescale / destruction can't strand them.
+local FX_PURPLE = Color3.fromRGB(185, 105, 255)
+
+local function playUpgradeFX(deployerId: string)
+	local base = getDeployerBase(deployerId)
+	if not base then return end
+	local origin   = base.Position
+	local groundY  = origin.Y - base.Size.Y / 2 + 0.3
+
+	local function neon(size: Vector3, cf: CFrame, shape: Enum.PartType?): Part
+		local p      = Instance.new("Part")
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = cf
+		p.Color      = FX_PURPLE
+		p.Material   = Enum.Material.Neon
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CanQuery   = false
+		p.CastShadow = false
+		p.Parent     = workspace
+		return p
+	end
+	local function tweenOut(p: Part, info: TweenInfo, goal: { [string]: any })
+		local tw = TweenService:Create(p, info, goal)
+		tw:Play()
+		tw.Completed:Once(function() p:Destroy() end)
+	end
+
+	-- Ground shock-ring (flat disc rolled flat) expanding outward
+	local ring = neon(Vector3.new(0.4, 3, 3),
+		CFrame.new(origin.X, groundY, origin.Z) * CFrame.Angles(0, 0, math.pi / 2),
+		Enum.PartType.Cylinder)
+	ring.Transparency = 0.1
+	tweenOut(ring, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = Vector3.new(0.4, 18, 18), Transparency = 1 })
+
+	-- Vertical fire flash column
+	local col = neon(Vector3.new(4, 2.4, 2.4),
+		CFrame.new(origin.X, groundY + 2, origin.Z) * CFrame.Angles(0, 0, math.pi / 2),
+		Enum.PartType.Cylinder)
+	col.Transparency = 0.15
+	tweenOut(col, TweenInfo.new(0.55, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+		{ Size = Vector3.new(15, 0.5, 0.5), Transparency = 1,
+		  CFrame = CFrame.new(origin.X, groundY + 8, origin.Z) * CFrame.Angles(0, 0, math.pi / 2) })
+
+	-- A halo glow that blooms and dies
+	local glow      = Instance.new("PointLight")
+	glow.Color      = FX_PURPLE
+	glow.Brightness  = 7
+	glow.Range      = 26
+	glow.Parent     = col
+
+	-- Skyward embers
+	for i = 1, 6 do
+		local a   = (i / 6) * math.pi * 2
+		local out = Vector3.new(math.cos(a), 0, math.sin(a))
+		local e   = neon(Vector3.new(0.5, 0.5, 0.5),
+			CFrame.new(origin.X, groundY + 1.5, origin.Z), Enum.PartType.Ball)
+		e.Transparency = 0.2
+		tweenOut(e, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ CFrame = CFrame.new(origin + out * 4 + Vector3.new(0, 7 + i, 0)),
+			  Size = Vector3.new(0.1, 0.1, 0.1), Transparency = 1 })
+	end
+end
+
 local function destroyDeployerDisplay(deployerId: string)
 	local bb = deployerBillboards[deployerId]
 	if bb and bb.Parent then bb:Destroy() end
@@ -90,6 +190,9 @@ local function destroyDeployerDisplay(deployerId: string)
 		deployerEntries[deployerId] = nil
 	end
 	deployerCurrentTypes[deployerId] = nil
+	deployerLevels[deployerId]       = nil
+	deployerCaps[deployerId]         = nil
+	deployerNextCosts[deployerId]    = nil
 end
 
 local function ensureDisplay(deployerId: string, unitType: string)
@@ -191,15 +294,66 @@ local function buildPage(): CommandCard.Page
 			viewportKey     = "unit:" .. key,
 			viewportFactory = function() return ViewportPreview.forUnit(key, Vector2.new(64, 64)) end,
 			badge           = (key == current) and "✓" or nil,
-			desc            = locked and "Locked — research required" or ("Free-spawn " .. key),
+			desc            = locked and "Locked — research required" or ("Summon " .. key),
 			onClick         = function()
-				if not activeDeployerId or locked then return end
-				networkRef.setDeployerType(activeDeployerId, key)
+				if locked then return end
+				-- Apply to the whole bonfire multi-selection.
+				for _, id in selectedBonfireIds() do
+					networkRef.setDeployerType(id, key)
+				end
 				if CommandCard.isOwner(OWNER) then CommandCard.update(OWNER, buildPage()) end
 			end,
 		})
 	end
-	return { header = "DEPLOYER", slots = slots }
+
+	-- ── Empower upgrade slot (+capacity, faster summon; scaling price) ──────────
+	-- Reflects the whole bonfire multi-selection: targets the LOWEST level present, so a
+	-- press evens the group out (stragglers catch up to the rest before any go higher).
+	local ids = selectedBonfireIds()
+	local minLevel = math.huge
+	for _, id in ids do
+		local lvl = deployerLevels[id] or 0
+		if lvl < minLevel then minLevel = lvl end
+	end
+	if minLevel == math.huge then minLevel = 0 end
+	local atMin = 0
+	for _, id in ids do
+		if (deployerLevels[id] or 0) == minLevel then atMin += 1 end
+	end
+
+	local maxed   = minLevel >= Config.DEPLOYER_UPGRADE_MAX_LEVEL
+	local perCost = Config.bonfireUpgradeCost(minLevel)
+	local cap     = Config.bonfireCapacity(minLevel)
+	local res     = resourcesFn and resourcesFn() or 0
+	local multi   = atMin > 1
+	local desc
+	if maxed then
+		desc = "Max power — capacity " .. cap
+	elseif multi then
+		desc = "Empower " .. atMin .. " bonfires (Lv " .. minLevel .. ") · " .. perCost .. " each"
+	else
+		desc = "Capacity " .. cap .. " → " .. (cap + Config.DEPLOYER_UPGRADE_CAP_STEP) .. ", faster summons"
+	end
+	table.insert(slots, {
+		index           = #UNIT_DEFS + 1,
+		name            = "EMPOWER",
+		color           = UPGRADE_COLOR,
+		cost            = (not maxed) and perCost or nil,
+		enabled         = (not maxed) and res >= perCost,
+		locked          = maxed,
+		icon            = "✦",
+		viewportKey     = "bonfire:empower",
+		viewportFactory = function() return ViewportPreview.forBonfireUpgrade(Vector2.new(64, 64)) end,
+		badge           = multi and ("×" .. atMin) or nil,
+		desc            = desc,
+		onClick         = function()
+			if maxed then return end
+			local sel = selectedBonfireIds()
+			if #sel > 0 then networkRef.upgradeDeployer(sel) end
+		end,
+	})
+
+	return { header = "BONFIRE", slots = slots }
 end
 
 local function renderIfActive()
@@ -209,9 +363,11 @@ local function renderIfActive()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function DeployerPanel.init(network, hasResearch)
+function DeployerPanel.init(network, hasResearch, getResources, getMultiIds)
 	networkRef    = network
 	hasResearchFn = hasResearch
+	resourcesFn   = getResources
+	getMultiIdsFn = getMultiIds
 
 	-- ScreenGui overlay for per-deployer unit viewport icons
 	overlaySg                  = Instance.new("ScreenGui")
@@ -244,10 +400,14 @@ function DeployerPanel.init(network, hasResearch)
 		end
 	end)
 
-	-- Listen for server updates → drive world display
-	network.onDeployerUpdate(function(deployerId: string, unitType: string, progress: number)
+	-- Listen for server updates → drive world display + Empower state
+	network.onDeployerUpdate(function(deployerId: string, unitType: string, progress: number, level: number?, capacity: number?, nextCost: number?, justUpgraded: boolean?)
+		if level    ~= nil then deployerLevels[deployerId]    = level    end
+		if capacity ~= nil then deployerCaps[deployerId]      = capacity end
+		if nextCost ~= nil then deployerNextCosts[deployerId] = nextCost end
+		if justUpgraded then playUpgradeFX(deployerId) end
 		updateWorldDisplay(deployerId, unitType, progress)
-		if deployerId == activeDeployerId then
+		if deployerId == activeDeployerId or (getMultiIdsFn and table.find(getMultiIdsFn(), deployerId)) then
 			renderIfActive()
 		end
 	end)

@@ -14,7 +14,7 @@ local BuildingPlacer = {}
 local localPlayer    = Players.LocalPlayer
 
 local isPlacing           = false
-local currentType         = "Barracks"
+local currentType         = "Foundry"
 local currentSnapTarget: Vector3? = nil   -- Mine mode: deposit we're snapping to
 local ccTooClose          = false          -- CommandCenter mode: ghost is red
 local outOfBuildZone      = false          -- non-CC mode: ghost is outside build zone
@@ -311,6 +311,7 @@ local function ghostSize(buildingType: string): Vector3
 	if buildingType == "Relay"         then return Config.RELAY_SIZE end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
+	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -679,7 +680,7 @@ end
 
 function BuildingPlacer.enterPlacementMode(buildingType: string?)
 	if isPlacing then return end
-	currentType      = buildingType or "Barracks"
+	currentType      = buildingType or "Foundry"
 	currentSnapTarget = nil
 	ccTooClose       = false
 	outOfBuildZone   = false

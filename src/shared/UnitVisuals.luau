@@ -365,6 +365,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyBlob"    then return Vector3.new(9, 6, 9) end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
+	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
@@ -622,16 +623,20 @@ end
 -- buildFoundryDecor (to build them) and the client FoundryRotor (to spin them around the
 -- centrepiece) so the live geometry and the animation never drift apart.
 function UnitVisuals.foundryArms(): { { cf: CFrame, size: Vector3 } }
+	-- All Foundry geometry was authored for a 28×28 footprint; FOUNDRY_SIZE is now
+	-- smaller (3×3 tiles), so scale uniformly. Both this and buildFoundryDecor use the
+	-- same factor so the static struts and the FoundryRotor spin stay aligned.
+	local S = Config.FOUNDRY_SIZE.X / 28
 	local arms: { { cf: CFrame, size: Vector3 } } = {}
 	for _, theta in { 0, math.pi } do
 		local dir  = Vector3.new(math.cos(theta), 0, math.sin(theta))
-		local low  = dir * 2  + Vector3.new(0, 5,  0)   -- inner foot: near & low at the hub
-		local high = dir * 13 + Vector3.new(0, 16, 0)   -- outer head: up & out (~45°)
+		local low  = (dir * 2  + Vector3.new(0, 5,  0)) * S   -- inner foot: near & low at the hub
+		local high = (dir * 13 + Vector3.new(0, 16, 0)) * S   -- outer head: up & out (~45°)
 		local mid  = (low + high) / 2
 		local len  = (high - low).Magnitude
 		table.insert(arms, {
 			cf   = CFrame.lookAt(mid, high),
-			size = Vector3.new(1.6, 1.6, len),
+			size = Vector3.new(1.6 * S, 1.6 * S, len),
 		})
 	end
 	return arms
@@ -653,12 +658,18 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 	local cPlate    = Color3.fromRGB(70, 73, 78)
 	local cMolten   = Color3.fromRGB(255, 110, 30)
 
+	-- The crucible geometry was authored for a 28×28 footprint; FOUNDRY_SIZE is now
+	-- smaller (3×3 tiles). Scale every part's size + local offset uniformly (rotation
+	-- preserved) so the whole structure shrinks to fit. The animated arms are built raw
+	-- from foundryArms() (already scaled) to avoid scaling them twice.
+	local S = Config.FOUNDRY_SIZE.X / 28
+
 	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
 		local p = Instance.new("Part")
 		p.Name = name
 		if shape then (p :: any).Shape = shape end
-		p.Size       = size
-		p.CFrame     = groundCF * localCF
+		p.Size       = size * S
+		p.CFrame     = groundCF * (CFrame.new(localCF.Position * S) * localCF.Rotation)
 		p.Color      = color
 		p.Material   = material
 		p.Anchored   = true
@@ -690,8 +701,19 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 	-- ── Rotating hub + two angled struts ──────────────────────────────────────
 	-- The struts pivot around this hub (FoundryRotor drives "FoundryArm*" CFrames).
 	dp("FoundryHub", Vector3.new(3.2, 3.2, 3.2), CFrame.new(0, 13.2, 0), teamColor.Color, Enum.Material.Neon, Enum.PartType.Ball)
+	-- foundryArms() is already scaled, so build these raw (don't pass through the scaling dp).
 	for i, a in UnitVisuals.foundryArms() do
-		dp("FoundryArm" .. i, a.size, a.cf, cDarkSteel, Enum.Material.Metal)
+		local arm        = Instance.new("Part")
+		arm.Name         = "FoundryArm" .. i
+		arm.Size         = a.size
+		arm.CFrame       = groundCF * a.cf
+		arm.Color        = cDarkSteel
+		arm.Material     = Enum.Material.Metal
+		arm.Anchored     = true
+		arm.CanCollide   = false
+		arm.CastShadow   = false
+		arm.CanQuery     = false
+		arm.Parent       = parent
 	end
 
 	if withFX then
@@ -727,6 +749,156 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 		harv.RollOffMinDistance = 10
 		harv.RollOffMaxDistance = 120
 		harv.Parent             = molten
+	end
+end
+
+-- ── Bonfire "tiki" log stack (Empower upgrades) ──────────────────────────────
+-- Each Empower purchase stacks ONE log onto the bonfire, building a log-cabin tiki
+-- around the flames: logs come in alternating layers (a pair along X, then a pair
+-- along Z) that flare outward as the tower climbs. Deterministic per index so the
+-- server can add the next log on each upgrade and every client sees the same tower.
+local BONFIRE_LOG_A = Color3.fromRGB(74, 50, 34)
+local BONFIRE_LOG_B = Color3.fromRGB(58, 38, 26)
+
+-- Local-space size + CFrame (relative to groundCF) of the `index`-th tiki log (1-based).
+local function bonfireLogPose(index: number): (Vector3, CFrame)
+	local layer = math.floor((index - 1) / 2)    -- two logs per layer
+	local side  = (index - 1) % 2                 -- the two logs of a layer
+	local sign  = (side == 0) and 1 or -1
+	local y     = 0.75 + layer * 1.05             -- each layer sits higher
+	local r     = 2.0 + layer * 0.2               -- ...and flares a bit wider
+	local len   = 2 * r + 1.4                     -- overhang past the corners
+	local thick = 0.62
+	if layer % 2 == 0 then
+		-- Pair runs along X, capping the front/back edges (±Z).
+		return Vector3.new(len, thick, thick), CFrame.new(0, y, sign * r)
+	else
+		-- Pair runs along Z, capping the left/right edges (±X).
+		return Vector3.new(thick, thick, len), CFrame.new(sign * r, y, 0)
+	end
+end
+
+local function makeBonfireLog(parent: Instance, groundCF: CFrame, index: number): Part
+	local size, localCF = bonfireLogPose(index)
+	local p      = Instance.new("Part")
+	p.Name       = "TikiLog" .. index
+	p.Size       = size
+	p.CFrame     = groundCF * localCF
+	p.Color      = (index % 2 == 0) and BONFIRE_LOG_A or BONFIRE_LOG_B
+	p.Material   = Enum.Material.Wood
+	p.Anchored   = true
+	p.CanCollide = false
+	p.CastShadow = false
+	p.CanQuery   = false
+	p.Parent     = parent
+	return p
+end
+
+-- Adds the single tiki log for the given upgrade `index` to a LIVE bonfire model.
+-- Called server-side on each Empower so the tower grows (replicates to everyone).
+function UnitVisuals.addBonfireLog(model: Instance, index: number): Part?
+	local base = model:FindFirstChild("Base") :: BasePart?
+	if not base then return nil end
+	local groundCF = base.CFrame * CFrame.new(0, -base.Size.Y / 2, 0)
+	return makeBonfireLog(model, groundCF, index)
+end
+
+--[[
+	Builds the Bonfire decoration set (internal building type "Deployer"): a small
+	mystical purple bonfire that summons units. A ring of dark stones and crossed logs
+	cradle layered violet neon flames, ringed by a glowing team-coloured rune circle on
+	the ground with a few drifting embers. Empower upgrades stack a tiki of logs on top
+	(see addBonfireLog). Shared by BuildingManager (live, withFX) and buildBuildingPreview
+	(thumbnail) so the two stay in sync.
+
+	groundCF:  CFrame at the ground-level centre of the footprint (Y = 0 = ground).
+	teamColor: accent colour for the rune ring (the flames stay purple — that's the identity).
+	withFX:    true to add the purple glow light + looped ember light (live building only).
+	level:     number of Empower upgrades already bought → that many tiki logs are built.
+]]
+function UnitVisuals.buildBonfireDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?, level: number?)
+	local cStone  = Color3.fromRGB(58, 56, 64)
+	local cStone2 = Color3.fromRGB(44, 42, 50)
+	local cLog    = Color3.fromRGB(58, 40, 30)
+	local cFlameA = Color3.fromRGB(150, 70, 235)   -- deep violet core
+	local cFlameB = Color3.fromRGB(190, 110, 255)  -- mid magenta-violet
+	local cFlameC = Color3.fromRGB(225, 180, 255)  -- pale lilac tip
+	local V       = Vector3.new
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3, material: Enum.Material, shape: Enum.PartType?): Part
+		local p      = Instance.new("Part")
+		p.Name       = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+
+	-- ── Glowing team-coloured rune ring on the ground ──────────────────────────
+	-- Flat discs: roll the cylinder 90° about Z so its circular faces point up (X = thin
+	-- vertical height, Y/Z = diameter), matching the Foundry's vcyl pattern.
+	dp("RuneRing", V(0.15, 7, 7), CFrame.new(0, 0.08, 0) * CFrame.Angles(0, 0, math.pi / 2), teamColor.Color, Enum.Material.Neon, Enum.PartType.Cylinder)
+		.Transparency = 0.35
+	dp("RuneCore", V(0.2, 5, 5),  CFrame.new(0, 0.06, 0) * CFrame.Angles(0, 0, math.pi / 2), cStone2,         Enum.Material.Slate,  Enum.PartType.Cylinder)
+
+	-- ── Ring of dark fire-stones ──────────────────────────────────────────────
+	local STONES = 7
+	for i = 1, STONES do
+		local a = (i / STONES) * math.pi * 2
+		local r = 2.5
+		dp("Stone" .. i, V(1.1 + (i % 2) * 0.35, 1.0, 1.0),
+			CFrame.new(math.cos(a) * r, 0.5, math.sin(a) * r) * CFrame.Angles(0, a, 0),
+			(i % 2 == 0) and cStone or cStone2, Enum.Material.Slate)
+	end
+
+	-- ── Crossed logs (teepee) ─────────────────────────────────────────────────
+	for i, a in { 0.0, math.pi * 0.66, math.pi * 1.33 } do
+		dp("Log" .. i, V(0.55, 4.2, 0.55),
+			CFrame.new(math.cos(a) * 1.2, 1.9, math.sin(a) * 1.2)
+				* CFrame.Angles(math.cos(a) * 0.5, 0, -math.sin(a) * 0.5),
+			cLog, Enum.Material.Wood)
+	end
+
+	-- ── Layered violet flames (neon, rising + fading) ─────────────────────────
+	local function flame(name: string, dia: number, y: number, color: Color3, transp: number)
+		local p = dp(name, V(dia, dia * 1.35, dia), CFrame.new(0, y, 0), color, Enum.Material.Neon, Enum.PartType.Ball)
+		p.Transparency = transp
+		return p
+	end
+	local core = flame("Flame1", 3.0, 2.6, cFlameA, 0.05)
+	flame("Flame2", 2.3, 4.0, cFlameB, 0.22)
+	flame("Flame3", 1.5, 5.1, cFlameC, 0.42)
+	-- side wisps
+	flame("Wisp1", 1.0, 3.4, cFlameB, 0.45).CFrame = groundCF * CFrame.new( 1.1, 3.4, 0.4)
+	flame("Wisp2", 0.9, 3.0, cFlameC, 0.5 ).CFrame = groundCF * CFrame.new(-1.0, 3.0, -0.5)
+
+	if withFX then
+		local glow      = Instance.new("PointLight")
+		glow.Color      = Color3.fromRGB(170, 90, 255)
+		glow.Brightness  = 4
+		glow.Range      = 22
+		glow.Parent     = core
+
+		-- drifting embers: a few small neon motes above the flame
+		for i = 1, 3 do
+			local a = i * 2.2
+			local e = dp("Ember" .. i, V(0.25, 0.25, 0.25),
+				CFrame.new(math.cos(a) * 1.0, 5.2 + i * 0.5, math.sin(a) * 1.0),
+				cFlameC, Enum.Material.Neon, Enum.PartType.Ball)
+			e.Transparency = 0.3
+		end
+	end
+
+	-- Tiki log stack from previously-bought Empower upgrades (0 for a fresh bonfire).
+	for i = 1, (level or 0) do
+		makeBonfireLog(parent, groundCF, i)
 	end
 end
 
@@ -1233,28 +1405,10 @@ function UnitVisuals.buildBuildingPreview(
 		end
 
 	elseif buildingType == "Deployer" then
-		-- Deployer: armored auto-spawn bay (preview).
-		base.Size      = Vector3.new(10, 0.5, 10)
-		base.Position  = Vector3.new(0, 0.25, 0)
-		base.BrickColor = BrickColor.new("Dark stone grey")
-		base.Material   = Enum.Material.Metal
-
-		local grey = BrickColor.new("Dark stone grey")
-
-		local bw2 = makePart(parent); bw2.Size = Vector3.new(9.3, 4.5, 0.7); bw2.Position = Vector3.new(0, 2.75, -5.35);   bw2.BrickColor = color; bw2.Material = Enum.Material.SmoothPlastic
-		local lw2 = makePart(parent); lw2.Size = Vector3.new(0.7, 4.5, 10.7); lw2.Position = Vector3.new(-5.35, 2.75, 0); lw2.BrickColor = color; lw2.Material = Enum.Material.SmoothPlastic
-		local rw2 = makePart(parent); rw2.Size = Vector3.new(0.7, 4.5, 10.7); rw2.Position = Vector3.new( 5.35, 2.75, 0); rw2.BrickColor = color; rw2.Material = Enum.Material.SmoothPlastic
-		local rf2 = makePart(parent); rf2.Size = Vector3.new(9.3, 0.4, 5.3);  rf2.Position = Vector3.new(0, 5.2, -2.65);   rf2.BrickColor = grey;  rf2.Material = Enum.Material.DiamondPlate
-		local ob2 = makePart(parent); ob2.Size = Vector3.new(10.7, 0.5, 0.7); ob2.Position = Vector3.new(0, 5.2, 2.35);    ob2.BrickColor = color; ob2.Material = Enum.Material.SmoothPlastic
-		local rl  = makePart(parent); rl.Size  = Vector3.new(0.4, 1.2, 4);    rl.Position  = Vector3.new(-4.8, 1.1, 2.5);  rl.BrickColor  = grey;  rl.Material  = Enum.Material.Metal
-		local rr  = makePart(parent); rr.Size  = Vector3.new(0.4, 1.2, 4);    rr.Position  = Vector3.new( 4.8, 1.1, 2.5);  rr.BrickColor  = grey;  rr.Material  = Enum.Material.Metal
-		local dp  = makePart(parent); dp.Name  = "DeployPad"; dp.Size = Vector3.new(6, 0.2, 6); dp.Position = Vector3.new(0, 0.7, 0); dp.BrickColor = color; dp.Material = Enum.Material.Neon
-		local ns2 = makePart(parent); ns2.Size = Vector3.new(9.3, 0.3, 0.3);  ns2.Position = Vector3.new(0, 5.2, -5.35);   ns2.BrickColor = color; ns2.Material = Enum.Material.Neon
-		local sl  = makePart(parent); sl.Shape = Enum.PartType.Ball; sl.Size = Vector3.new(0.8, 0.8, 0.8); sl.Position = Vector3.new(-5.35, 5.45, -5.35); sl.BrickColor = color; sl.Material = Enum.Material.Neon
-		local sr  = makePart(parent); sr.Shape = Enum.PartType.Ball; sr.Size = Vector3.new(0.8, 0.8, 0.8); sr.Position = Vector3.new( 5.35, 5.45, -5.35); sr.BrickColor = color; sr.Material = Enum.Material.Neon
-		local ap  = makePart(parent); ap.Size  = Vector3.new(0.3, 2.5, 0.3);  ap.Position  = Vector3.new(0, 6.5, -4.5);    ap.BrickColor  = grey;  ap.Material  = Enum.Material.Metal
-		local an  = makePart(parent); an.Size  = Vector3.new(0.15, 1.2, 1.8); an.Position  = Vector3.new(1.1, 7.35, -4.5); an.BrickColor  = color; an.Material  = Enum.Material.Neon
-		local _ = bw2; _ = lw2; _ = rw2; _ = rf2; _ = ob2; _ = rl; _ = rr; _ = dp; _ = ns2; _ = sl; _ = sr; _ = ap; _ = an
+		-- Bonfire (preview): the mystical purple flame from the shared builder, so the
+		-- thumbnail matches the live building exactly.
+		base.Transparency = 1
+		UnitVisuals.buildBonfireDecor(parent, CFrame.new(position), color, false)
 
 	elseif buildingType == "LampreyNest" then
 		-- Lamprey Nest (preview): invisible base; the egg-tipped tentacle cluster comes
@@ -1263,36 +1417,9 @@ function UnitVisuals.buildBuildingPreview(
 		UnitVisuals.buildLampreyNestDecor(parent, CFrame.new(position), color, false)
 
 	else
-		-- Barracks: open-top training facility (preview).
-		-- Repurpose base as the foundation floor so the camera frames it correctly.
-		base.Size      = Vector3.new(10, 0.7, 10)
-		base.Position  = Vector3.new(0, 0.35, 0)
-		base.BrickColor = BrickColor.new("Dark stone grey")
-		base.Material   = Enum.Material.Metal
-
-		local grey = BrickColor.new("Dark stone grey")
-
-		-- Side walls
-		local lw = makePart(parent); lw.Size = Vector3.new(0.7, 6.3, 10.7); lw.Position = Vector3.new(-5.35, 3.85, 0); lw.BrickColor = color; lw.Material = Enum.Material.SmoothPlastic
-		local rw = makePart(parent); rw.Size = Vector3.new(0.7, 6.3, 10.7); rw.Position = Vector3.new( 5.35, 3.85, 0); rw.BrickColor = color; rw.Material = Enum.Material.SmoothPlastic
-		-- Back wall
-		local bw = makePart(parent); bw.Size = Vector3.new(9.3, 6.3, 0.7);  bw.Position = Vector3.new(0, 3.85, -5.35); bw.BrickColor = color; bw.Material = Enum.Material.SmoothPlastic
-		-- Front pillars
-		local pl = makePart(parent); pl.Size = Vector3.new(0.7, 6.3, 0.7);  pl.Position = Vector3.new(-4.65, 3.85, 5.35); pl.BrickColor = color; pl.Material = Enum.Material.SmoothPlastic
-		local pr = makePart(parent); pr.Size = Vector3.new(0.7, 6.3, 0.7);  pr.Position = Vector3.new( 4.65, 3.85, 5.35); pr.BrickColor = color; pr.Material = Enum.Material.SmoothPlastic
-		-- Top beam
-		local tb = makePart(parent); tb.Size = Vector3.new(10.7, 0.6, 0.7); tb.Position = Vector3.new(0, 7.3, 5.35); tb.BrickColor = color; tb.Material = Enum.Material.SmoothPlastic
-		-- Training pad
-		local pad = makePart(parent); pad.Name = "TrainingPad"; pad.Size = Vector3.new(4, 0.2, 4); pad.Position = Vector3.new(0, 0.8, 0); pad.BrickColor = color; pad.Material = Enum.Material.Neon
-		-- Neon accents
-		local ns = makePart(parent); ns.Size = Vector3.new(9.3, 0.3, 0.3); ns.Position = Vector3.new(0, 7.3, -5.35); ns.BrickColor = color; ns.Material = Enum.Material.Neon
-		local cl = makePart(parent); cl.Shape = Enum.PartType.Ball; cl.Size = Vector3.new(0.7, 0.7, 0.7); cl.Position = Vector3.new(-5.35, 7.3, -5.35); cl.BrickColor = color; cl.Material = Enum.Material.Neon
-		local cr = makePart(parent); cr.Shape = Enum.PartType.Ball; cr.Size = Vector3.new(0.7, 0.7, 0.7); cr.Position = Vector3.new( 5.35, 7.3, -5.35); cr.BrickColor = color; cr.Material = Enum.Material.Neon
-		-- Flag
-		local fp = makePart(parent); fp.Size = Vector3.new(0.35, 3, 0.35);  fp.Position = Vector3.new(0, 8.5, -4.5);    fp.BrickColor = grey;  fp.Material = Enum.Material.Metal
-		local fl = makePart(parent); fl.Size = Vector3.new(0.15, 1.4, 2.4); fl.Position = Vector3.new(1.25, 9.5, -4.5); fl.BrickColor = color; fl.Material = Enum.Material.Neon
-		-- suppress unused warnings
-		local _ = lw; _ = rw; _ = bw; _ = pl; _ = pr; _ = tb; _ = ns; _ = cl; _ = cr; _ = fp; _ = fl
+		-- Generic fallback: a plain team-coloured block (no placeable type reaches here
+		-- now that the Barracks is gone, but keep the preview safe for unknown types).
+		base.Material = Enum.Material.SmoothPlastic
 	end
 
 	return base

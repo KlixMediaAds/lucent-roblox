@@ -27,9 +27,35 @@ function Config.scaledBuildingCost(baseCost: number, buildingType: string, curre
 	if not growth then return baseCost end
 	return math.floor(baseCost * growth ^ math.max(0, currentCount) + 0.5)
 end
-Config.DEPLOYER_COST         = 100  -- Deployer building cost
-Config.DEPLOYER_MAX_UNITS    = 4    -- max simultaneous auto-deployed soldiers per Deployer
-Config.DEPLOYER_SPAWN_INTERVAL = 15 -- seconds between auto-spawn checks
+-- Bonfire (internal building type "Deployer") — a mystical purple bonfire that
+-- auto-summons units for FREE up to a capacity, with a repeatable "Empower" upgrade
+-- that raises capacity AND shortens the summon interval. Each purchase also stacks a
+-- LOG onto the fire, building a tiki tower that flares outward as it climbs (see
+-- UnitVisuals.addBonfireLog). Capacity/interval are tracked per-building from level.
+-- The upgrade is open-ended by design; MAX_LEVEL just caps it "for now".
+Config.DEPLOYER_COST              = 100  -- Bonfire build cost (flat)
+Config.DEPLOYER_BASE_CAPACITY     = 3    -- max simultaneous summoned units at level 0
+Config.DEPLOYER_BASE_INTERVAL     = 15   -- seconds between summons at level 0
+Config.DEPLOYER_MIN_INTERVAL      = 3.5  -- floor so deep upgrades don't go absurd
+Config.DEPLOYER_UPGRADE_COST      = 75   -- base cost of the first Empower upgrade
+Config.DEPLOYER_UPGRADE_GROWTH    = 1.22 -- upgrade cost multiplier per level already bought
+Config.DEPLOYER_UPGRADE_CAP_STEP  = 1    -- +capacity per Empower level
+Config.DEPLOYER_UPGRADE_INTERVAL_MULT = 0.9   -- summon interval ×this per Empower level (until the floor)
+Config.DEPLOYER_UPGRADE_MAX_LEVEL = 20   -- max Empower purchases per bonfire (≈ tiki logs)
+
+-- Cost to Empower a bonfire that has already bought `level` upgrades.
+function Config.bonfireUpgradeCost(level: number): number
+	return math.floor(Config.DEPLOYER_UPGRADE_COST * Config.DEPLOYER_UPGRADE_GROWTH ^ math.max(0, level) + 0.5)
+end
+function Config.bonfireCapacity(level: number): number
+	return Config.DEPLOYER_BASE_CAPACITY + level * Config.DEPLOYER_UPGRADE_CAP_STEP
+end
+function Config.bonfireInterval(level: number): number
+	-- Early levels speed up summons; later levels are floored so the reward shifts to
+	-- pure capacity (and the growing tiki).
+	return math.max(Config.DEPLOYER_MIN_INTERVAL,
+		Config.DEPLOYER_BASE_INTERVAL * Config.DEPLOYER_UPGRADE_INTERVAL_MULT ^ math.max(0, level))
+end
 
 -- Unit types (trained from Barracks)
 Config.UNIT_TYPES = {
@@ -72,7 +98,8 @@ Config.TANK_SLOW_MULT         = 0.4  -- speed multiplier while slowed (requires 
 -- Buildings
 Config.BUILDING_SIZE         = Vector3.new(10, 8, 10)
 Config.BUILDING_GRID         = 5     -- snap grid in studs
-Config.FOUNDRY_SIZE          = Vector3.new(28, 10, 28)  -- 4× the Command Center's ground area
+Config.FOUNDRY_SIZE          = Vector3.new(15, 10, 15)  -- 3×3 tiles (grid = 5)
+Config.BONFIRE_SIZE          = Vector3.new(8, 7, 8)     -- summoning bonfire footprint (internal type "Deployer")
 Config.ENGINEERING_POST_SIZE = Vector3.new(12, 10, 12)
 
 -- Engineering Post — researches random combat upgrades. Light research rolls one
@@ -200,12 +227,12 @@ Config.UNLOCKS = {
 		condText = "Build 3 Foundries", cond = { type = "building", name = "Foundry", count = 3 } },
 	EliteUnits       = { icon = "⭐", title = "Elite Units", category = "Army",
 		vp = { kind = "unit", name = "Elite" },
-		desc = "Unlocks the Elite unit at Barracks.",
-		condText = "Train 5 Soldiers", cond = { type = "train",    name = "Soldier",  count = 5 } },
+		desc = "Unlocks the Elite unit at the Bonfire.",
+		condText = "Summon 5 Soldiers", cond = { type = "train",    name = "Soldier",  count = 5 } },
 	MedicUnit        = { icon = "➕", title = "Medic Unit", category = "Army",
 		vp = { kind = "unit", name = "Medic" },
 		desc = "Unlocks the Medic, which automatically heals nearby friendly units.",
-		condText = "Build 3 Barracks", cond = { type = "building", name = "Barracks", count = 3 } },
+		condText = "Build 2 Bonfires", cond = { type = "building", name = "Deployer", count = 2 } },
 	TurretUpgrades   = { icon = "⚙", title = "Turret Upgrades", category = "Infra",
 		vp = { kind = "building", name = "Turret" },
 		desc = "Unlocks upgrade options for all Turrets.",
@@ -213,7 +240,7 @@ Config.UNLOCKS = {
 	Relay            = { icon = "📡", title = "Relay", category = "Infra",
 		vp = { kind = "building", name = "Relay" },
 		desc = "Unlocks the Relay, extending your build zone by 65 studs.",
-		condText = "Build 2 Barracks", cond = { type = "building", name = "Barracks", count = 2 } },
+		condText = "Build 2 Bonfires", cond = { type = "building", name = "Deployer", count = 2 } },
 	ConcussionShells = { icon = "💥", title = "Concussion Shells", category = "Army",
 		vp = { kind = "unit", name = "Tank" },
 		desc = "Tank shells slow enemy units on impact.",
@@ -336,7 +363,7 @@ Config.TURRET_ARTILLERY = { range = 200, damage = 130, rate = 5.0 }
 Config.VISION_UNIT    = 65
 Config.VISION_DEFAULT = 40
 Config.VISION_RADIUS  = {
-	CommandCenter = 75, Barracks = 50, Foundry = 55, Turret = 40, EngineeringPost = 50,
+	CommandCenter = 75, Foundry = 55, Turret = 40, EngineeringPost = 50,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
 	LampreyNest = 50,
 }
@@ -352,12 +379,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Barracks = 15, Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15 }
+Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55 }
-Config.BUILDING_HP         = { Barracks = 500, Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550 }
+Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14 }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13 }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7 }
@@ -434,6 +461,7 @@ Config.REMOTES = {
 	SpawnLaneUnit           = "SpawnLaneUnit",
 	SetDeployerType         = "SetDeployerType",
 	DeployerUpdate          = "DeployerUpdate",
+	UpgradeDeployer         = "UpgradeDeployer",
 	LampreyEgg              = "LampreyEgg",
 	HagfishStrike           = "HagfishStrike",
 	BroodmotherDeath        = "BroodmotherDeath",

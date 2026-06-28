@@ -111,17 +111,17 @@ local hasResearchFn: ((string) -> boolean)?
 type BuildingInfo = { cost: number, requires: { [string]: number }, researchReq: string? }
 local BUILDING_INFO: { [string]: BuildingInfo } = {
 	Foundry    = { cost = Config.FOUNDRY_COST,      requires = {},               researchReq = nil        },
-	Barracks   = { cost = Config.BUILDING_COST,     requires = { Foundry = 1 },  researchReq = nil        },
-	Deployer   = { cost = Config.DEPLOYER_COST,     requires = { Barracks = 1 }, researchReq = nil        },
-	Turret     = { cost = Config.TURRET_COST,       requires = { Barracks = 1 }, researchReq = nil        },
+	Deployer   = { cost = Config.DEPLOYER_COST,     requires = { Foundry = 1 },  researchReq = nil        },
+	Turret     = { cost = Config.TURRET_COST,       requires = { Deployer = 1 }, researchReq = nil        },
 	Relay      = { cost = Config.RELAY_COST,        requires = {},             researchReq = "Relay"      },
 	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
-	LampreyNest = { cost = Config.LAMPREY_NEST_COST, requires = { Barracks = 1 }, researchReq = nil       },
-	EngineeringPost = { cost = Config.ENGINEERING_POST_COST, requires = { Barracks = 1 }, researchReq = nil },
+	LampreyNest = { cost = Config.LAMPREY_NEST_COST, requires = { Deployer = 1 }, researchReq = nil       },
+	EngineeringPost = { cost = Config.ENGINEERING_POST_COST, requires = { Deployer = 1 }, researchReq = nil },
 }
 
 -- Display labels that differ from the internal building-type id.
 local DISPLAY_NAME: { [string]: string } = {
+	Deployer        = "Bonfire",
 	LampreyNest     = "Nest",
 	EngineeringPost = "Eng Post",
 }
@@ -145,8 +145,7 @@ end
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
 	{ btype = "Foundry",    icon = "🏭", color = C.MINE,                        desc = "Passive income; +15% per nearby mineral deposit (deposits drain)" },
-	{ btype = "Barracks",   icon = "⚔", color = C.BARRACKS,                    desc = "Trains and deploys combat units"               },
-	{ btype = "Deployer",   icon = "🚀", color = C.DEPLOYER,                    desc = "Auto-spawns up to 4 soldiers"                  },
+	{ btype = "Deployer",   icon = "🔥", color = Color3.fromRGB(160, 80, 230),  desc = "Mystical bonfire; auto-summons units for free. Empower it for more capacity & faster summons" },
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
 	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
@@ -323,7 +322,7 @@ local function applyNodeState(node: ChildNode)
 		node.label.Text           = dispName(node.btype) .. "\nPLACING…"
 		node.label.TextColor3     = C.ACCENT
 	else
-		local accent = ({ Foundry = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET })[node.btype]
+		local accent = ({ Foundry = C.MINE, Turret = C.TURRET })[node.btype]
 			or node.color
 		node.btn.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
 		node.stroke.Color         = accent
@@ -1502,7 +1501,7 @@ end
 -- ── Command-card build page ────────────────────────────────────────────────────
 -- Accent colours for the three "starter" buildings (mirrors the old node styling).
 local BUILD_ACCENT: { [string]: Color3 } = {
-	Foundry = C.MINE, Barracks = C.BARRACKS, Turret = C.TURRET,
+	Foundry = C.MINE, Deployer = Color3.fromRGB(160, 80, 230), Turret = C.TURRET,
 }
 
 local function visibleBuildDefs(): { { btype: string, icon: string, color: Color3, desc: string } }

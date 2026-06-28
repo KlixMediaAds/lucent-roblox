@@ -35,6 +35,7 @@ local turretTimers:      { [string]: number } = {}   -- attackTimer per turret i
 local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per deployer id
 local deployerUnitType:  { [string]: string } = {}   -- deployerId → unit type to spawn
 local deployerUpdateAcc: { [string]: number } = {}   -- accumulator for periodic client updates
+local deployerLevel:     { [string]: number } = {}   -- bonfire Empower upgrades bought per id
 
 -- Engineering Post research state per building id.
 local engState:     { [string]: string } = {}   -- "idle" | "researching" | "ready"
@@ -90,6 +91,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CreepyBlob"   then return Vector3.new(9, 6, 9) end
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
+	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
@@ -573,51 +575,11 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		end
 
 	elseif buildingType == "Deployer" then
-		-- Deployer: low armored bay that auto-spawns soldiers.
+		-- Bonfire: a mystical purple flame that auto-summons units. The team-coloured base
+		-- stays as the invisible collision/HP box; the bonfire comes from the shared
+		-- builder so the thumbnail preview stays in sync.
 		base.Transparency = 1
-
-		local col  = player.TeamColor
-		local grey = BrickColor.new("Dark stone grey")
-
-		local function bp(sz: Vector3, pos: Vector3, col2: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
-			local p          = Instance.new("Part")
-			if shape then (p :: any).Shape = shape end
-			p.Size           = sz
-			p.Position       = position + pos
-			p.BrickColor     = col2
-			p.Material       = mat
-			p.Anchored       = true
-			p.CanCollide     = false
-			p.CastShadow     = false
-			p.Parent         = model
-			return p
-		end
-
-		-- Foundation slab (wide, low-profile)
-		bp(Vector3.new(10, 0.5, 10),    Vector3.new(0, 0.25, 0),         grey, Enum.Material.Metal)
-		-- Back wall (solid, stocky)
-		bp(Vector3.new(9.3, 4.5, 0.7),  Vector3.new(0, 2.75, -5.35),     col,  Enum.Material.SmoothPlastic)
-		-- Side walls (short and armored)
-		bp(Vector3.new(0.7, 4.5, 10.7), Vector3.new(-5.35, 2.75, 0),     col,  Enum.Material.SmoothPlastic)
-		bp(Vector3.new(0.7, 4.5, 10.7), Vector3.new( 5.35, 2.75, 0),     col,  Enum.Material.SmoothPlastic)
-		-- Partial metal roof (back half only)
-		bp(Vector3.new(9.3, 0.4, 5.3),  Vector3.new(0, 5.2, -2.65),      grey, Enum.Material.DiamondPlate)
-		-- Front overhang beam
-		bp(Vector3.new(10.7, 0.5, 0.7), Vector3.new(0, 5.2, 2.35),       col,  Enum.Material.SmoothPlastic)
-		-- Side rail guides flanking the deploy ramp (front half)
-		bp(Vector3.new(0.4, 1.2, 4),    Vector3.new(-4.8, 1.1, 2.5),     grey, Enum.Material.Metal)
-		bp(Vector3.new(0.4, 1.2, 4),    Vector3.new( 4.8, 1.1, 2.5),     grey, Enum.Material.Metal)
-		-- Central deploy pad (neon, wider than barracks training pad)
-		local pad = bp(Vector3.new(6, 0.2, 6), Vector3.new(0, 0.7, 0),   col,  Enum.Material.Neon)
-		pad.Name = "DeployPad"
-		-- Neon accent strip on back wall top
-		bp(Vector3.new(9.3, 0.3, 0.3),  Vector3.new(0, 5.2, -5.35),      col,  Enum.Material.Neon)
-		-- Signal lights on back top corners
-		bp(Vector3.new(0.8, 0.8, 0.8),  Vector3.new(-5.35, 5.45, -5.35), col,  Enum.Material.Neon, Enum.PartType.Ball)
-		bp(Vector3.new(0.8, 0.8, 0.8),  Vector3.new( 5.35, 5.45, -5.35), col,  Enum.Material.Neon, Enum.PartType.Ball)
-		-- Antenna pole and banner
-		bp(Vector3.new(0.3, 2.5, 0.3),  Vector3.new(0, 6.5, -4.5),       grey, Enum.Material.Metal)
-		bp(Vector3.new(0.15, 1.2, 1.8), Vector3.new(1.1, 7.35, -4.5),    col,  Enum.Material.Neon)
+		UnitVisuals.buildBonfireDecor(model, CFrame.new(position), player.TeamColor, true)
 
 	elseif buildingType == "LampreyNest" then
 		-- Lamprey Nest: the team-coloured base stays as the invisible collision/HP
@@ -642,50 +604,9 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		UnitVisuals.buildEngineeringPostDecor(model, CFrame.new(position), player.TeamColor, true)
 
 	else
-		-- Barracks: open-top training facility.
-		-- base stays as the invisible 10×8×10 logic box (health-bar anchor, raycast target).
-		base.Transparency = 1
-
-		local col  = player.TeamColor
-		local grey = BrickColor.new("Dark stone grey")
-
-		local function bp(sz: Vector3, pos: Vector3, col2: BrickColor, mat: Enum.Material, shape: Enum.PartType?): Part
-			local p          = Instance.new("Part")
-			if shape then (p :: any).Shape = shape end
-			p.Size           = sz
-			p.Position       = position + pos
-			p.BrickColor     = col2
-			p.Material       = mat
-			p.Anchored       = true
-			p.CanCollide     = false
-			p.CastShadow     = false
-			p.Parent         = model
-			return p
-		end
-
-		-- Foundation
-		bp(Vector3.new(10, 0.7, 10),    Vector3.new(0, 0.35, 0),       grey, Enum.Material.Metal)
-		-- Side walls (extend full depth so corners are filled)
-		bp(Vector3.new(0.7, 6.3, 10.7), Vector3.new(-5.35, 3.85, 0),   col,  Enum.Material.SmoothPlastic)
-		bp(Vector3.new(0.7, 6.3, 10.7), Vector3.new( 5.35, 3.85, 0),   col,  Enum.Material.SmoothPlastic)
-		-- Back wall (narrower so side walls handle the corner seam)
-		bp(Vector3.new(9.3, 6.3, 0.7),  Vector3.new(0, 3.85, -5.35),   col,  Enum.Material.SmoothPlastic)
-		-- Front pillars (open facade)
-		bp(Vector3.new(0.7, 6.3, 0.7),  Vector3.new(-4.65, 3.85, 5.35), col, Enum.Material.SmoothPlastic)
-		bp(Vector3.new(0.7, 6.3, 0.7),  Vector3.new( 4.65, 3.85, 5.35), col, Enum.Material.SmoothPlastic)
-		-- Top beam connecting front pillars
-		bp(Vector3.new(10.7, 0.6, 0.7), Vector3.new(0, 7.3, 5.35),     col,  Enum.Material.SmoothPlastic)
-		-- Training pad (glowing floor, visible from above)
-		local pad = bp(Vector3.new(4, 0.2, 4), Vector3.new(0, 0.8, 0), col,  Enum.Material.Neon)
-		pad.Name = "TrainingPad"
-		-- Neon accent strip along top of back wall
-		bp(Vector3.new(9.3, 0.3, 0.3),  Vector3.new(0, 7.3, -5.35),    col,  Enum.Material.Neon)
-		-- Corner accent lights (back-top)
-		bp(Vector3.new(0.7, 0.7, 0.7),  Vector3.new(-5.35, 7.3, -5.35), col, Enum.Material.Neon, Enum.PartType.Ball)
-		bp(Vector3.new(0.7, 0.7, 0.7),  Vector3.new( 5.35, 7.3, -5.35), col, Enum.Material.Neon, Enum.PartType.Ball)
-		-- Flag pole and flag on back wall
-		bp(Vector3.new(0.35, 3, 0.35),  Vector3.new(0, 8.5, -4.5),     grey, Enum.Material.Metal)
-		bp(Vector3.new(0.15, 1.4, 2.4), Vector3.new(1.25, 9.5, -4.5),  col,  Enum.Material.Neon)
+		-- Generic fallback: keep the team-coloured base visible. No placeable type reaches
+		-- here now that the Barracks is gone, but stay safe for any unknown type.
+		base.Transparency = 0
 	end
 
 	local ov        = Instance.new("StringValue")
@@ -795,6 +716,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		deployerTimers[id]    = 0
 		deployerUnitType[id]  = "Soldier"
 		deployerUpdateAcc[id] = 0
+		deployerLevel[id]     = 0
 	end
 
 	RemoteHandler.get(Config.REMOTES.BuildingPlaced):FireAllClients(
@@ -1790,6 +1712,7 @@ function BuildingManager.resetAll()
 	deployerTimers           = {}
 	deployerUnitType         = {}
 	deployerUpdateAcc        = {}
+	deployerLevel            = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -1839,7 +1762,6 @@ local SELL_REFUND_FRAC = 0.5
 local SELL_COST: { [string]: number } = {
 	Foundry         = Config.FOUNDRY_COST,
 	EngineeringPost = Config.ENGINEERING_POST_COST,
-	Barracks    = Config.BUILDING_COST,
 	Deployer    = Config.DEPLOYER_COST,
 	Turret      = Config.TURRET_COST,
 	Relay       = Config.RELAY_COST,
@@ -2532,6 +2454,7 @@ function BuildingManager.damage(id: string, amount: number)
 	deployerTimers[id]    = nil
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
+	deployerLevel[id]     = nil
 	nestEggs[id]          = nil
 	engState[id]          = nil
 	engResearchEnd[id]    = nil
@@ -2613,6 +2536,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		deployerTimers[id]    = nil
 		deployerUnitType[id]  = nil
 		deployerUpdateAcc[id] = nil
+		deployerLevel[id]     = nil
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
 		engState[id]          = nil
@@ -2670,18 +2594,18 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 		if not inZone then return false end
 	end
 
-	-- Requirement check: Barracks needs a Foundry; Turret/Deployer needs a Barracks; Relay needs research
+	-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/EngPost/Nest need a
+	-- Bonfire; Relay needs research.
 	-- AI bots (UserId < 0) bypass the Foundry prerequisite — they build on their own pacing.
-	if buildingType == "Barracks" and player.UserId > 0
+	if buildingType == "Deployer" and player.UserId > 0
 		and getPlayerBuildingCount(player, "Foundry") < 1 then return false end
-	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
-	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
 	if buildingType == "EngineeringPost" and player.UserId > 0
-		and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
-	-- LampreyNest normally needs a Barracks first; AI swarm bots (UserId < 0) skip
+		and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
+	-- LampreyNest normally needs a Bonfire first; AI swarm bots (UserId < 0) skip
 	-- this so their entire army can come from nests + creepy structures.
 	if buildingType == "LampreyNest" and player.UserId > 0
-		and getPlayerBuildingCount(player, "Barracks") < 1 then return false end
+		and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
@@ -2874,16 +2798,20 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		for id, data in buildingData do
 			if data.buildingType ~= "Deployer" then continue end
 			if data.isConstructing then continue end
+			-- Capacity + summon interval scale with this bonfire's Empower level.
+			local level    = deployerLevel[id] or 0
+			local capacity = Config.bonfireCapacity(level)
+			local interval = Config.bonfireInterval(level)
 			deployerTimers[id] = (deployerTimers[id] or 0) + dt
-			local progress = math.clamp(deployerTimers[id] / Config.DEPLOYER_SPAWN_INTERVAL, 0, 1)
-			if deployerTimers[id] >= Config.DEPLOYER_SPAWN_INTERVAL then
-				deployerTimers[id] -= Config.DEPLOYER_SPAWN_INTERVAL
+			local progress = math.clamp(deployerTimers[id] / interval, 0, 1)
+			if deployerTimers[id] >= interval then
+				deployerTimers[id] -= interval
 				progress = 0
 				if unitManagerRef then
 					local aliveCount = unitManagerRef.getDeployerAliveCount(id)
-					if aliveCount < Config.DEPLOYER_MAX_UNITS then
+					if aliveCount < capacity then
 						local unitType = deployerUnitType[id] or "Soldier"
-						local spawnPos = data.base.Position + Vector3.new(Config.BUILDING_SIZE.X + 2, 0, 0)
+						local spawnPos = data.base.Position + Vector3.new(Config.BONFIRE_SIZE.X + 2, 0, 0)
 						unitManagerRef.spawnForDeployer(id, data.owner, spawnPos, unitType)
 					end
 				end
@@ -2894,7 +2822,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				if deployerUpdateAcc[id] >= 0.35 then
 					deployerUpdateAcc[id] = 0
 					local unitType = deployerUnitType[id] or "Soldier"
-					deployerUpdateRemote:FireClient(data.owner, id, unitType, progress)
+					local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
+					deployerUpdateRemote:FireClient(data.owner, id, unitType, progress, level, capacity, nextCost)
 				end
 			end
 		end
@@ -3166,16 +3095,15 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Foundry=true, Barracks=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true }
+		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Barracks needs a Foundry; Turret/Deployer/Nest/Post need a Barracks; Relay/Blob need research
-		if buildingType == "Barracks"
+		-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/Nest/Post need a Bonfire; Relay/Blob need research
+		if buildingType == "Deployer"
 			and getPlayerBuildingCount(player, "Foundry") < 1 then return end
-		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Barracks") < 1 then return end
-		if buildingType == "Deployer" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
-		if buildingType == "EngineeringPost" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
-		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Barracks") < 1 then return end
+		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Deployer") < 1 then return end
+		if buildingType == "EngineeringPost" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
+		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
@@ -3276,8 +3204,53 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 		deployerUnitType[deployerId] = unitType
 		-- Immediately send an update so the client reflects the change without waiting for next poll
-		local progress = math.clamp((deployerTimers[deployerId] or 0) / Config.DEPLOYER_SPAWN_INTERVAL, 0, 1)
-		RemoteHandler.get(Config.REMOTES.DeployerUpdate):FireClient(player, deployerId, unitType, progress)
+		local level    = deployerLevel[deployerId] or 0
+		local progress = math.clamp((deployerTimers[deployerId] or 0) / Config.bonfireInterval(level), 0, 1)
+		local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
+		RemoteHandler.get(Config.REMOTES.DeployerUpdate):FireClient(player, deployerId, unitType, progress, level, Config.bonfireCapacity(level), nextCost)
+	end)
+
+	-- ── UpgradeDeployer remote (Empower bonfires: +capacity, faster summon) ─────
+	-- Accepts one id or a list (multi-select). When several bonfires are selected at
+	-- different levels, only the LOWEST-level ones are upgraded so a press evens the
+	-- group out; each is charged its own (level-based) cost, stopping when broke.
+	RemoteHandler.get(Config.REMOTES.UpgradeDeployer).OnServerEvent:Connect(function(player, deployerIds)
+		local ids = type(deployerIds) == "string" and { deployerIds } or deployerIds
+		if type(ids) ~= "table" then return end
+
+		-- Eligible = owned, finished, below max. Find the lowest level among them.
+		local eligible: { string } = {}
+		local minLevel = math.huge
+		for _, id in ids do
+			if type(id) ~= "string" then continue end
+			local data = buildingData[id]
+			if not data or data.buildingType ~= "Deployer" or data.owner ~= player or data.isConstructing then continue end
+			local lvl = deployerLevel[id] or 0
+			if lvl >= Config.DEPLOYER_UPGRADE_MAX_LEVEL then continue end
+			table.insert(eligible, id)
+			if lvl < minLevel then minLevel = lvl end
+		end
+		if #eligible == 0 then return end
+
+		local cost          = Config.bonfireUpgradeCost(minLevel)  -- all min-level bonfires share this cost
+		local updateRemote  = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
+		for _, id in eligible do
+			if (deployerLevel[id] or 0) ~= minLevel then continue end
+			if not resourceManagerRef or resourceManagerRef.get(player) < cost then break end
+			resourceManagerRef.spend(player, cost)
+			local level = minLevel + 1
+			deployerLevel[id] = level
+			-- Stack the next tiki log onto the live model (replicates to everyone).
+			local bdata = buildingData[id]
+			if bdata and bdata.base and bdata.base.Parent then
+				UnitVisuals.addBonfireLog(bdata.base.Parent, level)
+			end
+			local unitType = deployerUnitType[id] or "Soldier"
+			local progress = math.clamp((deployerTimers[id] or 0) / Config.bonfireInterval(level), 0, 1)
+			local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
+			-- `true` 8th arg flags a fresh upgrade so the client plays the empower FX.
+			updateRemote:FireClient(player, id, unitType, progress, level, Config.bonfireCapacity(level), nextCost, true)
+		end
 	end)
 
 	-- ── UpgradeTurret remote ──────────────────────────────────────────────
@@ -3449,6 +3422,32 @@ function BuildingManager.upgradeTurretForPlayer(player: any, turretId: string, u
 
 	data.turretUpgrade = upgradeType
 	applyTurretUpgradeVisuals(turretId, upgradeType)
+	return true
+end
+
+-- ── Bonfire helpers for AI bots (server-side; no client UI involved) ──────────
+-- Set which unit a bonfire summons (lets AI armies be varied, not all-Soldier).
+function BuildingManager.setBonfireSummonType(player: any, deployerId: string, unitType: string): boolean
+	local data = buildingData[deployerId]
+	if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return false end
+	deployerUnitType[deployerId] = unitType
+	return true
+end
+
+-- Empower a bonfire one level (same effect as the player's Empower, incl. the tiki log),
+-- capped at `maxLevel`. Returns true if it upgraded. Lets AI capacity scale with difficulty.
+function BuildingManager.upgradeBonfireForPlayer(player: any, deployerId: string, maxLevel: number): boolean
+	local data = buildingData[deployerId]
+	if not data or data.buildingType ~= "Deployer" or data.owner ~= player or data.isConstructing then return false end
+	local level = deployerLevel[deployerId] or 0
+	local cap   = math.min(Config.DEPLOYER_UPGRADE_MAX_LEVEL, maxLevel or 0)
+	if level >= cap then return false end
+	local cost = Config.bonfireUpgradeCost(level)
+	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
+	resourceManagerRef.spend(player, cost)
+	level += 1
+	deployerLevel[deployerId] = level
+	if data.base and data.base.Parent then UnitVisuals.addBonfireLog(data.base.Parent, level) end
 	return true
 end
 

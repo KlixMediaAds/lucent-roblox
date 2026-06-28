@@ -464,8 +464,8 @@ type ThreatResult = {
 }
 
 local THREAT_BUILDING = {
-	Monument = 200, CommandCenter = 100, LampreyNest = 70, Barracks = 50,
-	Turret = 30, CreepyBlob = 35, Deployer = 30, Relay = 15,
+	Monument = 200, CommandCenter = 100, LampreyNest = 70,
+	Turret = 30, CreepyBlob = 35, Deployer = 50, Relay = 15,
 }
 local THREAT_UNIT = {
 	Broodmother = 46, Howitzer = 38, Elite = 35, Lamprey = 32, Tank = 30, Soldier = 20,
@@ -618,7 +618,7 @@ local function pickAttackTarget(ai: any): Vector3?
 	local r = math.random()
 	local t: Vector3?
 	if r < 0.38 then
-		t = findEnemyBuilding(own, "Barracks") or findEnemyBuilding(own, "LampreyNest")
+		t = findEnemyBuilding(own, "Deployer") or findEnemyBuilding(own, "LampreyNest")
 	elseif r < 0.58 then
 		t = findEnemyBuilding(own, "Turret")
 	elseif r < 0.74 then
@@ -714,7 +714,7 @@ local function lurkAnchor(ai: any): Vector3?
 	return ai.priorityTarget
 		or ai.lastKnownEnemyPos
 		or findEnemyBuilding(ai.ownerStr, "CommandCenter")
-		or findEnemyBuilding(ai.ownerStr, "Barracks")
+		or findEnemyBuilding(ai.ownerStr, "Deployer")
 end
 
 local function updateScouts(ai: any, pts: { Vector3 })
@@ -826,7 +826,7 @@ local function updateHarass(ai: any)
 			tgt = ai.enemyHarvesters[math.random(1, #ai.enemyHarvesters)]
 		end
 		tgt = tgt or findEnemyBuilding(ai.ownerStr, "Relay")
-			or findEnemyBuilding(ai.ownerStr, "Barracks")
+			or findEnemyBuilding(ai.ownerStr, "Deployer")
 			or findEnemyBuilding(ai.ownerStr, "CommandCenter")
 			or ai.explorePoints[#ai.explorePoints]
 		ai.harassTarget = tgt
@@ -957,11 +957,12 @@ local function planEconomy(ai: any)
 	local phase = ai.phase
 	local reserve = ai.reserve
 
+	-- The Bonfire (internal type "Deployer") is the AI's primary military structure now
+	-- that the Barracks is gone — it free-summons the army and gates turrets/nests.
 	local liveFound     = countOwnedBuildings(ai.ownerStr, "Foundry")
-	local liveBarracks  = countOwnedBuildings(ai.ownerStr, "Barracks")
+	local liveBarracks  = countOwnedBuildings(ai.ownerStr, "Deployer")
 	local liveTurrets   = countOwnedBuildings(ai.ownerStr, "Turret")
 	local liveRelays    = countOwnedBuildings(ai.ownerStr, "Relay")
-	local liveDeployers = countOwnedBuildings(ai.ownerStr, "Deployer")
 
 	local econMult = (phase == "opening" and 0.5)
 		or (phase == "expand" and 0.75)
@@ -974,7 +975,6 @@ local function planEconomy(ai: any)
 	local wantTur  = math.min(ai.caps.t, math.max(0, math.ceil(arche.desired.turrets * econMult)))
 	if arche.turtle and phase ~= "opening" then wantTur = math.min(ai.caps.t, arche.desired.turrets) end
 	local wantRel  = (phase ~= "opening") and math.min(ai.caps.r, arche.desired.relays) or 0
-	local wantDep  = math.min(1, arche.desired.deployers)
 
 	if ai.baseUnderAttack         then wantTur = math.min(ai.caps.t, wantTur + 1) end
 	if ai.enemyUnitCount >= 5      then wantTur = math.min(ai.caps.t, wantTur + 1) end
@@ -995,8 +995,8 @@ local function planEconomy(ai: any)
 	end
 
 	if liveBarracks < 1 then
-		add(100, Config.BUILDING_COST, function()
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+		add(100, Config.DEPLOYER_COST, function()
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
 				ai.builtBarracks = math.max(ai.builtBarracks, 1); return true
 			end
 			return false
@@ -1018,10 +1018,10 @@ local function planEconomy(ai: any)
 			return false
 		end)
 	end
-	-- Build-up barracks (the from-zero case is the prio-100 item above).
+	-- Build-up bonfires (the from-zero case is the prio-100 item above).
 	if liveBarracks >= 1 and liveBarracks < wantBar then
-		add(80, Config.BUILDING_COST, function()
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+		add(80, Config.DEPLOYER_COST, function()
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
 				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1); return true
 			end
 			return false
@@ -1041,12 +1041,6 @@ local function planEconomy(ai: any)
 			return false
 		end)
 	end
-	if liveDeployers < wantDep and (phase == "mid" or phase == "late") and liveBarracks >= 1 then
-		add(40, Config.DEPLOYER_COST, function()
-			return tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 18, 40)
-		end)
-	end
-
 	table.sort(items, function(a, b) return a.prio > b.prio end)
 
 	-- Nightmare is deliberately unbound — buy everything affordable, top-down.
@@ -1141,10 +1135,11 @@ local function btBuildFirstMine(ai: any)
 end
 
 local function btBuildFirstBarracks(ai: any)
-	local live = countOwnedBuildings(ai.ownerStr, "Barracks")
+	-- "Barracks" is gone; the Bonfire (type "Deployer") is the AI's first military build.
+	local live = countOwnedBuildings(ai.ownerStr, "Deployer")
 	if live >= 1 then ai.builtBarracks = math.max(ai.builtBarracks, 1); return SUCCESS end
-	if not canAfford(ai.player, Config.BUILDING_COST, ai.reserve) then return RUNNING end
-	if tryPlaceRandom(ai.player, ai.base, "Barracks", 15, 35) then ai.builtBarracks += 1; return SUCCESS end
+	if not canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then return RUNNING end
+	if tryPlaceRandom(ai.player, ai.base, "Deployer", 15, 35) then ai.builtBarracks += 1; return SUCCESS end
 	return RUNNING
 end
 
@@ -1169,32 +1164,42 @@ local function btUpdateVision(ai: any)
 	return SUCCESS
 end
 
-local function btTrainUnit(ai: any)
-	if unitManager.getUnitCount(ai.player) >= ai.maxUnits then return FAILURE end
-	local barrackIds = getOwnedBuildingIds(ai.ownerStr, "Barracks")
-	if #barrackIds == 0 then return FAILURE end
+-- The AI's army comes from FREE, capacity-limited bonfire auto-summon — the same rules
+-- the player plays by. This just MANAGES the bonfires (it does NOT mass paid units like
+-- the old training did, which defied the capacity cap): give each bonfire a varied summon
+-- type, and empower them with surplus to scale capacity by difficulty.
+local function btManageBonfires(ai: any)
+	local ids = getOwnedBuildingIds(ai.ownerStr, "Deployer")
+	if #ids == 0 then return FAILURE end
 
-	local unitType = pickWeighted(ai.currentWeights)
-	local typeDef  = Config.UNIT_TYPES[unitType]
-	local cost     = typeDef and typeDef.cost or 25
+	-- Pace tech by peak army size now that nothing increments totalTrained directly.
+	ai.totalTrained = math.max(ai.totalTrained, unitManager.getUnitCount(ai.player))
 
-	-- Research-gated unit we can't make yet → fall back to Soldier.
-	if typeDef and typeDef.researchReq and not hasTech(ai, typeDef.researchReq) then
-		unitType = "Soldier"
-		typeDef  = Config.UNIT_TYPES.Soldier
-		cost     = typeDef and typeDef.cost or 25
-	end
-	if not canAfford(ai.player, cost, ai.reserve) then return FAILURE end
-
-	for _, barrackId in barrackIds do
-		if unitManager.trainFromBarracks(barrackId, unitType, ai.player) then
-			ai.totalTrained += 1
-			if unitType == "Soldier" then ai.trainedSoldiers += 1
-			elseif unitType == "Tank" then ai.trainedTanks += 1 end
-			return SUCCESS
+	-- Assign each bonfire a (composition-driven) summon type once → varied armies, not
+	-- all-Soldier. Research-gated picks fall back to Soldier.
+	ai.bonfireType = ai.bonfireType or {}
+	for _, id in ids do
+		if not ai.bonfireType[id] then
+			local utype = (next(ai.currentWeights) ~= nil) and pickWeighted(ai.currentWeights) or "Soldier"
+			local def   = Config.UNIT_TYPES[utype]
+			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Soldier" end
+			if buildingManager.setBonfireSummonType and buildingManager.setBonfireSummonType(ai.player, id, utype) then
+				ai.bonfireType[id] = utype
+			end
 		end
 	end
-	return FAILURE
+
+	-- Empower with clear surplus, capped by difficulty. Gradual by design — the army
+	-- still fills slowly through free auto-summon, so this never floods units.
+	local cap = ai.bonfireEmpowerCap or 0
+	if cap > 0 and buildingManager.upgradeBonfireForPlayer
+		and resourceManager.get(ai.player) > ai.reserve * 2.5 then
+		for _, id in ids do
+			if buildingManager.upgradeBonfireForPlayer(ai.player, id, cap) then break end
+		end
+	end
+
+	return SUCCESS
 end
 
 -- Wave archetype: turtle, then launch escalating timed all-ins on a clock.
@@ -1317,7 +1322,7 @@ local function btCommandArmy(ai: any)
 			-- Competent bots sometimes flank a second target.
 			ai.isFlankingAttack = ai.competence >= 0.7 and math.random() < 0.35 and #ai.mainForce >= 5
 			if ai.isFlankingAttack then
-				local c = findEnemyBuilding(ai.ownerStr, pickFrom({ "Barracks", "Turret", "Relay" }))
+				local c = findEnemyBuilding(ai.ownerStr, pickFrom({ "Deployer", "Turret", "Relay" }))
 				ai.feintTarget = (c and c ~= ai.attackTarget) and c or nil
 				if not ai.feintTarget then ai.isFlankingAttack = false end
 			end
@@ -1480,7 +1485,7 @@ local function trainerStrategyTree(ai: any)
 	ai.reserve = math.floor(ai.reserveBase * ai.archetype.reserveMult)
 
 	local playerMines    = buildingManager.getHumanBuildingCount("Foundry")
-	local playerBarracks = countHumanBuildings("Barracks")
+	local playerBarracks = countHumanBuildings("Deployer")
 	local playerAllBld   = countHumanBuildings("any")
 	local playerArmy     = countHumanArmy()
 
@@ -1527,12 +1532,12 @@ local function trainerStrategyTree(ai: any)
 	end
 
 	local liveMines    = countOwnedBuildings(ai.ownerStr, "Foundry")
-	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Barracks")
+	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Deployer")
 	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
 
 	if liveBarracks < math.min(ai.caps.b, ai.builtBarracks) then
-		if canAfford(ai.player, Config.BUILDING_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then ai.builtBarracks += 1 end
+		if canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then ai.builtBarracks += 1 end
 		end
 	end
 	if liveMines < ai.caps.h then
@@ -1541,8 +1546,8 @@ local function trainerStrategyTree(ai: any)
 		end
 	end
 	if liveBarracks < ai.caps.b then
-		if canAfford(ai.player, Config.BUILDING_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Barracks", 15, 35) then
+		if canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then
+			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
 				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1)
 			end
 		end
@@ -1597,7 +1602,8 @@ local function btCommandArmyTrainer(ai: any)
 			fanAcrossMap(ai, ai.mainForce, nearPts, 3)
 		end
 
-		if ai.trainerWaveTimer >= ai.trainerWaveInterval and armySize >= ai.minAtk and ai.priorityTarget then
+		local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
+		if pastPeace and ai.trainerWaveTimer >= ai.trainerWaveInterval and armySize >= ai.minAtk and ai.priorityTarget then
 			local target = pickAttackTarget(ai)
 			if target then
 				ai.attackTarget   = target
@@ -1654,7 +1660,7 @@ end
 
 local function trainerReactionTree(ai: any)
 	btUpdateVision(ai)
-	if not ai.trainerConceded then btTrainUnit(ai) end
+	if not ai.trainerConceded then btManageBonfires(ai) end
 	btCommandArmyTrainer(ai)
 end
 
@@ -1687,7 +1693,7 @@ local function reactionTree(ai: any)
 	if ai.personality == "trainer" then trainerReactionTree(ai); return end
 	if ai.isNightmare then applyNightmareScaling(ai) end
 	btUpdateVision(ai)
-	btTrainUnit(ai)
+	btManageBonfires(ai)
 	btCommandArmy(ai)
 end
 
@@ -1707,6 +1713,9 @@ local function applyLevel(ai: any, level: number)
 	ai.techTier        = L.techTier
 	ai.competence      = L.competence
 	ai.firstStrike     = L.firstStrike
+	-- How far the bot will Empower its bonfires (capacity scaling). Gentle: Easy never
+	-- upgrades, Medium tops out at +2, up to +4 at the highest tier.
+	ai.bonfireEmpowerCap = math.max(0, level - 1)
 end
 
 -- When the bot is first allowed to commit its main army, and when the harassment
@@ -1768,6 +1777,7 @@ function AIManager.resetBot(userId: number)
 	ai.trainedSoldiers   = 0
 	ai.trainedTanks      = 0
 	ai.totalTrained      = 0
+	ai.bonfireType       = {}
 	ai.lastKnownEnemyPos = nil
 	ai.lastEnemySeenTick = 0
 	ai.priorityTarget    = nil

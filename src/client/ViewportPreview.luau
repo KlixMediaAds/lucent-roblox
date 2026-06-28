@@ -201,4 +201,33 @@ function ViewportPreview.forBuilding(
 	end)
 end
 
+-- A bespoke icon for the Bonfire's "Empower" upgrade: a violet flame crowned by a
+-- glowing gold up-chevron (capacity/speed rising). Built here so it renders with the
+-- same framing/lighting as the other 3D slot icons.
+function ViewportPreview.forBonfireUpgrade(pixelSize: Vector2): ViewportFrame
+	return build(pixelSize, function(vpf)
+		local function part(size: Vector3, cf: CFrame, color: Color3, shape: Enum.PartType?): Part
+			local p      = Instance.new("Part")
+			if shape then (p :: any).Shape = shape end
+			p.Size       = size
+			p.CFrame     = cf
+			p.Color      = color
+			p.Material   = Enum.Material.Neon
+			p.Anchored   = true
+			p.CanCollide = false
+			p.CastShadow = false
+			p.Parent     = vpf
+			return p
+		end
+		-- Violet flame (rising, fading tip)
+		part(Vector3.new(2.0, 2.6, 2.0), CFrame.new(0, 0.0, 0), Color3.fromRGB(150,  70, 235), Enum.PartType.Ball)
+		part(Vector3.new(1.4, 1.9, 1.4), CFrame.new(0, 1.1, 0), Color3.fromRGB(190, 110, 255), Enum.PartType.Ball)
+		part(Vector3.new(0.8, 1.1, 0.8), CFrame.new(0, 2.0, 0), Color3.fromRGB(225, 180, 255), Enum.PartType.Ball)
+		-- Gold up-chevron (the two bars meet at the top centre → "^")
+		local gold = Color3.fromRGB(245, 205, 110)
+		part(Vector3.new(0.5, 2.0, 0.5), CFrame.new(-0.75, 3.3, 0) * CFrame.Angles(0, 0, math.rad(-40)), gold)
+		part(Vector3.new(0.5, 2.0, 0.5), CFrame.new( 0.75, 3.3, 0) * CFrame.Angles(0, 0, math.rad( 40)), gold)
+	end)
+end
+
 return ViewportPreview
