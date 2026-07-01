@@ -22,6 +22,7 @@ local onCCSelectedCb:        ((string?) -> ())?
 local onTurretSelectedCb:    ((string?) -> ())?
 local onBlobSelectedCb:      ((string?) -> ())?
 local onDeployerSelectedCb:  ((string?) -> ())?
+local onTestSelectedCb:      ((string?) -> ())?
 local onLampreyNestSelectedCb: ((string?) -> ())?
 local onEngineeringSelectedCb: ((string?) -> ())?
 -- Fires for an owned building that has no dedicated panel (so init.client can show
@@ -40,6 +41,7 @@ local function clearBuildingPanels()
 	if onTurretSelectedCb      then onTurretSelectedCb(nil)      end
 	if onBlobSelectedCb        then onBlobSelectedCb(nil)        end
 	if onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
+	if onTestSelectedCb        then onTestSelectedCb(nil)        end
 	if onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
 	if onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
 	if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(nil, nil) end
@@ -56,6 +58,7 @@ local function clearBuildingPanelsExcept(exceptType: string?)
 	if exceptType ~= "Turret"          and onTurretSelectedCb      then onTurretSelectedCb(nil)      end
 	if exceptType ~= "CreepyBlob"      and onBlobSelectedCb        then onBlobSelectedCb(nil)        end
 	if exceptType ~= "Deployer"        and onDeployerSelectedCb    then onDeployerSelectedCb(nil)    end
+	if exceptType ~= "TEST"            and onTestSelectedCb        then onTestSelectedCb(nil)        end
 	if exceptType ~= "LampreyNest"     and onLampreyNestSelectedCb then onLampreyNestSelectedCb(nil) end
 	if exceptType ~= "EngineeringPost" and onEngineeringSelectedCb then onEngineeringSelectedCb(nil) end
 	-- Always clear the generic "other" structure card; the click handler re-shows it
@@ -990,6 +993,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 						if onBlobSelectedCb then onBlobSelectedCb(bid) end
 					elseif owned and info.buildingType == "Deployer" then
 						if onDeployerSelectedCb then onDeployerSelectedCb(bid) end
+					elseif owned and info.buildingType == "TEST" then
+						if onTestSelectedCb then onTestSelectedCb(bid) end
 					elseif owned and info.buildingType == "LampreyNest" then
 						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(bid) end
 					elseif owned and info.buildingType == "EngineeringPost" then
@@ -1047,6 +1052,10 @@ end
 
 function UnitController.onDeployerSelected(fn: (string?) -> ())
 	onDeployerSelectedCb = fn
+end
+
+function UnitController.onTestSelected(fn: (string?) -> ())
+	onTestSelectedCb = fn
 end
 
 function UnitController.onLampreyNestSelected(fn: (string?) -> ())

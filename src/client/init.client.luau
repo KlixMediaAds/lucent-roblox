@@ -23,12 +23,14 @@ local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local HagfishBody    = require(script:WaitForChild("HagfishBody"))
 local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
+local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
 local LampreyNestPanel = require(script:WaitForChild("LampreyNestPanel"))
 local EngineeringPanel = require(script:WaitForChild("EngineeringPanel"))
 local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
+local TestPanel      = require(script:WaitForChild("TestPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
@@ -239,6 +241,7 @@ LampreyBody.init(workspace.CurrentCamera)
 HagfishBody.init(workspace.CurrentCamera)
 BroodmotherBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
+SwarmGrass.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
@@ -373,6 +376,18 @@ DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
 	function() return UnitController.getSelectedBuildingIds() end)
+-- TEST building: STRUCTURES tab reuses the CC build page, with a BACK slot wired to
+-- return to the TEST menu; hide tears that build page back down.
+TestPanel.init(Network,
+	function(techName) return researchedTechs[techName] == true end,
+	function() return currentResources end,
+	function(backFn: () -> ())
+		HUD.showBuildPage({
+			{ name = "BACK", color = Color3.fromRGB(150, 160, 178), icon = "←",
+			  desc = "Return to the TEST menu", onClick = backFn },
+		})
+	end,
+	function() HUD.hideBuildPage() end)
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
@@ -527,6 +542,7 @@ local function hideBuildingPanels()
 	BlobPanel.hide()
 	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
+	TestPanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
@@ -720,9 +736,27 @@ UnitController.onDeployerSelected(function(deployerId: string?)
 		TurretPanel.hide()
 		BlobPanel.hide()
 		CCMobilePanel.hide()
+		TestPanel.hide()
 		DeployerPanel.show(deployerId)
 	else
 		DeployerPanel.hide()
+	end
+end)
+
+-- ── TEST building panel ─────────────────────────────────────────────────────────
+UnitController.onTestSelected(function(testId: string?)
+	if testId then
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.hide()
+		CCMobilePanel.hide()
+		LampreyNestPanel.hide()
+		EngineeringPanel.hide()
+		DeployerPanel.hide()
+		TestPanel.show(testId)
+	else
+		TestPanel.hide()
 	end
 end)
 
@@ -1271,6 +1305,7 @@ Network.onResourceSync(function(amount: number)
 	TurretPanel.refreshIfVisible()
 	LampreyNestPanel.refreshIfVisible()
 	DeployerPanel.refreshIfVisible()
+	TestPanel.refreshIfVisible()
 end)
 
 -- Floating "+N" income popup over your own Foundry each income tick.
@@ -1357,6 +1392,7 @@ Network.onUnlockGranted(function(techName: string)
 	WorkshopPanel.refreshIfVisible()
 	MinePanel.refreshIfVisible()
 	DeployerPanel.refreshIfVisible()
+	TestPanel.refreshIfVisible()
 	TurretPanel.refreshIfVisible()
 	BlobPanel.refreshIfVisible()
 	CCMobilePanel.refreshIfVisible()

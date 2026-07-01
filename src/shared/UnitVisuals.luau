@@ -366,6 +366,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
+	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
@@ -1404,9 +1405,9 @@ function UnitVisuals.buildBuildingPreview(
 				* CFrame.Angles(math.sin(angle) * 0.28, 0, -math.cos(angle) * 0.28)
 		end
 
-	elseif buildingType == "Deployer" then
-		-- Bonfire (preview): the mystical purple flame from the shared builder, so the
-		-- thumbnail matches the live building exactly.
+	elseif buildingType == "Deployer" or buildingType == "TEST" then
+		-- Bonfire / TEST (preview): the mystical purple flame from the shared builder, so
+		-- the thumbnail matches the live building exactly. TEST reuses the bonfire decor.
 		base.Transparency = 1
 		UnitVisuals.buildBonfireDecor(parent, CFrame.new(position), color, false)
 

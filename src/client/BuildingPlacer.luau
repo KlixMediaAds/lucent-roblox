@@ -312,6 +312,7 @@ local function ghostSize(buildingType: string): Vector3
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
+	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	return Config.BUILDING_SIZE
 end
 

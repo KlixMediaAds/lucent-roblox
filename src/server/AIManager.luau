@@ -1912,6 +1912,7 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		Team      = team,
 		Name      = "AI_" .. aiCounter,
 		Parent    = workspace,
+		isSwarm   = swarmMode,   -- swarm-mode AIs get a distinct black spike command center
 	}
 
 	resourceManager.add(aiPlayer, Config.STARTING_RESOURCES)

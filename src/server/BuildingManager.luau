@@ -36,6 +36,10 @@ local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per 
 local deployerUnitType:  { [string]: string } = {}   -- deployerId → unit type to spawn
 local deployerUpdateAcc: { [string]: number } = {}   -- accumulator for periodic client updates
 local deployerLevel:     { [string]: number } = {}   -- bonfire Empower upgrades bought per id
+-- TEST building shares the deployer summon maps above (timers/unitType/updateAcc) but
+-- tracks its two upgrades SEPARATELY: supply (capacity) and rate (summon interval).
+local testSupplyLevel:   { [string]: number } = {}   -- TEST id → Supply upgrades bought
+local testRateLevel:     { [string]: number } = {}   -- TEST id → Spawn Rate upgrades bought
 
 -- Engineering Post research state per building id.
 local engState:     { [string]: string } = {}   -- "idle" | "researching" | "ready"
@@ -92,6 +96,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "LampreyNest"   then return Config.LAMPREY_NEST_SIZE end
 	if buildingType == "Foundry"       then return Config.FOUNDRY_SIZE end
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
+	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
 	return Config.BUILDING_SIZE
 end
@@ -125,6 +130,7 @@ local function baseCostFor(buildingType: string): number
 		or buildingType == "LampreyNest"     and Config.LAMPREY_NEST_COST
 		or buildingType == "Foundry"         and Config.FOUNDRY_COST
 		or buildingType == "EngineeringPost" and Config.ENGINEERING_POST_COST
+		or buildingType == "TEST"            and Config.TEST_COST
 		or Config.BUILDING_COST
 end
 
@@ -301,13 +307,47 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		model.PrimaryPart = base   -- needed for PivotTo during mobile movement
 		playerCCId[player.UserId] = id
 
-		-- Industrial Fabricator Core. The team-coloured base block stays as the
-		-- collision/HP part, visible between the platform rings; all decoration
-		-- (reactor pit, rings, pipes, fabrication arms) comes from the shared
-		-- builder so the thumbnail preview stays in sync. The avatar sits on the
-		-- operator pulpit at the platform edge (see init.server seatAvatarOnCC).
-		base.Material = Enum.Material.Metal
-		UnitVisuals.buildCommandCenterDecor(model, CFrame.new(position), player.TeamColor, true)
+		-- Real players are Roblox userdata (indexing an unknown member throws);
+		-- AI players are plain Lua tables carrying the isSwarm flag.
+		local isSwarmCC = type(player) == "table" and player.isSwarm == true
+		if isSwarmCC then
+			-- Swarm-mode AIs use a stark black spike instead of the Fabricator Core.
+			-- The team-coloured base stays as the collision/HP part; hide it under a
+			-- tall black cone spike rising from the base.
+			base.Transparency = 1
+
+			-- Tag for the client-side SwarmGrass renderer (black grass field). Grass
+			-- is drawn locally on each client (zero replication) as one merged mesh.
+			model:SetAttribute("SwarmCC", true)
+
+			local SPIKE_H     = 28
+			local spike       = Instance.new("Part")
+			spike.Name        = "Spike"
+			spike.Size        = Vector3.new(6, SPIKE_H, 6)
+			spike.Color       = Color3.fromRGB(8, 8, 10)
+			spike.Material    = Enum.Material.Slate
+			spike.Anchored    = true
+			spike.CanCollide  = false
+			spike.CastShadow  = true
+			spike.CFrame      = CFrame.new(position + Vector3.new(0, SPIKE_H / 2, 0))
+			spike.Parent      = model
+
+			-- Enum.PartType has no Cone; use the standard Roblox cone FileMesh.
+			-- FileMesh visual size = mesh native size (≈1 stud) × Scale.
+			local spikeMesh   = Instance.new("SpecialMesh")
+			spikeMesh.MeshType = Enum.MeshType.FileMesh
+			spikeMesh.MeshId   = "rbxassetid://1033714"
+			spikeMesh.Scale    = Vector3.new(6, SPIKE_H, 6)
+			spikeMesh.Parent   = spike
+		else
+			-- Industrial Fabricator Core. The team-coloured base block stays as the
+			-- collision/HP part, visible between the platform rings; all decoration
+			-- (reactor pit, rings, pipes, fabrication arms) comes from the shared
+			-- builder so the thumbnail preview stays in sync. The avatar sits on the
+			-- operator pulpit at the platform edge (see init.server seatAvatarOnCC).
+			base.Material = Enum.Material.Metal
+			UnitVisuals.buildCommandCenterDecor(model, CFrame.new(position), player.TeamColor, true)
+		end
 
 	elseif buildingType == "Turret" then
 		-- Military tripod-mounted machine gun
@@ -574,10 +614,10 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			spine.Parent        = model
 		end
 
-	elseif buildingType == "Deployer" then
-		-- Bonfire: a mystical purple flame that auto-summons units. The team-coloured base
-		-- stays as the invisible collision/HP box; the bonfire comes from the shared
-		-- builder so the thumbnail preview stays in sync.
+	elseif buildingType == "Deployer" or buildingType == "TEST" then
+		-- Bonfire / TEST: a mystical purple flame that auto-summons units. The team-coloured
+		-- base stays as the invisible collision/HP box; the bonfire comes from the shared
+		-- builder so the thumbnail preview stays in sync. TEST reuses the bonfire decor.
 		base.Transparency = 1
 		UnitVisuals.buildBonfireDecor(model, CFrame.new(position), player.TeamColor, true)
 
@@ -717,6 +757,13 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		deployerUnitType[id]  = "Soldier"
 		deployerUpdateAcc[id] = 0
 		deployerLevel[id]     = 0
+	end
+	if buildingType == "TEST" then
+		deployerTimers[id]    = 0
+		deployerUnitType[id]  = "Soldier"
+		deployerUpdateAcc[id] = 0
+		testSupplyLevel[id]   = 0
+		testRateLevel[id]     = 0
 	end
 
 	RemoteHandler.get(Config.REMOTES.BuildingPlaced):FireAllClients(
@@ -1713,6 +1760,8 @@ function BuildingManager.resetAll()
 	deployerUnitType         = {}
 	deployerUpdateAcc        = {}
 	deployerLevel            = {}
+	testSupplyLevel          = {}
+	testRateLevel            = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -1767,6 +1816,7 @@ local SELL_COST: { [string]: number } = {
 	Relay       = Config.RELAY_COST,
 	CreepyBlob  = Config.CREEPY_BLOB_COST,
 	LampreyNest = Config.LAMPREY_NEST_COST,
+	TEST        = Config.TEST_COST,
 }
 
 -- Sell a structure: refund part of its cost to the owner and demolish it. The
@@ -2455,6 +2505,8 @@ function BuildingManager.damage(id: string, amount: number)
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
 	deployerLevel[id]     = nil
+	testSupplyLevel[id]   = nil
+	testRateLevel[id]     = nil
 	nestEggs[id]          = nil
 	engState[id]          = nil
 	engResearchEnd[id]    = nil
@@ -2537,6 +2589,8 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		deployerUnitType[id]  = nil
 		deployerUpdateAcc[id] = nil
 		deployerLevel[id]     = nil
+		testSupplyLevel[id]   = nil
+		testRateLevel[id]     = nil
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
 		engState[id]          = nil
@@ -2606,6 +2660,9 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	-- this so their entire army can come from nests + creepy structures.
 	if buildingType == "LampreyNest" and player.UserId > 0
 		and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
+	-- TEST is limited to one per player (placed + in-flight).
+	if buildingType == "TEST"
+		and getPlayerBuildingCount(player, "TEST") + pendingCountFor(player, "TEST") >= 1 then return false end
 	if buildingType == "Relay" then
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return false end
 	end
@@ -2793,15 +2850,28 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
-		-- ── Deployer auto-spawn ───────────────────────────────────────────────
+		-- ── Deployer / TEST auto-spawn ────────────────────────────────────────
+		-- Both the Bonfire and the TEST building auto-summon their chosen unit up to a
+		-- capacity, on an interval. The Bonfire scales both from one Empower level; the
+		-- TEST building scales capacity (Supply) and interval (Spawn Rate) separately.
 		local deployerUpdateRemote = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
+		local testUpdateRemote     = RemoteHandler.get(Config.REMOTES.TestUpdate)
 		for id, data in buildingData do
-			if data.buildingType ~= "Deployer" then continue end
+			local isDeployer = data.buildingType == "Deployer"
+			local isTest     = data.buildingType == "TEST"
+			if not (isDeployer or isTest) then continue end
 			if data.isConstructing then continue end
-			-- Capacity + summon interval scale with this bonfire's Empower level.
-			local level    = deployerLevel[id] or 0
-			local capacity = Config.bonfireCapacity(level)
-			local interval = Config.bonfireInterval(level)
+
+			local capacity, interval
+			if isTest then
+				capacity = Config.testCapacity(testSupplyLevel[id] or 0)
+				interval = Config.testInterval(testRateLevel[id] or 0)
+			else
+				local level = deployerLevel[id] or 0
+				capacity = Config.bonfireCapacity(level)
+				interval = Config.bonfireInterval(level)
+			end
+
 			deployerTimers[id] = (deployerTimers[id] or 0) + dt
 			local progress = math.clamp(deployerTimers[id] / interval, 0, 1)
 			if deployerTimers[id] >= interval then
@@ -2811,7 +2881,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					local aliveCount = unitManagerRef.getDeployerAliveCount(id)
 					if aliveCount < capacity then
 						local unitType = deployerUnitType[id] or "Soldier"
-						local spawnPos = data.base.Position + Vector3.new(Config.BONFIRE_SIZE.X + 2, 0, 0)
+						local footprint = isTest and Config.TEST_SIZE.X or Config.BONFIRE_SIZE.X
+						local spawnPos = data.base.Position + Vector3.new(footprint / 2 + 2, 0, 0)
 						unitManagerRef.spawnForDeployer(id, data.owner, spawnPos, unitType)
 					end
 				end
@@ -2822,8 +2893,17 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				if deployerUpdateAcc[id] >= 0.35 then
 					deployerUpdateAcc[id] = 0
 					local unitType = deployerUnitType[id] or "Soldier"
-					local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
-					deployerUpdateRemote:FireClient(data.owner, id, unitType, progress, level, capacity, nextCost)
+					if isTest then
+						local sLvl = testSupplyLevel[id] or 0
+						local rLvl = testRateLevel[id] or 0
+						local sCost = sLvl < Config.TEST_SUPPLY_MAX_LEVEL and Config.testSupplyCost(sLvl) or 0
+						local rCost = rLvl < Config.TEST_RATE_MAX_LEVEL and Config.testRateCost(rLvl) or 0
+						testUpdateRemote:FireClient(data.owner, id, unitType, progress, sLvl, rLvl, capacity, sCost, rCost)
+					else
+						local level    = deployerLevel[id] or 0
+						local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
+						deployerUpdateRemote:FireClient(data.owner, id, unitType, progress, level, capacity, nextCost)
+					end
 				end
 			end
 		end
@@ -3095,7 +3175,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true }
+		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true, TEST=true }
 		if not PLACEABLE[buildingType] then return end
 
 		-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/Nest/Post need a Bonfire; Relay/Blob need research
@@ -3104,6 +3184,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Deployer") < 1 then return end
 		if buildingType == "EngineeringPost" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
 		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
+		-- TEST is limited to one per player (placed + in-flight).
+		if buildingType == "TEST"
+			and getPlayerBuildingCount(player, "TEST") + pendingCountFor(player, "TEST") >= 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
@@ -3251,6 +3334,65 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			-- `true` 8th arg flags a fresh upgrade so the client plays the empower FX.
 			updateRemote:FireClient(player, id, unitType, progress, level, Config.bonfireCapacity(level), nextCost, true)
 		end
+	end)
+
+	-- ── TEST building remotes (separate Supply + Spawn Rate upgrades) ───────────
+	-- Fires a full TestUpdate to the owner so the panel reflects the latest state.
+	local function sendTestUpdate(player: any, id: string, justUpgraded: boolean?)
+		local data = buildingData[id]
+		if not data then return end
+		local sLvl     = testSupplyLevel[id] or 0
+		local rLvl     = testRateLevel[id] or 0
+		local unitType = deployerUnitType[id] or "Soldier"
+		local capacity = Config.testCapacity(sLvl)
+		local interval = Config.testInterval(rLvl)
+		local progress = math.clamp((deployerTimers[id] or 0) / interval, 0, 1)
+		local sCost    = sLvl < Config.TEST_SUPPLY_MAX_LEVEL and Config.testSupplyCost(sLvl) or 0
+		local rCost    = rLvl < Config.TEST_RATE_MAX_LEVEL and Config.testRateCost(rLvl) or 0
+		RemoteHandler.get(Config.REMOTES.TestUpdate):FireClient(
+			player, id, unitType, progress, sLvl, rLvl, capacity, sCost, rCost, justUpgraded)
+	end
+
+	-- Set the unit type a TEST building auto-summons (mirrors SetDeployerType).
+	RemoteHandler.get(Config.REMOTES.SetTestType).OnServerEvent:Connect(function(player, testId, unitType)
+		if type(testId) ~= "string" or type(unitType) ~= "string" then return end
+		local VALID = { Soldier = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
+		if not VALID[unitType] then return end
+		local data = buildingData[testId]
+		if not data or data.buildingType ~= "TEST" or data.owner ~= player then return end
+		if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
+			local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
+			if not researchManagerRef.hasResearch(player, req) then return end
+		end
+		deployerUnitType[testId] = unitType
+		sendTestUpdate(player, testId)
+	end)
+
+	-- Upgrade a TEST building's Supply (capacity) or Spawn Rate (interval) — separately.
+	RemoteHandler.get(Config.REMOTES.UpgradeTest).OnServerEvent:Connect(function(player, testId, kind)
+		if type(testId) ~= "string" or type(kind) ~= "string" then return end
+		local data = buildingData[testId]
+		if not data or data.buildingType ~= "TEST" or data.owner ~= player or data.isConstructing then return end
+		if not resourceManagerRef then return end
+
+		if kind == "supply" then
+			local lvl = testSupplyLevel[testId] or 0
+			if lvl >= Config.TEST_SUPPLY_MAX_LEVEL then return end
+			local cost = Config.testSupplyCost(lvl)
+			if resourceManagerRef.get(player) < cost then return end
+			resourceManagerRef.spend(player, cost)
+			testSupplyLevel[testId] = lvl + 1
+		elseif kind == "rate" then
+			local lvl = testRateLevel[testId] or 0
+			if lvl >= Config.TEST_RATE_MAX_LEVEL then return end
+			local cost = Config.testRateCost(lvl)
+			if resourceManagerRef.get(player) < cost then return end
+			resourceManagerRef.spend(player, cost)
+			testRateLevel[testId] = lvl + 1
+		else
+			return
+		end
+		sendTestUpdate(player, testId, true)
 	end)
 
 	-- ── UpgradeTurret remote ──────────────────────────────────────────────

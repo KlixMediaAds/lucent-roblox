@@ -57,6 +57,41 @@ function Config.bonfireInterval(level: number): number
 		Config.DEPLOYER_BASE_INTERVAL * Config.DEPLOYER_UPGRADE_INTERVAL_MULT ^ math.max(0, level))
 end
 
+-- TEST building — a 4×4-tile "super bonfire" sandbox structure (limit 1 per player).
+-- When selected it opens a 3-way menu: UPGRADES, UNITS, STRUCTURES.
+--   • UNITS     — same unit grid as the Bonfire; picks which unit it auto-summons.
+--   • STRUCTURES— the Command Center build options.
+--   • UPGRADES  — two SEPARATE repeatable upgrades: Supply (+capacity) and
+--                 Spawn Rate (shorter summon interval). Unlike the Bonfire's combined
+--                 "Empower", these are tracked and purchased independently.
+Config.TEST_COST              = 100  -- build cost (flat)
+Config.TEST_SIZE              = Vector3.new(20, 8, 20)  -- 4×4 tiles (grid = 5)
+Config.TEST_BASE_CAPACITY     = 3    -- max simultaneous summoned units at supply level 0
+Config.TEST_BASE_INTERVAL     = 15   -- seconds between summons at rate level 0
+Config.TEST_MIN_INTERVAL      = 3.5  -- floor so deep rate upgrades don't go absurd
+Config.TEST_SUPPLY_COST       = 75   -- base cost of the first Supply upgrade
+Config.TEST_SUPPLY_GROWTH     = 1.22 -- Supply cost multiplier per level already bought
+Config.TEST_SUPPLY_CAP_STEP   = 1    -- +capacity per Supply level
+Config.TEST_SUPPLY_MAX_LEVEL  = 20   -- max Supply upgrades
+Config.TEST_RATE_COST         = 75   -- base cost of the first Spawn Rate upgrade
+Config.TEST_RATE_GROWTH       = 1.22 -- Spawn Rate cost multiplier per level already bought
+Config.TEST_RATE_INTERVAL_MULT = 0.9 -- summon interval ×this per Spawn Rate level (until the floor)
+Config.TEST_RATE_MAX_LEVEL    = 20   -- max Spawn Rate upgrades
+
+function Config.testSupplyCost(level: number): number
+	return math.floor(Config.TEST_SUPPLY_COST * Config.TEST_SUPPLY_GROWTH ^ math.max(0, level) + 0.5)
+end
+function Config.testRateCost(level: number): number
+	return math.floor(Config.TEST_RATE_COST * Config.TEST_RATE_GROWTH ^ math.max(0, level) + 0.5)
+end
+function Config.testCapacity(supplyLevel: number): number
+	return Config.TEST_BASE_CAPACITY + supplyLevel * Config.TEST_SUPPLY_CAP_STEP
+end
+function Config.testInterval(rateLevel: number): number
+	return math.max(Config.TEST_MIN_INTERVAL,
+		Config.TEST_BASE_INTERVAL * Config.TEST_RATE_INTERVAL_MULT ^ math.max(0, rateLevel))
+end
+
 -- Unit types (trained from Barracks)
 Config.UNIT_TYPES = {
 	Soldier       = { cost = 25,  size = Vector3.new(4, 4, 4) },
@@ -365,7 +400,7 @@ Config.VISION_DEFAULT = 40
 Config.VISION_RADIUS  = {
 	CommandCenter = 75, Foundry = 55, Turret = 40, EngineeringPost = 50,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
-	LampreyNest = 50,
+	LampreyNest = 50, TEST = 55,
 }
 
 -- Mutant turret → creepy soldier spawning
@@ -379,12 +414,12 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15 }
+Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15, TEST = 12 }
 Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0 }
 
 -- Combat / Health
 Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55 }
-Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550 }
+Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
 Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14 }
 Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13 }
 Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7 }
@@ -462,6 +497,9 @@ Config.REMOTES = {
 	SetDeployerType         = "SetDeployerType",
 	DeployerUpdate          = "DeployerUpdate",
 	UpgradeDeployer         = "UpgradeDeployer",
+	SetTestType             = "SetTestType",
+	TestUpdate              = "TestUpdate",
+	UpgradeTest             = "UpgradeTest",
 	LampreyEgg              = "LampreyEgg",
 	HagfishStrike           = "HagfishStrike",
 	BroodmotherDeath        = "BroodmotherDeath",

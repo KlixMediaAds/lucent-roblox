@@ -117,6 +117,13 @@ local BUILDING_INFO: { [string]: BuildingInfo } = {
 	CreepyBlob = { cost = Config.CREEPY_BLOB_COST,  requires = {},             researchReq = "CreepyBlob" },
 	LampreyNest = { cost = Config.LAMPREY_NEST_COST, requires = { Deployer = 1 }, researchReq = nil       },
 	EngineeringPost = { cost = Config.ENGINEERING_POST_COST, requires = { Deployer = 1 }, researchReq = nil },
+	TEST       = { cost = Config.TEST_COST,         requires = {},               researchReq = nil        },
+}
+
+-- Buildings limited to a fixed number per player; their build node hides once the
+-- player owns (or has in-flight) that many. TEST is a one-at-a-time structure.
+local BUILDING_MAX_COUNT: { [string]: number } = {
+	TEST = 1,
 }
 
 -- Display labels that differ from the internal building-type id.
@@ -124,6 +131,7 @@ local DISPLAY_NAME: { [string]: string } = {
 	Deployer        = "Bonfire",
 	LampreyNest     = "Nest",
 	EngineeringPost = "Eng Post",
+	TEST            = "TEST",
 }
 
 local function dispName(btype: string): string
@@ -151,6 +159,7 @@ local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string }
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 	{ btype = "LampreyNest", icon = "🥚", color = Color3.fromRGB(120, 190, 60), desc = "Births Lampreys from pulsing eggs"             },
 	{ btype = "EngineeringPost", icon = "🔬", color = Color3.fromRGB(90, 200, 255), desc = "Researches random combat upgrades for your units" },
+	{ btype = "TEST", icon = "🧪", color = Color3.fromRGB(160, 80, 230), desc = "Sandbox bonfire (limit 1): summons units, builds structures & has separate supply / spawn-rate upgrades" },
 }
 local CHILD_SPACING = 114   -- px between child centres
 
@@ -264,8 +273,14 @@ end
 -- A build node is shown only once it is fully available — both its research gate
 -- (if any) and its building prerequisites are met. Locked structures are hidden
 -- entirely rather than shown greyed-out.
+local function isAtMaxCount(btype: string): boolean
+	local max = BUILDING_MAX_COUNT[btype]
+	if not max then return false end
+	return (playerCounts[btype] or 0) + (pendingCounts[btype] or 0) >= max
+end
+
 local function isNodeVisible(btype: string): boolean
-	return isResearchVisible(btype) and isUnlocked(btype)
+	return isResearchVisible(btype) and isUnlocked(btype) and not isAtMaxCount(btype)
 end
 
 -- Re-packs the visible build nodes into consecutive slots along the bottom bar so

@@ -267,4 +267,19 @@ function Network.onDeployerUpdate(fn: (string, string, number, number?, number?,
 	RemoteHandler.get(Config.REMOTES.DeployerUpdate).OnClientEvent:Connect(fn)
 end
 
+-- ── TEST building ───────────────────────────────────────────────────────────
+function Network.setTestType(testId: string, unitType: string)
+	RemoteHandler.get(Config.REMOTES.SetTestType):FireServer(testId, unitType)
+end
+
+-- Upgrade a TEST building's "supply" (capacity) or "rate" (summon speed), separately.
+function Network.upgradeTest(testId: string, kind: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeTest):FireServer(testId, kind)
+end
+
+-- testId, unitType, progress (0–1), supplyLevel, rateLevel, capacity, supplyCost, rateCost, justUpgraded
+function Network.onTestUpdate(fn: (string, string, number, number, number, number, number, number, boolean?) -> ())
+	RemoteHandler.get(Config.REMOTES.TestUpdate).OnClientEvent:Connect(fn)
+end
+
 return Network
