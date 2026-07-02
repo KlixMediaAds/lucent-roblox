@@ -29,6 +29,8 @@ local GREY  = BrickColor.new("Dark stone grey").Color
 local BLACK = BrickColor.new("Black").Color
 local BRASS = BrickColor.new("Warm Yellow").Color
 local WHITE = BrickColor.new("White").Color
+local GHILLIE  = Color3.fromRGB( 58,  70,  44)   -- Sniper's dark camo ghillie wrap / hood
+local GUNMETAL = Color3.fromRGB( 38,  40,  46)   -- Sniper's long rifle body
 
 local SMOOTH = Enum.Material.SmoothPlastic
 local METAL  = Enum.Material.Metal
@@ -117,7 +119,7 @@ local HOWITZER: Blueprint = {
 	},
 }
 
--- ── Soldier: little trooper — team-coloured body, skin-toned head + arms ──────
+-- ── Survivor: little trooper — team-coloured body, skin-toned head + arms ──────
 -- Body root is an invisible anchor. Stack (bottom→top): legs ball, torso pill,
 -- shoulders ball (all team colour = uniform), then a small skin sphere head and
 -- two little skin arms reaching forward to grip the rifle held across the chest.
@@ -138,6 +140,41 @@ local SOLDIER: Blueprint = {
 		{ size = Vector3.new(0.42, 0.42, 0.42), cf = CFrame.new( 0.05, 0.30, -1.15), skin = true, material = SMOOTH, shape = BALL }, -- front hand (foregrip)
 		-- ── Rifle (held across the front) ────────────────────────────────────
 		{ size = Vector3.new(0.30, 0.26, 1.7),  cf = CFrame.new( 0.30, 0.40, -0.70), color = GREY, material = SMOOTH },
+	},
+}
+
+-- ── Sniper: a marksman kitted differently from the trooper ─────────────────────
+-- Same team-coloured trooper base, but draped in a dark ghillie wrap + hood (the
+-- "different wear"), and shouldering a long scoped rifle that reads as a sniper at
+-- a glance. Body stays team-tinted so allegiance is still readable; the gear + gun
+-- are fixed dark colours. −Z is forward; the rifle runs out ahead of the chest.
+local SNIPER: Blueprint = {
+	rootTransparent = true,
+	parts = {
+		-- ── Body / uniform (team colour) ─────────────────────────────────────
+		{ size = Vector3.new(1.5, 2.0, 2.0), cf = CFrame.Angles(0, 0, math.pi / 2), color = nil, material = SMOOTH, shape = CYL  }, -- torso pill
+		{ size = Vector3.new(2.0, 2.0, 2.0), cf = CFrame.new(0, -0.75, 0),          color = nil, material = SMOOTH, shape = BALL }, -- lower body / legs
+		{ size = Vector3.new(2.0, 2.0, 2.0), cf = CFrame.new(0,  0.75, 0),          color = nil, material = SMOOTH, shape = BALL }, -- chest / shoulders
+		-- ── Ghillie wrap + hood (fixed dark camo — the distinguishing kit) ────
+		{ size = Vector3.new(1.75, 1.55, 1.35), cf = CFrame.new(0, 0.55, 0.45),     color = GHILLIE, material = SMOOTH },              -- cloak hanging off the back
+		{ size = Vector3.new(2.15, 0.55, 2.15), cf = CFrame.new(0, 1.05, 0),        color = GHILLIE, material = SMOOTH, shape = BALL }, -- shoulder shroud
+		{ size = Vector3.new(1.35, 0.75, 1.35), cf = CFrame.new(0, 2.05, 0.05),     color = GHILLIE, material = SMOOTH, shape = BALL }, -- hood over the crown
+		-- ── Head (skin) ──────────────────────────────────────────────────────
+		{ size = Vector3.new(1.1, 1.1, 1.1), cf = CFrame.new(0, 1.7, 0),            skin = true, material = SMOOTH, shape = BALL, name = "_SniperHead" }, -- little round head
+		-- ── Arms bracing the long rifle (skin) ───────────────────────────────
+		{ size = Vector3.new(0.34, 0.34, 1.25), cf = CFrame.new( 0.65, 0.25, -0.55) * CFrame.Angles(0, math.rad(-8),  0), skin = true, material = SMOOTH }, -- right arm
+		{ size = Vector3.new(0.34, 0.34, 1.55), cf = CFrame.new(-0.05, 0.20, -0.95) * CFrame.Angles(0, math.rad( 14), 0), skin = true, material = SMOOTH }, -- left arm reaches far down the barrel
+		{ size = Vector3.new(0.42, 0.42, 0.42), cf = CFrame.new( 0.50, 0.30, -0.05), skin = true, material = SMOOTH, shape = BALL }, -- rear hand (trigger)
+		{ size = Vector3.new(0.42, 0.42, 0.42), cf = CFrame.new( 0.05, 0.24, -1.65), skin = true, material = SMOOTH, shape = BALL }, -- front hand (far foregrip)
+		-- ── Long sniper rifle (across the front, reaching well past the chest) ─
+		{ size = Vector3.new(0.30, 0.32, 0.75), cf = CFrame.new( 0.30, 0.36,  0.35), color = GUNMETAL, material = METAL },              -- shoulder stock (rear)
+		{ size = Vector3.new(0.30, 0.30, 2.9),  cf = CFrame.new( 0.30, 0.42, -0.95), color = GUNMETAL, material = METAL },              -- receiver + long barrel
+		{ size = Vector3.new(0.16, 0.16, 0.9),  cf = CFrame.new( 0.30, 0.42, -2.55), color = BLACK,    material = METAL },              -- slim muzzle / suppressor
+		-- ── Telescopic sight (block scope + glowing team-colour lens) ─────────
+		{ size = Vector3.new(0.22, 0.22, 1.05), cf = CFrame.new( 0.30, 0.66, -0.80), color = BLACK, material = METAL },                 -- scope tube
+		{ size = Vector3.new(0.10, 0.24, 0.10), cf = CFrame.new( 0.30, 0.54, -0.55), color = BLACK, material = METAL },                 -- rear scope mount
+		{ size = Vector3.new(0.10, 0.24, 0.10), cf = CFrame.new( 0.30, 0.54, -1.05), color = BLACK, material = METAL },                 -- front scope mount
+		{ size = Vector3.new(0.24, 0.24, 0.24), cf = CFrame.new( 0.30, 0.66, -1.35), color = nil,   material = NEON, shape = BALL },     -- objective lens (team-colour glint)
 	},
 }
 
@@ -204,7 +241,8 @@ local FOAMER: Blueprint = {
 ]]
 function UnitBlueprints.get(unitType: string, bodySize: Vector3): Blueprint?
 	if unitType == "Howitzer" then return HOWITZER end
-	if unitType == "Soldier"  then return SOLDIER  end
+	if unitType == "Survivor"  then return SOLDIER  end
+	if unitType == "Sniper"    then return SNIPER   end
 	if unitType == "Tank"     then return tankBlueprint(bodySize)  end
 	if unitType == "Medic"    then return medicBlueprint(bodySize) end
 	if unitType == "Foamer"   then return FOAMER   end

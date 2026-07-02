@@ -328,10 +328,16 @@ local function seatAvatarOnCC(player: Player, ccId: string)
 		seat.Transparency = 1
 		seat.CanCollide   = false
 		seat.Anchored     = false
-		-- Pulpit deck top sits 0.6 studs above the roof at local (-5.6, 0); face the reactor
-		seat.CFrame       = ccBase.CFrame
-			* CFrame.new(-5.6, Config.COMMAND_CENTER_SIZE.Y / 2 + 0.65, 0)
-			* CFrame.Angles(0, -math.pi / 2, 0)
+		if ccModel:GetAttribute("SwarmCC") then
+			-- The Hollowed spike has no operator pulpit; perch the avatar on top of the
+			-- base at centre instead of floating where the Human pulpit would be.
+			seat.CFrame = ccBase.CFrame * CFrame.new(0, Config.COMMAND_CENTER_SIZE.Y / 2 + 0.65, 0)
+		else
+			-- Pulpit deck top sits 0.6 studs above the roof at local (-5.6, 0); face the reactor
+			seat.CFrame = ccBase.CFrame
+				* CFrame.new(-5.6, Config.COMMAND_CENTER_SIZE.Y / 2 + 0.65, 0)
+				* CFrame.Angles(0, -math.pi / 2, 0)
+		end
 		seat.Parent       = ccModel
 
 		-- Weld keeps the seat rigid with the base even if physics nudges it

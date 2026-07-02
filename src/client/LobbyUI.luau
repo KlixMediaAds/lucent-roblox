@@ -28,6 +28,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local LobbyUI     = {}
 local localPlayer = Players.LocalPlayer
@@ -134,6 +135,9 @@ local depositDots: { Frame } = {}
 local terrainDots: { Frame } = {}
 local isReady             = false
 local settingsExpanded    = false
+-- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
+local selectedFaction     = "Humans"
+local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel } } = {}
 local lobbyTerrainEnabled = false
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
@@ -834,6 +838,71 @@ local function setSettingsExpanded(expanded: boolean, instant: boolean?)
 	end
 end
 
+-- Highlight whichever faction card is currently chosen (gold border + brighter fill).
+local function applyFactionVisual()
+	for f, refs in factionCards do
+		local sel = f == selectedFaction
+		refs.card.BackgroundColor3 = sel and C_PANEL_HI or C_SLOT
+		refs.stroke.Color          = sel and C_GOLD or C_BORDER
+		refs.stroke.Thickness      = sel and 2 or 1
+		refs.stroke.Transparency   = sel and 0 or 0.35
+		refs.name.TextColor3       = sel and C_GOLD or C_TEXT
+	end
+end
+
+-- Pick a team and tell the server (stored per-player, like team colour).
+local function setFaction(faction: string)
+	if selectedFaction == faction then return end
+	selectedFaction = faction
+	applyFactionVisual()
+	RemoteHandler.get(Config.REMOTES.LobbySetFaction):FireServer(faction)
+end
+
+-- Two picture buttons side by side: Humans (a Survivor) and Hollowed (a Lamprey),
+-- each a 3D unit thumbnail above a label. The chosen one reads as selected.
+local function buildFactionSection(parent: Instance, y: number)
+	label(parent, "TEAM", 12, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -32, 0, 16), UDim2.fromOffset(16, y), Enum.TextXAlignment.Left)
+
+	local FB_GAP = 12
+	local innerW = SETTINGS_W - 32
+	local fbW    = math.floor((innerW - FB_GAP) / 2)
+	local fbH    = 120
+	local fbY    = y + 22
+
+	local defs = {
+		{ faction = "Humans",   unit = "Survivor", label = "HUMANS"   },
+		{ faction = "Hollowed", unit = "Lamprey",  label = "HOLLOWED" },
+	}
+	for i, d in defs do
+		local bx   = 16 + (i - 1) * (fbW + FB_GAP)
+		local card = Instance.new("TextButton")
+		card.Name             = "Faction_" .. d.faction
+		card.Size             = UDim2.fromOffset(fbW, fbH)
+		card.Position         = UDim2.fromOffset(bx, fbY)
+		card.BackgroundColor3  = C_SLOT
+		card.AutoButtonColor  = false
+		card.BorderSizePixel  = 0
+		card.Text             = ""
+		card.Parent           = parent
+		corner(card, 6)
+		local st = stroke(card, C_BORDER, 1); st.Transparency = 0.35
+
+		local vpf    = ViewportPreview.forUnit(d.unit, Vector2.new(fbW - 16, fbH - 36))
+		vpf.Position = UDim2.fromOffset(8, 6)
+		vpf.Parent   = card
+
+		local nameLbl = label(card, d.label, 13, C_TEXT, Enum.Font.GothamBold,
+			UDim2.new(1, 0, 0, 18), UDim2.new(0, 0, 1, -24), Enum.TextXAlignment.Center)
+
+		local faction = d.faction
+		card.MouseButton1Click:Connect(function() setFaction(faction) end)
+		factionCards[faction] = { card = card, stroke = st, name = nameLbl }
+	end
+
+	applyFactionVisual()  -- default (Humans) reads as selected without a network call
+end
+
 local function buildSettingsColumn()
 	settingsPanel = Instance.new("Frame")
 	settingsPanel.Name = "Settings"
@@ -889,9 +958,8 @@ local function buildSettingsColumn()
 	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C_TITLE, true)
 	rowY += ROW_STEP
 
-	-- Teams (coming soon — FFA for now)
-	local teamsBtn = settingRow(settingsPanel, rowY, "TEAMS", "FFA · COMING SOON", C_SUBTEXT, false)
-	teamsBtn.TextSize = 13
+	-- Team / faction: two picture buttons — Humans (a Survivor) vs Hollowed (a Lamprey).
+	buildFactionSection(settingsPanel, rowY)
 
 	header.MouseButton1Click:Connect(function()
 		setSettingsExpanded(not settingsExpanded)
@@ -1107,6 +1175,11 @@ function LobbyUI.init(onGameStart: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.LobbyStart).OnClientEvent:Connect(function()
 		playGameStartTransition(onGameStart)
 	end)
+end
+
+-- The locally-chosen team/faction ("Humans" or "Hollowed").
+function LobbyUI.getFaction(): string
+	return selectedFaction
 end
 
 return LobbyUI

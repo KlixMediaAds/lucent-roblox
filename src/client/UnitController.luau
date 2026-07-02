@@ -28,6 +28,9 @@ local onEngineeringSelectedCb: ((string?) -> ())?
 -- Fires for an owned building that has no dedicated panel (so init.client can show
 -- a generic "upgrades coming soon" command card). (buildingId, buildingType) or nil.
 local onOtherBuildingSelectedCb: ((string?, string?) -> ())?
+-- Fires whenever the selected UNIT set changes (with the current owned-unit ids),
+-- so init.client can show a unit command card (e.g. the Survivor upgrade menu).
+local onUnitsSelectedCb:     (({string}) -> ())?
 local onMoveIssuedCb:        (() -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
@@ -110,6 +113,7 @@ local MIN_DRAG   = 8   -- pixels
 
 -- ── Unit voice lines ─────────────────────────────────────────────────────────
 local SOLDIER_VOICE_IDS     = {88664954760340,  70872333577296,  135999718666781}
+local SNIPER_VOICE_IDS      = {78319577229180}
 local TANK_VOICE_IDS        = {128274629467753, 139954121143852, 75168311027870}
 local SOLDIER_DEATH_ID      = 97350089441789
 local TANK_DEATH_ID         = 137547229383680
@@ -128,6 +132,7 @@ local function playSound(id: number, pitchRange: number, volume: number)
 end
 
 local function playSoldierVoice() playSound(SOLDIER_VOICE_IDS[math.random(#SOLDIER_VOICE_IDS)], 0.2, 1) end
+local function playSniperVoice()  playSound(SNIPER_VOICE_IDS[math.random(#SNIPER_VOICE_IDS)],   0.12, 1) end
 local function playSoldierDeath() playSound(SOLDIER_DEATH_ID, 0.12, 1) end
 local function playTankVoice()    playSound(TANK_VOICE_IDS[math.random(#TANK_VOICE_IDS)],       0.1, 7) end
 local function playTankDeath()    playSound(TANK_DEATH_ID, 0.06, 7) end
@@ -359,8 +364,9 @@ local function maybeUnitVoice()
 		if info and info.ownerId == localPlayer.UserId then
 			local ut = info.part:FindFirstChild("UnitType")
 			if ut then
-				if      ut.Value == "Tank"    then playTankVoice();    return
-				elseif  ut.Value == "Soldier" then playSoldierVoice(); return
+				if      ut.Value == "Tank"     then playTankVoice();    return
+				elseif  ut.Value == "Sniper"   then playSniperVoice();  return
+				elseif  ut.Value == "Survivor" then playSoldierVoice(); return
 				end
 			end
 		end
@@ -406,6 +412,7 @@ end
 local function notify()
 	syncSelectionBoxes()
 	if onChangedCb then onChangedCb(#selected) end
+	if onUnitsSelectedCb then onUnitsSelectedCb(selected) end
 end
 
 local function clearSelection()
@@ -756,7 +763,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if ownerId == localPlayer.UserId then
 				local ut = part:FindFirstChild("UnitType")
 				if ut then
-					if      ut.Value == "Soldier" then playSoldierVoice()
+					if      ut.Value == "Survivor" then playSoldierVoice()
+					elseif  ut.Value == "Sniper"   then playSniperVoice()
 					elseif  ut.Value == "Tank"    then playTankVoice()
 					end
 				end
@@ -779,7 +787,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	-- Unit death sounds
 	network.onUnitDied(function(unitType: string, _pos: Vector3)
 		if      unitType == "Tank"    then playTankDeath()
-		elseif  unitType == "Soldier" then playSoldierDeath()
+		elseif  unitType == "Survivor" then playSoldierDeath()
 		elseif  unitType == "Lamprey" then playLampreyDeath()
 		end
 	end)
@@ -1028,6 +1036,18 @@ end
 
 function UnitController.onSelectionChanged(fn: (number) -> ())
 	onChangedCb = fn
+end
+
+function UnitController.onUnitsSelected(fn: ({string}) -> ())
+	onUnitsSelectedCb = fn
+end
+
+-- The UnitType of a tracked unit (reads the "UnitType" StringValue on its part).
+function UnitController.getUnitType(id: string): string?
+	local info = knownUnits[id]
+	if not info then return nil end
+	local tv = info.part:FindFirstChild("UnitType")
+	return tv and (tv :: StringValue).Value or nil
 end
 
 function UnitController.onBarracksSelected(fn: (string?) -> ())

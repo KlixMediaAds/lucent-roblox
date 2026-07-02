@@ -39,7 +39,8 @@ local BONE     = Color3.fromRGB(226, 221, 202)
 type Blood = { spray: Color3, pool: Color3, bone: boolean }
 
 local BLOOD: { [string]: Blood } = {
-	Soldier       = { spray = RED,   pool = RED_DK,   bone = true  },
+	Survivor      = { spray = RED,   pool = RED_DK,   bone = true  },
+	Sniper        = { spray = RED,   pool = RED_DK,   bone = true  },
 	Elite         = { spray = RED,   pool = RED_DK,   bone = true  },
 	Medic         = { spray = RED,   pool = RED_DK,   bone = true  },
 	Lamprey       = { spray = EEL,   pool = EEL_DK,   bone = false },
@@ -51,7 +52,7 @@ local DEFAULT_BLOOD: Blood = { spray = RED, pool = RED_DK, bone = true }
 
 -- Scales gib count, particle volume and pool radius with the unit's mass.
 local SCALE: { [string]: number } = {
-	Soldier = 1.0, Elite = 1.25, Medic = 1.0, CreepySoldier = 1.0,
+	Survivor = 1.0, Sniper = 1.0, Elite = 1.25, Medic = 1.0, CreepySoldier = 1.0,
 	Lamprey = 1.7, Hagfish = 1.4, Broodmother = 3.2,
 }
 
@@ -144,7 +145,9 @@ end
 
 -- ── Particle bursts ─────────────────────────────────────────────────────────────
 
-local function burst(pos: Vector3, color: Color3, scale: number)
+local function burst(pos: Vector3, color: Color3, scale: number, emitMul: number?, power: number?)
+	emitMul = emitMul or 1
+	power   = power or 1
 	local fx        = Instance.new("Part")
 	fx.Size         = Vector3.one * 0.1
 	fx.Position     = pos
@@ -161,7 +164,7 @@ local function burst(pos: Vector3, color: Color3, scale: number)
 	spray.Color            = ColorSequence.new(color)
 	spray.LightInfluence   = 1
 	spray.Lifetime         = NumberRange.new(0.35, 0.75)
-	spray.Speed            = NumberRange.new(20, 46)
+	spray.Speed            = NumberRange.new(20 * power, 46 * power)
 	spray.SpreadAngle      = Vector2.new(180, 180)
 	spray.Acceleration     = Vector3.new(0, -75, 0)
 	spray.Rotation         = NumberRange.new(0, 360)
@@ -194,16 +197,57 @@ local function burst(pos: Vector3, color: Color3, scale: number)
 	mist.Enabled        = false
 	mist.Parent         = fx
 
-	spray:Emit(math.floor(22 * scale + 0.5))
-	mist:Emit(math.floor(14 * scale + 0.5))
+	spray:Emit(math.floor(22 * scale * emitMul + 0.5))
+	mist:Emit(math.floor(14 * scale * emitMul + 0.5))
 	Debris:AddItem(fx, 2.5)
+end
+
+-- Vertical blood geyser — a pressurised column that shoots up and rains back down.
+-- Used for the most violent deaths where the body ruptures at the torso.
+local function bloodFountain(pos: Vector3, color: Color3, scale: number)
+	local part        = Instance.new("Part")
+	part.Size         = Vector3.one * 0.2
+	part.Position     = pos
+	part.Transparency = 1
+	part.Anchored     = true
+	part.CanCollide   = false
+	part.CanQuery     = false
+	part.CanTouch     = false
+	part.CastShadow   = false
+	part.Parent       = folder()
+
+	local fountain          = Instance.new("ParticleEmitter")
+	fountain.Color          = ColorSequence.new(color)
+	fountain.EmissionDirection = Enum.NormalId.Top
+	fountain.LightInfluence = 1
+	fountain.Lifetime       = NumberRange.new(0.7, 1.4)
+	fountain.Speed          = NumberRange.new(26, 44)
+	fountain.SpreadAngle    = Vector2.new(24, 24)
+	fountain.Acceleration   = Vector3.new(0, -60, 0)
+	fountain.Rotation       = NumberRange.new(0, 360)
+	fountain.RotSpeed       = NumberRange.new(-160, 160)
+	fountain.Size           = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.6 * scale), NumberSequenceKeypoint.new(1, 0.1) })
+	fountain.Transparency   = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05), NumberSequenceKeypoint.new(0.8, 0.3),
+		NumberSequenceKeypoint.new(1, 1) })
+	fountain.Enabled        = false
+	fountain.Parent         = part
+	fountain:Emit(math.floor(50 * scale + 0.5))
+	Debris:AddItem(part, 2.5)
 end
 
 -- ── Physics gibs ────────────────────────────────────────────────────────────────
 
-local function flingGibs(pos: Vector3, info: Blood, scale: number)
-	local n = math.clamp(math.floor(3.5 * scale + 0.5), 3, 16)
-	local rscale = math.sqrt(scale)
+-- `gibMul` multiplies the chunk count, `level` (1–3) makes higher tiers throw
+-- bigger chunks harder, and `blast` flattens the arc into a wide horizontal spray
+-- (the tier-3 "blown apart" second wave) instead of a fountaining upward toss.
+local function flingGibs(pos: Vector3, info: Blood, scale: number, gibMul: number?, level: number?, blast: boolean?)
+	gibMul = gibMul or 1
+	level  = level or 1
+	local n = math.clamp(math.floor(3.5 * scale * gibMul + 0.5), 3, 42)
+	local rscale  = math.sqrt(scale) * (1 + (level - 1) * 0.22)   -- bigger chunks at higher tiers
+	local force   = (1 + (level - 1) * 0.55) * (if blast then 1.5 else 1)
 	for _ = 1, n do
 		local gib       = Instance.new("Part")
 		gib.Material    = Enum.Material.SmoothPlastic
@@ -229,8 +273,8 @@ local function flingGibs(pos: Vector3, info: Blood, scale: number)
 		gib.Parent   = folder()
 
 		local ang   = math.random() * math.pi * 2
-		local outSp = 12 + math.random() * 24
-		local upSp  = 14 + math.random() * 18
+		local outSp = (12 + math.random() * 24) * force
+		local upSp  = (14 + math.random() * 18) * force * (if blast then 0.4 else 1)
 		gib.AssemblyLinearVelocity  = Vector3.new(math.cos(ang) * outSp, upSp, math.sin(ang) * outSp)
 		gib.AssemblyAngularVelocity = Vector3.new(
 			(math.random() - 0.5) * 30, (math.random() - 0.5) * 30, (math.random() - 0.5) * 30)
@@ -384,22 +428,47 @@ end
 
 -- ── Public API ──────────────────────────────────────────────────────────────────
 
--- Full death gore at a biological unit's position.
-function GoreManager.spawn(unitType: string, pos: Vector3)
+-- Death violence tiers, picked by how far the killing blow overkilled the victim.
+-- Tier 1 is the baseline spray/gibs/pool. Tier 2 (a heavy overkill) ruptures the
+-- body — more gibs flung wider, a thicker double spray, a bigger pool and more
+-- splatter. Tier 3 (a massive overkill) blows it apart — a vertical blood geyser
+-- and a violent low horizontal gib blast on top of everything else.
+type Tier = { emit: number, gibs: number, pool: number, splats: number, reach: number }
+local TIER: { Tier } = {
+	{ emit = 1.0, gibs = 1.0, pool = 1.0, splats = 1.0, reach = 1.0 },   -- clean kill
+	{ emit = 1.8, gibs = 2.1, pool = 1.4, splats = 1.9, reach = 1.5 },   -- ruptured
+	{ emit = 2.8, gibs = 3.4, pool = 1.9, splats = 3.0, reach = 2.2 },   -- blown apart
+}
+
+-- Full death gore at a biological unit's position. `level` (1–3, default 1) is the
+-- gore tier — how gruesome the death is; see TIER above.
+function GoreManager.spawn(unitType: string, pos: Vector3, level: number?)
 	local info  = BLOOD[unitType] or DEFAULT_BLOOD
 	local scale = SCALE[unitType] or 1
+	local lv    = math.clamp(math.floor(level or 1), 1, 3)
+	local t     = TIER[lv]
 
-	burst(pos + Vector3.new(0, 1, 0), info.spray, scale)
-	flingGibs(pos + Vector3.new(0, 0.5, 0), info, scale)
+	burst(pos + Vector3.new(0, 1, 0), info.spray, scale, t.emit, 1 + (lv - 1) * 0.5)
+	flingGibs(pos + Vector3.new(0, 0.5, 0), info, scale, t.gibs, lv)
+
+	-- Tier 2+: a second rupturing spray higher up the torso.
+	if lv >= 2 then
+		burst(pos + Vector3.new(0, 1.5, 0), info.spray, scale, t.emit * 0.6, 1 + (lv - 1) * 0.5)
+	end
+	-- Tier 3: the body bursts — an upward geyser plus a wide low gib blast.
+	if lv >= 3 then
+		bloodFountain(pos + Vector3.new(0, 1.2, 0), info.spray, scale)
+		flingGibs(pos + Vector3.new(0, 0.8, 0), info, scale, t.gibs * 0.7, lv, true)
+	end
 
 	local groundPos, normal = groundBelow(pos)
 	-- Main pool.
-	spawnStain(groundPos, normal, info.pool, (3.0 + math.random() * 1.5) * scale, 14, 6, true)
-	-- Scattered splatter around it.
-	local splats = math.clamp(math.floor(3 * scale + 0.5), 3, 9)
+	spawnStain(groundPos, normal, info.pool, (3.0 + math.random() * 1.5) * scale * t.pool, 14, 6, true)
+	-- Scattered splatter around it — flung further at higher tiers.
+	local splats = math.clamp(math.floor(3 * scale * t.splats + 0.5), 3, 22)
 	for _ = 1, splats do
 		local ang = math.random() * math.pi * 2
-		local r   = (1.5 + math.random() * 3.0) * scale
+		local r   = (1.5 + math.random() * 3.0) * scale * t.reach
 		local sp  = groundPos + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r)
 		local gPos, gN = groundBelow(sp + Vector3.new(0, 2, 0))
 		spawnStain(gPos, gN, info.pool, (0.8 + math.random() * 1.4) * scale, 10, 4, false)

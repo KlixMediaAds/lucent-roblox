@@ -94,7 +94,8 @@ end
 
 -- Unit types (trained from Barracks)
 Config.UNIT_TYPES = {
-	Soldier       = { cost = 25,  size = Vector3.new(4, 4, 4) },
+	Survivor      = { cost = 25,  size = Vector3.new(4, 4, 4) },
+	Sniper        = { cost = 75,  size = Vector3.new(4, 4, 4) },  -- long-range marksman: slow fire, high damage (trained by upgrading a Survivor, not summoned directly)
 	Tank          = { cost = 60,  size = Vector3.new(7, 5, 9)  },
 	Howitzer      = { cost = 90,  size = Vector3.new(8, 14, 8) },
 	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
@@ -105,6 +106,10 @@ Config.UNIT_TYPES = {
 	Broodmother   = { cost = 200, size = Vector3.new(13.2, 24, 13.2) }, -- towering anemone-bodied tripod (visuals drawn client-side; 1.2× the base 11×20×11)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 }
+
+-- Field upgrade: a selected Survivor can be re-kitted into a Sniper (command-card
+-- action on the unit, not a Bonfire summon option). Charged per Survivor upgraded.
+Config.SNIPER_UPGRADE_COST = 60
 
 Config.CC_PASSIVE_INCOME      = 10    -- resources granted per tick to every standing Command Center
 Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-income ticks
@@ -120,8 +125,8 @@ Config.FOUNDRY_BOOST_PER_DEPOSIT = 0.15  -- +15% income per active nearby deposi
 Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting deposit per income tick
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Soldier = 26, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24 }
-Config.UNIT_ACCEL             = { Soldier = 12, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14 }
+Config.UNIT_MOVE_SPEED        = { Survivor = 26, Sniper = 22, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24 }
+Config.UNIT_ACCEL             = { Survivor = 12, Sniper = 10, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -263,7 +268,7 @@ Config.UNLOCKS = {
 	EliteUnits       = { icon = "⭐", title = "Elite Units", category = "Army",
 		vp = { kind = "unit", name = "Elite" },
 		desc = "Unlocks the Elite unit at the Bonfire.",
-		condText = "Summon 5 Soldiers", cond = { type = "train",    name = "Soldier",  count = 5 } },
+		condText = "Summon 5 Survivors", cond = { type = "train",    name = "Survivor",  count = 5 } },
 	MedicUnit        = { icon = "➕", title = "Medic Unit", category = "Army",
 		vp = { kind = "unit", name = "Medic" },
 		desc = "Unlocks the Medic, which automatically heals nearby friendly units.",
@@ -280,18 +285,18 @@ Config.UNLOCKS = {
 		vp = { kind = "unit", name = "Tank" },
 		desc = "Tank shells slow enemy units on impact.",
 		condText = "Kill 5 enemies",   cond = { type = "kill", count = 5 } },
-	-- Soldier upgrades disabled for now (HardenedArmor / CombatStims / Rollers).
+	-- Survivor upgrades disabled for now (HardenedArmor / CombatStims / Rollers).
 	-- Removing them from UNLOCKS hides them from the upgrade UI, blocks player +
 	-- AI research, and makes hasResearch() always false so the runtime behaviors
 	-- never activate. Re-enable by uncommenting these blocks.
 	--[[
 	HardenedArmor    = { icon = "🛡", title = "Hardened Armor", category = "Army",
-		vp = { kind = "unit", name = "Soldier" },
-		desc = "Soldiers absorb a flat amount of damage per hit.",
+		vp = { kind = "unit", name = "Survivor" },
+		desc = "Survivors absorb a flat amount of damage per hit.",
 		condText = "Kill 8 enemies",   cond = { type = "kill", count = 8 } },
 	CombatStims      = { icon = "⚡", title = "Combat Stims", category = "Army",
-		vp = { kind = "unit", name = "Soldier" },
-		desc = "Soldiers auto-boost speed and attack rate when engaging enemies.",
+		vp = { kind = "unit", name = "Survivor" },
+		desc = "Survivors auto-boost speed and attack rate when engaging enemies.",
 		condText = "Kill 10 enemies",  cond = { type = "kill", count = 10 } },
 	--]]
 	RocketBarrage    = { icon = "🚀", title = "Rocket Barrage", category = "Army",
@@ -304,11 +309,11 @@ Config.UNLOCKS = {
 		desc = "Tanks launch harpoons that slow enemies by 90% for 7 s.",
 		condText = "Build 5 Turrets",  cond = { type = "building", name = "Turret", count = 5 },
 		requires = "ConcussionShells", group = "TankSpec" },
-	-- Soldier upgrade disabled for now (see HardenedArmor/CombatStims note above).
+	-- Survivor upgrade disabled for now (see HardenedArmor/CombatStims note above).
 	--[[
 	Rollers          = { icon = "🔄", title = "Rollers", category = "Army",
-		vp = { kind = "unit", name = "Soldier" },
-		desc = "Soldiers become Rollers: rolling melee charge, 20% faster movement.",
+		vp = { kind = "unit", name = "Survivor" },
+		desc = "Survivors become Rollers: rolling melee charge, 20% faster movement.",
 		condText = "Kill 20 enemies",  cond = { type = "kill", count = 20 },
 		requires = "CombatStims" },
 	--]]
@@ -351,13 +356,13 @@ Config.TRAPPER_SLOW_MULT     = 0.1  -- speed multiplier while harpooned (90% slo
 Config.TRAPPER_SLOW_DURATION = 7    -- seconds the harpoon slow lasts
 Config.TRAPPER_RESTOCK_TIME  = 10   -- seconds to restock one harpoon
 
--- Soldier: Combat Stims
+-- Survivor: Combat Stims
 Config.SOLDIER_STIM_DURATION  = 8    -- seconds stims stay active
 Config.SOLDIER_STIM_COOLDOWN  = 20   -- seconds before stims can reactivate
 Config.SOLDIER_STIM_SPEED     = 1.5  -- move speed multiplier while stimmed
 Config.SOLDIER_STIM_RATE      = 0.55 -- attack-rate period multiplier while stimmed (lower = faster)
 
--- Soldier: Hardened Armor
+-- Survivor: Hardened Armor
 Config.SOLDIER_ARMOR          = 6    -- flat damage absorbed per incoming hit
 
 -- ── Wounded soldiers: immobilization, rescue-dragging & field healing ──────────
@@ -376,7 +381,7 @@ Config.SOLDIER_HEAL_RADIUS             = 30    -- studs from the CC counted as "
 Config.SOLDIER_HEAL_RATE               = 4     -- HP/s regained while healing at the CC
 Config.SOLDIER_RECOVER_RATIO           = 0.6   -- HP ratio at which a soldier gets back up
 
--- Soldier: Rollers upgrade
+-- Survivor: Rollers upgrade
 Config.ROLLER_ATTACK_RANGE  = 14   -- studs; approach/engage range (wider for tracking)
 Config.ROLLER_CHARGE_DIST   = 22   -- studs; fixed dash distance per attack (zips past target)
 Config.ROLLER_CHARGE_SPEED  = 90   -- studs/s dash speed
@@ -415,14 +420,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15, TEST = 12 }
-Config.UNIT_TRAIN_TIME  = { Soldier = 6,   Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0 }
+Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Soldier = 80,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55 }
+Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55 }
 Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
-Config.UNIT_ATTACK_DAMAGE  = { Soldier = 12,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14 }
-Config.UNIT_ATTACK_RANGE   = { Soldier = 15,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13 }
-Config.UNIT_ATTACK_RATE    = { Soldier = 0.8, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7 }
+Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14 }
+Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13 }
+Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -455,6 +460,7 @@ Config.REMOTES = {
 	UnitDied          = "UnitDied",
 	UnitHit           = "UnitHit",
 	UpgradeTurret     = "UpgradeTurret",
+	UpgradeUnit       = "UpgradeUnit",
 	UnlockGranted     = "UnlockGranted",
 	UnlockChoice      = "UnlockChoice",
 	UnlockChoose      = "UnlockChoose",
@@ -478,6 +484,7 @@ Config.REMOTES = {
 	LobbyReroll             = "LobbyReroll",
 	LobbyStart              = "LobbyStart",
 	LobbySetColor           = "LobbySetColor",
+	LobbySetFaction         = "LobbySetFaction",
 	LobbyTerrainToggle      = "LobbyTerrainToggle",
 	LobbyAddAI              = "LobbyAddAI",
 	LobbyRemoveAI           = "LobbyRemoveAI",

@@ -225,6 +225,14 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		player.TeamColor = BrickColor.new(colorName)
 	end)
 
+	-- Per-player team/faction pick (Humans / Hollowed). Stored as a player attribute
+	-- so match setup can read it later; defaults to Humans if never chosen.
+	RemoteHandler.get(Config.REMOTES.LobbySetFaction).OnServerEvent:Connect(function(player, faction: string)
+		if not active then return end
+		if faction ~= "Humans" and faction ~= "Hollowed" then return end
+		player:SetAttribute("Faction", faction)
+	end)
+
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false
 	end

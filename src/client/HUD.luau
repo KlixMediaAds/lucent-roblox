@@ -165,7 +165,7 @@ local CHILD_SPACING = 114   -- px between child centres
 
 -- Lane mode unit spawn panel definitions
 local LANE_UNIT_DEFS: { { utype: string, icon: string, color: Color3 } } = {
-	{ utype = "Soldier", icon = "⚔",  color = C.BARRACKS                       },
+	{ utype = "Survivor", icon = "⚔",  color = C.BARRACKS                       },
 	{ utype = "Tank",    icon = "🛡",  color = Color3.fromRGB(60,  140,  60)    },
 	{ utype = "Elite",   icon = "⭐",  color = Color3.fromRGB(200, 160,  40)    },
 	{ utype = "Medic",   icon = "➕",  color = Color3.fromRGB(40,  160, 140)    },
@@ -253,15 +253,29 @@ end
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
 
+-- Faction gating: the Hollowed team places ONLY Blobs and Nests; Humans place
+-- everything except those two. Faction comes from the replicated player attribute
+-- set in the lobby (defaults to Humans).
+local HOLLOWED_BUILDINGS: { [string]: boolean } = { CreepyBlob = true, LampreyNest = true }
+local function currentFaction(): string
+	return localPlayer:GetAttribute("Faction") or "Humans"
+end
+local function factionAllows(btype: string): boolean
+	if currentFaction() == "Hollowed" then return HOLLOWED_BUILDINGS[btype] == true end
+	return HOLLOWED_BUILDINGS[btype] ~= true
+end
+
 -- Returns false if this building's researchReq hasn't been completed yet.
 -- Such nodes are fully hidden from the tray until research is done.
 local function isResearchVisible(btype: string): boolean
+	if currentFaction() == "Hollowed" then return true end  -- Hollowed skip the Human tech tree
 	local info = BUILDING_INFO[btype]
 	if not info or not info.researchReq then return true end
 	return hasResearchFn ~= nil and hasResearchFn(info.researchReq)
 end
 
 local function isUnlocked(btype: string): boolean
+	if currentFaction() == "Hollowed" then return true end  -- Hollowed's Blob/Nest have no prereqs
 	local info = BUILDING_INFO[btype]
 	if not info then return true end
 	for req, count in info.requires do
@@ -280,7 +294,7 @@ local function isAtMaxCount(btype: string): boolean
 end
 
 local function isNodeVisible(btype: string): boolean
-	return isResearchVisible(btype) and isUnlocked(btype) and not isAtMaxCount(btype)
+	return factionAllows(btype) and isResearchVisible(btype) and isUnlocked(btype) and not isAtMaxCount(btype)
 end
 
 -- Re-packs the visible build nodes into consecutive slots along the bottom bar so

@@ -31,8 +31,10 @@ local LampreyNestPanel = require(script:WaitForChild("LampreyNestPanel"))
 local EngineeringPanel = require(script:WaitForChild("EngineeringPanel"))
 local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local TestPanel      = require(script:WaitForChild("TestPanel"))
+local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
+local Jumpscare      = require(script:WaitForChild("Jumpscare"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local ScoutManager   = require(script:WaitForChild("ScoutManager"))
@@ -324,6 +326,7 @@ end)
 
 local dragFrame, ccBtn = HUD.create()
 CommandCard.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
+Jumpscare.init(Players.LocalPlayer:WaitForChild("PlayerGui"))
 if isLane then HUD.setLaneMode(true) end
 Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
@@ -388,6 +391,7 @@ TestPanel.init(Network,
 		})
 	end,
 	function() HUD.hideBuildPage() end)
+SurvivorPanel.init(Network, function() return currentResources end)
 MechLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
@@ -596,6 +600,12 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 	end
 end)
 
+-- [F]: lamprey jumpscare — it lunges out of the dark and swallows the camera.
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.KeyCode == Enum.KeyCode.F then Jumpscare.trigger() end
+end)
+
 -- [R] shortcut: recenter the camera on the Command Center (the map's [R] button).
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
@@ -725,6 +735,24 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 				updateIncomeReadout()
 			end)
 		end)
+	end
+end)
+
+-- ── Survivor unit panel ────────────────────────────────────────────────────────
+-- Selecting owned Survivors opens a unit command card with the "Upgrade to Sniper"
+-- action. Any selection that has no owned Survivors hides it (a building selection
+-- clears the unit selection first, so this fires with an empty list then).
+UnitController.onUnitsSelected(function(ids: { string })
+	local survivorIds: { string } = {}
+	for _, id in ids do
+		if UnitController.getUnitType(id) == "Survivor" then
+			table.insert(survivorIds, id)
+		end
+	end
+	if #survivorIds > 0 then
+		SurvivorPanel.show(survivorIds)
+	else
+		SurvivorPanel.hide()
 	end
 end)
 
@@ -1164,7 +1192,7 @@ local function applyTrapperVisual(body: BasePart)
 	end
 end
 
--- ── Soldier upgrade visuals ───────────────────────────────────────────────────
+-- ── Survivor upgrade visuals ───────────────────────────────────────────────────
 -- CombatStims: two small green cylinders on the back (stim injectors)
 local function applySoldierStimVisual(body: BasePart)
 	if body:FindFirstChild("_StimInjector") then return end
@@ -1287,7 +1315,7 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			if tv and tv.Value == "Tank" and researchedTechs["Trapper"] then
 				applyTrapperVisual(p)
 			end
-			if tv and tv.Value == "Soldier" then
+			if tv and tv.Value == "Survivor" then
 				if researchedTechs["CombatStims"]   then applySoldierStimVisual(p)  end
 				if researchedTechs["HardenedArmor"] then applySoldierArmorVisual(p) end
 			end
@@ -1306,6 +1334,7 @@ Network.onResourceSync(function(amount: number)
 	LampreyNestPanel.refreshIfVisible()
 	DeployerPanel.refreshIfVisible()
 	TestPanel.refreshIfVisible()
+	SurvivorPanel.refreshIfVisible()
 end)
 
 -- Floating "+N" income popup over your own Foundry each income tick.
@@ -1368,7 +1397,7 @@ local function applyUnlockVisuals(techName: string)
 					applyTankConcussionVisual(child :: BasePart)
 				elseif tv.Value == "Tank" and techName == "Trapper" then
 					applyTrapperVisual(child :: BasePart)
-				elseif tv.Value == "Soldier" then
+				elseif tv.Value == "Survivor" then
 					if techName == "CombatStims"   then applySoldierStimVisual(child :: BasePart)  end
 					if techName == "HardenedArmor" then applySoldierArmorVisual(child :: BasePart) end
 				end
@@ -2016,7 +2045,7 @@ end)
 
 -- ── Unit attack VFX ──────────────────────────────────────────────────────────
 -- Traveling projectile from attacker → target, then a brief impact flash.
--- Soldiers: small fast yellow bullet.  Tanks: larger slower orange shell with arc.
+-- Survivors: small fast yellow bullet.  Tanks: larger slower orange shell with arc.
 -- Elite: large purple lobbed orb with trail + full explosion VFX.
 
 -- Elite explosion: single RenderStepped connection animates all pieces together.
@@ -3115,6 +3144,7 @@ end
 
 -- Plays a short 3D-positional sound at `pos` and auto-destroys when finished.
 local SND_SOLDIER          = "rbxassetid://138651783706047"
+local SND_SNIPER           = "rbxassetid://1231327271"
 local SND_TANK             = "rbxassetid://122500594085328"
 local SND_LAMPREY_ATTACK   = "rbxassetid://106129163863465"
 local SND_LAMPREY_IMPACT   = "rbxassetid://99851197639856"
@@ -3496,10 +3526,88 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 		return
 	end
 
-	-- Soldier (and CreepySoldier) — quick gunshot
+	-- Sniper — a single heavy long-range shot: a long, bright, near-instant tracer
+	-- with a big muzzle flash and a deep report (lower-pitched, louder gunshot).
+	if unitType == "Sniper" then
+		playSound3D(fromPos, SND_SNIPER, 0.12)   -- dedicated rifle crack
+
+		local origin = fromPos + Vector3.new(0, 1.6, 0)
+		local dest   = toPos   + Vector3.new(0, 1.0, 0)
+		local rawDir = dest - origin
+		local dist   = rawDir.Magnitude
+		local unit   = if dist > 0.01 then rawDir / dist else Vector3.new(0, 0, -1)
+
+		-- Big muzzle flash at the barrel.
+		local flash        = Instance.new("Part")
+		flash.Name         = "_SniperMuzzle"
+		flash.Shape        = Enum.PartType.Ball
+		flash.Size         = Vector3.new(0.9, 0.9, 0.9)
+		flash.Color        = Color3.fromRGB(255, 246, 205)
+		flash.Material     = Enum.Material.Neon
+		flash.Anchored     = true
+		flash.CanCollide   = false
+		flash.CanQuery     = false
+		flash.CastShadow   = false
+		flash.Position     = origin
+		flash.Parent       = workspace
+		task.delay(0.06, function() if flash.Parent then flash:Destroy() end end)
+
+		-- Full-length tracer struck across the whole line of fire at once, then fades.
+		local mid          = origin:Lerp(dest, 0.5)
+		local core         = Instance.new("Part")
+		core.Name          = "_SniperTracer"
+		core.Size          = Vector3.new(0.14, 0.14, math.max(dist, 0.1))
+		core.Color         = Color3.fromRGB(255, 250, 220)
+		core.Material      = Enum.Material.Neon
+		core.Anchored      = true
+		core.CanCollide    = false
+		core.CanQuery      = false
+		core.CastShadow    = false
+		core.CFrame        = CFrame.lookAt(mid, mid + unit)
+		core.Parent        = workspace
+
+		local halo         = core:Clone()
+		halo.Name          = "_SniperTracerGlow"
+		halo.Size          = Vector3.new(0.34, 0.34, math.max(dist, 0.1))
+		halo.Color         = Color3.fromRGB(255, 205, 120)
+		halo.Transparency  = 0.45
+		halo.Parent        = workspace
+
+		-- Impact spark bloom at the target.
+		local spark        = Instance.new("Part")
+		spark.Shape        = Enum.PartType.Ball
+		spark.Size         = Vector3.new(0.6, 0.6, 0.6)
+		spark.Color        = Color3.fromRGB(255, 235, 180)
+		spark.Material     = Enum.Material.Neon
+		spark.Anchored     = true
+		spark.CanCollide   = false
+		spark.CanQuery     = false
+		spark.CastShadow   = false
+		spark.Position     = dest
+		spark.Parent       = workspace
+
+		local elapsed = 0
+		local conn: RBXScriptConnection
+		conn = RunService.RenderStepped:Connect(function(dt)
+			elapsed += dt
+			local a = math.min(elapsed / 0.16, 1)
+			core.Transparency  = a
+			halo.Transparency  = 0.45 + a * 0.55
+			local s = 0.6 + a * 2.2
+			spark.Size         = Vector3.new(s, s, s)
+			spark.Transparency = a
+			if a >= 1 then
+				conn:Disconnect()
+				core:Destroy(); halo:Destroy(); spark:Destroy()
+			end
+		end)
+		return
+	end
+
+	-- Survivor (and CreepySoldier) — quick gunshot
 	playSound3D(fromPos, SND_SOLDIER, 0.55)
 
-	-- Soldier: oriented tracer streak — thin neon rod aimed at target,
+	-- Survivor: oriented tracer streak — thin neon rod aimed at target,
 	-- outer glow shell, muzzle flash at barrel, expanding impact bloom on hit.
 	local TRAVEL     = 0.10   -- seconds; snappy and readable at RTS distances
 	local STREAK_LEN = 2.4    -- stud length of the tracer body

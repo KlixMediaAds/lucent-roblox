@@ -34,7 +34,7 @@ local TURRET_COLOR  = Color3.fromRGB(140,  40, 210)
 type ProdDef = { key: string, label: string, icon: string, color: Color3, cost: number }
 
 local PROD_DEFS: { ProdDef } = {
-	{ key = "CreepySoldier", label = "Soldier", icon = "🪲", color = SOLDIER_COLOR, cost = Config.BLOB_SOLDIER_COST },
+	{ key = "CreepySoldier", label = "Survivor", icon = "🪲", color = SOLDIER_COLOR, cost = Config.BLOB_SOLDIER_COST },
 	{ key = "CreepyWorm",    label = "Worm",    icon = "🪱", color = WORM_COLOR,    cost = Config.BLOB_WORM_COST    },
 	{ key = "CreepyTurret",  label = "Turret",  icon = "⊛", color = TURRET_COLOR,  cost = Config.BLOB_TURRET_COST  },
 }

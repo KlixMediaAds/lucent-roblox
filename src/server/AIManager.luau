@@ -105,10 +105,10 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Aggressor",
 		desired = { harvesters = 3, barracks = 2, turrets = 3, relays = 1, deployers = 0 },
 		comp = {
-			opening = { Soldier = 4 },
-			expand  = { Soldier = 4, Elite = 2 },
-			mid     = { Soldier = 3, Elite = 3, Foamer = 1 },
-			late    = { Soldier = 2, Elite = 4, Foamer = 1, Tank = 1 },
+			opening = { Survivor = 4 },
+			expand  = { Survivor = 4, Elite = 2 },
+			mid     = { Survivor = 3, Elite = 3, Foamer = 1 },
+			late    = { Survivor = 2, Elite = 4, Foamer = 1, Tank = 1 },
 		},
 		techPlan = { "EliteUnits", "CombatStims", "HardenedArmor", "Rollers" },
 		turret = "Flamethrower",
@@ -119,8 +119,8 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Mechanized",
 		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 1 },
 		comp = {
-			opening = { Soldier = 3 },
-			expand  = { Soldier = 2, Tank = 3 },
+			opening = { Survivor = 3 },
+			expand  = { Survivor = 2, Tank = 3 },
 			mid     = { Tank = 4, Howitzer = 1, Elite = 1 },
 			late    = { Tank = 4, Howitzer = 2, Elite = 2, Medic = 1 },
 		},
@@ -133,10 +133,10 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Economist",
 		desired = { harvesters = 6, barracks = 3, turrets = 4, relays = 3, deployers = 1 },
 		comp = {
-			opening = { Soldier = 3 },
-			expand  = { Soldier = 3, Tank = 1 },
-			mid     = { Soldier = 2, Tank = 2, Elite = 2, Medic = 1 },
-			late    = { Tank = 3, Elite = 3, Howitzer = 1, Medic = 2 },
+			opening = { Survivor = 3 },
+			expand  = { Survivor = 3, Tank = 1 },
+			mid     = { Survivor = 2, Tank = 2, Elite = 2, Medic = 1 },
+			late    = { Tank = 3, Elite = 3, Howitzer = 1, Medic = 2, Sniper = 1 },
 		},
 		techPlan = { "EliteUnits", "MedicUnit", "ConcussionShells", "TurretUpgrades" },
 		turret = "RocketLauncher",
@@ -147,10 +147,10 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Defender",
 		desired = { harvesters = 5, barracks = 3, turrets = 8, relays = 3, deployers = 1 },
 		comp = {
-			opening = { Soldier = 3 },
-			expand  = { Soldier = 3, Foamer = 1 },
-			mid     = { Soldier = 2, Foamer = 2, Howitzer = 1, Tank = 1 },
-			late    = { Howitzer = 3, Foamer = 2, Tank = 2, Elite = 2, Medic = 1 },
+			opening = { Survivor = 3 },
+			expand  = { Survivor = 3, Foamer = 1 },
+			mid     = { Survivor = 2, Foamer = 2, Howitzer = 1, Tank = 1, Sniper = 1 },
+			late    = { Howitzer = 3, Foamer = 2, Tank = 2, Elite = 2, Medic = 1, Sniper = 2 },
 		},
 		techPlan = { "TurretUpgrades", "EliteUnits", "ConcussionShells", "MedicUnit" },
 		turret = "Artillery",
@@ -161,9 +161,9 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Waves",
 		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 0 },
 		comp = {
-			opening = { Soldier = 4 },
-			expand  = { Soldier = 3, Tank = 1 },
-			mid     = { Soldier = 2, Tank = 3, Elite = 1 },
+			opening = { Survivor = 4 },
+			expand  = { Survivor = 3, Tank = 1 },
+			mid     = { Survivor = 2, Tank = 3, Elite = 1 },
 			late    = { Tank = 3, Howitzer = 2, Elite = 2, Foamer = 1 },
 		},
 		techPlan = { "EliteUnits", "ConcussionShells", "TurretUpgrades", "RocketBarrage" },
@@ -176,10 +176,10 @@ local ARCHETYPES: { [string]: Archetype } = {
 		label = "Trainer",
 		desired = { harvesters = 2, barracks = 2, turrets = 1, relays = 0, deployers = 0 },
 		comp = {
-			opening = { Soldier = 3 },
-			expand  = { Soldier = 3, Tank = 1 },
-			mid     = { Soldier = 3, Tank = 1, Foamer = 1 },
-			late    = { Soldier = 3, Tank = 1, Foamer = 1 },
+			opening = { Survivor = 3 },
+			expand  = { Survivor = 3, Tank = 1 },
+			mid     = { Survivor = 3, Tank = 1, Foamer = 1 },
+			late    = { Survivor = 3, Tank = 1, Foamer = 1 },
 		},
 		techPlan = {},
 		turret = "Flamethrower",
@@ -190,7 +190,7 @@ local ARCHETYPES: { [string]: Archetype } = {
 	Swarm = {
 		label = "Swarm",
 		desired = { harvesters = 4, barracks = 0, turrets = 0, relays = 0, deployers = 0 },
-		comp = { opening = { Soldier = 1 }, expand = { Soldier = 1 }, mid = { Soldier = 1 }, late = { Soldier = 1 } },
+		comp = { opening = { Survivor = 1 }, expand = { Survivor = 1 }, mid = { Survivor = 1 }, late = { Survivor = 1 } },
 		techPlan = {},
 		turret = "Flamethrower",
 		engageRatio = 0.8, harass = true, waveMode = false, turtle = false, noCounter = true,
@@ -244,14 +244,14 @@ end
 local function pickWeighted(weights: { [string]: number }): string
 	local total = 0
 	for _, w in weights do total += w end
-	if total <= 0 then return "Soldier" end
+	if total <= 0 then return "Survivor" end
 	local r, cum = math.random() * total, 0
 	for name, w in weights do
 		cum += w
 		if r <= cum then return name end
 	end
 	for name in weights do return name end
-	return "Soldier"
+	return "Survivor"
 end
 
 local function pickFrom(list: { string }): string
@@ -431,7 +431,7 @@ local function enemyValueNear(ownerStr: string, pos: Vector3, radius: number): n
 			local dz = (p :: BasePart).Position.Z - pos.Z
 			if dx * dx + dz * dz <= r2 then
 				local ut = p:FindFirstChild("UnitType")
-				total += unitValue(ut and ut.Value or "Soldier")
+				total += unitValue(ut and ut.Value or "Survivor")
 			end
 		end
 	end
@@ -468,7 +468,7 @@ local THREAT_BUILDING = {
 	Turret = 30, CreepyBlob = 35, Deployer = 50, Relay = 15,
 }
 local THREAT_UNIT = {
-	Broodmother = 46, Howitzer = 38, Elite = 35, Lamprey = 32, Tank = 30, Soldier = 20,
+	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Survivor = 20,
 	Foamer = 18, CreepySoldier = 15, Hagfish = 14, Medic = 10, Harvester = 8,
 }
 
@@ -537,7 +537,7 @@ local function scanThreats(ai: any): ThreatResult
 			if dist > vR then continue end
 
 			local ut    = p:FindFirstChild("UnitType")
-			local utype = ut and ut.Value or "Soldier"
+			local utype = ut and ut.Value or "Survivor"
 
 			result.enemyUnitCount += 1
 			result.enemyComp[utype] = (result.enemyComp[utype] or 0) + 1
@@ -901,7 +901,7 @@ local function computeComposition(ai: any)
 
 	if not arche.noCounter then
 		local comp = ai.enemyComp or {}
-		local cheapMass = (comp.Soldier or 0) + (comp.CreepySoldier or 0) + (comp.Hagfish or 0)
+		local cheapMass = (comp.Survivor or 0) + (comp.CreepySoldier or 0) + (comp.Hagfish or 0)
 		local heavy     = (comp.Tank or 0) + (comp.Howitzer or 0) + (comp.Elite or 0) + (comp.Lamprey or 0)
 
 		-- Turret lines: only the Howitzer (65) out-ranges a turret (50).
@@ -914,11 +914,11 @@ local function computeComposition(ai: any)
 			w["Tank"]   = (w["Tank"] or 0) + math.floor(cheapMass / 3)
 			w["Foamer"] = (w["Foamer"] or 0) + 1
 		end
-		-- Heavy mech: Elite + Foamer to peel, backed by Soldiers.
+		-- Heavy mech: Elite + Foamer to peel, backed by Survivors.
 		if heavy >= 3 then
 			w["Elite"]   = (w["Elite"] or 0) + 2
 			w["Foamer"]  = (w["Foamer"] or 0) + 1
-			w["Soldier"] = (w["Soldier"] or 0) + 1
+			w["Survivor"] = (w["Survivor"] or 0) + 1
 		end
 	end
 
@@ -945,7 +945,7 @@ local function computeComposition(ai: any)
 
 	local total = 0
 	for _, v in w do total += v end
-	if total <= 0 then w["Soldier"] = 1 end
+	if total <= 0 then w["Survivor"] = 1 end
 
 	ai.currentWeights = w
 end
@@ -1176,13 +1176,13 @@ local function btManageBonfires(ai: any)
 	ai.totalTrained = math.max(ai.totalTrained, unitManager.getUnitCount(ai.player))
 
 	-- Assign each bonfire a (composition-driven) summon type once → varied armies, not
-	-- all-Soldier. Research-gated picks fall back to Soldier.
+	-- all-Survivor. Research-gated picks fall back to Survivor.
 	ai.bonfireType = ai.bonfireType or {}
 	for _, id in ids do
 		if not ai.bonfireType[id] then
-			local utype = (next(ai.currentWeights) ~= nil) and pickWeighted(ai.currentWeights) or "Soldier"
+			local utype = (next(ai.currentWeights) ~= nil) and pickWeighted(ai.currentWeights) or "Survivor"
 			local def   = Config.UNIT_TYPES[utype]
-			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Soldier" end
+			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Survivor" end
 			if buildingManager.setBonfireSummonType and buildingManager.setBonfireSummonType(ai.player, id, utype) then
 				ai.bonfireType[id] = utype
 			end

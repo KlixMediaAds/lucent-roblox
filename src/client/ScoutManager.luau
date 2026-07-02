@@ -104,7 +104,7 @@ end
 
 local function unitTypeOf(part: BasePart): string
 	local tv = part:FindFirstChild("UnitType") :: StringValue?
-	return (tv and tv.Value) or "Soldier"
+	return (tv and tv.Value) or "Survivor"
 end
 
 local function unitCost(unitType: string): number
@@ -526,7 +526,7 @@ end
 local function onEnemyStructureFound(worldPos: Vector3)
 	if currentMode ~= "scout" then return end
 
-	local reportType = "Soldier"
+	local reportType = "Survivor"
 	for _, s in scouts do
 		if s.part.Parent then reportType = unitTypeOf(s.part); break end
 	end

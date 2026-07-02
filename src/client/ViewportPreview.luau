@@ -5,7 +5,7 @@
 	Uses UnitVisuals to build models so previews always match in-game appearance.
 
 	Usage:
-	  local vpf = ViewportPreview.forUnit("Soldier", Vector2.new(52, 52))
+	  local vpf = ViewportPreview.forUnit("Survivor", Vector2.new(52, 52))
 	  local vpf = ViewportPreview.forBuilding("Turret", Vector2.new(52, 52))
 	  vpf.Parent = someButton
 

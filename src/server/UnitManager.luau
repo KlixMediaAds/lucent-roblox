@@ -144,9 +144,9 @@ local playerStatMult:  { [number]: { [string]: StatMult } } = {}
 local playerUpgradeLog: { [number]: { string } } = {}
 
 -- Unit types a Light research may roll, with player-facing plural names.
-local UPGRADE_UNITS: { string } = { "Soldier", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish", "Broodmother" }
+local UPGRADE_UNITS: { string } = { "Survivor", "Sniper", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish", "Broodmother" }
 local UPGRADE_UNIT_NAME: { [string]: string } = {
-	Soldier = "Soldiers", Tank = "Tanks", Howitzer = "Howitzers", Foamer = "Foamers",
+	Survivor = "Survivors", Sniper = "Snipers", Tank = "Tanks", Howitzer = "Howitzers", Foamer = "Foamers",
 	Elite = "Elites", Medic = "Medics", Lamprey = "Lampreys", Hagfish = "Hagfish",
 	Broodmother = "Broodmothers",
 }
@@ -376,7 +376,7 @@ end
 
 -- Returns the effective damage dealt to a unit after applying Hardened Armor.
 local function calcDamage(targetData: UnitData, rawDmg: number): number
-	if targetData.unitType == "Soldier" and researchManagerRef
+	if targetData.unitType == "Survivor" and researchManagerRef
 		and researchManagerRef.hasResearch(targetData.owner, "HardenedArmor") then
 		return math.max(1, rawDmg - Config.SOLDIER_ARMOR)
 	end
@@ -590,7 +590,7 @@ local function assignRescues(owner: any, candidates: { string })
 	local pool: { string } = {}
 	for _, id in candidates do
 		local d = units[id]
-		if d and d.owner == owner and d.unitType == "Soldier"
+		if d and d.owner == owner and d.unitType == "Survivor"
 			and not d.immobilized and not d.draggingId and d.hp > 0 then
 			table.insert(pool, id)
 		end
@@ -836,7 +836,7 @@ end
 -- Spawns a unit for a Deployer and records it in the tracking tables.
 -- Deployed units automatically attack-march toward enemy territory at no resource cost.
 function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3, unitType: string?)
-	local spawnType = unitType or "Soldier"
+	local spawnType = unitType or "Survivor"
 	local uid = spawnUnit(player, spawnPos, spawnType)
 	if uid then
 		-- Bonfire summons count as "trained" so train-gated unlocks (e.g. EliteUnits)
@@ -847,23 +847,74 @@ function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnP
 		if not deployerUnits[deployerId] then deployerUnits[deployerId] = {} end
 		deployerUnits[deployerId][uid] = true
 		unitToDeployer[uid] = deployerId
-		local data = units[uid]
-		-- Human bonfires auto-attack-move toward the far side of the map (set-and-forget
-		-- aggression). AI bonfires must NOT: their units stay idle near the bonfire (the
-		-- spawnUnit defaults: target=nil, home=spawnPos) so the AI brain controls them and
-		-- respects its peace window — otherwise the AI would charge the player from t=0.
-		if data and player.UserId > 0 then
-			-- March toward the opposite corner of the map from the spawn point.
-			-- atkMoveDest keeps the aggro scan active so the unit fights enemies it
-			-- passes; when a kill clears aggroId the unit resumes the march.
-			local marchX    = math.clamp(-spawnPos.X * 3, -MOVE_BOUND, MOVE_BOUND)
-			local marchZ    = math.clamp(-spawnPos.Z * 3, -MOVE_BOUND, MOVE_BOUND)
-			local marchDest = Vector3.new(marchX, 0, marchZ)
-			data.target      = marchDest
-			data.home        = marchDest
-			data.atkMoveDest = marchDest
-		end
+		-- Summoned units hold at the bonfire awaiting orders — they keep the spawnUnit
+		-- defaults (target=nil, home=spawnPos, atkMoveDest=nil), so they idle where they
+		-- appear, still defend against enemies that wander into range, and return to the
+		-- bonfire afterwards. The player (or the AI brain) then commands them. Previously
+		-- human bonfires auto-attack-marched toward the enemy corner; that is removed.
 	end
+end
+
+-- Field-upgrade one of `player`'s living Survivors into a Sniper in place: charges
+-- the upgrade cost, re-stats it from Config (keeping its current HP fraction so a
+-- hurt trooper stays hurt), swaps its decorators to the Sniper blueprint, and
+-- retags its UnitType so the client treats it as a Sniper from then on. Keeps the
+-- same unit id, so selection and orders carry over. Returns whether it converted.
+function UnitManager.upgradeUnit(player: Player, id: string, toType: string): boolean
+	local data = units[id]
+	if not data or data.owner ~= player or data.hp <= 0 then return false end
+	if data.dying or data.immobilized then return false end
+	-- Only the Survivor → Sniper path exists for now.
+	if data.unitType ~= "Survivor" or toType ~= "Sniper" then return false end
+	if not resourceManagerRef then return false end
+	if not resourceManagerRef.spend(player, Config.SNIPER_UPGRADE_COST) then return false end
+
+	local part   = data.part
+	local hpFrac = math.clamp(data.hp / data.maxHp, 0, 1)
+
+	-- Re-stat from Config for the new type, respecting this player's Engineering upgrades.
+	local maxHp    = (Config.UNIT_HP :: any)[toType] or data.maxHp
+	local dmg      = (Config.UNIT_ATTACK_DAMAGE :: any)[toType] or data.attackDmg
+	local atkRate  = (Config.UNIT_ATTACK_RATE :: any)[toType] or data.attackRate
+	local spd      = (Config.UNIT_MOVE_SPEED :: any)[toType] or data.moveSpeed
+	local acc      = (Config.UNIT_ACCEL :: any)[toType] or data.accel
+	local atkRange = (Config.UNIT_ATTACK_RANGE :: any)[toType] or data.attackRange
+	local pm = playerStatMult[player.UserId] and playerStatMult[player.UserId][toType]
+	if pm then
+		maxHp = maxHp * pm.hp; dmg = dmg * pm.dmg; atkRate = atkRate * pm.rate
+		spd = spd * pm.speed; atkRange = atkRange * pm.range
+	end
+
+	data.unitType    = toType
+	data.maxHp       = maxHp
+	data.hp          = math.max(1, math.floor(maxHp * hpFrac + 0.5))
+	data.attackDmg   = dmg
+	data.attackRate  = atkRate
+	data.moveSpeed   = spd
+	data.accel       = acc
+	data.attackRange = atkRange
+	-- Drop Survivor-only transient state so it doesn't linger on the Sniper.
+	data.stimUntil, data.stimCooldownUntil = nil, nil
+
+	-- Retag so client voice / projectile / visuals switch to the Sniper.
+	local tv = part:FindFirstChild("UnitType")
+	if tv and tv:IsA("StringValue") then (tv :: StringValue).Value = toType end
+
+	-- Rebuild the visual decorators from the Sniper blueprint.
+	local decs = unitDecorators[id]
+	if decs then
+		for _, dec in decs do dec.part:Destroy() end
+	end
+	unitDecorators[id] = {}
+	local blueprint = UnitBlueprints.get(toType, part.Size)
+	if blueprint then buildFromBlueprint(id, part, blueprint) end
+
+	-- Resize the health bar for the new max HP and refresh the fill.
+	local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+	if bb then bb.Size = UDim2.new(0, hpBarWidth(maxHp), 0, 4) end
+	applyHP(data, false)
+
+	return true
 end
 
 -- Returns the number of soldiers currently alive that belong to this Deployer.
@@ -1033,7 +1084,7 @@ local BLOOD_DEATH_SOUNDS = {
 	"rbxassetid://106771269229569",
 }
 local BIOLOGICAL_UNIT: { [string]: boolean } = {
-	Soldier = true, Elite = true, Medic = true, CreepySoldier = true,
+	Survivor = true, Sniper = true, Elite = true, Medic = true, CreepySoldier = true,
 	Lamprey = true, Hagfish = true, Broodmother = true,
 }
 
@@ -1044,11 +1095,23 @@ local SOLDIER_DECAP_CHANCE = 0.1
 local SOLDIER_SCREAM_CHANCE = 1 / 15
 local SOLDIER_SCREAM_ID     = "rbxassetid://136401198004658"
 
--- Death FX for a biological unit: a pitch-varied blood sound plus gore. Most
--- deaths get the standard spray/gibs/pool; ~1 soldier in 10 instead loses its
--- head in a geyser of blood and ragdolls to the ground (reuses its live parts as
--- the corpse, so MUST run before the body root is destroyed).
-local function spawnDeathFX(unitType: string, part: BasePart)
+-- Overkill grading: how far the killing blow drove HP below zero, relative to the
+-- unit's max HP, picks the gore tier (1–3). A clean kill ruptures normally; a
+-- heavy hit tears the body open; a massive one blows it apart. Read AFTER the
+-- fatal damage is applied, when `data.hp` is already negative.
+local function goreLevel(data: UnitData): number
+	local ratio = -data.hp / math.max(1, data.maxHp)   -- overkill as a fraction of max HP
+	if ratio >= 1.5 then return 3
+	elseif ratio >= 0.6 then return 2
+	else return 1 end
+end
+
+-- Death FX for a biological unit: a pitch-varied blood sound plus gore. `level`
+-- (1–3) is the gore tier from goreLevel. Most deaths get the standard
+-- spray/gibs/pool; ~1 soldier in 10 instead loses its head in a geyser of blood
+-- and ragdolls to the ground (reuses its live parts as the corpse, so MUST run
+-- before the body root is destroyed).
+local function spawnDeathFX(unitType: string, part: BasePart, level: number?)
 	if not BIOLOGICAL_UNIT[unitType] then return end
 	local pos = part.Position
 
@@ -1073,8 +1136,8 @@ local function spawnDeathFX(unitType: string, part: BasePart)
 	s.Parent               = anchor
 	s:Play()
 
-	-- Soldiers occasionally scream as they die.
-	if unitType == "Soldier" and math.random() < SOLDIER_SCREAM_CHANCE then
+	-- Survivors occasionally scream as they die.
+	if unitType == "Survivor" and math.random() < SOLDIER_SCREAM_CHANCE then
 		local scream              = Instance.new("Sound")
 		scream.SoundId            = SOLDIER_SCREAM_ID
 		scream.Volume             = 0.85
@@ -1086,10 +1149,10 @@ local function spawnDeathFX(unitType: string, part: BasePart)
 	end
 	Debris:AddItem(anchor, 6)
 
-	if unitType == "Soldier" and math.random() < SOLDIER_DECAP_CHANCE then
+	if unitType == "Survivor" and math.random() < SOLDIER_DECAP_CHANCE then
 		GoreManager.decapitate(part)
 	else
-		GoreManager.spawn(unitType, pos)
+		GoreManager.spawn(unitType, pos, level)
 	end
 end
 
@@ -1100,7 +1163,7 @@ end
 -- in `units` (flagged `dying`) so the loops skip it until the timer fires.
 local function beginBroodmotherDeath(id: string, data: UnitData)
 	if data.dying then return end
-	spawnDeathFX(data.unitType, data.part)
+	spawnDeathFX(data.unitType, data.part, goreLevel(data))
 	data.dying          = true
 	data.target         = nil
 	data.path           = nil
@@ -1180,7 +1243,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 				end
 			end
 		end
-		if (data.unitType == "Tank" or data.unitType == "Soldier" or data.unitType == "Lamprey")
+		if (data.unitType == "Tank" or data.unitType == "Survivor" or data.unitType == "Lamprey")
 			and data.owner.UserId > 0 and data.owner.Parent then
 			RemoteHandler.get(Config.REMOTES.UnitDied):FireClient(data.owner, data.unitType, hitPos)
 		end
@@ -1192,7 +1255,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 			beginBroodmotherDeath(bestId, data)
 			return true, hitPos
 		end
-		spawnDeathFX(data.unitType, data.part)
+		spawnDeathFX(data.unitType, data.part, goreLevel(data))
 		releaseDragLinks(bestId)
 		unitDecorators[bestId] = nil
 		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
@@ -1400,7 +1463,7 @@ function UnitManager.init(resourceManager)
 			-- A badly-hurt soldier may go down: prone, still able to shoot but
 			-- unable to move. Chance rises the closer to death they are. Posing,
 			-- dragging and healing of downed soldiers run in the rescue pass below.
-			if data.unitType == "Soldier" and not data.immobilized and data.hp > 0 then
+			if data.unitType == "Survivor" and not data.immobilized and data.hp > 0 then
 				local ratio = data.hp / data.maxHp
 				if ratio <= Config.SOLDIER_IMMOBILIZE_THRESHOLD then
 					local nowT = tick()
@@ -1421,7 +1484,7 @@ function UnitManager.init(resourceManager)
 				end
 			end
 
-			local isRoller  = data.unitType == "Soldier" and researchManagerRef ~= nil
+			local isRoller  = data.unitType == "Survivor" and researchManagerRef ~= nil
 				and researchManagerRef.hasResearch(data.owner, "Rollers")
 			if isRoller then data.attackRange = Config.ROLLER_ATTACK_RANGE end
 
@@ -1638,7 +1701,7 @@ function UnitManager.init(resourceManager)
 						if data.foamedUntil and t < (data.foamedUntil :: number) then
 							effSpeed = effSpeed * Config.FOAMER_FOAM_SLOW_MULT
 						end
-						if data.unitType == "Soldier" and data.stimUntil and t < (data.stimUntil :: number) then
+						if data.unitType == "Survivor" and data.stimUntil and t < (data.stimUntil :: number) then
 							effSpeed = effSpeed * Config.SOLDIER_STIM_SPEED
 						end
 						if isRoller then effSpeed = effSpeed * Config.ROLLER_SPEED_MULT end
@@ -1731,11 +1794,21 @@ function UnitManager.init(resourceManager)
 				if data.target == nil or data.atkMoveDest ~= nil then
 					local myStr = tostring(data.owner.UserId)
 					local myPos = data.part.Position
-					local bestId2, bestDist2 = nil :: string?, AGGRO + 1
-					local acx0 = math.floor((myPos.X - AGGRO) / GRID_CELL) + GRID_OFFSET
-					local acx1 = math.floor((myPos.X + AGGRO) / GRID_CELL) + GRID_OFFSET
-					local acz0 = math.floor((myPos.Z - AGGRO) / GRID_CELL) + GRID_OFFSET
-					local acz1 = math.floor((myPos.Z + AGGRO) / GRID_CELL) + GRID_OFFSET
+					-- Acquire from the unit's actual reach: a long-range unit (Sniper,
+					-- Howitzer, …) engages the moment an enemy enters firing range
+					-- instead of marching to the fixed short aggro radius first.
+					local acqR = math.max(AGGRO, data.attackRange)
+					-- Snipers won't lock onto a target hidden in the fog (so they don't
+					-- march up to something they aren't allowed to shoot).
+					local acqSpotter: ((Vector3) -> boolean)? = nil
+					if data.unitType == "Sniper" and buildingManagerRef and buildingManagerRef.makeSpotterCheck then
+						acqSpotter = buildingManagerRef.makeSpotterCheck(myStr)
+					end
+					local bestId2, bestDist2 = nil :: string?, acqR + 1
+					local acx0 = math.floor((myPos.X - acqR) / GRID_CELL) + GRID_OFFSET
+					local acx1 = math.floor((myPos.X + acqR) / GRID_CELL) + GRID_OFFSET
+					local acz0 = math.floor((myPos.Z - acqR) / GRID_CELL) + GRID_OFFSET
+					local acz1 = math.floor((myPos.Z + acqR) / GRID_CELL) + GRID_OFFSET
 					for gx = acx0, acx1 do
 						for gz = acz0, acz1 do
 							local cell = spatialGrid[gx * GRID_STRIDE + gz]
@@ -1747,7 +1820,7 @@ function UnitManager.init(resourceManager)
 								local dx = other.part.Position.X - myPos.X
 								local dz = other.part.Position.Z - myPos.Z
 								local d  = math.sqrt(dx * dx + dz * dz)
-								if d <= AGGRO and d < bestDist2 then
+								if d <= acqR and d < bestDist2 and (not acqSpotter or acqSpotter(other.part.Position)) then
 									bestDist2 = d; bestId2 = otherId
 								end
 							end
@@ -1757,7 +1830,7 @@ function UnitManager.init(resourceManager)
 						data.aggroId   = bestId2
 						data.aggroHome = data.part.Position
 						-- Auto-trigger Combat Stims on engagement
-						if data.unitType == "Soldier" and researchManagerRef
+						if data.unitType == "Survivor" and researchManagerRef
 							and researchManagerRef.hasResearch(data.owner, "CombatStims") then
 							local t = tick()
 							if not data.stimCooldownUntil or t >= (data.stimCooldownUntil :: number) then
@@ -1886,7 +1959,7 @@ function UnitManager.init(resourceManager)
 
 			data.attackTimer += dt
 			local effectiveRate = data.attackRate
-			if data.unitType == "Soldier" and data.stimUntil and tick() < (data.stimUntil :: number) then
+			if data.unitType == "Survivor" and data.stimUntil and tick() < (data.stimUntil :: number) then
 				effectiveRate = effectiveRate * Config.SOLDIER_STIM_RATE
 			end
 			-- Trapper uses a fast check interval so it reacts quickly when a harpoon slot opens
@@ -2251,7 +2324,14 @@ function UnitManager.init(resourceManager)
 						end
 					end
 				else
-					-- Soldiers / Elite: nearest enemy unit first, fall back to buildings
+					-- Survivors / Elite / Sniper: nearest enemy unit first, fall back to
+					-- buildings. The Sniper out-ranges its own sight, so it must never
+					-- fire into unexplored fog — a target only counts if it's spotted by
+					-- the owner's units/buildings (same rule as the Artillery turret).
+					local spotter: ((Vector3) -> boolean)? = nil
+					if data.unitType == "Sniper" and buildingManagerRef and buildingManagerRef.makeSpotterCheck then
+						spotter = buildingManagerRef.makeSpotterCheck(myOwnerStr)
+					end
 					local bestId2, bestDist2 = nil :: string?, math.huge
 					fillGridScratch(myPos, atkRange)
 					for gi = 1, gridScratchN do
@@ -2260,7 +2340,7 @@ function UnitManager.init(resourceManager)
 						if not other or other.hp <= 0 then continue end
 						if tostring(other.owner.UserId) == myOwnerStr then continue end
 						local d = (other.part.Position - myPos).Magnitude
-						if d <= atkRange and d < bestDist2 then
+						if d <= atkRange and d < bestDist2 and (not spotter or spotter(other.part.Position)) then
 							bestDist2 = d; bestId2 = otherId
 						end
 					end
@@ -2278,7 +2358,7 @@ function UnitManager.init(resourceManager)
 							local base  = model and model:FindFirstChild("Base")
 							if base and (base :: BasePart).Parent then
 								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange then
+								if (bp.Position - myPos).Magnitude <= atkRange and (not spotter or spotter(bp.Position)) then
 									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
 								end
 							else
@@ -2286,7 +2366,7 @@ function UnitManager.init(resourceManager)
 							end
 						end
 						if not bId then
-							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange, spotter)
 						end
 						if bId and bPos then
 							buildingManagerRef.damage(bId, data.attackDmg)
@@ -2454,11 +2534,11 @@ function UnitManager.init(resourceManager)
 					beginBroodmotherDeath(id, d)
 					continue
 				end
-				if (d.unitType == "Tank" or d.unitType == "Soldier")
+				if (d.unitType == "Tank" or d.unitType == "Survivor")
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
 				end
-				spawnDeathFX(d.unitType, d.part)
+				spawnDeathFX(d.unitType, d.part, goreLevel(d))
 				releaseDragLinks(id)
 				unitDecorators[id] = nil
 				playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
@@ -2563,6 +2643,13 @@ function UnitManager.init(resourceManager)
 				data.aggroId    = nil
 				data.aggroHome  = nil
 			end
+		end
+	end)
+
+	RemoteHandler.get(Config.REMOTES.UpgradeUnit).OnServerEvent:Connect(function(player, ids, toType)
+		if type(ids) ~= "table" or type(toType) ~= "string" then return end
+		for _, id in ids do
+			if type(id) == "string" then UnitManager.upgradeUnit(player, id, toType) end
 		end
 	end)
 

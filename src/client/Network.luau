@@ -26,6 +26,11 @@ function Network.focusAttack(ids: {string}, targetId: string, targetType: string
 	RemoteHandler.get(Config.REMOTES.FocusAttack):FireServer(ids, targetId, targetType)
 end
 
+-- Re-kit the given units into `toType` (e.g. upgrade selected Survivors to Snipers).
+function Network.upgradeUnit(ids: {string}, toType: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeUnit):FireServer(ids, toType)
+end
+
 function Network.onUnitDied(fn: (unitType: string, pos: Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitDied).OnClientEvent:Connect(fn)
 end

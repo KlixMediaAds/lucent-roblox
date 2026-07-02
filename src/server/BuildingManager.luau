@@ -266,6 +266,20 @@ local function applyHP(data: BuildingData, tookDamage: boolean?)
 	end
 end
 
+-- ── Faction ───────────────────────────────────────────────────────────────────
+-- A player is "Hollowed" (the nest/blob creature faction: spike CC, black grass,
+-- can only place Blobs + Nests) if they chose that team in the lobby, or if they're
+-- a Swarm-mode AI bot (plain Lua table carrying isSwarm). Everyone else is Humans.
+local function isHollowed(player: any): boolean
+	if type(player) == "table" then return player.isSwarm == true end
+	return player:GetAttribute("Faction") == "Hollowed"
+end
+BuildingManager.isHollowed = isHollowed
+
+-- Buildings the Hollowed faction places (and which Humans therefore cannot).
+local HOLLOWED_BUILDINGS: { [string]: boolean } = { CreepyBlob = true, LampreyNest = true }
+BuildingManager.HOLLOWED_BUILDINGS = HOLLOWED_BUILDINGS
+
 -- ── Building creation ─────────────────────────────────────────────────────────
 
 local function createBuilding(player: any, position: Vector3, buildingType: string, groundY: number?): string
@@ -307,11 +321,11 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		model.PrimaryPart = base   -- needed for PivotTo during mobile movement
 		playerCCId[player.UserId] = id
 
-		-- Real players are Roblox userdata (indexing an unknown member throws);
-		-- AI players are plain Lua tables carrying the isSwarm flag.
-		local isSwarmCC = type(player) == "table" and player.isSwarm == true
+		-- The Hollowed faction (Swarm AIs + players who picked Hollowed) get the
+		-- stark spike CC; Humans get the Fabricator Core.
+		local isSwarmCC = isHollowed(player)
 		if isSwarmCC then
-			-- Swarm-mode AIs use a stark black spike instead of the Fabricator Core.
+			-- Hollowed use a stark black spike instead of the Fabricator Core.
 			-- The team-coloured base stays as the collision/HP part; hide it under a
 			-- tall black cone spike rising from the base.
 			base.Transparency = 1
@@ -754,13 +768,13 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	end
 	if buildingType == "Deployer" then
 		deployerTimers[id]    = 0
-		deployerUnitType[id]  = "Soldier"
+		deployerUnitType[id]  = "Survivor"
 		deployerUpdateAcc[id] = 0
 		deployerLevel[id]     = 0
 	end
 	if buildingType == "TEST" then
 		deployerTimers[id]    = 0
-		deployerUnitType[id]  = "Soldier"
+		deployerUnitType[id]  = "Survivor"
 		deployerUpdateAcc[id] = 0
 		testSupplyLevel[id]   = 0
 		testRateLevel[id]     = 0
@@ -2724,6 +2738,16 @@ local function isSpotted(sources: { SightSource }, pos: Vector3): boolean
 	return false
 end
 
+-- Public spotter-check factory: gathers `ownerStr`'s sight sources once, then
+-- returns a predicate `(pos) -> boolean` that reports whether a point is out of
+-- the fog (within vision of that owner's units/buildings). Long-range units such
+-- as the Sniper use this so they never fire blindly into unexplored fog — the same
+-- rule the Artillery turret follows. Gather once per volley, reuse for every test.
+function BuildingManager.makeSpotterCheck(ownerStr: string): (Vector3) -> boolean
+	local sources = gatherSightSources(ownerStr)
+	return function(pos) return isSpotted(sources, pos) end
+end
+
 -- ── Init ──────────────────────────────────────────────────────────────────────
 
 function BuildingManager.init(resourceManager, mineralManager_)
@@ -2880,7 +2904,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				if unitManagerRef then
 					local aliveCount = unitManagerRef.getDeployerAliveCount(id)
 					if aliveCount < capacity then
-						local unitType = deployerUnitType[id] or "Soldier"
+						local unitType = deployerUnitType[id] or "Survivor"
 						local footprint = isTest and Config.TEST_SIZE.X or Config.BONFIRE_SIZE.X
 						local spawnPos = data.base.Position + Vector3.new(footprint / 2 + 2, 0, 0)
 						unitManagerRef.spawnForDeployer(id, data.owner, spawnPos, unitType)
@@ -2892,7 +2916,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				deployerUpdateAcc[id] = (deployerUpdateAcc[id] or 0) + dt
 				if deployerUpdateAcc[id] >= 0.35 then
 					deployerUpdateAcc[id] = 0
-					local unitType = deployerUnitType[id] or "Soldier"
+					local unitType = deployerUnitType[id] or "Survivor"
 					if isTest then
 						local sLvl = testSupplyLevel[id] or 0
 						local rLvl = testRateLevel[id] or 0
@@ -3178,19 +3202,31 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true, TEST=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/Nest/Post need a Bonfire; Relay/Blob need research
+		-- Faction gate: the Hollowed may ONLY place Blobs and Nests; Humans may place
+		-- anything EXCEPT those two (they belong to the Hollowed now).
+		local hollowed = isHollowed(player)
+		if hollowed then
+			if not HOLLOWED_BUILDINGS[buildingType] then return end
+		else
+			if HOLLOWED_BUILDINGS[buildingType] then return end
+		end
+
+		-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/Post need a
+		-- Bonfire; Relay needs research. The Hollowed have no Foundry/Bonfire/research
+		-- tree, so their Blob + Nest skip the Human prerequisites entirely.
 		if buildingType == "Deployer"
 			and getPlayerBuildingCount(player, "Foundry") < 1 then return end
 		if buildingType == "Turret"   and getPlayerBuildingCount(player, "Deployer") < 1 then return end
 		if buildingType == "EngineeringPost" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
-		if buildingType == "LampreyNest" and getPlayerBuildingCount(player, "Deployer") < 1 then return end
+		if buildingType == "LampreyNest" and not hollowed
+			and getPlayerBuildingCount(player, "Deployer") < 1 then return end
 		-- TEST is limited to one per player (placed + in-flight).
 		if buildingType == "TEST"
 			and getPlayerBuildingCount(player, "TEST") + pendingCountFor(player, "TEST") >= 1 then return end
 		if buildingType == "Relay" then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "Relay") then return end
 		end
-		if buildingType == "CreepyBlob" then
+		if buildingType == "CreepyBlob" and not hollowed then
 			if not researchManagerRef or not researchManagerRef.hasResearch(player, "CreepyBlob") then return end
 		end
 
@@ -3276,7 +3312,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	-- ── SetDeployerType remote ─────────────────────────────────────────────────
 	RemoteHandler.get(Config.REMOTES.SetDeployerType).OnServerEvent:Connect(function(player, deployerId, unitType)
 		if type(deployerId) ~= "string" or type(unitType) ~= "string" then return end
-		local VALID = { Soldier = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
+		local VALID = { Survivor = true, Sniper = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
 		if not VALID[unitType] then return end
 		local data = buildingData[deployerId]
 		if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return end
@@ -3328,7 +3364,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if bdata and bdata.base and bdata.base.Parent then
 				UnitVisuals.addBonfireLog(bdata.base.Parent, level)
 			end
-			local unitType = deployerUnitType[id] or "Soldier"
+			local unitType = deployerUnitType[id] or "Survivor"
 			local progress = math.clamp((deployerTimers[id] or 0) / Config.bonfireInterval(level), 0, 1)
 			local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
 			-- `true` 8th arg flags a fresh upgrade so the client plays the empower FX.
@@ -3343,7 +3379,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if not data then return end
 		local sLvl     = testSupplyLevel[id] or 0
 		local rLvl     = testRateLevel[id] or 0
-		local unitType = deployerUnitType[id] or "Soldier"
+		local unitType = deployerUnitType[id] or "Survivor"
 		local capacity = Config.testCapacity(sLvl)
 		local interval = Config.testInterval(rLvl)
 		local progress = math.clamp((deployerTimers[id] or 0) / interval, 0, 1)
@@ -3356,7 +3392,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	-- Set the unit type a TEST building auto-summons (mirrors SetDeployerType).
 	RemoteHandler.get(Config.REMOTES.SetTestType).OnServerEvent:Connect(function(player, testId, unitType)
 		if type(testId) ~= "string" or type(unitType) ~= "string" then return end
-		local VALID = { Soldier = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
+		local VALID = { Survivor = true, Sniper = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
 		if not VALID[unitType] then return end
 		local data = buildingData[testId]
 		if not data or data.buildingType ~= "TEST" or data.owner ~= player then return end
@@ -3568,7 +3604,7 @@ function BuildingManager.upgradeTurretForPlayer(player: any, turretId: string, u
 end
 
 -- ── Bonfire helpers for AI bots (server-side; no client UI involved) ──────────
--- Set which unit a bonfire summons (lets AI armies be varied, not all-Soldier).
+-- Set which unit a bonfire summons (lets AI armies be varied, not all-Survivor).
 function BuildingManager.setBonfireSummonType(player: any, deployerId: string, unitType: string): boolean
 	local data = buildingData[deployerId]
 	if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return false end

@@ -50,8 +50,9 @@ local FOAM_BLUE    = Color3.fromRGB(160, 220, 255)
 
 type UnitDef = { key: string, label: string, icon: string, color: Color3, angle: number }
 
+-- Snipers are NOT summoned here — they're a field upgrade on a selected Survivor.
 local UNIT_DEFS: { UnitDef } = {
-	{ key = "Soldier",  label = "Soldier",  icon = "⚔",  color = C.GREEN,      angle = -135 },
+	{ key = "Survivor", label = "Survivor",  icon = "⚔",  color = C.GREEN,      angle = -135 },
 	{ key = "Tank",     label = "Tank",      icon = "⬡",  color = C.BARRACKS,   angle = -90  },
 	{ key = "Howitzer", label = "Howitzer",  icon = "💣", color = HOWITZER_OLV, angle = -45  },
 	{ key = "Elite",    label = "Elite",     icon = "★",  color = PURPLE,       angle = 0    },
@@ -60,7 +61,7 @@ local UNIT_DEFS: { UnitDef } = {
 }
 
 local UNIT_COLOR: { [string]: Color3 } = {
-	Soldier  = C.GREEN,
+	Survivor = C.GREEN,
 	Tank     = C.BARRACKS,
 	Howitzer = HOWITZER_OLV,
 	Elite    = PURPLE,
@@ -279,7 +280,7 @@ end
 
 -- ── Command-card page ───────────────────────────────────────────────────────────
 local function buildPage(): CommandCard.Page
-	local current = activeDeployerId and deployerCurrentTypes[activeDeployerId] or "Soldier"
+	local current = activeDeployerId and deployerCurrentTypes[activeDeployerId] or "Survivor"
 	local slots: { CommandCard.Slot } = {}
 	for i, def in UNIT_DEFS do
 		local key    = def.key

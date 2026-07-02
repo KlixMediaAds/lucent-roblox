@@ -1091,7 +1091,7 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	end
 
 	-- Base block body. For units whose blueprint marks the root transparent
-	-- (Soldier, Howitzer) this becomes an invisible anchor; the visible shape is
+	-- (Survivor, Howitzer) this becomes an invisible anchor; the visible shape is
 	-- entirely decorator parts. Named after the unit type so callers can pick it
 	-- as the model's PrimaryPart.
 	local body          = Instance.new("Part")
@@ -1431,7 +1431,7 @@ end
 	Used to sit the training preview correctly on the barracks training pad.
 ]]
 function UnitVisuals.getUnitPreviewBottomOffset(unitType: string): number
-	if unitType == "Soldier" then
+	if unitType == "Survivor" or unitType == "Sniper" then
 		return 1.75  -- pill half-height (total height 3.5)
 	end
 	if unitType == "Lamprey" then

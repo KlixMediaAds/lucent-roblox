@@ -56,7 +56,7 @@ local testState: { [string]: TestState } = {}
 local function stateFor(id: string): TestState
 	local s = testState[id]
 	if not s then
-		s = { unitType = "Soldier", supplyLevel = 0, rateLevel = 0,
+		s = { unitType = "Survivor", supplyLevel = 0, rateLevel = 0,
 			capacity = Config.TEST_BASE_CAPACITY, supplyCost = Config.testSupplyCost(0),
 			rateCost = Config.testRateCost(0), progress = 0 }
 		testState[id] = s
@@ -72,8 +72,9 @@ local FOAM_BLUE    = Color3.fromRGB(160, 220, 255)
 local UPGRADE_COLOR = Color3.fromRGB(232, 196, 120)  -- gold
 
 type UnitDef = { key: string, label: string, icon: string, color: Color3 }
+-- Snipers are NOT summoned here — they're a field upgrade on a selected Survivor.
 local UNIT_DEFS: { UnitDef } = {
-	{ key = "Soldier",  label = "Soldier",  icon = "⚔",  color = C.GREEN      },
+	{ key = "Survivor", label = "Survivor", icon = "⚔",  color = C.GREEN      },
 	{ key = "Tank",     label = "Tank",     icon = "⬡",  color = C.BARRACKS   },
 	{ key = "Howitzer", label = "Howitzer", icon = "💣", color = HOWITZER_OLV },
 	{ key = "Elite",    label = "Elite",    icon = "★",  color = PURPLE       },
@@ -81,7 +82,7 @@ local UNIT_DEFS: { UnitDef } = {
 	{ key = "Foamer",   label = "Foamer",   icon = "🫧", color = FOAM_BLUE    },
 }
 local UNIT_COLOR: { [string]: Color3 } = {
-	Soldier = C.GREEN, Tank = C.BARRACKS, Howitzer = HOWITZER_OLV,
+	Survivor = C.GREEN, Tank = C.BARRACKS, Howitzer = HOWITZER_OLV,
 	Elite = PURPLE, Medic = MEDIC_TEAL, Foamer = FOAM_BLUE,
 }
 local RESEARCH_GATE: { [string]: string } = { Elite = "EliteUnits", Medic = "MedicUnit" }
@@ -186,7 +187,7 @@ local function buildMenuPage(): CommandCard.Page
 end
 
 local function buildUnitsPage(): CommandCard.Page
-	local current = activeTestId and stateFor(activeTestId).unitType or "Soldier"
+	local current = activeTestId and stateFor(activeTestId).unitType or "Survivor"
 	local slots: { CommandCard.Slot } = {}
 	for i, def in UNIT_DEFS do
 		local key    = def.key
