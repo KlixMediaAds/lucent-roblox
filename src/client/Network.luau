@@ -228,6 +228,36 @@ function Network.moveMobileCC(ccId: string, pos: Vector3)
 	RemoteHandler.get(Config.REMOTES.MoveMobileCC):FireServer(ccId, pos)
 end
 
+-- ccId, unitType: the Hollowed Mother trains a unit beside itself (Leech/Biter/Polyp)
+function Network.trainFromMother(ccId: string, unitType: string)
+	RemoteHandler.get(Config.REMOTES.TrainFromMother):FireServer(ccId, unitType)
+end
+
+-- unitId: toggle a Leech between burrowed (structure/income) and mobile
+function Network.toggleBurrow(unitId: string)
+	RemoteHandler.get(Config.REMOTES.ToggleBurrow):FireServer(unitId)
+end
+
+-- polypId, structureType ("Brain"/"CreepyTurret"): morph a Polyp into a structure
+function Network.morphPolyp(polypId: string, structureType: string)
+	RemoteHandler.get(Config.REMOTES.MorphPolyp):FireServer(polypId, structureType)
+end
+
+-- brainId: begin the Brain's Biter-Genome research (unlocks Biter evolution)
+function Network.researchBrain(brainId: string)
+	RemoteHandler.get(Config.REMOTES.ResearchBrain):FireServer(brainId)
+end
+
+-- biterId, targetType ("Lamprey"/"Hagfish"/"Mother"): evolve a Biter
+function Network.evolveBiter(biterId: string, targetType: string)
+	RemoteHandler.get(Config.REMOTES.EvolveBiter):FireServer(biterId, targetType)
+end
+
+-- unitId: a burrowed Leech just paid out income → play its harvest animation
+function Network.onLeechHarvest(fn: (string) -> ())
+	RemoteHandler.get(Config.REMOTES.LeechHarvest).OnClientEvent:Connect(fn)
+end
+
 -- ccId, isUnlocked, isMobile
 function Network.onCCMobileSync(fn: (string, boolean, boolean) -> ())
 	RemoteHandler.get(Config.REMOTES.CCMobileSync).OnClientEvent:Connect(fn)

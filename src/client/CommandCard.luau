@@ -65,6 +65,10 @@ export type Slot = {
 export type Page = {
 	header: string?,
 	slots:  { Slot },
+	-- Number of columns to lay the tiles out in. Defaults to 3 (the classic small
+	-- 3×3 grid). Pass 2 for the Hollowed race's larger 2×2 tiles — same grid frame,
+	-- fewer/bigger tiles.
+	cols:   number?,
 }
 
 -- ── Layout (square grid, sized to match the minimap) ─────────────────────────────
@@ -84,6 +88,21 @@ CommandCard.BOTTOM_OFFSET = 10
 
 local HEADER_H = 26
 local TIP_W    = 240
+
+-- Tile geometry for a given column count. The grid frame is fixed (GRID_W×GRID_H);
+-- the tile size is derived so `cols` columns exactly fill it with the standard GAP.
+-- cols = 3 → 40px tiles (classic). cols = 2 → 63px tiles (Hollowed 2×2).
+local function tilePxFor(cols: number): number
+	return (GRID_W - (cols - 1) * GAP) / cols
+end
+local function tileGeom(index: number, cols: number): (number, number, number)
+	local tilePx = tilePxFor(cols)
+	local row = math.floor((index - 1) / cols)
+	local col = (index - 1) % cols
+	local x   = PAD + col * (tilePx + GAP)
+	local y   = PAD + row * (tilePx + GAP)
+	return tilePx, x, y
+end
 
 -- ── State ──────────────────────────────────────────────────────────────────────
 local frame:      Frame?
@@ -291,11 +310,15 @@ local function setHolderViewport(tile: Tile, wantVp: ViewportFrame?)
 	end
 end
 
-local function applySlot(tile: Tile, slot: Slot)
+local function applySlot(tile: Tile, slot: Slot, cols: number)
 	local locked  = slot.locked == true
 	local enabled = slot.enabled ~= false
 
-	tile.wrapper.Visible = true
+	-- Position + size this tile for the active column count (2 = big Hollowed tiles).
+	local tilePx, x, y = tileGeom(slot.index, cols)
+	tile.wrapper.Size     = UDim2.fromOffset(tilePx, tilePx)
+	tile.wrapper.Position = UDim2.fromOffset(x, y)
+	tile.wrapper.Visible  = true
 	tile.locked = locked
 
 	local wantVp: ViewportFrame? = nil
@@ -303,7 +326,8 @@ local function applySlot(tile: Tile, slot: Slot)
 		local vp = vpCache[slot.viewportKey]
 		if not vp then
 			vp = (slot.viewportFactory :: () -> ViewportFrame)()
-			vp.Size                   = UDim2.fromOffset(TILE - 8, TILE - 8)
+			-- Scale-based so one cached viewport fits tiles of any column count.
+			vp.Size                   = UDim2.fromScale(0.82, 0.82)
 			vp.Position               = UDim2.fromScale(0.5, 0.5)
 			vp.AnchorPoint            = Vector2.new(0.5, 0.5)
 			vp.BackgroundTransparency = 1
@@ -317,6 +341,7 @@ local function applySlot(tile: Tile, slot: Slot)
 	else
 		tile.btn.Text       = slot.icon or ""
 		tile.btn.TextColor3 = locked and MONO_TXT or TXT
+		tile.btn.TextSize   = math.floor(tilePx * 0.5)   -- bigger glyphs on bigger tiles
 	end
 
 	-- Border colour conveys state: locked = grey, unaffordable = red, else steel.
@@ -578,12 +603,13 @@ local function renderPage(page: Page)
 	if msgLbl then msgLbl.Visible = false end
 	if hint then hint.Visible = false end
 	setHeader(page.header or "")
+	local cols = page.cols or COLS
 	local used: { [number]: boolean } = {}
 	for _, slot in page.slots do
 		local i = slot.index
 		if i >= 1 and i <= SLOTS then
 			used[i] = true
-			applySlot(tiles[i], slot)
+			applySlot(tiles[i], slot, cols)
 		end
 	end
 	for i = 1, SLOTS do

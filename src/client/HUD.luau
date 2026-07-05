@@ -253,15 +253,17 @@ end
 
 -- ── Requirement helpers ───────────────────────────────────────────────────────
 
--- Faction gating: the Hollowed team places ONLY Blobs and Nests; Humans place
--- everything except those two. Faction comes from the replicated player attribute
+-- Faction gating: the Hollowed team builds NOTHING from the bottom tray — everything
+-- flows from selecting the Mother (their spike Command Center) and its option grid. So
+-- their tray is empty. Humans place everything except the legacy creature buildings
+-- (kept in code for the Swarm AI). Faction comes from the replicated player attribute
 -- set in the lobby (defaults to Humans).
 local HOLLOWED_BUILDINGS: { [string]: boolean } = { CreepyBlob = true, LampreyNest = true }
 local function currentFaction(): string
 	return localPlayer:GetAttribute("Faction") or "Humans"
 end
 local function factionAllows(btype: string): boolean
-	if currentFaction() == "Hollowed" then return HOLLOWED_BUILDINGS[btype] == true end
+	if currentFaction() == "Hollowed" then return false end
 	return HOLLOWED_BUILDINGS[btype] ~= true
 end
 

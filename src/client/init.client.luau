@@ -22,6 +22,7 @@ local WalkerLegs     = require(script:WaitForChild("WalkerLegs"))
 local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local HagfishBody    = require(script:WaitForChild("HagfishBody"))
 local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
+local LeechBody      = require(script:WaitForChild("LeechBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
@@ -32,6 +33,11 @@ local EngineeringPanel = require(script:WaitForChild("EngineeringPanel"))
 local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local TestPanel      = require(script:WaitForChild("TestPanel"))
 local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
+local MotherPanel    = require(script:WaitForChild("MotherPanel"))
+local LeechPanel     = require(script:WaitForChild("LeechPanel"))
+local PolypPanel     = require(script:WaitForChild("PolypPanel"))
+local BiterPanel     = require(script:WaitForChild("BiterPanel"))
+local BrainPanel     = require(script:WaitForChild("BrainPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local Jumpscare      = require(script:WaitForChild("Jumpscare"))
@@ -86,6 +92,12 @@ do
 end
 
 local localUserId = Players.LocalPlayer.UserId
+
+-- The Hollowed race drives everything from the Mother's option grid instead of the
+-- Human build tray, so selection/[Space] branch on this.
+local function isHollowedLocal(): boolean
+	return Players.LocalPlayer:GetAttribute("Faction") == "Hollowed"
+end
 
 -- Client-side deposit resource tracking for hover health bars (posKey → remaining)
 local depositClientRes: { [string]: number } = {}
@@ -188,6 +200,33 @@ local function buildCCMoveGhost()
 	base.Parent         = m
 	m.PrimaryPart       = base
 
+	-- Hollowed Mother: a simple ghostly black spike (matches the placed Mother),
+	-- not the Human Fabricator Core rig.
+	if isHollowedLocal() then
+		base.Transparency = 1
+		local SPIKE_H     = 28
+		local spike       = Instance.new("Part")
+		spike.Name        = "Spike"
+		spike.Size        = Vector3.new(6, SPIKE_H, 6)
+		spike.Color       = Color3.fromRGB(8, 8, 10)
+		spike.Material    = Enum.Material.Slate
+		spike.Transparency = 0.5
+		spike.Anchored    = true
+		spike.CanCollide  = false
+		spike.CanQuery    = false
+		spike.CastShadow  = false
+		spike.CFrame      = CFrame.new(0, SPIKE_H / 2, 0)
+		local spikeMesh   = Instance.new("SpecialMesh")
+		spikeMesh.MeshType = Enum.MeshType.FileMesh
+		spikeMesh.MeshId   = "rbxassetid://1033714"
+		spikeMesh.Scale    = Vector3.new(6, SPIKE_H, 6)
+		spikeMesh.Parent   = spike
+		spike.Parent      = m
+		m.Parent    = workspace
+		ccMoveGhost = m
+		return
+	end
+
 	-- Fabricator Core decor (shared with the live CC), made ghostly
 	UnitVisuals.buildCommandCenterDecor(m, CFrame.new(0, 0, 0), color, false)
 	for _, d in m:GetDescendants() do
@@ -242,6 +281,7 @@ WalkerLegs.init(workspace.CurrentCamera)
 LampreyBody.init(workspace.CurrentCamera)
 HagfishBody.init(workspace.CurrentCamera)
 BroodmotherBody.init(workspace.CurrentCamera)
+LeechBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 SwarmGrass.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
@@ -375,6 +415,11 @@ EngineeringPanel.init(Network)
 CCMobilePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)
+MotherPanel.init(Network, function() return currentResources end)
+LeechPanel.init(Network)
+PolypPanel.init(Network)
+BiterPanel.init(Network)
+BrainPanel.init(Network)
 DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
@@ -547,6 +592,8 @@ local function hideBuildingPanels()
 	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
 	TestPanel.hide()
+	MotherPanel.hide()
+	BrainPanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
@@ -580,19 +627,31 @@ local ccPageId: string? = nil
 local function showCCBuildPage(ccId: string?)
 	if not ownCCId then return end
 	ccPageId = ccId or ownCCId
-	HUD.showBuildPage()
+	if isHollowedLocal() then
+		-- Hollowed: the CC is the Mother — show its 2×2 option grid instead of the
+		-- Human build page. Feed the current uproot state so it shows Uproot/Downroot.
+		MotherPanel.setMobileState(ccIsMobile)
+		MotherPanel.show(ccPageId :: string)
+	else
+		HUD.showBuildPage()
+	end
 end
 
 local function hideCCBuildPage()
 	ccPageId = nil
-	HUD.hideBuildPage()
+	if isHollowedLocal() then
+		MotherPanel.hide()
+	else
+		HUD.hideBuildPage()
+	end
 end
 
--- [Space]: toggle the Command Center build options on the command card.
+-- [Space]: toggle the Command Center (Mother, for Hollowed) options on the command card.
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.KeyCode ~= Enum.KeyCode.Space then return end
-	if HUD.isBuildPageShown() then
+	local shown = isHollowedLocal() and MotherPanel.isVisible() or HUD.isBuildPageShown()
+	if shown then
 		hideCCBuildPage()
 	else
 		hideBuildingPanels()
@@ -642,6 +701,11 @@ local function enterCCMode()
 	BlobPanel.hide()
 	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
+	MotherPanel.hide()
+	LeechPanel.hide()
+	PolypPanel.hide()
+	BiterPanel.hide()
+	BrainPanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
@@ -738,22 +802,30 @@ Network.onBuildingPlaced(function(id: string, ownerId: number, pos: Vector3, bui
 	end
 end)
 
--- ── Survivor unit panel ────────────────────────────────────────────────────────
--- Selecting owned Survivors opens a unit command card with the "Upgrade to Sniper"
--- action. Any selection that has no owned Survivors hides it (a building selection
--- clears the unit selection first, so this fires with an empty list then).
+-- ── Unit command cards (Survivor upgrade + Hollowed units) ─────────────────────
+-- Selecting owned units opens that unit's option grid: Survivor → Upgrade to Sniper;
+-- Leech → Burrow/Unburrow; Polyp → morph (Brain/Creepy Turret); Biter → evolve (once
+-- Biter Genome is researched, else an empty grid). Any selection lacking a given type
+-- hides its panel (a building selection clears the unit selection first, so this fires
+-- with an empty list then).
 UnitController.onUnitsSelected(function(ids: { string })
 	local survivorIds: { string } = {}
+	local leechIds:    { string } = {}
+	local polypIds:    { string } = {}
+	local biterIds:    { string } = {}
 	for _, id in ids do
-		if UnitController.getUnitType(id) == "Survivor" then
-			table.insert(survivorIds, id)
+		local t = UnitController.getUnitType(id)
+		if     t == "Survivor" then table.insert(survivorIds, id)
+		elseif t == "Leech"    then table.insert(leechIds, id)
+		elseif t == "Polyp"    then table.insert(polypIds, id)
+		elseif t == "Biter"    then table.insert(biterIds, id)
 		end
 	end
-	if #survivorIds > 0 then
-		SurvivorPanel.show(survivorIds)
-	else
-		SurvivorPanel.hide()
-	end
+
+	if #survivorIds > 0 then SurvivorPanel.show(survivorIds) else SurvivorPanel.hide() end
+	if #leechIds    > 0 then LeechPanel.show(leechIds)       else LeechPanel.hide()    end
+	if #polypIds    > 0 then PolypPanel.show(polypIds)       else PolypPanel.hide()    end
+	if #biterIds    > 0 then BiterPanel.show(biterIds)       else BiterPanel.hide()    end
 end)
 
 -- ── Bonfire panel ──────────────────────────────────────────────────────────────
@@ -887,6 +959,13 @@ local OTHER_STRUCT_NAME: { [string]: string } = {
 	Relay = "RELAY", Monument = "MONUMENT",
 }
 UnitController.onOtherBuildingSelected(function(bid: string?, btype: string?)
+	if bid and btype == "Brain" then
+		-- The Hollowed Brain has its own research card (Biter Genome).
+		CommandCard.hide("other")
+		BrainPanel.show(bid)
+		return
+	end
+	BrainPanel.hide()
 	if bid then
 		local name = (btype and (OTHER_STRUCT_NAME[btype] or btype) or "STRUCTURE"):upper()
 		CommandCard.showMessage("other", name, "Upgrades coming soon!")
@@ -967,17 +1046,21 @@ Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boo
 	if ccId ~= ownCCId then return end
 	ccIsMobile = isMobile
 	CCMobilePanel.setMobileState(isUnlocked, isMobile)
+	MotherPanel.setMobileState(isMobile)   -- flips the Mother card between Uproot / Downroot
 	BuildingPlacer.setCCMobile(isMobile)
 	if isMobile then
 		buildCCMoveGhost()
-		task.spawn(function()
-			local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
-			if not bf then return end
-			local model = bf:WaitForChild(ccId, 10)
-			if not model then return end
-			local base = model:FindFirstChild("Base") :: BasePart?
-			if base then MechLegs.attach(ccId, base) end
-		end)
+		-- The Hollowed Mother is a raw spike, not a mechanical rig — no MechLegs for it.
+		if not isHollowedLocal() then
+			task.spawn(function()
+				local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
+				if not bf then return end
+				local model = bf:WaitForChild(ccId, 10)
+				if not model then return end
+				local base = model:FindFirstChild("Base") :: BasePart?
+				if base then MechLegs.attach(ccId, base) end
+			end)
+		end
 	else
 		destroyCCMoveGhost()
 		MechLegs.detach(ccId)
@@ -1305,6 +1388,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			HagfishBody.attach(unitId, part)
 		elseif tv and tv.Value == "Broodmother" then
 			BroodmotherBody.attach(unitId, part)
+		elseif tv and tv.Value == "Leech" then
+			LeechBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -1335,6 +1420,8 @@ Network.onResourceSync(function(amount: number)
 	DeployerPanel.refreshIfVisible()
 	TestPanel.refreshIfVisible()
 	SurvivorPanel.refreshIfVisible()
+	MotherPanel.refreshIfVisible()
+	LeechPanel.refreshIfVisible()
 end)
 
 -- Floating "+N" income popup over your own Foundry each income tick.
@@ -3398,6 +3485,51 @@ end
 Network.onHagfishStrike(function(hagPos: Vector3, strikes: { Vector3 })
 	HagfishBody.triggerAttackNear(hagPos)
 	HagfishBody.spawnTentacles(strikes)
+end)
+
+-- A burrowed Leech just paid out income → play its feeding/harvest animation, and
+-- float a rising "+income" above the player's OWN leeches (economy feedback).
+Network.onLeechHarvest(function(unitId: string)
+	LeechBody.triggerHarvest(unitId)
+
+	local unitsF = workspace:FindFirstChild("Units") :: Folder?
+	local part   = unitsF and unitsF:FindFirstChild(unitId) :: BasePart?
+	if not part then return end
+	local ov = part:FindFirstChild("OwnerId") :: StringValue?
+	if not ov or ov.Value ~= tostring(localUserId) then return end
+
+	local yBase              = part.Size.Y / 2 + 3
+	local xOff               = (math.random() - 0.5) * 3
+	local bb                 = Instance.new("BillboardGui")
+	bb.Name                  = "_LeechIncome"
+	bb.Size                  = UDim2.fromOffset(60, 20)
+	bb.StudsOffset           = Vector3.new(xOff, yBase, 0)
+	bb.AlwaysOnTop           = true
+	bb.MaxDistance           = 200
+	bb.Parent                = part
+
+	local lbl                  = Instance.new("TextLabel")
+	lbl.Size                   = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font                   = Enum.Font.GothamBold
+	lbl.TextSize               = 15
+	lbl.TextColor3             = Color3.fromRGB(120, 255, 140)
+	lbl.TextStrokeTransparency = 0.35
+	lbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+	lbl.Text                   = "+" .. Config.LEECH_BURROW_INCOME
+	lbl.Parent                 = bb
+
+	local el = 0
+	local lc: RBXScriptConnection
+	lc = RunService.RenderStepped:Connect(function(idt)
+		el += idt
+		if bb.Parent then
+			local t = math.min(el / 1.3, 1)
+			bb.StudsOffset       = Vector3.new(xOff, yBase + t * 6, 0)
+			lbl.TextTransparency = math.clamp((t - 0.4) / 0.6, 0, 1)
+		end
+		if el >= 1.3 then lc:Disconnect(); if bb.Parent then bb:Destroy() end end
+	end)
 end)
 
 -- Broodmother death: the nearest one collapses, splits along its ribcage and drops

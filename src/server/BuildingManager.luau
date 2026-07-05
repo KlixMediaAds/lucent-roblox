@@ -83,6 +83,7 @@ local nextBuildRiseTime: number? = nil  -- overrides BUILD_TIME for the next cre
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
 local ccMobile:         { [string]: boolean } = {}  -- ccId   → currently walking
 local ccMoveTargets:    { [string]: Vector3 } = {}  -- ccId   → current move target
+local brainGenomeResearching: { [number]: boolean } = {}  -- userId → Biter-Genome research in progress
 local playerCCId:       { [number]: string  } = {}  -- userId → their CC building id
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
@@ -98,6 +99,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
+	if buildingType == "Brain"         then return Config.BRAIN_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -656,6 +658,11 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		-- ready" notifier billboard is added below and toggled when research completes.
 		base.Transparency = 1
 		UnitVisuals.buildEngineeringPostDecor(model, CFrame.new(position), player.TeamColor, true)
+
+	elseif buildingType == "Brain" then
+		-- Hollowed Brain (Polyp morph target). MVP: a single black organic mass.
+		base.Color    = Color3.fromRGB(12, 10, 14)
+		base.Material = Enum.Material.Slate
 
 	else
 		-- Generic fallback: keep the team-coloured base visible. No placeable type reaches
@@ -1789,6 +1796,11 @@ function BuildingManager.resetAll()
 	ccMobile                 = {}
 	ccMoveTargets            = {}
 	playerCCId               = {}
+	brainGenomeResearching   = {}
+	-- Clear the per-player Biter-Genome unlock so it doesn't carry into the next match.
+	for _, plr in game:GetService("Players"):GetPlayers() do
+		plr:SetAttribute("BiterGenome", nil)
+	end
 end
 
 function BuildingManager.setOnCCDestroyed(fn: (any) -> ())
@@ -2536,8 +2548,23 @@ function BuildingManager.damage(id: string, amount: number)
 	end
 
 	if wasCC then
-		playerHasCC[owner.UserId] = nil
-		if onCCDestroyedCb then onCCDestroyedCb(owner) end
+		-- A player can own several Command Centers (Biter → Mother stacks them). Only
+		-- eliminate when the LAST one falls; otherwise re-point the primary CC id to a
+		-- surviving Mother and keep the player in the game.
+		local remaining: string? = nil
+		for otherId, d in buildingData do
+			if d.buildingType == "CommandCenter" and d.owner == owner then
+				remaining = otherId
+				break
+			end
+		end
+		if remaining then
+			playerCCId[owner.UserId] = remaining
+		else
+			playerHasCC[owner.UserId] = nil
+			playerCCId[owner.UserId] = nil
+			if onCCDestroyedCb then onCCDestroyedCb(owner) end
+		end
 	end
 
 	if wasMonument then
@@ -2703,6 +2730,30 @@ function BuildingManager.placeInstantForPlayer(player: any, position: Vector3, b
 	local ok, id = BuildingManager.placeForPlayer(player, position, buildingType)
 	skipNextConstruction = false
 	return ok, id
+end
+
+-- Polyp / Biter morph: instantly create a fully-built structure at `position`,
+-- bypassing build-zone / prerequisite / cost gates (the unit already paid to exist).
+-- `turretUpgrade` (optional) pre-applies a turret path, e.g. "Creepy". CommandCenter
+-- is allowed here even if the player already owns one (Biter → Mother can stack CCs).
+-- Returns the new building id, or nil if the footprint is off-map.
+function BuildingManager.morphStructureForPlayer(player: any, position: Vector3, buildingType: string, turretUpgrade: string?): string?
+	local snapped = snapGrid(position)
+	if isOutOfMapBounds(snapped, buildingType) then return nil end
+	skipNextConstruction = true
+	local id = createBuilding(player, snapped, buildingType)
+	skipNextConstruction = false
+	if researchManagerRef and buildingType ~= "CommandCenter" then
+		researchManagerRef.recordBuildingPlaced(player, buildingType)
+	end
+	if buildingType == "Turret" and turretUpgrade then
+		local data = buildingData[id]
+		if data then
+			data.turretUpgrade = turretUpgrade
+			applyTurretUpgradeVisuals(id, turretUpgrade)
+		end
+	end
+	return id
 end
 
 -- ── Artillery spotter check ───────────────────────────────────────────────────
@@ -3086,6 +3137,28 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		local data = buildingData[ccId]
 		if not data or data.buildingType ~= "CommandCenter" then return end
 		if data.owner ~= player then return end
+
+		-- The Hollowed Mother "uproots" / "downroots" for free — no research, no unlock
+		-- cost. It just toggles between rooted (structure, has build options) and mobile
+		-- (moveable unit). Humans keep the researched + paid Mobile-CC path below.
+		if isHollowed(player) then
+			local nowMobile = not ccMobile[ccId]
+			ccMobile[ccId]  = nowMobile
+			if not nowMobile then ccMoveTargets[ccId] = nil end
+			local model = buildingsFolder:FindFirstChild(ccId)
+			if model then
+				local mv = model:FindFirstChild("IsMobile") :: BoolValue?
+				if not mv then
+					mv        = Instance.new("BoolValue")
+					mv.Name   = "IsMobile"
+					mv.Parent = model
+				end
+				(mv :: BoolValue).Value = nowMobile
+			end
+			RemoteHandler.get(Config.REMOTES.CCMobileSync):FireClient(player, ccId, true, nowMobile)
+			return
+		end
+
 		if not researchManagerRef or not researchManagerRef.hasResearch(player, "MobileCC") then return end
 
 		if not ccMobileUnlocked[player.UserId] then
@@ -3129,6 +3202,26 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if data.owner ~= player then return end
 		if not ccMobile[ccId] then return end
 		ccMoveTargets[ccId] = Vector3.new(pos.X, 0, pos.Z)
+	end)
+
+	-- ── ResearchBrain remote (Hollowed Brain → "Biter Genome") ────────────
+	-- A 3-second research that, on completion, sets the owner's "BiterGenome" player
+	-- attribute (replicates to their client), unlocking Biter evolution. Per-player:
+	-- once any Brain finishes it, every Biter can evolve.
+	RemoteHandler.get(Config.REMOTES.ResearchBrain).OnServerEvent:Connect(function(player, brainId)
+		if type(brainId) ~= "string" then return end
+		local data = buildingData[brainId]
+		if not data or data.buildingType ~= "Brain" or data.owner ~= player then return end
+		if data.isConstructing then return end
+		if player:GetAttribute("BiterGenome") == true then return end
+		if brainGenomeResearching[player.UserId] then return end
+		brainGenomeResearching[player.UserId] = true
+		task.delay(Config.BITER_GENOME_TIME, function()
+			brainGenomeResearching[player.UserId] = nil
+			if player and player.Parent then
+				player:SetAttribute("BiterGenome", true)
+			end
+		end)
 	end)
 
 	-- ── PlaceBuilding remote ──────────────────────────────────────────────
@@ -3202,11 +3295,12 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true, TEST=true }
 		if not PLACEABLE[buildingType] then return end
 
-		-- Faction gate: the Hollowed may ONLY place Blobs and Nests; Humans may place
-		-- anything EXCEPT those two (they belong to the Hollowed now).
+		-- Faction gate: the Hollowed build NOTHING from the tray — every unit and
+		-- structure comes from selecting the Mother and its option grid. Humans place
+		-- anything EXCEPT the legacy creature buildings (kept in code for the Swarm AI).
 		local hollowed = isHollowed(player)
 		if hollowed then
-			if not HOLLOWED_BUILDINGS[buildingType] then return end
+			if buildingType ~= "CommandCenter" then return end
 		else
 			if HOLLOWED_BUILDINGS[buildingType] then return end
 		end

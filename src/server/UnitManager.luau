@@ -66,6 +66,9 @@ type UnitData = {
 	draggedBy     : { string }?,     -- (casualty) unit ids currently hauling this soldier (≤ DRAG_SLOTS)
 	draggingId    : string?,         -- (rescuer) the casualty unit id this soldier is hauling
 	healingAtCC   : boolean?,        -- casualty has been brought home and is regenerating
+	-- Leech (Hollowed): burrowed = rooted underground, paying passive income (structure state)
+	burrowed      : boolean?,
+	burrowIncomeAt: number?,         -- os.clock() throttle for the next burrow income payout
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -411,9 +414,12 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	part.Anchored       = true
 	part.CastShadow     = false
 
-	-- CreepySoldier: always black regardless of team color
-	if unitType == "CreepySoldier" then
+	-- CreepySoldier + Biter/Polyp: MVP single black parts (no blueprint geometry yet).
+	-- (Leech is drawn client-side by LeechBody — see the invisible-pivot block below.)
+	if unitType == "CreepySoldier" or unitType == "Biter" or unitType == "Polyp" then
 		part.BrickColor = BrickColor.new("Black")
+		part.Color      = Color3.fromRGB(10, 10, 12)
+		part.Material   = Enum.Material.Slate
 	end
 
 	local ov        = Instance.new("StringValue")
@@ -462,6 +468,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	end
 	if unitType == "Howitzer" then
 		attachHowitzerSmoke(part)
+	end
+	if unitType == "Leech" then
+		-- The whole leech is drawn client-side (LeechBody) as a low, sideways worm; the
+		-- body part is an invisible, ground-snapped pivot for movement/targeting.
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 2.5, 0) end  -- just above the crawling body
 	end
 	if unitType == "Lamprey" then
 		-- The entire creature is drawn by the client LampreyBody animator; the body
@@ -831,6 +844,26 @@ end
 -- Spawns immediately and returns the unit ID (for turret-spawned units that need tracking).
 function UnitManager.spawnUnitNow(player: Player, position: Vector3, unitType: string): string?
 	return spawnUnit(player, position, unitType)
+end
+
+-- Remove a living unit immediately (used by the Polyp morph + Biter evolve). Mirrors the
+-- heartbeat's dead-unit cleanup: drop decorators, decrement the owner's unit count,
+-- destroy the part, and clear any deployer bookkeeping. Returns the unit's world position
+-- (so the caller can spawn a structure/unit where it stood).
+local function despawnUnit(id: string): Vector3?
+	local d = units[id]
+	if not d then return nil end
+	local pos = d.part and d.part.Position or nil
+	unitDecorators[id] = nil
+	playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
+	if d.part then d.part:Destroy() end
+	units[id] = nil
+	local dep = unitToDeployer[id]
+	if dep then
+		unitToDeployer[id] = nil
+		if deployerUnits[dep] then deployerUnits[dep][id] = nil end
+	end
+	return pos
 end
 
 -- Spawns a unit for a Deployer and records it in the tracking tables.
@@ -1459,6 +1492,25 @@ function UnitManager.init(resourceManager)
 			-- death timer (beginBroodmotherDeath) removes it.
 			if data.dying then continue end
 
+			-- A burrowed Leech is in a structure state: rooted underground, paying out
+			-- passive income each interval, never moving or attacking. Skip all of its
+			-- unit AI until it unburrows.
+			if data.burrowed then
+				data.velocity = Vector3.zero
+				local now = os.clock()
+				if not data.burrowIncomeAt then
+					data.burrowIncomeAt = now + Config.LEECH_BURROW_INTERVAL
+				elseif now >= (data.burrowIncomeAt :: number) then
+					data.burrowIncomeAt = now + Config.LEECH_BURROW_INTERVAL
+					if resourceManagerRef and data.owner and data.owner.UserId > 0 then
+						resourceManagerRef.add(data.owner, Config.LEECH_BURROW_INCOME)
+					end
+					-- Signal every client to play this leech's feeding/harvest animation.
+					RemoteHandler.get(Config.REMOTES.LeechHarvest):FireAllClients(id)
+				end
+				continue
+			end
+
 			-- ── Wounded-soldier collapse roll ─────────────────────────────────
 			-- A badly-hurt soldier may go down: prone, still able to shoot but
 			-- unable to move. Chance rises the closer to death they are. Posing,
@@ -1789,6 +1841,7 @@ function UnitManager.init(resourceManager)
 			-- Downed soldiers hold position (they still shoot via the combat scan below,
 			-- just never chase); active rescuers are busy hauling.
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
+				and data.unitType ~= "Leech" and data.unitType ~= "Polyp"  -- non-combat Hollowed units
 				and not data.immobilized and not data.draggingId
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
@@ -2606,6 +2659,105 @@ function UnitManager.init(resourceManager)
 			else
 				fireTrainingUpdate(barrackId, player)
 			end
+		end
+	end)
+
+	-- ── Mother (Hollowed CC) trains a unit beside itself ──────────────────────────
+	-- Instant-spawn model: click a Mother option → spend its cost → the unit appears on
+	-- a jittered ring just outside the Mother's footprint.
+	RemoteHandler.get(Config.REMOTES.TrainFromMother).OnServerEvent:Connect(function(player, ccId, unitType)
+		if type(ccId) ~= "string" or type(unitType) ~= "string" then return end
+		if unitType ~= "Leech" and unitType ~= "Biter" and unitType ~= "Polyp" then return end
+		local typeDef = Config.UNIT_TYPES[unitType]
+		if not typeDef then return end
+
+		local buildingsFolder = workspace:FindFirstChild("Buildings")
+		if not buildingsFolder then return end
+		local building = buildingsFolder:FindFirstChild(ccId)
+		if not building then return end
+		local btv = building:FindFirstChild("BuildingType") :: StringValue?
+		if not btv or btv.Value ~= "CommandCenter" then return end
+		local ownerVal = building:FindFirstChild("OwnerId")
+		if not ownerVal or ownerVal.Value ~= tostring(player.UserId) then return end
+		local base = building:FindFirstChild("Base") :: BasePart?
+		if not base then return end
+
+		if not resourceManagerRef or not resourceManagerRef.spend(player, typeDef.cost) then return end
+
+		local ang      = math.random() * math.pi * 2
+		local reach    = Config.COMMAND_CENTER_SIZE.X / 2 + 4 + typeDef.size.X
+		local spawnPos = base.Position + Vector3.new(math.cos(ang) * reach, 0, math.sin(ang) * reach)
+		spawnUnit(player, spawnPos, unitType)
+	end)
+
+	-- ── Leech burrow / unburrow toggle ────────────────────────────────────────────
+	-- Burrowing puts the Leech into a structure state (rooted, passive income); the
+	-- heartbeat skip above handles income + freezing. Here we flip the flag, sink/raise
+	-- the body, and tag a Burrowed BoolValue the client LeechPanel reads.
+	RemoteHandler.get(Config.REMOTES.ToggleBurrow).OnServerEvent:Connect(function(player, unitId)
+		if type(unitId) ~= "string" then return end
+		local data = units[unitId]
+		if not data or data.owner ~= player then return end
+		if data.unitType ~= "Leech" or data.hp <= 0 or data.dying then return end
+
+		local nowBurrowed = not data.burrowed
+		data.burrowed       = nowBurrowed
+		data.velocity       = Vector3.zero
+		data.target         = nil
+		data.aggroId        = nil
+		data.aggroHome      = nil
+		data.atkMoveDest    = nil
+		data.burrowIncomeAt = nil
+
+		local part    = data.part
+		local groundY = terrainManagerRef and terrainManagerRef.surfaceHeightAt(part.Position.X, part.Position.Z)
+			or (part.Position.Y - part.Size.Y / 2)
+		local restY = groundY + part.Size.Y / 2 + 0.1
+		part.Position = Vector3.new(part.Position.X,
+			nowBurrowed and (restY - Config.LEECH_BURROW_SINK) or restY,
+			part.Position.Z)
+
+		local bv = part:FindFirstChild("Burrowed") :: BoolValue?
+		if not bv then
+			bv = Instance.new("BoolValue")
+			bv.Name = "Burrowed"
+			bv.Parent = part
+		end
+		(bv :: BoolValue).Value = nowBurrowed
+	end)
+
+	-- ── Polyp morph → structure (Brain / Creepy Turret) ──────────────────────────
+	-- The Polyp instantly becomes the chosen structure at its spot (it already paid to
+	-- exist, so the morph is free). BuildingManager.morphStructureForPlayer bypasses the
+	-- normal build-zone / prerequisite / cost gates.
+	RemoteHandler.get(Config.REMOTES.MorphPolyp).OnServerEvent:Connect(function(player, polypId, structureType)
+		if type(polypId) ~= "string" or type(structureType) ~= "string" then return end
+		if not buildingManagerRef then return end
+		local data = units[polypId]
+		if not data or data.owner ~= player or data.unitType ~= "Polyp" then return end
+		if data.hp <= 0 or data.dying then return end
+		local pos = despawnUnit(polypId)
+		if not pos then return end
+		if structureType == "Brain" then
+			buildingManagerRef.morphStructureForPlayer(player, pos, "Brain")
+		elseif structureType == "CreepyTurret" then
+			buildingManagerRef.morphStructureForPlayer(player, pos, "Turret", "Creepy")
+		end
+	end)
+
+	-- ── Biter evolve → Lamprey / Hagfish / Mother (needs Biter Genome) ───────────
+	RemoteHandler.get(Config.REMOTES.EvolveBiter).OnServerEvent:Connect(function(player, biterId, targetType)
+		if type(biterId) ~= "string" or type(targetType) ~= "string" then return end
+		if player:GetAttribute("BiterGenome") ~= true then return end
+		local data = units[biterId]
+		if not data or data.owner ~= player or data.unitType ~= "Biter" then return end
+		if data.hp <= 0 or data.dying then return end
+		local pos = despawnUnit(biterId)
+		if not pos then return end
+		if targetType == "Lamprey" or targetType == "Hagfish" then
+			spawnUnit(player, pos, targetType)
+		elseif targetType == "Mother" and buildingManagerRef then
+			buildingManagerRef.morphStructureForPlayer(player, pos, "CommandCenter")
 		end
 	end)
 
