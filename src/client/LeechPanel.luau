@@ -14,6 +14,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local LeechPanel = {}
 local OWNER      = "leech"
@@ -63,7 +64,9 @@ function LeechPanel._buildPage(): CommandCard.Page
 		slot = {
 			index   = 1,
 			name    = "BURROW",
-			icon    = "⬇",
+			-- 3D thumbnail of the burrowed, arched (feeding) leech.
+			viewportKey     = "leech:arched",
+			viewportFactory = function() return ViewportPreview.forLeech(true, Vector2.new(64, 64)) end,
 			color   = BURROW_COL,
 			desc    = (n > 1) and ("Burrow all " .. n .. " Leeches for passive income.")
 				or "Burrow into the ground — becomes a structure that generates passive income.",
@@ -77,7 +80,9 @@ function LeechPanel._buildPage(): CommandCard.Page
 		slot = {
 			index   = 1,
 			name    = "UNBURROW",
-			icon    = "⬆",
+			-- 3D thumbnail of the regular (mobile) leech.
+			viewportKey     = "leech:mobile",
+			viewportFactory = function() return ViewportPreview.forLeech(false, Vector2.new(64, 64)) end,
 			color   = UNBURROW_COL,
 			desc    = (n > 1) and ("Unburrow all " .. n .. " Leeches back into mobile units.")
 				or "Surface again as a mobile unit.",

@@ -388,6 +388,167 @@ end
 	All parts are Anchored, CanCollide false, CanQuery false. Arm segments are
 	named "Fab<Seg><i>" so FabricatorArms (client) can animate them.
 ]]
+-- ── Hollowed Mother — living Command Center ──────────────────────────────────
+-- A brood-queen creature (replaces the old black spike): a Diplocaulus boomerang
+-- head on a low, splayed salamander body; a swollen queen-ant gaster behind it,
+-- banded and glowing with brood light; and a sea-anemone crown of tentacles rising
+-- from its back — the faction's tall silhouette.
+-- `castShadows` true for the live building, false for previews/ghosts.
+
+-- Deterministic anemone-tentacle layout, shared by the static builder (resting
+-- pose) and the client MotherCrown animator (slow hagfish-style wobble). Two rows
+-- run along the spine — from behind the head, over the trunk, down the gaster —
+-- each tentacle rooted in the back and leaning out over its own side, tallest over
+-- the midsection. Segments are named "Crown_<i>_<j>" so the animator finds them.
+export type MotherTent = { base: Vector3, radial: Vector3, lens: { number }, thicks: { number }, seed: number }
+UnitVisuals.MOTHER_CROWN = (function(): { MotherTent }
+	local rng = Random.new(7331)
+	-- z along the spine and the back height there (embedded ~0.5 into the flesh).
+	local ROW: { { number } } = {  -- { z, baseY, lengthScale }
+		{ -2.6, 4.5, 0.85 },
+		{ -0.4, 5.3, 1.05 },
+		{  1.8, 5.1, 1.20 },
+		{  4.0, 6.1, 1.20 },
+		{  6.2, 7.1, 1.05 },
+		{  8.4, 7.0, 0.85 },
+	}
+	local list: { MotherTent } = {}
+	for _, s in { -1, 1 } do
+		for _, row in ROW do
+			local sc = row[3] * rng:NextNumber(0.9, 1.1)
+			list[#list + 1] = {
+				base   = Vector3.new(s * 1.4, row[2], row[1]),
+				-- Leans outward over its side with a slight backward drift.
+				radial = Vector3.new(s * 0.9, 0, 0.15 + rng:NextNumber(-0.1, 0.1)).Unit,
+				lens   = { 3.2 * sc, 2.7 * sc, 2.2 * sc },
+				thicks = { 0.85, 0.6, 0.38 },
+				seed   = rng:NextNumber(0, 100),
+			}
+		end
+	end
+	return list
+end)()
+
+-- Resting local-space spine points (4) of one tentacle: rises from its root on the
+-- back and splays outward like an anemone. The animator adds wobble on top.
+function UnitVisuals.motherCrownSpine(spec: MotherTent): { Vector3 }
+	local up   = Vector3.yAxis
+	local dirs = {
+		(spec.radial * 0.25 + up).Unit,
+		(spec.radial * 0.60 + up).Unit,
+		(spec.radial * 1.05 + up * 0.65).Unit,
+	}
+	local pts = { spec.base }
+	for k = 1, 3 do pts[k + 1] = pts[k] + dirs[k] * spec.lens[k] end
+	return pts
+end
+
+function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, castShadows: boolean?)
+	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh
+	local cBelly  = Color3.fromRGB(58, 34, 40)   -- lighter flesh bands
+	local cChitin = Color3.fromRGB(12, 10, 14)   -- near-black chitin (head shield, legs)
+	local cAccent = teamColor.Color              -- eyes / tentacle tips / brood glow
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3,
+		material: Enum.Material, shape: Enum.PartType?, shadow: boolean?): Part
+		local p = Instance.new("Part")
+		p.Name = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = (castShadows == true) and (shadow == true)
+		p.Parent     = parent
+		return p
+	end
+	local function worldPt(v: Vector3): Vector3
+		return (groundCF * CFrame.new(v)).Position
+	end
+	-- Tapered organic segment between two local-space points.
+	local function seg(name: string, a: Vector3, b: Vector3, thick: number, color: Color3, material: Enum.Material): Part
+		local p = dp(name, Vector3.one, CFrame.new(), color, material)
+		UnitVisuals.orientYBetween(p, worldPt(a), worldPt(b), thick)
+		return p
+	end
+
+	-- ── Diplocaulus head (front = −Z): ONE flat arrowhead. A flat skull slab with
+	-- a rounded snout at the front, and per side a flat-lying WEDGE — a true
+	-- tapering triangle in plan view — running from inside the slab to a sharp
+	-- point swept outward-and-back. Together they read as the classic boomerang.
+	local HEAD_Y = 2.6
+	-- Neck: fills the gap between Trunk1 and the skull slab.
+	dp("Neck", Vector3.new(4.6, 2.8, 4.4), CFrame.new(0, HEAD_Y, -4.8), cChitin, Enum.Material.Slate, Enum.PartType.Ball, true)
+	-- Central skull slab (flat block) + rounded snout melting out of its front edge.
+	dp("Skull", Vector3.new(5.2, 1.6, 4.8), CFrame.new(0, HEAD_Y,        -6.4), cChitin, Enum.Material.Slate, nil, true)
+	dp("Snout", Vector3.new(4.4, 1.5, 3.0), CFrame.new(0, HEAD_Y - 0.05, -8.4), cChitin, Enum.Material.Slate, Enum.PartType.Ball)
+	-- Horns: wedge laid flat (roll 90°) so its triangle is horizontal — base buried
+	-- in the skull slab, tapering to a point 7.5 studs outward-back.
+	for _, s in { -1, 1 } do
+		local root   = Vector3.new(s * 2.0, HEAD_Y, -6.2)
+		local tipDir = Vector3.new(s * math.sin(math.rad(52)), 0, math.cos(math.rad(52)))
+		local centre = root + tipDir * (7.5 / 2 - 0.8)   -- sink the base 0.8 into the slab
+		dp("HornWing", Vector3.new(1.5, 3.4, 7.5),        -- (thickness, base width, length)
+			CFrame.lookAt(centre, centre + tipDir) * CFrame.Angles(0, 0, math.rad(90 * s)),
+			cChitin, Enum.Material.Slate, Enum.PartType.Wedge, true)
+		-- Small glowing eye on top of the skull slab, near the snout.
+		dp("Eye", Vector3.new(0.7, 0.7, 0.7), CFrame.new(s * 1.4, HEAD_Y + 0.75, -7.2), cAccent, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- ── Low salamander trunk rising into the thorax (heavily overlapped) ────────
+	dp("Trunk1", Vector3.new(6.0, 3.2, 6.0), CFrame.new(0, 2.6, -4.4), cHide, Enum.Material.Slate, Enum.PartType.Ball, true)
+	dp("Trunk2", Vector3.new(6.8, 3.9, 6.6), CFrame.new(0, 3.1, -2.0), cHide, Enum.Material.Slate, Enum.PartType.Ball, true)
+	dp("Thorax", Vector3.new(7.4, 4.6, 7.0), CFrame.new(0, 3.6,  0.6), cHide, Enum.Material.Slate, Enum.PartType.Ball, true)
+
+	-- ── Four stubby splayed legs (salamander stance), rooted deep in the trunk ──
+	for _, s in { -1, 1 } do
+		for li, zHip in { -4.2, 0.8 } do
+			local zFoot = zHip + (li == 1 and -1.4 or 1.2)   -- front pair reaches forward, rear back
+			local hip   = Vector3.new(s * 2.4, 2.5, zHip)    -- buried inside the trunk mass
+			local knee  = Vector3.new(s * 4.9, 2.0, zHip + (li == 1 and -0.6 or 0.5))
+			local foot  = Vector3.new(s * 6.0, 0.4, zFoot)
+			seg("LegUpper", hip,  knee, 1.35, cChitin, Enum.Material.Slate)
+			seg("LegFore",  knee, foot, 1.0,  cChitin, Enum.Material.Slate)
+			dp("Foot", Vector3.new(2.1, 0.7, 2.5), CFrame.new(s * 6.1, 0.3, zFoot), cChitin, Enum.Material.Slate, Enum.PartType.Ball)
+		end
+	end
+
+	-- ── Queen-ant gaster: swollen, banded, tipped down to the egg vent ──────────
+	dp("Petiole",  Vector3.new(4.6, 3.6, 4.2), CFrame.new(0, 3.6,  3.0), cHide,  Enum.Material.Slate, Enum.PartType.Ball)
+	dp("GasterA",  Vector3.new(6.6, 5.4, 6.0), CFrame.new(0, 4.0,  5.2), cHide,  Enum.Material.Slate, Enum.PartType.Ball, true)
+	dp("GasterB",  Vector3.new(8.2, 6.6, 7.6), CFrame.new(0, 4.6,  7.8), cHide,  Enum.Material.Slate, Enum.PartType.Ball, true)
+	dp("GasterTip", Vector3.new(6.4, 5.2, 5.8),
+		CFrame.new(0, 3.7, 10.4) * CFrame.Angles(math.rad(18), 0, 0), cHide, Enum.Material.Slate, Enum.PartType.Ball, true)
+	-- Lighter flesh bands wrapped around the segment seams (queen-ant striping).
+	dp("Band1", Vector3.new(7.5, 1.3, 6.8), CFrame.new(0, 4.3, 6.5), cBelly, Enum.Material.Slate, Enum.PartType.Ball)
+	dp("Band2", Vector3.new(7.2, 1.3, 6.6), CFrame.new(0, 4.3, 9.2), cBelly, Enum.Material.Slate, Enum.PartType.Ball)
+	-- Brood-glow nodules shining through the gaster skin.
+	for _, off in { Vector3.new( 3.8, 5.5, 7.2), Vector3.new(-3.8, 4.8, 8.2),
+	                Vector3.new( 3.0, 4.0, 10.0), Vector3.new(-2.8, 5.8, 6.2) } do
+		dp("BroodGlow", Vector3.new(0.9, 0.9, 0.9), CFrame.new(off), cAccent, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	-- ── Egg vent at the gaster tip ───────────────────────────────────────────────
+	dp("EggVent", Vector3.new(1.0, 2.8, 2.8),
+		CFrame.new(0, 2.2, 12.4) * CFrame.Angles(0, math.rad(90), 0), cChitin, Enum.Material.Slate, Enum.PartType.Cylinder)
+
+	-- ── Sea-anemone tentacle crown on the back ──────────────────────────────────
+	-- Built in the shared resting pose from MOTHER_CROWN; segments are named
+	-- "Crown_<i>_<j>" so the client MotherCrown animator can find and sway them
+	-- (slow hagfish-tentacle wobble). Tips glow in the team colour.
+	for i, spec in UnitVisuals.MOTHER_CROWN do
+		local pts = UnitVisuals.motherCrownSpine(spec)
+		for j = 1, 3 do
+			local isTip = j == 3
+			seg("Crown_" .. i .. "_" .. j, pts[j], pts[j + 1], spec.thicks[j],
+				isTip and cAccent or cHide,
+				isTip and Enum.Material.Neon or Enum.Material.Slate)
+		end
+	end
+end
+
 function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
 	local FAB = UnitVisuals.FAB
 
@@ -1074,6 +1235,82 @@ function UnitVisuals.buildLampreyNestDecor(parent: Instance, groundCF: CFrame, t
 	end
 end
 
+-- Preview-only static Leech: the sideways blood-worm the client LeechBody draws — a
+-- clean tapering body (no spine knuckles) with a rounded head and two neon eye specks.
+-- Geometry mirrors LeechBody so the thumbnail matches the live unit.
+--   arched = false → mobile crawling pose (gently S-curved, head lifted to sense).
+--   arched = true  → burrowed feeding pose (rainbow arch, head planted into the ground).
+-- The live unit is fully drawn/animated by LeechBody, so none of this is in the blueprint.
+local function addLeechPreview(parent: Instance, arched: boolean)
+	local N_SEG     = 7
+	local BODY_LEN  = 7.5
+	local HEAD_FWD  = 3.4
+	local THICK     = { 1.4, 1.5, 1.4, 1.2, 0.95, 0.7, 0.48, 0.28 }
+	local HEAD_SIZE = Vector3.new(1.7, 1.5, 2.1)
+	local EYE_SIZE  = Vector3.new(0.3, 0.3, 0.3)
+	local HEAD_RISE = 1.3
+	-- Burrow arch (mirrors LeechBody).
+	local ARCH_HEIGHT    = 5.0
+	local ARCH_SPAN      = 6.8
+	local ARCH_END_LATCH = 0.35
+
+	local C_BODY = Color3.fromRGB(66, 34, 38)   -- dark blood-maroon
+	local C_EYE  = Color3.fromRGB(190, 80, 64)  -- faint eye specks
+
+	local fwd   = Vector3.new(0, 0, -1)
+	local right = Vector3.new(1, 0, 0)
+
+	local function ap(color: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
+		local p    = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Color    = color
+		p.Material  = mat
+		return p
+	end
+
+	-- Spine points (head index 1 → tail index N_SEG+1).
+	local pts: { Vector3 } = {}
+	for i = 0, N_SEG do
+		local s     = i / N_SEG
+		local restY = THICK[i + 1] * 0.5
+		local along, height, lat
+		if arched then
+			local archUp = math.sin(math.pi * s)                 -- 0 at both ends, 1 mid
+			along  = ARCH_SPAN * (0.5 - s)                       -- head +half → tail −half
+			height = restY + ARCH_HEIGHT * archUp - ARCH_END_LATCH * (1 - archUp)
+			lat    = 0
+		else
+			along  = HEAD_FWD - s * BODY_LEN                     -- +fwd at head, −fwd at tail
+			height = restY + HEAD_RISE * (1 - s) * (1 - s)       -- head lifts to sense
+			lat    = math.sin(s * math.pi * 1.5) * 0.7           -- gentle S so it reads as alive
+		end
+		pts[i + 1] = fwd * along + right * lat + Vector3.new(0, height, 0)
+	end
+
+	-- Tapering opaque segments (no ball joints along the spine).
+	for i = 1, N_SEG do
+		local t   = (THICK[i] + THICK[i + 1]) * 0.5
+		local seg = ap(C_BODY, Enum.Material.SmoothPlastic)
+		UnitVisuals.orientYBetween(seg, pts[i], pts[i + 1], t)
+	end
+
+	-- Rounded head, facing the way the leech leads (down into the ground when arched).
+	local headPos = pts[1]
+	local headDir = pts[1] - pts[2]
+	headDir = if headDir.Magnitude > 0.01 then headDir.Unit else fwd
+	local headCF  = CFrame.lookAt(headPos, headPos + headDir)
+	local head    = ap(C_BODY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	head.Size     = HEAD_SIZE
+	head.CFrame   = headCF
+
+	-- Two small neon eye specks on top of the head, near the front.
+	for _, sgn in { -1, 1 } do
+		local e  = ap(C_EYE, Enum.Material.Neon, Enum.PartType.Ball)
+		e.Size   = EYE_SIZE
+		e.CFrame = headCF * CFrame.new(sgn * 0.5, 0.5, -0.55)
+	end
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 --[[
@@ -1128,7 +1365,32 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		body.Transparency = 1   -- live unit + preview draw the creature, not the pivot block
 		addBroodmotherPreview(parent, body)
 	end
+	if unitType == "Leech" then
+		body.Transparency = 1   -- live unit + preview draw the worm, not the pivot block
+		addLeechPreview(parent, false)
+	end
 
+	return body
+end
+
+--[[
+	Builds a static Leech thumbnail in a chosen pose (separate from buildUnitPreview so the
+	command card can show both). arched = false → mobile crawling worm; arched = true →
+	burrowed feeding pose (rainbow arch). Returns the transparent pivot body.
+]]
+function UnitVisuals.buildLeechPreview(parent: Instance, arched: boolean, _teamColor: BrickColor?): BasePart?
+	local typeDef = (Config.UNIT_TYPES :: any).Leech
+	local body      = Instance.new("Part")
+	body.Name       = "Leech"
+	body.Size       = (typeDef and typeDef.size) or Vector3.new(4, 3, 5)
+	body.CFrame     = CFrame.new()
+	body.Transparency = 1
+	body.Anchored   = true
+	body.CanCollide = false
+	body.CastShadow = false
+	body.CanQuery   = false
+	body.Parent     = parent
+	addLeechPreview(parent, arched)
 	return body
 end
 

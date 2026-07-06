@@ -201,6 +201,15 @@ function ViewportPreview.forBuilding(
 	end)
 end
 
+-- Preview of a Leech in a chosen pose: arched = false → mobile crawling worm;
+-- arched = true → burrowed feeding pose (rainbow arch). Used by the Mother build grid
+-- (mobile) and the Leech command card (arched = burrow, mobile = unburrow).
+function ViewportPreview.forLeech(arched: boolean, pixelSize: Vector2, teamColor: BrickColor?): ViewportFrame
+	return build(pixelSize, function(vpf)
+		UnitVisuals.buildLeechPreview(vpf, arched, teamColor)
+	end)
+end
+
 -- A bespoke icon for the Bonfire's "Empower" upgrade: a violet flame crowned by a
 -- glowing gold up-chevron (capacity/speed rising). Built here so it renders with the
 -- same framing/lighting as the other 3D slot icons.

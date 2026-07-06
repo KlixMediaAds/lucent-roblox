@@ -20,6 +20,7 @@ local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
+local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local MotherPanel = {}
 local C           = UILib.C
@@ -66,7 +67,7 @@ local function buildPage(): CommandCard.Page
 	local res = resourcesFn and resourcesFn() or 0
 	for i, opt in OPTIONS do
 		local cost = (Config.UNIT_TYPES :: any)[opt.key].cost
-		table.insert(slots, {
+		local slot: CommandCard.Slot = {
 			index   = i,
 			name    = opt.name,
 			icon    = opt.icon,
@@ -79,7 +80,14 @@ local function buildPage(): CommandCard.Page
 				if (resourcesFn and resourcesFn() or 0) < cost then return end
 				networkRef.trainFromMother(activeCCId, opt.key)
 			end,
-		})
+		}
+		-- Show the Leech as a 3D thumbnail (like units in the Bonfire grid) instead of an emoji.
+		if opt.key == "Leech" then
+			slot.icon            = nil
+			slot.viewportKey     = "unit:Leech"
+			slot.viewportFactory = function() return ViewportPreview.forUnit("Leech", Vector2.new(64, 64)) end
+		end
+		table.insert(slots, slot)
 	end
 
 	table.insert(slots, {

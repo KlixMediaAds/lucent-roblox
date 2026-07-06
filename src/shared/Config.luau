@@ -122,7 +122,13 @@ Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-
 -- income to its owner each interval (mirrors the Command Center passive income).
 Config.LEECH_BURROW_INCOME    = 8     -- resources per tick from each burrowed Leech
 Config.LEECH_BURROW_INTERVAL  = 6     -- seconds between burrowed-Leech income ticks
-Config.LEECH_BURROW_SINK      = 1.6   -- studs a Leech sinks into the ground while burrowed
+Config.LEECH_BURROW_SINK      = 0     -- Leech no longer sinks: it arches up (rainbow) to feed — see LeechBody
+-- Each Leech rears up and quests for a random moment before planting its head to feed.
+-- The server rolls this per-burrow, offsets the first income tick by it (so a batch of
+-- leeches anchored together desync and pay out organically, not in lockstep), and stamps
+-- it on the part as an "AnchorDelay" attribute the client body-animator reads.
+Config.LEECH_ANCHOR_DELAY_MIN = 0.5   -- min seconds head-up before a Leech anchors
+Config.LEECH_ANCHOR_DELAY_MAX = 3.0   -- max seconds head-up before a Leech anchors
 
 -- Polyp (Hollowed): morphs instantly into one of two structures — the Brain or a
 -- Creepy Turret. The Brain researches "Biter Genome" (a per-player flag stored on the

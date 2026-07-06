@@ -69,6 +69,9 @@ type UnitData = {
 	-- Leech (Hollowed): burrowed = rooted underground, paying passive income (structure state)
 	burrowed      : boolean?,
 	burrowIncomeAt: number?,         -- os.clock() throttle for the next burrow income payout
+	-- Body CFrame at the last decorator sync. Decorators are only re-CFramed when this
+	-- changes, so idle units cost zero property writes / replication per heartbeat.
+	decorLastCF   : CFrame?,
 }
 
 type QueueItem = { unitType: string, trainTime: number, player: Player, spawnPos: Vector3 }
@@ -132,6 +135,18 @@ local fireZones: { FireZone } = {}
 -- Replaced unanchored+WeldConstraint parts to cut physics body count.
 type Decorator = { part: Part, localCF: CFrame }
 local unitDecorators: { [string]: { Decorator } } = {}
+
+-- Reusable scratch buffers for the per-heartbeat decorator BulkMoveTo (no per-frame allocs).
+local decorBulkParts: { BasePart } = {}
+local decorBulkCFs:   { CFrame }   = {}
+
+-- Ground-height memo: terrain is static once generated, so downward raycasts are
+-- cached on a 1-stud grid (flat tiers are exact; ramp stairstepping stays under the
+-- movement slope-check slack). Moving armies hammer the same cells every heartbeat,
+-- turning thousands of physics raycasts/sec into dictionary hits. Cleared on resetAll.
+local groundYCache: { [number]: number } = {}
+local groundYCacheN = 0
+local GROUND_CACHE_MAX = 500000  -- safety cap; wipe-and-refill beyond this
 
 -- Live unit count per player userId (for unit cap enforcement).
 local playerUnitCount: { [number]: number } = {}
@@ -941,6 +956,7 @@ function UnitManager.upgradeUnit(player: Player, id: string, toType: string): bo
 	unitDecorators[id] = {}
 	local blueprint = UnitBlueprints.get(toType, part.Size)
 	if blueprint then buildFromBlueprint(id, part, blueprint) end
+	data.decorLastCF = nil  -- decorators rebuilt → force a fresh sync next heartbeat
 
 	-- Resize the health bar for the new max HP and refresh the fill.
 	local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
@@ -1019,6 +1035,8 @@ function UnitManager.resetAll()
 	playerUnitCount  = {}
 	playerStatMult   = {}
 	playerUpgradeLog = {}
+	table.clear(groundYCache)   -- terrain may regenerate for the next match
+	groundYCacheN = 0
 	GoreManager.clear()
 end
 
@@ -1325,14 +1343,26 @@ function UnitManager.init(resourceManager)
 	terrainRp.FilterType = Enum.RaycastFilterType.Include
 	terrainRp.FilterDescendantsInstances = { workspace.Terrain }
 
+	local RAY_DOWN = Vector3.new(0, -120, 0)
 	local function getGroundY(x: number, z: number, halfSizeY: number): number
-		-- Origin well above the tallest terrain (main plateau ≈20, lane walls 26).
-		local result = workspace:Raycast(
-			Vector3.new(x, 80, z),
-			Vector3.new(0, -120, 0),
-			terrainRp
-		)
-		return if result then result.Position.Y + halfSizeY else halfSizeY + 0.1
+		-- Quantise to the 1-stud memo grid (map is ±432, so qx offsets by 4096 pack
+		-- uniquely with qz into one integer key).
+		local qx  = math.floor(x + 0.5)
+		local qz  = math.floor(z + 0.5)
+		local key = qx * 4096 + qz
+		local y   = groundYCache[key]
+		if y == nil then
+			-- Origin well above the tallest terrain (main plateau ≈20, lane walls 26).
+			local result = workspace:Raycast(Vector3.new(qx, 80, qz), RAY_DOWN, terrainRp)
+			y = if result then result.Position.Y else 0.1
+			if groundYCacheN >= GROUND_CACHE_MAX then
+				table.clear(groundYCache)
+				groundYCacheN = 0
+			end
+			groundYCache[key] = y
+			groundYCacheN += 1
+		end
+		return y + halfSizeY
 	end
 
 	-- Cliff-aware move resolution: units may only change elevation gently (ramps).
@@ -1637,6 +1667,7 @@ function UnitManager.init(resourceManager)
 						-- Raise barrel (localCF.Y interpolates from 0.3 → 3.5)
 						if data.foamBarrelDec then
 							(data.foamBarrelDec :: Decorator).localCF = CFrame.new(0, 0.3 + 3.2 * progress, 0)
+							data.decorLastCF = nil  -- localCF changed → force decorator resync
 						end
 						if progress >= 1 then
 							foamState      = "deployed"
@@ -1671,6 +1702,7 @@ function UnitManager.init(resourceManager)
 						-- Retract barrel (localCF.Y interpolates from 3.5 → 0.3)
 						if data.foamBarrelDec then
 							(data.foamBarrelDec :: Decorator).localCF = CFrame.new(0, 3.5 - 3.2 * progress, 0)
+							data.decorLastCF = nil  -- localCF changed → force decorator resync
 						end
 						if progress >= 1 then
 							foamState      = "mobile"
@@ -2559,13 +2591,27 @@ function UnitManager.init(resourceManager)
 
 		-- Update anchored decorator parts (treads, pill body, eyes, etc.) to match body CFrame.
 		-- This replaces the old WeldConstraint physics pass for all decorated units.
+		-- Perf: units that haven't moved since the last sync are skipped entirely
+		-- (decorLastCF dirty check), and all moved units' decorators are written in a
+		-- single BulkMoveTo — far cheaper than thousands of individual .CFrame sets,
+		-- both server-side and in replication.
+		local bulkParts: { BasePart } = decorBulkParts
+		local bulkCFs:   { CFrame }   = decorBulkCFs
+		table.clear(bulkParts)
+		table.clear(bulkCFs)
 		for id, data in units do
 			local decs = unitDecorators[id]
 			if not decs then continue end
 			local bodyCF = data.part.CFrame
+			if data.decorLastCF == bodyCF then continue end
+			data.decorLastCF = bodyCF
 			for _, d in decs do
-				d.part.CFrame = bodyCF * d.localCF
+				bulkParts[#bulkParts + 1] = d.part
+				bulkCFs[#bulkCFs + 1]    = bodyCF * d.localCF
 			end
+		end
+		if #bulkParts > 0 then
+			workspace:BulkMoveTo(bulkParts, bulkCFs, Enum.BulkMoveMode.FireCFrameChanged)
 		end
 
 		-- Remove dead units
@@ -2707,9 +2753,22 @@ function UnitManager.init(resourceManager)
 		data.aggroId        = nil
 		data.aggroHome      = nil
 		data.atkMoveDest    = nil
-		data.burrowIncomeAt = nil
 
 		local part    = data.part
+
+		-- Roll a per-burrow anchoring delay: the leech rears up and quests for this long
+		-- before planting its head. Offset the first income tick by it so a batch anchored
+		-- together desyncs and pays out organically. The client reads AnchorDelay to match
+		-- its head-plant to the same moment. (Reset on unburrow.)
+		if nowBurrowed then
+			local anchorDelay = Config.LEECH_ANCHOR_DELAY_MIN
+				+ math.random() * (Config.LEECH_ANCHOR_DELAY_MAX - Config.LEECH_ANCHOR_DELAY_MIN)
+			part:SetAttribute("AnchorDelay", anchorDelay)
+			data.burrowIncomeAt = os.clock() + anchorDelay + Config.LEECH_BURROW_INTERVAL
+		else
+			data.burrowIncomeAt = nil
+		end
+
 		local groundY = terrainManagerRef and terrainManagerRef.surfaceHeightAt(part.Position.X, part.Position.Z)
 			or (part.Position.Y - part.Size.Y / 2)
 		local restY = groundY + part.Size.Y / 2 + 0.1

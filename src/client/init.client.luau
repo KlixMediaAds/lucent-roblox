@@ -26,6 +26,7 @@ local LeechBody      = require(script:WaitForChild("LeechBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
+local MotherCrown    = require(script:WaitForChild("MotherCrown"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
 local LampreyNestPanel = require(script:WaitForChild("LampreyNestPanel"))
@@ -200,28 +201,17 @@ local function buildCCMoveGhost()
 	base.Parent         = m
 	m.PrimaryPart       = base
 
-	-- Hollowed Mother: a simple ghostly black spike (matches the placed Mother),
-	-- not the Human Fabricator Core rig.
+	-- Hollowed Mother: ghostly version of the brood-queen creature (shared builder
+	-- keeps it matching the placed Mother), not the Human Fabricator Core rig.
 	if isHollowedLocal() then
 		base.Transparency = 1
-		local SPIKE_H     = 28
-		local spike       = Instance.new("Part")
-		spike.Name        = "Spike"
-		spike.Size        = Vector3.new(6, SPIKE_H, 6)
-		spike.Color       = Color3.fromRGB(8, 8, 10)
-		spike.Material    = Enum.Material.Slate
-		spike.Transparency = 0.5
-		spike.Anchored    = true
-		spike.CanCollide  = false
-		spike.CanQuery    = false
-		spike.CastShadow  = false
-		spike.CFrame      = CFrame.new(0, SPIKE_H / 2, 0)
-		local spikeMesh   = Instance.new("SpecialMesh")
-		spikeMesh.MeshType = Enum.MeshType.FileMesh
-		spikeMesh.MeshId   = "rbxassetid://1033714"
-		spikeMesh.Scale    = Vector3.new(6, SPIKE_H, 6)
-		spikeMesh.Parent   = spike
-		spike.Parent      = m
+		UnitVisuals.buildMotherDecor(m, CFrame.new(0, 0, 0), color, false)
+		for _, d in m:GetDescendants() do
+			if d:IsA("BasePart") and d ~= base then
+				d.Transparency = math.max(d.Transparency, 0.5)
+				d.CanQuery     = false
+			end
+		end
 		m.Parent    = workspace
 		ccMoveGhost = m
 		return
@@ -285,6 +275,7 @@ LeechBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 SwarmGrass.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
+MotherCrown.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
 BuildingPlacer.setNotEnoughResourcesFn(function()

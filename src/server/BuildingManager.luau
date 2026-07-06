@@ -327,34 +327,17 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		-- stark spike CC; Humans get the Fabricator Core.
 		local isSwarmCC = isHollowed(player)
 		if isSwarmCC then
-			-- Hollowed use a stark black spike instead of the Fabricator Core.
-			-- The team-coloured base stays as the collision/HP part; hide it under a
-			-- tall black cone spike rising from the base.
+			-- Hollowed Mother: a living brood-queen creature (Diplocaulus head, queen-ant
+			-- egg-laying gaster, anemone tentacle crown). The team-coloured base stays as
+			-- the invisible collision/HP part; all geometry comes from the shared builder
+			-- so ghosts/previews stay in sync.
 			base.Transparency = 1
 
 			-- Tag for the client-side SwarmGrass renderer (black grass field). Grass
 			-- is drawn locally on each client (zero replication) as one merged mesh.
 			model:SetAttribute("SwarmCC", true)
 
-			local SPIKE_H     = 28
-			local spike       = Instance.new("Part")
-			spike.Name        = "Spike"
-			spike.Size        = Vector3.new(6, SPIKE_H, 6)
-			spike.Color       = Color3.fromRGB(8, 8, 10)
-			spike.Material    = Enum.Material.Slate
-			spike.Anchored    = true
-			spike.CanCollide  = false
-			spike.CastShadow  = true
-			spike.CFrame      = CFrame.new(position + Vector3.new(0, SPIKE_H / 2, 0))
-			spike.Parent      = model
-
-			-- Enum.PartType has no Cone; use the standard Roblox cone FileMesh.
-			-- FileMesh visual size = mesh native size (≈1 stud) × Scale.
-			local spikeMesh   = Instance.new("SpecialMesh")
-			spikeMesh.MeshType = Enum.MeshType.FileMesh
-			spikeMesh.MeshId   = "rbxassetid://1033714"
-			spikeMesh.Scale    = Vector3.new(6, SPIKE_H, 6)
-			spikeMesh.Parent   = spike
+			UnitVisuals.buildMotherDecor(model, CFrame.new(position), player.TeamColor, true)
 		else
 			-- Industrial Fabricator Core. The team-coloured base block stays as the
 			-- collision/HP part, visible between the platform rings; all decoration

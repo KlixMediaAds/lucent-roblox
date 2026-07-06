@@ -63,17 +63,38 @@ local HEAD_RISE   = 1.3            -- how far the head lifts off the ground (sen
 local IDLE_FREQ   = 0.85           -- head sway cycles/sec
 local IDLE_SWAY   = 0.45           -- idle head side-to-side sway
 
--- ── Harvest (feeding) animation — plays on each burrowed income tick ────────────
-local HARVEST_DUR  = 1.3           -- seconds the feeding animation plays
-local HARVEST_DIP  = 1.5           -- how far the head burrows down as it draws blood
-local PERI_AMP     = 0.55          -- peristalsis thickness pulse (fraction of body width)
-local PERI_FREQ    = 8.5           -- pump cycles/sec while feeding
-local PERI_K       = math.pi * 2.0 -- pump waves along the body
+-- ── Burrowed posture — a leech latched on to feed: both suckers pressed into the
+-- ground with the body arched up between them like a rainbow (not a flat sink). ──────
+local BURROW_EASE       = 4.5      -- how quickly the body eases into / out of the burrow pose
+local ARCH_HEIGHT       = 5.0      -- peak height of the arched midsection
+local ARCH_SPAN         = 6.8      -- ground distance from the planted tail to the head anchor
+local ARCH_END_LATCH    = 0.35     -- how far the mouth / tail suckers press into the ground
+local ARCH_BREATHE_AMP  = 0.4      -- subtle idle swell of the arch while latched
+local ARCH_BREATHE_FREQ = 0.9      -- breaths/sec of the arch
 
--- Harvest sound: a dirt shift as it latches on, then a coin-like chime 0.4 s later.
-local DIRT_SND_ID  = "rbxassetid://139990035476921"
-local CHIME_SND_ID = "rbxassetid://74040596787161"
-local CHIME_DELAY  = 0.4
+-- ── Anchoring — before it plants its head to feed, the leech rears up onto its tail
+-- and holds its head in the air, questing, for a short random moment before committing. ─
+local STAND_HEIGHT     = 6.2       -- head height while reared up and questing (pre-anchor)
+local STAND_REACH      = 1.2       -- slight forward lean of the reared body
+local SEARCH_SWAY      = 1.4       -- side-to-side head sway while it decides where to anchor
+local ANCHOR_EASE      = 4.0       -- how smoothly the head lowers to plant once it commits
+local ANCHOR_DELAY_MIN = 0.5       -- min seconds head-up before anchoring
+local ANCHOR_DELAY_MAX = 3.0       -- max seconds head-up before anchoring
+
+-- ── Harvest (feeding) — plays on each burrowed income tick. A bolus of drawn blood
+-- swells at the mouth and pumps along the arched body to the tail, inflating each
+-- section as it passes (a peristaltic, bodily inflation). Amplitude rides a smooth
+-- 0→1→0 envelope so it fades in and out with no snap. ────────────────────────────────
+local HARVEST_DUR  = 2.0           -- seconds one pump takes to travel mouth → tail
+local BOLUS_AMP    = 1.15          -- extra body thickness at the crest of the travelling bulge
+local BOLUS_WIDTH  = 0.22          -- half-width of the bulge along the body (in s units)
+local BOLUS_MARGIN = 0.28          -- how far the bulge starts/ends off the body ends (smooth entry/exit)
+local SUCK_DIP     = 0.4           -- how far the mouth pulls the head-end down while drawing
+
+-- Sounds. The feeding pump plays a single wet suck; the dirt shift is now the burrow
+-- cue, played when the leech digs in / pulls out (see the RenderStepped loop).
+local HARVEST_SND_ID = "rbxassetid://9125703168"
+local BURROW_SND_ID  = "rbxassetid://139990035476921"
 
 local CULL_SQ = 300 * 300
 
@@ -95,6 +116,13 @@ local function orientYBetween(part: BasePart, a: Vector3, b: Vector3, thick: num
 	part.Size   = Vector3.new(thick, len, thick)
 end
 
+-- A random horizontal unit direction — the way the leech reaches out to plant its head
+-- (the far anchor of the arch) when it digs in.
+local function randomHorizDir(): Vector3
+	local a = math.random() * math.pi * 2
+	return Vector3.new(math.cos(a), 0, math.sin(a))
+end
+
 -- ── Types ─────────────────────────────────────────────────────────────────────
 type Entry = {
 	body:        BasePart,
@@ -110,6 +138,13 @@ type Entry = {
 	harvestActive: boolean,
 	harvestT:      number,
 	harvestEmitted: boolean,
+	burrowBlend:   number,
+	anchorBlend:   number,
+	anchorDelay:   number,
+	burrowTime:    number,
+	archClock:     number,
+	wasBurrowed:   boolean,
+	archDir:       Vector3,
 	conn:        RBXScriptConnection,
 }
 
@@ -185,6 +220,11 @@ function LeechBody.attach(unitId: string, body: BasePart)
 	local n     = tonumber(unitId:match("%d+")) or 0
 	local phase = n * 0.6180339887
 
+	-- The Burrowed flag only exists after the first toggle; seed the posture from it so a
+	-- leech that is already burrowed when it comes into view doesn't re-play the dig cue.
+	local bv0 = body:FindFirstChild("Burrowed") :: BoolValue?
+	local b0  = bv0 ~= nil and bv0.Value == true
+
 	local conn = body.Destroying:Connect(function()
 		LeechBody.detach(unitId)
 	end)
@@ -203,6 +243,13 @@ function LeechBody.attach(unitId: string, body: BasePart)
 		harvestActive  = false,
 		harvestT       = 0,
 		harvestEmitted = false,
+		burrowBlend    = b0 and 1 or 0,
+		anchorBlend    = b0 and 1 or 0,    -- already-burrowed leeches start planted
+		anchorDelay    = ANCHOR_DELAY_MIN + math.random() * (ANCHOR_DELAY_MAX - ANCHOR_DELAY_MIN),
+		burrowTime     = b0 and 999 or 0,
+		archClock      = phase,
+		wasBurrowed    = b0,
+		archDir        = randomHorizDir(),
 		conn           = conn,
 	}
 end
@@ -243,45 +290,77 @@ local function layout(e: Entry, speedF: number)
 	local right = fwd:Cross(Vector3.yAxis).Unit
 	local centre = Vector3.new(bpos.X, groundY, bpos.Z)
 
-	-- Harvest envelope (0→1→0 over HARVEST_DUR): drives a head-down feeding dip and a
-	-- peristaltic thickness pump while a burrowed leech is drawing income.
+	-- Harvest envelope (0→1→0 over HARVEST_DUR): drives the mouth suck-dip and the feed
+	-- puff. The raw progress (bolusC) drives the blood bolus travelling head→tail.
 	local hv = 0
 	if e.harvestActive then
 		hv = math.sin(math.clamp(e.harvestT / HARVEST_DUR, 0, 1) * math.pi)
 	end
+	local bl = e.burrowBlend                                             -- 0 crawl → 1 burrow pose
+	local an = e.anchorBlend                                             -- 0 head-up questing → 1 planted
+
+	-- Blood-bolus centre travels from just off the mouth to just past the tail; its
+	-- amplitude rides a smooth 0→1→0 envelope so the pump fades in and out with no snap.
+	local bolusC, bolusEnv = -1, 0
+	if e.harvestActive then
+		local p  = math.clamp(e.harvestT / HARVEST_DUR, 0, 1)
+		bolusC   = -BOLUS_MARGIN + p * (1 + 2 * BOLUS_MARGIN)
+		bolusEnv = math.sin(p * math.pi)
+	end
+
+	-- archDir is where it reaches out to plant its head; aRight is the sway axis.
+	local aDir   = e.archDir
+	local aRight = Vector3.new(-aDir.Z, 0, aDir.X)
 
 	-- ── Build spine points along the ground (head index 1 → tail index N_SEG+1) ──
 	local pts: { Vector3 } = {}
 	for i = 0, N_SEG do
 		local s     = i / N_SEG
 		local along = HEAD_FWD - s * BODY_LEN            -- +fwd at head, −fwd at tail
+		local restY = THICK[i + 1] * 0.5
 
-		-- Vertical: each segment rests on the surface by its own radius, the head lifts
-		-- a little (sensing), and a travelling hump inch-worms the body when crawling.
-		-- While harvesting the front burrows down (dip) as it latches on to feed.
-		local restY    = THICK[i + 1] * 0.5
+		-- Crawling profile: the head lifts to sense and a travelling hump inch-worms the body.
 		local headLift = HEAD_RISE * (1 - s) * (1 - s)
 		local hump     = HUMP_AMP * speedF * math.max(0, math.sin(e.animClock - s * HUMP_K))
-		local dip      = hv * HARVEST_DIP * (1 - s) * (1 - s)
-		local height   = restY + headLift + hump - dip
+		local crawlY   = restY + headLift + hump
+		local lat      = math.sin(e.animClock - s * LAT_K) * LAT_AMP * (0.4 + 0.6 * speedF)
+		local sway     = math.sin(e.idleClock) * IDLE_SWAY * (1 - s)
+		local crawlHoriz = fwd * (along * sc) + right * ((lat + sway) * sc)
 
-		-- Lateral slither (side to side); quicker + wider when crawling, plus a gentle
-		-- idle head sway on the front.
-		local lat  = math.sin(e.animClock - s * LAT_K) * LAT_AMP * (0.4 + 0.6 * speedF)
-		local sway = math.sin(e.idleClock) * IDLE_SWAY * (1 - s)
+		-- Questing profile: reared up on the planted tail, head high and swaying while it
+		-- decides where to anchor (barely any horizontal reach yet).
+		local searchY     = restY + STAND_HEIGHT * (1 - s)
+		local searchHoriz = aDir   * (STAND_REACH * (1 - s) * sc)
+			+ aRight * (SEARCH_SWAY * (1 - s) * math.sin(e.archClock * 1.6) * sc)
 
-		pts[i + 1] = centre
-			+ fwd   * (along * sc)
-			+ right * ((lat + sway) * sc)
-			+ Vector3.new(0, height * sc, 0)
+		-- Anchored profile: a rainbow arch — head planted ARCH_SPAN away along aDir, both
+		-- suckers pressed to the ground, midsection raised, with a breathing swell and, while
+		-- feeding, a mouth suck-dip.
+		local archUp      = math.sin(math.pi * s)                        -- 0 at both ends, 1 mid
+		local breathe     = ARCH_BREATHE_AMP * archUp * math.sin(e.archClock)
+		local suck        = hv * SUCK_DIP * (1 - s) * (1 - s)
+		local anchoredY   = restY + ARCH_HEIGHT * archUp - ARCH_END_LATCH * (1 - archUp) + breathe - suck
+		local anchoredHoriz = aDir * (ARCH_SPAN * (1 - s) * sc)          -- head out, tail at pivot
+
+		-- Burrow pose = quest → anchored (anchorBlend); final = crawl → burrow (burrowBlend).
+		local burrowY     = searchY + (anchoredY - searchY) * an
+		local burrowHoriz = searchHoriz + (anchoredHoriz - searchHoriz) * an
+		local height      = crawlY + (burrowY - crawlY) * bl
+		local horiz       = crawlHoriz + (burrowHoriz - crawlHoriz) * bl
+
+		pts[i + 1] = centre + horiz + Vector3.new(0, height * sc, 0)
 	end
 
 	-- ── Tapering opaque segments (no ball joints along the spine) ─────────────
-	-- A peristaltic pulse ripples down the body while feeding (pumping blood along it).
+	-- While feeding, a bolus of blood pumps head→tail, swelling the body it passes through.
 	for i = 1, N_SEG do
-		local sm   = (i - 0.5) / N_SEG
-		local peri = 1 + PERI_AMP * hv * math.sin(e.harvestT * PERI_FREQ - sm * PERI_K)
-		local t    = (THICK[i] + THICK[i + 1]) * 0.5 * sc * peri
+		local sm    = (i - 0.5) / N_SEG
+		local bulge = 0
+		if bolusEnv > 0 then
+			local d = (sm - bolusC) / BOLUS_WIDTH
+			bulge   = BOLUS_AMP * bolusEnv * math.exp(-d * d)
+		end
+		local t = ((THICK[i] + THICK[i + 1]) * 0.5 + bulge) * sc
 		orientYBetween(e.segs[i], pts[i], pts[i + 1], t)
 	end
 
@@ -290,7 +369,9 @@ local function layout(e: Entry, speedF: number)
 	local headDir = (pts[1] - pts[2])
 	headDir = if headDir.Magnitude > 0.01 then headDir.Unit else fwd
 	local headCF  = CFrame.lookAt(headPos, headPos + headDir)  -- LookVector (−Z) = headDir
-	e.head.Size   = HEAD_SIZE * sc
+	-- The head swells as the bolus first forms at the mouth (bolusC near 0).
+	local headSwell = (bolusEnv > 0) and (BOLUS_AMP * 0.5 * bolusEnv * math.exp(-(bolusC / BOLUS_WIDTH) ^ 2)) or 0
+	e.head.Size   = (HEAD_SIZE + Vector3.new(headSwell, headSwell, headSwell)) * sc
 	e.head.CFrame = headCF
 
 	-- Two small eye specks on top of the head, near the front.
@@ -308,12 +389,7 @@ local function layout(e: Entry, speedF: number)
 			-- (FogManager sets LocalTransparencyModifier on _LeechBody parts).
 			if e.head.LocalTransparencyModifier < 0.5 then
 				e.feed:Emit(math.random(6, 10))
-				-- Dirt shift now, then the income chime 0.4 s later.
-				local sndPos = pts[1]
-				playSoundAt(sndPos, DIRT_SND_ID, 0.7)
-				task.delay(CHIME_DELAY, function()
-					playSoundAt(sndPos, CHIME_SND_ID, 0.65)
-				end)
+				playSoundAt(pts[1], HARVEST_SND_ID, 0.85)
 			end
 		end
 	end
@@ -349,9 +425,37 @@ function LeechBody.init(cam: Camera)
 			e.smoothSpeed  += (spd - e.smoothSpeed) * alpha
 			local speedF    = math.clamp(e.smoothSpeed / FULL_SPEED, 0, 1)
 
+			-- Burrow state (the server tags a Burrowed BoolValue on the pivot). Ease the
+			-- body into / out of the reared burrow pose, and play the dig cue on the flip.
+			local bv       = body:FindFirstChild("Burrowed") :: BoolValue?
+			local burrowed = bv ~= nil and (bv :: BoolValue).Value == true
+			if burrowed ~= e.wasBurrowed then
+				e.wasBurrowed = burrowed
+				if burrowed then
+					-- Fresh dig-in: throw the arch a new direction, rear up head-high, and
+					-- quest for the server's AnchorDelay before planting the head — so the
+					-- head-plant lines up with when this leech's first income tick is due
+					-- (each leech in a batch gets its own delay). Fall back to a local roll.
+					e.archDir     = randomHorizDir()
+					e.burrowTime  = 0
+					e.anchorDelay = (body:GetAttribute("AnchorDelay") :: number?)
+						or (ANCHOR_DELAY_MIN + math.random() * (ANCHOR_DELAY_MAX - ANCHOR_DELAY_MIN))
+				end
+				if e.head.LocalTransparencyModifier < 0.5 then
+					playSoundAt(bpos, BURROW_SND_ID, 0.85)
+				end
+			end
+			e.burrowBlend += ((burrowed and 1 or 0) - e.burrowBlend) * math.min(dt * BURROW_EASE, 1)
+
+			-- Head stays up and questing for anchorDelay seconds, then lowers to plant.
+			if burrowed then e.burrowTime += dt end
+			local anchorTarget = (burrowed and e.burrowTime >= e.anchorDelay) and 1 or 0
+			e.anchorBlend += (anchorTarget - e.anchorBlend) * math.min(dt * ANCHOR_EASE, 1)
+
 			-- Advance clocks (slither quickens with movement)
 			e.animClock += dt * (0.35 + speedF) * SLITHER_FREQ * math.pi * 2
 			e.idleClock += dt * IDLE_FREQ * math.pi * 2
+			e.archClock += dt * ARCH_BREATHE_FREQ * math.pi * 2
 
 			-- Advance the feeding/harvest animation timer.
 			if e.harvestActive then

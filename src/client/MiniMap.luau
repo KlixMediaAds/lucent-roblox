@@ -57,6 +57,11 @@ local returnClickFn: (() -> ())?   = nil
 local returnDimmed   = false
 
 local unitMarkers: { [string]: TextLabel } = {}
+-- Last written pose per unit marker — GUI property writes invalidate the minimap
+-- canvas, so idle units are skipped entirely (see syncUnitTriangles).
+local unitLastU: { [string]: number } = {}
+local unitLastV: { [string]: number } = {}
+local unitLastR: { [string]: number } = {}
 local buildingDots:{ [string]: Frame } = {}
 local minerDots:   { [string]: Frame } = {}
 local depositDots: { [string]: Frame } = {}
@@ -202,18 +207,29 @@ local function syncUnitTriangles(folder: Instance?, myStr: string)
 				unitMarkers[id] = marker
 			end
 
-			-- Position (centre of marker = unit world position)
-			local u, v      = w2m(bp.Position.X, bp.Position.Z)
-			marker.Position = UDim2.fromOffset(u, v)
-
-			-- Rotation: 0° = up (north/-Z world), 90° = right (+X world)
-			local lv        = bp.CFrame.LookVector
-			marker.Rotation = math.deg(math.atan2(lv.X, -lv.Z))
+			-- Position (centre of marker = unit world position); rotation 0° = up
+			-- (north/-Z world), 90° = right (+X world). Only write on change — GUI
+			-- writes invalidate the canvas, so idle units must cost nothing.
+			local u, v = w2m(bp.Position.X, bp.Position.Z)
+			if unitLastU[id] ~= u or unitLastV[id] ~= v then
+				unitLastU[id], unitLastV[id] = u, v
+				marker.Position = UDim2.fromOffset(u, v)
+			end
+			local lv  = bp.CFrame.LookVector
+			local rot = math.deg(math.atan2(lv.X, -lv.Z))
+			if unitLastR[id] ~= rot then
+				unitLastR[id]   = rot
+				marker.Rotation = rot
+			end
 		end
 	end
 
 	for id, marker in unitMarkers do
-		if not seen[id] then marker:Destroy(); unitMarkers[id] = nil end
+		if not seen[id] then
+			marker:Destroy()
+			unitMarkers[id] = nil
+			unitLastU[id], unitLastV[id], unitLastR[id] = nil, nil, nil
+		end
 	end
 end
 
@@ -819,17 +835,28 @@ function MiniMap.init(cameraModule: any, userId: number)
 
 	local myStr = tostring(localUserId)
 
-	RunService.RenderStepped:Connect(function()
-		local unitsF     = workspace:FindFirstChild("Units")
-		local buildingsF = workspace:FindFirstChild("Buildings")
-		local minersF    = workspace:FindFirstChild("Miners")
+	-- Dot/marker sync at 10 Hz — imperceptible on a minimap, but 6× fewer folder
+	-- scans, FindFirstChild calls and GUI writes than per-frame. The camera viewport
+	-- rectangle stays per-frame so it tracks panning smoothly.
+	local SYNC_INTERVAL = 0.1
+	local syncAcc       = SYNC_INTERVAL  -- fire on the first frame
 
-		syncTerrainDots()
-		syncDepositDots()
-		syncUnitTriangles(unitsF, myStr)
-		syncBuildingDots(buildingsF, buildingDots, myStr)
-		syncCCIcons(buildingsF, myStr)
-		syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
+	RunService.RenderStepped:Connect(function(dt: number)
+		syncAcc += dt
+		if syncAcc >= SYNC_INTERVAL then
+			syncAcc = 0
+
+			local unitsF     = workspace:FindFirstChild("Units")
+			local buildingsF = workspace:FindFirstChild("Buildings")
+			local minersF    = workspace:FindFirstChild("Miners")
+
+			syncTerrainDots()
+			syncDepositDots()
+			syncUnitTriangles(unitsF, myStr)
+			syncBuildingDots(buildingsF, buildingDots, myStr)
+			syncCCIcons(buildingsF, myStr)
+			syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
+		end
 
 		updateViewport()
 	end)
