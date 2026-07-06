@@ -362,7 +362,10 @@ if isLane then HUD.setLaneMode(true) end
 Tutorial.init(Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui)
 
 UnitController.init(Network, CameraModule, dragFrame, isBlocked)
-UnitController.onMoveIssued(function() Tutorial.notify("move_issued") end)
+UnitController.onMoveIssued(function(ids: { string })
+	Tutorial.notify("move_issued")
+	ScoutManager.releaseUnits(ids)   -- hand-ordered units leave their army assignment
+end)
 MinePanel.init(Network,
 	function() return currentResources end,
 	function(techName) return researchedTechs[techName] == true end)

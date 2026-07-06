@@ -31,7 +31,9 @@ local onOtherBuildingSelectedCb: ((string?, string?) -> ())?
 -- Fires whenever the selected UNIT set changes (with the current owned-unit ids),
 -- so init.client can show a unit command card (e.g. the Survivor upgrade menu).
 local onUnitsSelectedCb:     (({string}) -> ())?
-local onMoveIssuedCb:        (() -> ())?
+-- Fires with the ordered unit ids whenever the player hand-issues an order (move,
+-- attack-move, focus-attack, or formation), so army-command modes can release them.
+local onMoveIssuedCb:        (({string}) -> ())?
 local isBlockedFn: (() -> boolean)?
 local dragFrame: Frame?
 
@@ -675,6 +677,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				maybeUnitVoice()
 				network.focusAttack(selected, enemyUnitId, "unit")
 				if ground then spawnMovePing(ground, true) end
+				if onMoveIssuedCb then onMoveIssuedCb(selected) end
 				return
 			end
 			local enemyBldId = hitEnemyBuilding()
@@ -682,6 +685,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				maybeUnitVoice()
 				network.focusAttack(selected, enemyBldId, "building")
 				if ground then spawnMovePing(ground, true) end
+				if onMoveIssuedCb then onMoveIssuedCb(selected) end
 				return
 			end
 		end
@@ -693,7 +697,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				network.moveUnits(selected, ground)
 			end
 			spawnMovePing(ground, rmbAtkMove)
-			if onMoveIssuedCb then onMoveIssuedCb() end
+			if onMoveIssuedCb then onMoveIssuedCb(selected) end
 		end
 	end
 
@@ -745,7 +749,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			maybeUnitVoice()
 			network.formationMove(ids, positions, rmbAtkMove)
 			spawnMovePing(endG, rmbAtkMove)
-			if onMoveIssuedCb then onMoveIssuedCb() end
+			if onMoveIssuedCb then onMoveIssuedCb(selected) end
 		else
 			issueClickOrder(endG)
 		end
@@ -1104,7 +1108,7 @@ function UnitController.getSelectedBuildingIds(): {string}
 	return result
 end
 
-function UnitController.onMoveIssued(fn: () -> ())
+function UnitController.onMoveIssued(fn: ({string}) -> ())
 	onMoveIssuedCb = fn
 end
 
