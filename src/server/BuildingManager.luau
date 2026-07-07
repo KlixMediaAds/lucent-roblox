@@ -337,7 +337,27 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			-- is drawn locally on each client (zero replication) as one merged mesh.
 			model:SetAttribute("SwarmCC", true)
 
-			UnitVisuals.buildMotherDecor(model, CFrame.new(position), player.TeamColor, true)
+			-- Flip the creature 180° so its head faces +Z — i.e. toward the default
+			-- camera (which sits at +Z looking toward -Z) — instead of away from it.
+			-- The MotherCrown client animator applies the same flip so the crown tracks.
+			UnitVisuals.buildMotherDecor(model, CFrame.new(position) * CFrame.Angles(0, math.pi, 0), player.TeamColor, true)
+
+			-- The Mother's head / body / tentacles are all CanQuery=false decor and
+			-- sprawl well beyond and above the invisible 14×14 Base, so clicks on the
+			-- creature itself miss. Drop in a roomy invisible, query-able hitbox over the
+			-- whole creature — hitBuilding matches any descendant of the model, so this
+			-- alone makes the Mother easy to select. It's a model child, so it rides along
+			-- with uproot/downroot PivotTo moves and the construction sink animation.
+			local mhb        = Instance.new("Part")
+			mhb.Name         = "ClickHitbox"
+			mhb.Size         = Vector3.new(18, 16, 24)
+			mhb.CFrame       = CFrame.new(position + Vector3.new(0, 8, 0))
+			mhb.Transparency = 1
+			mhb.Anchored     = true
+			mhb.CanCollide   = false
+			mhb.CanQuery     = true
+			mhb.CastShadow   = false
+			mhb.Parent       = model
 		else
 			-- Industrial Fabricator Core. The team-coloured base block stays as the
 			-- collision/HP part, visible between the platform rings; all decoration
@@ -2424,6 +2444,152 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), unitType)
 	end
 	nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
+end
+
+-- ── Hollowed Mother egg spit (server-side, one task per egg) ─────────────────
+-- Inspired by the nest: the Mother spits an egg into the area in FRONT of it (the
+-- flipped creature faces +Z / the camera), where it incubates under a progress bar
+-- and then hatches into `unitType`. The cost is already spent by the TrainFromMother
+-- handler, so this never charges. Multiple eggs can be in flight at once.
+local motherEggCounter = 0
+function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: string)
+	local data = buildingData[ccId]
+	if not data then return end
+	local model = buildingsFolder:FindFirstChild(ccId)
+	if not model then return end
+	local base    = data.base
+	local basePos = base.Position
+	local halfX   = Config.COMMAND_CENTER_SIZE.X / 2
+
+	-- "Front" = the way the flipped creature's head points. buildMotherDecor is built
+	-- flipped 180°, so the head faces -base.LookVector (robust to any base rotation).
+	local fwd = -base.CFrame.LookVector
+	fwd = Vector3.new(fwd.X, 0, fwd.Z)
+	fwd = fwd.Magnitude > 0.01 and fwd.Unit or Vector3.new(0, 0, 1)
+
+	local EGG_FULL = Vector3.new(2.6, 3.2, 2.6)
+	local function settleYAt(x: number, z: number): number
+		local surf = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z) or 0
+		return surf + EGG_FULL.Y / 2
+	end
+	local function overlapsEgg(x: number, z: number): boolean
+		for _, child in model:GetChildren() do
+			if child:IsA("BasePart") and child.Name:match("^MotherEgg_") then
+				local dx, dz = child.Position.X - x, child.Position.Z - z
+				if dx * dx + dz * dz < 25 then return true end   -- ~5-stud gap
+			end
+		end
+		return false
+	end
+
+	-- Settle spot: an arc within ±55° of straight ahead, just outside the footprint.
+	local minR, maxR = halfX + 4, halfX + 13
+	local px, pz = basePos.X + fwd.X * minR, basePos.Z + fwd.Z * minR
+	for _ = 1, 14 do
+		local a    = (rng:NextNumber() - 0.5) * math.rad(110)
+		local ca, sa = math.cos(a), math.sin(a)
+		local dir  = Vector3.new(fwd.X * ca - fwd.Z * sa, 0, fwd.X * sa + fwd.Z * ca)
+		local r    = minR + math.sqrt(rng:NextNumber()) * (maxR - minR)
+		px, pz = basePos.X + dir.X * r, basePos.Z + dir.Z * r
+		if not overlapsEgg(px, pz) then break end
+	end
+	local target   = Vector3.new(px, settleYAt(px, pz), pz)
+	local startPos = basePos + Vector3.new(0, base.Size.Y * 0.4, 0) + fwd * (halfX * 0.5)
+
+	-- Egg (parented to the CC model so it replicates + the overlap check can see it).
+	motherEggCounter += 1
+	local egg           = Instance.new("Part")
+	egg.Name            = "MotherEgg_" .. motherEggCounter
+	egg.Shape           = Enum.PartType.Ball
+	egg.Size            = EGG_FULL * 0.4
+	egg.Position        = startPos
+	egg.Color           = Color3.fromRGB(255, 120, 60)   -- warm orange (Hagfish-eye glow)
+	egg.Material        = Enum.Material.Neon
+	egg.Anchored        = true
+	egg.CanCollide      = false
+	egg.CanQuery        = false
+	egg.CastShadow      = false
+	egg.Transparency    = 0.1
+	egg.Parent          = model
+	local eggLight      = Instance.new("PointLight")
+	eggLight.Color      = Color3.fromRGB(255, 140, 70)
+	eggLight.Brightness = 3
+	eggLight.Range      = 12
+	eggLight.Parent     = egg
+
+	-- Progress bar floating on top of the egg.
+	local bb            = Instance.new("BillboardGui")
+	bb.Name             = "EggProgress"
+	bb.Size             = UDim2.fromOffset(48, 7)
+	bb.StudsOffset      = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
+	bb.AlwaysOnTop      = true
+	bb.LightInfluence   = 0
+	bb.MaxDistance      = 240
+	bb.Enabled          = false   -- shown once the egg lands and incubation begins
+	bb.Parent           = egg
+	local barBg         = Instance.new("Frame")
+	barBg.Size          = UDim2.fromScale(1, 1)
+	barBg.BackgroundColor3 = Color3.fromRGB(12, 8, 16)
+	barBg.BackgroundTransparency = 0.25
+	barBg.BorderSizePixel = 0
+	barBg.Parent        = bb
+	local bgCorner      = Instance.new("UICorner"); bgCorner.CornerRadius = UDim.new(1, 0); bgCorner.Parent = barBg
+	local barStroke     = Instance.new("UIStroke"); barStroke.Color = Color3.fromRGB(0, 0, 0); barStroke.Thickness = 1; barStroke.Transparency = 0.35; barStroke.Parent = barBg
+	local fill          = Instance.new("Frame")
+	fill.Size           = UDim2.fromScale(0, 1)
+	fill.BackgroundColor3 = Color3.fromRGB(255, 150, 70)
+	fill.BorderSizePixel = 0
+	fill.Parent         = barBg
+	local fillCorner    = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
+
+	-- Spit: arc the egg up out of the Mother's mouth and down onto its settle spot.
+	local throwDist = (Vector3.new(target.X, 0, target.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude
+	local apex      = Vector3.new(
+		(startPos.X + target.X) / 2,
+		math.max(startPos.Y, target.Y) + 4 + throwDist * 0.2,
+		(startPos.Z + target.Z) / 2
+	)
+	local halfEject = 0.28
+	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Position = apex, Size = EGG_FULL,
+	}):Play()
+	task.wait(halfEject)
+	if egg.Parent == nil then return end
+	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+		Position = target,
+	}):Play()
+	task.wait(halfEject)
+	if egg.Parent == nil then return end
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(target, target, "LampreyEggLand")
+
+	-- Settled: tell clients to sprout the enveloping tentacles from the egg's base and
+	-- climb them up, hugging + pulsing with the egg (animated client-side in MotherEggBody).
+	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg)
+
+	-- Incubate: the egg breathes while the progress bar fills over the incubation.
+	bb.Enabled = true
+	TweenService:Create(egg,
+		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Size = EGG_FULL * 1.12 }):Play()
+	TweenService:Create(eggLight,
+		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Brightness = 5 }):Play()
+	TweenService:Create(fill,
+		TweenInfo.new(Config.MOTHER_EGG_INCUBATION, Enum.EasingStyle.Linear),
+		{ Size = UDim2.fromScale(1, 1) }):Play()
+
+	task.wait(Config.MOTHER_EGG_INCUBATION)
+
+	-- Hatch.
+	if egg.Parent == nil then return end
+	if not buildingData[ccId] then egg:Destroy(); return end
+	local hatchPos = egg.Position
+	egg:Destroy()
+	spawnEggHatchVFX(hatchPos)
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
+	if unitManagerRef then
+		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), unitType)
+	end
 end
 
 -- ── Server-callable production (shared by remote handlers + AI swarm bots) ──────

@@ -490,6 +490,22 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		part.Transparency = 1
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 2.5, 0) end  -- just above the crawling body
+		-- The visible worm sprawls sideways and rears up to feed, well outside the thin
+		-- pivot, so top-down clicks slip past it. Add a roomy invisible, query-able click
+		-- hitbox that rides along as a decorator (posed to bodyCF each frame), so the
+		-- selection raycast reliably lands on the worm the player is aiming at.
+		local hbox         = Instance.new("Part")
+		hbox.Name          = "ClickHitbox"
+		hbox.Size          = Vector3.new(6, 6, 8)
+		hbox.Transparency  = 1
+		hbox.Anchored      = true
+		hbox.CanCollide    = false
+		hbox.CanQuery      = true    -- must be hit by the (unfiltered) selection ray
+		hbox.CastShadow    = false
+		hbox.CFrame        = part.CFrame * CFrame.new(0, 1.5, 0)
+		hbox.Parent        = part
+		local decs = unitDecorators[id]
+		decs[#decs + 1] = { part = hbox, localCF = CFrame.new(0, 1.5, 0) }
 	end
 	if unitType == "Lamprey" then
 		-- The entire creature is drawn by the client LampreyBody animator; the body
@@ -2730,10 +2746,18 @@ function UnitManager.init(resourceManager)
 
 		if not resourceManagerRef or not resourceManagerRef.spend(player, typeDef.cost) then return end
 
-		local ang      = math.random() * math.pi * 2
-		local reach    = Config.COMMAND_CENTER_SIZE.X / 2 + 4 + typeDef.size.X
-		local spawnPos = base.Position + Vector3.new(math.cos(ang) * reach, 0, math.sin(ang) * reach)
-		spawnUnit(player, spawnPos, unitType)
+		-- The Mother spits an egg into the area in front of it that incubates under a
+		-- progress bar, then hatches into the unit (inspired by the Lamprey Nest). The
+		-- cost was just spent above, so produceMotherEgg never charges again.
+		if buildingManagerRef and buildingManagerRef.produceMotherEgg then
+			task.spawn(buildingManagerRef.produceMotherEgg, player, ccId, unitType)
+		else
+			-- Fallback: instant spawn on a jittered ring if the egg path is unavailable.
+			local ang      = math.random() * math.pi * 2
+			local reach    = Config.COMMAND_CENTER_SIZE.X / 2 + 4 + typeDef.size.X
+			local spawnPos = base.Position + Vector3.new(math.cos(ang) * reach, 0, math.sin(ang) * reach)
+			spawnUnit(player, spawnPos, unitType)
+		end
 	end)
 
 	-- ── Leech burrow / unburrow toggle ────────────────────────────────────────────

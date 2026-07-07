@@ -3,6 +3,8 @@ local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
 
+local UILib       = require(script.Parent:WaitForChild("UILib"))
+
 local MiniMap     = {}
 local localPlayer = Players.LocalPlayer
 
@@ -512,12 +514,15 @@ local function hookInput(clickArea: GuiButton)
 	local pressing = false
 
 	local function tryPan()
-		local ml = UserInputService:GetMouseLocation()
-		local ap = clickArea.AbsolutePosition
-		local mu = ml.X - ap.X
-		local mv = ml.Y - ap.Y
-		if mu < 0 or mv < 0 or mu > MAP_SIZE or mv > MAP_SIZE then return end
-		cameraRef.setFocus(m2w(mu, mv))
+		local ml  = UserInputService:GetMouseLocation()
+		local ap  = clickArea.AbsolutePosition
+		local asz = clickArea.AbsoluteSize   -- scaled on-screen size (UIScale-aware)
+		local mu  = ml.X - ap.X
+		local mv  = ml.Y - ap.Y
+		if mu < 0 or mv < 0 or mu > asz.X or mv > asz.Y then return end
+		-- Normalise the click into the map's 0..MAP_SIZE space before converting, so
+		-- panning stays correct at any UI scale (not just 1.0).
+		cameraRef.setFocus(m2w(mu / asz.X * MAP_SIZE, mv / asz.Y * MAP_SIZE))
 	end
 
 	clickArea.MouseButton1Down:Connect(function()
@@ -557,6 +562,10 @@ local function buildUI()
 	sg.ZIndexBehavior     = Enum.ZIndexBehavior.Sibling
 	sg.IgnoreGuiInset     = true   -- AbsolutePosition matches GetMouseLocation() coords
 	sg.Parent             = localPlayer.PlayerGui
+	-- Same shared HUD scale as the resource bar / command grid / command-bar band so
+	-- the whole bottom cluster scales cohesively (the map no longer shrinks to a sliver
+	-- on large screens). Click-to-pan below reads AbsoluteSize so it stays scale-correct.
+	UILib.applyHudScale(sg)
 
 	-- Border frame
 	local border              = Instance.new("Frame")

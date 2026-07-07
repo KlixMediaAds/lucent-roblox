@@ -225,6 +225,10 @@ Config.LAMPREY_NEST_SIZE       = Vector3.new(11, 7, 11)
 Config.LAMPREY_NEST_EJECT_TIME = 1.5  -- seconds the tubes pulse + the egg arcs out of the nest
 Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10s total per egg)
 
+-- Hollowed Mother — spits an egg into the area in front of it (toward the camera)
+-- that incubates under a progress bar, then hatches into the trained unit.
+Config.MOTHER_EGG_INCUBATION   = 8.0  -- seconds from the egg settling to hatch
+
 -- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest
 -- births eggs: instead of settling them around its own footprint, the nest LAUNCHES
 -- each egg to a player-set rally point (right-click the ground while the nest is
@@ -541,6 +545,7 @@ Config.REMOTES = {
 	ResearchBrain           = "ResearchBrain",
 	EvolveBiter             = "EvolveBiter",
 	LeechHarvest            = "LeechHarvest",
+	MotherEggLand           = "MotherEggLand",
 	SellBuilding            = "SellBuilding",
 	ShowDefeatScreen        = "ShowDefeatScreen",
 	PlayAgain               = "PlayAgain",

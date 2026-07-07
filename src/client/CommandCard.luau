@@ -401,8 +401,9 @@ end
 function CommandCard.init(sg: ScreenGui)
 	if frame then return end
 
-	-- Own UNSCALED, inset-ignoring ScreenGui so the grid matches the minimap's pixel
-	-- size at every resolution (the main HUD has a UIScale; the minimap does not).
+	-- Own inset-ignoring ScreenGui carrying the SAME shared HUD scale as the minimap,
+	-- so the command grid stays the same size as the minimap at every resolution and
+	-- the whole bottom cluster scales together.
 	local own               = Instance.new("ScreenGui")
 	own.Name                = "RTSCommandCard"
 	own.ResetOnSpawn        = false
@@ -410,6 +411,7 @@ function CommandCard.init(sg: ScreenGui)
 	own.DisplayOrder        = 3
 	own.ZIndexBehavior      = Enum.ZIndexBehavior.Sibling
 	own.Parent              = sg.Parent
+	UILib.applyHudScale(own)
 
 	local stash             = Instance.new("Frame")
 	stash.Name              = "VpStash"

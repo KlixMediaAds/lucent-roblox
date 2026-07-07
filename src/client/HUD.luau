@@ -25,43 +25,10 @@ local Network           = require(script.Parent:WaitForChild("Network"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
 
 -- ── UI scaling ────────────────────────────────────────────────────────────────
--- Pixel offsets are authored against this reference resolution; a UIScale adjusts
--- them uniformly for any viewport so the layout stays proportional. The base is set
--- a little below 1080p so the HUD reads larger (and grows further on big screens).
-local BASE_W = 1680
-local BASE_H = 945
-
-local function setupScaling(sg: ScreenGui)
-	local uiScale        = Instance.new("UIScale")
-	uiScale.Scale        = 1
-	uiScale.Parent       = sg
-
-	local function applyScale()
-		local cam = workspace.CurrentCamera
-		if not cam then return end
-		local vp  = cam.ViewportSize
-		if vp.X == 0 or vp.Y == 0 then return end
-		uiScale.Scale = math.max(
-			math.min(vp.X / BASE_W, vp.Y / BASE_H),
-			0.35  -- floor: never shrink below 35 % (very small / mobile windows)
-		)
-	end
-
-	applyScale()
-
-	-- Re-apply whenever the camera or its viewport size changes
-	local function hookCamera(cam: Camera)
-		cam:GetPropertyChangedSignal("ViewportSize"):Connect(applyScale)
-		applyScale()
-	end
-
-	if workspace.CurrentCamera then
-		hookCamera(workspace.CurrentCamera)
-	end
-	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-		if workspace.CurrentCamera then hookCamera(workspace.CurrentCamera) end
-	end)
-end
+-- The whole bottom HUD cluster (this ScreenGui plus the minimap, command grid,
+-- resource bar, command-bar band and scout icons — each a separate ScreenGui) scales
+-- off one shared factor in UILib so it stays a cohesive size on every display. See
+-- UILib.applyHudScale.
 
 local HUD         = {}
 local localPlayer = Players.LocalPlayer
@@ -749,12 +716,12 @@ function HUD.create(): (Frame, TextButton)
 	sg.ResetOnSpawn             = false
 	sg.ZIndexBehavior           = Enum.ZIndexBehavior.Sibling
 	sg.Parent                   = localPlayer.PlayerGui
-	setupScaling(sg)
+	UILib.applyHudScale(sg)
 
 	-- Bottom-left map cluster (resource counter + upgrades button) lives in its own
-	-- UNSCALED, inset-ignoring ScreenGui so it shares the minimap's coordinate space.
-	-- (The main RTSHUD has a UIScale; the minimap does not — mixing them made the
-	-- resource bar drift into / behind the map at non-1.0 UI scales.)
+	-- inset-ignoring ScreenGui so it shares the minimap's coordinate space. It carries
+	-- the SAME shared HUD scale as the minimap (below) so the two scale in lockstep and
+	-- the resource bar always sits cleanly above the map at every resolution.
 	local mapSg                 = Instance.new("ScreenGui")
 	mapSg.Name                  = "RTSMapHUD"
 	mapSg.ResetOnSpawn          = false
@@ -762,6 +729,7 @@ function HUD.create(): (Frame, TextButton)
 	mapSg.DisplayOrder          = 3
 	mapSg.ZIndexBehavior        = Enum.ZIndexBehavior.Sibling
 	mapSg.Parent                = localPlayer.PlayerGui
+	UILib.applyHudScale(mapSg)
 
 	-- ── Resource count — designed crystal icon + the number (no frame) ────────
 	local MAP_W = 148   -- minimap border width (MAP_SIZE 144 + 4)

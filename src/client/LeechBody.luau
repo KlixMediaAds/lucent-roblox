@@ -131,6 +131,7 @@ type Entry = {
 	eyes:        { BasePart },
 	feedHost:    BasePart,
 	feed:        ParticleEmitter,
+	rise:        ParticleEmitter,
 	prevPos:     Vector3?,
 	animClock:   number,
 	idleClock:   number,
@@ -196,6 +197,44 @@ local function makeFeedEmitter(host: BasePart): ParticleEmitter
 	return pe
 end
 
+-- Thin, radiant gold→white streaks that shoot up quickly on each harvest — the
+-- "soul" of the drawn blood ascending. Tight spread + high speed + a taper to a
+-- point makes each mote read as a slender rising streak; LightEmission makes them
+-- glow additively so it looks angelic and rich rather than dusty.
+local function makeRiseEmitter(host: BasePart): ParticleEmitter
+	local pe          = Instance.new("ParticleEmitter")
+	pe.Texture        = "rbxasset://textures/particles/sparkles_main.dds"
+	pe.Color          = ColorSequence.new({
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB(255, 245, 205)),  -- warm candlelit gold
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 226, 150)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB(255, 255, 255)),  -- to pure white at the crest
+	})
+	pe.LightEmission  = 1        -- fully additive → radiant, not smoky
+	pe.LightInfluence = 0        -- ignore world lighting; always bright
+	pe.Size           = NumberSequence.new({
+		NumberSequenceKeypoint.new(0,    0.45),
+		NumberSequenceKeypoint.new(0.15, 0.26),
+		NumberSequenceKeypoint.new(1,    0),      -- taper to a slim point (the "streak" tail)
+	})
+	pe.Transparency   = NumberSequence.new({
+		NumberSequenceKeypoint.new(0,    1.0),    -- flick in
+		NumberSequenceKeypoint.new(0.12, 0.1),
+		NumberSequenceKeypoint.new(0.75, 0.35),
+		NumberSequenceKeypoint.new(1,    1.0),    -- dissolve at the top
+	})
+	pe.Lifetime       = NumberRange.new(0.45, 0.75)
+	pe.Speed          = NumberRange.new(15, 22)   -- quick ascent
+	pe.Drag           = 3.5                        -- ease off as they climb → streak then settle
+	pe.SpreadAngle    = Vector2.new(7, 7)          -- tight column so they stay slender & vertical
+	pe.Acceleration   = Vector3.new(0, 5, 0)       -- keep drifting upward as they fade
+	pe.Rotation       = NumberRange.new(0, 0)
+	pe.RotSpeed       = NumberRange.new(0, 0)
+	pe.EmissionDirection = Enum.NormalId.Top
+	pe.Rate           = 0                          -- burst-only via :Emit
+	pe.Parent         = host
+	return pe
+end
+
 -- ── Public API: attach / detach ─────────────────────────────────────────────--
 function LeechBody.attach(unitId: string, body: BasePart)
 	if active[unitId] then return end
@@ -216,6 +255,7 @@ function LeechBody.attach(unitId: string, body: BasePart)
 	local feedHost = makePart(unitId, C_BODY, Enum.Material.SmoothPlastic)
 	feedHost.Transparency = 1
 	local feed = makeFeedEmitter(feedHost)
+	local rise = makeRiseEmitter(feedHost)
 
 	local n     = tonumber(unitId:match("%d+")) or 0
 	local phase = n * 0.6180339887
@@ -236,6 +276,7 @@ function LeechBody.attach(unitId: string, body: BasePart)
 		eyes           = eyes,
 		feedHost       = feedHost,
 		feed           = feed,
+		rise           = rise,
 		prevPos        = nil,
 		animClock      = phase,
 		idleClock      = phase * 1.4,
@@ -389,6 +430,7 @@ local function layout(e: Entry, speedF: number)
 			-- (FogManager sets LocalTransparencyModifier on _LeechBody parts).
 			if e.head.LocalTransparencyModifier < 0.5 then
 				e.feed:Emit(math.random(6, 10))
+				e.rise:Emit(math.random(10, 14))   -- angelic gold→white streaks ascending
 				playSoundAt(pts[1], HARVEST_SND_ID, 0.85)
 			end
 		end

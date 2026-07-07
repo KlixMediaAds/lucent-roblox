@@ -99,7 +99,9 @@ function MotherCrown.init(cam: Camera)
 			if dx * dx + dy * dy + dz * dz > CULL_SQ then continue end
 
 			-- Ground frame = bottom of the (invisible) base box, tracking uproot moves.
-			local groundCF = base.CFrame * CFrame.new(0, -base.Size.Y / 2, 0)
+			-- The 180° flip matches BuildingManager's flipped buildMotherDecor call so
+			-- the animated crown stays aligned with the rest of the (flipped) creature.
+			local groundCF = base.CFrame * CFrame.new(0, -base.Size.Y / 2, 0) * CFrame.Angles(0, math.pi, 0)
 			local t        = now + e.phase
 
 			for i, spine in SPINES do

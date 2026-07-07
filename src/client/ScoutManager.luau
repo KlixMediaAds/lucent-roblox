@@ -865,6 +865,9 @@ local function createPanel()
 	sg.ZIndexBehavior    = Enum.ZIndexBehavior.Sibling
 	sg.Parent            = pg
 	panelGui = sg
+	-- Same shared HUD scale as the minimap so the scout toggle/menu stay locked to the
+	-- (also-scaled) minimap and grow together on large screens.
+	UILib.applyHudScale(sg)
 
 	-- StarCraft-style command bar: a full-width black backdrop that sits beneath
 	-- every other HUD element, its top flush with the top of the minimap.
@@ -875,6 +878,9 @@ local function createPanel()
 	backdropGui.DisplayOrder    = -5   -- below the minimap (0) and every other panel
 	backdropGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
 	backdropGui.Parent          = pg
+	-- Shared HUD scale so the band's height scales with the rest of the cluster instead
+	-- of staying a thin sliver under a large minimap/grid on big screens.
+	UILib.applyHudScale(backdropGui)
 
 	local bar                   = Instance.new("Frame")
 	bar.Name                    = "CommandBar"
@@ -962,8 +968,17 @@ local function createPanel()
 		if not menuFrame then return end
 		if open then
 			menuFrame.Visible = true
-			local lay    = menuContent and menuContent:FindFirstChildOfClass("UIListLayout")
-			local target = (lay and lay.AbsoluteContentSize.X) or 0
+			-- Width the row wipes open to, in LOCAL (pre-UIScale) units. We compute it
+			-- from the pill constants instead of AbsoluteContentSize — that reads back in
+			-- already-scaled pixels, which on a scaled HUD left the wrapper a hair short and
+			-- clipped the last pill. Only count pills that are actually shown (ATTACK is
+			-- hidden until an enemy is found); +6 is slack so the row never cuts off.
+			local PILL_PAD = 8   -- matches the row UIListLayout padding
+			local visible  = 0
+			for mode in modeButtons do
+				if not modeLocked(mode) then visible += 1 end
+			end
+			local target = visible > 0 and (visible * PILL_W + (visible - 1) * PILL_PAD + 6) or 0
 			menuFrame.Size = UDim2.fromOffset(0, MENU_H)
 			TweenService:Create(menuFrame,
 				TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out),

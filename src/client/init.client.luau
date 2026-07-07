@@ -23,6 +23,7 @@ local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local HagfishBody    = require(script:WaitForChild("HagfishBody"))
 local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
 local LeechBody      = require(script:WaitForChild("LeechBody"))
+local MotherEggBody  = require(script:WaitForChild("MotherEggBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
@@ -49,6 +50,7 @@ local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager    = require(script:WaitForChild("CometManager"))
 local DepositFX       = require(script:WaitForChild("DepositFX"))
 local LobbyUI         = require(script:WaitForChild("LobbyUI"))
+local MainMenu        = require(script:WaitForChild("MainMenu"))
 local ShaderManager   = require(script:WaitForChild("ShaderManager"))
 local ViewportPreview = require(script:WaitForChild("ViewportPreview"))
 
@@ -205,7 +207,8 @@ local function buildCCMoveGhost()
 	-- keeps it matching the placed Mother), not the Human Fabricator Core rig.
 	if isHollowedLocal() then
 		base.Transparency = 1
-		UnitVisuals.buildMotherDecor(m, CFrame.new(0, 0, 0), color, false)
+		-- Match the placed Mother's 180° flip (head faces +Z / the camera).
+		UnitVisuals.buildMotherDecor(m, CFrame.new(0, 0, 0) * CFrame.Angles(0, math.pi, 0), color, false)
 		for _, d in m:GetDescendants() do
 			if d:IsA("BasePart") and d ~= base then
 				d.Transparency = math.max(d.Transparency, 0.5)
@@ -272,6 +275,7 @@ LampreyBody.init(workspace.CurrentCamera)
 HagfishBody.init(workspace.CurrentCamera)
 BroodmotherBody.init(workspace.CurrentCamera)
 LeechBody.init(workspace.CurrentCamera)
+MotherEggBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 SwarmGrass.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
@@ -3481,6 +3485,11 @@ Network.onHagfishStrike(function(hagPos: Vector3, strikes: { Vector3 })
 	HagfishBody.spawnTentacles(strikes)
 end)
 
+-- A Mother egg just settled → sprout its enveloping, pulsing tentacles (client-side).
+Network.onMotherEggLand(function(egg: BasePart)
+	MotherEggBody.sprout(egg)
+end)
+
 -- A burrowed Leech just paid out income → play its feeding/harvest animation, and
 -- float a rising "+income" above the player's OWN leeches (economy feedback).
 Network.onLeechHarvest(function(unitId: string)
@@ -4612,4 +4621,9 @@ end
 end -- startGame
 
 CometManager.init()
-LobbyUI.init(startGame)
+
+-- Main menu first: BATTLE opens the Map/AI lobby (which owns the game-start flow);
+-- TUTORIAL isn't wired up yet. The lobby only builds once BATTLE is pressed.
+MainMenu.init(function()
+	LobbyUI.init(startGame)
+end)

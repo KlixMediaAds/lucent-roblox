@@ -432,8 +432,12 @@ local function hitUnit(): string?
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
 	if not result then return nil end
+	local inst = result.Instance
 	for id, info in knownUnits do
-		if info.part == result.Instance and info.ownerId == localPlayer.UserId then
+		-- Match the pivot part itself OR any descendant (e.g. the Leech's roomy
+		-- invisible ClickHitbox), so clicking the visible body selects the unit.
+		if info.ownerId == localPlayer.UserId
+			and (info.part == inst or inst:IsDescendantOf(info.part)) then
 			return id
 		end
 	end
@@ -462,8 +466,10 @@ local function hitEnemyUnit(): string?
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
 	if not result then return nil end
+	local inst = result.Instance
 	for id, info in knownUnits do
-		if info.part == result.Instance and info.ownerId ~= localPlayer.UserId then
+		if info.ownerId ~= localPlayer.UserId
+			and (info.part == inst or inst:IsDescendantOf(info.part)) then
 			return id
 		end
 	end

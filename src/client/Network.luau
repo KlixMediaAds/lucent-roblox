@@ -258,6 +258,11 @@ function Network.onLeechHarvest(fn: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.LeechHarvest).OnClientEvent:Connect(fn)
 end
 
+-- egg: a Mother egg just settled → sprout its enveloping tentacles
+function Network.onMotherEggLand(fn: (BasePart) -> ())
+	RemoteHandler.get(Config.REMOTES.MotherEggLand).OnClientEvent:Connect(fn)
+end
+
 -- ccId, isUnlocked, isMobile
 function Network.onCCMobileSync(fn: (string, boolean, boolean) -> ())
 	RemoteHandler.get(Config.REMOTES.CCMobileSync).OnClientEvent:Connect(fn)

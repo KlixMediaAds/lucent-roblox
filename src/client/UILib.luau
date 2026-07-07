@@ -75,6 +75,52 @@ function UILib.pad(parent: Instance, t: number, b: number?, l: number?, r: numbe
 	return p
 end
 
+-- ── Resolution scaling (shared by the whole bottom HUD) ─────────────────────────
+-- The bottom command cluster — minimap, command grid, resource bar, the full-width
+-- command-bar band and the scout icons — lives across several separate ScreenGuis.
+-- Each is authored in pixels against a reference resolution; a UIScale driven by the
+-- SAME factor keeps the whole cluster a constant fraction of the screen on every
+-- display (StarCraft-style), instead of shrinking to a sliver on large monitors while
+-- the band stretches thin. The base is a little below 1080p so the HUD reads large,
+-- and it grows further on bigger screens. Every HUD ScreenGui must call applyHudScale
+-- so they scale in lockstep and stay aligned.
+local SCALE_BASE_W = 1680
+local SCALE_BASE_H = 945
+local SCALE_FLOOR  = 0.35   -- never shrink below 35% (tiny / mobile windows)
+local SCALE_HUD    = 2.0    -- global HUD size multiplier (enlarge the whole cluster)
+
+function UILib.hudScaleFactor(): number
+	local cam = workspace.CurrentCamera
+	if not cam then return 1 * SCALE_HUD end
+	local vp = cam.ViewportSize
+	if vp.X == 0 or vp.Y == 0 then return 1 * SCALE_HUD end
+	return SCALE_HUD * math.max(math.min(vp.X / SCALE_BASE_W, vp.Y / SCALE_BASE_H), SCALE_FLOOR)
+end
+
+-- Parents a UIScale to `sg` and keeps its Scale synced to the viewport size. Returns
+-- the UIScale so callers can inspect it if needed.
+function UILib.applyHudScale(sg: ScreenGui): UIScale
+	local uiScale  = Instance.new("UIScale")
+	uiScale.Scale  = UILib.hudScaleFactor()
+	uiScale.Parent = sg
+
+	local function apply()
+		uiScale.Scale = UILib.hudScaleFactor()
+	end
+
+	local function hookCamera(cam: Camera)
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(apply)
+		apply()
+	end
+
+	if workspace.CurrentCamera then hookCamera(workspace.CurrentCamera) end
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if workspace.CurrentCamera then hookCamera(workspace.CurrentCamera) end
+	end)
+
+	return uiScale
+end
+
 -- ── Panel ─────────────────────────────────────────────────────────────────────
 
 -- Creates a dark-glass panel frame with rounded corners and a border.
