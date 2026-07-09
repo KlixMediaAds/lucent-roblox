@@ -3,6 +3,7 @@
 
 	Chat commands:
 	  /shader 1   → enable preset "1" (Gloomy Atmosphere)
+	  /shader 2   → enable preset "2" (60·30·10 cinematic tri-tone grade)
 	  /shader 0   → disable; restore all original values
 
 	Architecture:
@@ -99,6 +100,62 @@ local PRESETS: { [string]: LightingPreset } = {
 			-- No sun glare — overcast sky, fully diffuse lighting
 			Glare   = 0,
 			-- Low offset: mist starts close to viewer for atmospheric depth
+			Offset  = 0.10,
+		},
+	},
+
+	--[[
+	  "2" — 60·30·10
+	  A cinematic tri-tone grade that pushes the whole scene into a 60-30-10 palette.
+	  A post-process can't literally repaint every asset, so it maps the frame's tonal
+	  range to the three roles — and because midtones cover most of any frame, shadows
+	  less, and highlights least, the coverage lands roughly 60/30/10:
+	    • 60% DOMINANT — the teal that the bulk of lit/mid surfaces settle into.
+	    • 30% SECONDARY — the deep navy that shadows and shaded faces sink toward.
+	    • 10% ACCENT   — the warm amber that only the brightest surfaces + neon/emissive
+	                     pop into, lifted by a tight bloom so it reads as the highlight.
+	  (Classic teal-and-orange: complementary, high-contrast, reads as deliberate.)
+	--]]
+	["2"] = {
+		-- ── Lighting service ──────────────────────────────────────────────────
+		lighting = {
+			-- Shadow fill = SECONDARY navy → the ~30% of the frame sitting in shade.
+			Ambient              = Color3.fromRGB(30, 46, 62),
+			-- Outdoor diffuse = DOMINANT teal → most lit surfaces (~60%) take this tone.
+			OutdoorAmbient       = Color3.fromRGB(96, 150, 150),
+			-- Top-down highlight tint = ACCENT amber → bright, up-facing faces skew warm (the 10%).
+			ColorShift_Top       = Color3.fromRGB(70, 42, 14),
+			-- Bounce from below reinforces the navy secondary in the shadows.
+			ColorShift_Bottom    = Color3.fromRGB( 8, 20, 34),
+			-- Barely compress exposure; the tonal split does the work, keep neon above bloom.
+			ExposureCompensation = -0.05,
+		},
+		-- ── ColorCorrectionEffect ─────────────────────────────────────────────
+		colorCorrection = {
+			-- Keep most chroma so the three tones stay distinct (teal / navy / amber).
+			Saturation = -0.10,
+			-- Global multiply nudges the midtone body toward the dominant teal (the 60%).
+			TintColor  = Color3.fromRGB(198, 224, 222),
+			-- Contrast separates the three tonal bands so the 60/30/10 split reads cleanly.
+			Contrast   = 0.12,
+			Brightness = -0.01,
+		},
+		-- ── BloomEffect ───────────────────────────────────────────────────────
+		bloom = {
+			-- Only the brightest ~10% (neon, fire, emissive accents) blooms → the accent pop.
+			Threshold = 0.80,
+			Intensity = 0.9,
+			Size      = 48,
+		},
+		-- ── Atmosphere ────────────────────────────────────────────────────────
+		atmosphere = {
+			-- Distance haze in the dominant teal so depth folds into the 60% tone.
+			Color   = Color3.fromRGB(104, 150, 150),
+			Decay   = Color3.fromRGB( 46,  70,  78),
+			Density = 0.20,
+			Haze    = 1.2,
+			-- A touch of glare so the horizon/sky carries a warm accent highlight.
+			Glare   = 0.25,
 			Offset  = 0.10,
 		},
 	},
@@ -294,7 +351,7 @@ function ShaderManager.handleCommand(arg: string)
 		enable(trimmed)
 	else
 		warn(string.format(
-			"[ShaderManager] Unknown arg '%s'. Usage: /shader 1  (enable)  |  /shader 0  (disable)",
+			"[ShaderManager] Unknown arg '%s'. Usage: /shader 1  (Gloomy)  |  /shader 2  (60·30·10)  |  /shader 0  (disable)",
 			trimmed
 		))
 	end

@@ -60,6 +60,12 @@ local blobCooldowns:    { [string]: number } = {}   -- blobId → os.clock() exp
 local nestEggs:         { [string]: number } = {}   -- LampreyNest id → count of in-flight + incubating eggs
 local nestEggCounter    = 0                          -- monotonic id for naming egg parts
 local nestLauncherBusy: { [string]: boolean } = {}  -- LampreyNest id → a launcher throw is mid-animation
+
+-- Hollowed Mother "Egg Sacs" upgrade state, per Command Center (Mother) id.
+local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs purchases (0–MAX)
+local eggSacNests:      { [string]: { Vector3 } } = {}  -- Mother id → world positions of its planted nests
+local eggSacTimer:      { [string]: number } = {}   -- Mother id → autospawn interval accumulator
+local eggSacInFlight:   { [string]: number } = {}   -- Mother id → Embryo eggs currently incubating
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
@@ -83,7 +89,6 @@ local nextBuildRiseTime: number? = nil  -- overrides BUILD_TIME for the next cre
 local ccMobileUnlocked: { [number]: boolean } = {}  -- userId → has paid 200 to unlock mobility
 local ccMobile:         { [string]: boolean } = {}  -- ccId   → currently walking
 local ccMoveTargets:    { [string]: Vector3 } = {}  -- ccId   → current move target
-local brainGenomeResearching: { [number]: boolean } = {}  -- userId → Biter-Genome research in progress
 local playerCCId:       { [number]: string  } = {}  -- userId → their CC building id
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
@@ -99,7 +104,6 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
-	if buildingType == "Brain"         then return Config.BRAIN_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -661,11 +665,6 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		-- ready" notifier billboard is added below and toggled when research completes.
 		base.Transparency = 1
 		UnitVisuals.buildEngineeringPostDecor(model, CFrame.new(position), player.TeamColor, true)
-
-	elseif buildingType == "Brain" then
-		-- Hollowed Brain (Polyp morph target). MVP: a single black organic mass.
-		base.Color    = Color3.fromRGB(12, 10, 14)
-		base.Material = Enum.Material.Slate
 
 	else
 		-- Generic fallback: keep the team-coloured base visible. No placeable type reaches
@@ -1748,6 +1747,27 @@ function BuildingManager.hasCommandCenter(player: any): boolean
 	return playerHasCC[player.UserId] == true
 end
 
+-- UserIds of every commander (real players AND AI bots) that still owns at least one
+-- Command Center. Source of truth is the live building table, so a destroyed CC drops
+-- out immediately. Used by the elimination/victory check so a solo player vs AI (only
+-- one real player in the match) can still win by wiping out every enemy commander.
+function BuildingManager.getCommanderUserIdsWithCC(): { number }
+	local seen: { [number]: boolean } = {}
+	local out:  { number } = {}
+	for _, data in buildingData do
+		-- Count constructing CCs too, so a commander mid-rebuild still reads as "in the
+		-- match" and can't be prematurely declared defeated.
+		if data.buildingType == "CommandCenter" and data.owner then
+			local uid = data.owner.UserId
+			if not seen[uid] then
+				seen[uid] = true
+				table.insert(out, uid)
+			end
+		end
+	end
+	return out
+end
+
 -- Number of finished + in-progress buildings of `buildingType` owned by `player`.
 function BuildingManager.getBuildingCount(player: any, buildingType: string): number
 	return getPlayerBuildingCount(player, buildingType)
@@ -1786,6 +1806,10 @@ function BuildingManager.resetAll()
 	deployerLevel            = {}
 	testSupplyLevel          = {}
 	testRateLevel            = {}
+	eggSacLevel              = {}
+	eggSacNests              = {}
+	eggSacTimer              = {}
+	eggSacInFlight           = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -1799,10 +1823,9 @@ function BuildingManager.resetAll()
 	ccMobile                 = {}
 	ccMoveTargets            = {}
 	playerCCId               = {}
-	brainGenomeResearching   = {}
-	-- Clear the per-player Biter-Genome unlock so it doesn't carry into the next match.
+	-- Clear the per-player Embryo evolution unlock so it doesn't carry into the next match.
 	for _, plr in game:GetService("Players"):GetPlayers() do
-		plr:SetAttribute("BiterGenome", nil)
+		plr:SetAttribute("EmbryoGenome", nil)
 	end
 end
 
@@ -2592,6 +2615,139 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	end
 end
 
+-- ── Hollowed Mother "Egg Sacs" upgrade ──────────────────────────────────────────
+-- Slot order for the planted nests: the first pair sits on the Mother's two flanks
+-- (±X), each later pair fills in around the ring so purchases visibly add nests.
+local EGGSAC_NEST_ANGLES_DEG = { 0, 180, 90, 270, 45, 225, 135, 315 }
+
+-- World position (on the ground) of nest slot `slotIndex` around Mother `base`.
+local function eggSacNestSlotPos(base: BasePart, slotIndex: number): Vector3
+	local center = base.Position
+	local half   = Config.COMMAND_CENTER_SIZE.X / 2
+	local r      = half + 8
+	local ang    = math.rad(EGGSAC_NEST_ANGLES_DEG[slotIndex] or (slotIndex * 47))
+	local x, z   = center.X + math.cos(ang) * r, center.Z + math.sin(ang) * r
+	local surf   = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)
+		or (center.Y - Config.COMMAND_CENTER_SIZE.Y / 2)
+	return Vector3.new(x, surf, z)
+end
+
+-- Plant (build + record) the nests for slot indices (fromSlot+1 .. toSlot) around a Mother.
+local function plantEggSacNests(model: Model, base: BasePart, ccId: string, fromSlot: number, toSlot: number)
+	local nests = eggSacNests[ccId]
+	if not nests then nests = {}; eggSacNests[ccId] = nests end
+	for slot = fromSlot + 1, toSlot do
+		local pos = eggSacNestSlotPos(base, slot)
+		nests[slot] = pos
+		UnitVisuals.buildMotherNestDecor(model, CFrame.new(pos), base.BrickColor, true)
+	end
+end
+
+-- Autospawn: settle an Embryo egg in `nestPos`, incubate it, then hatch an Embryo tracked
+-- against the Mother (reusing the Deployer alive-count bookkeeping keyed by the Mother
+-- id). `eggSacInFlight[ccId]` is always decremented when this finishes, aborted or not.
+local function produceEggSacEmbryo(ccId: string, player: any, nestPos: Vector3)
+	local function release()
+		eggSacInFlight[ccId] = math.max(0, (eggSacInFlight[ccId] or 1) - 1)
+	end
+
+	local model = buildingsFolder:FindFirstChild(ccId)
+	if not model then release(); return end
+
+	local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
+	motherEggCounter += 1
+	local egg           = Instance.new("Part")
+	egg.Name            = "EggSacEgg_" .. motherEggCounter
+	egg.Shape           = Enum.PartType.Ball
+	egg.Size            = EGG_FULL * 0.3
+	egg.Position        = nestPos + Vector3.new(0, EGG_FULL.Y * 0.7, 0)
+	egg.Color           = Color3.fromRGB(255, 120, 60)
+	egg.Material        = Enum.Material.Neon
+	egg.Anchored        = true
+	egg.CanCollide      = false
+	egg.CanQuery        = false
+	egg.CastShadow      = false
+	egg.Transparency    = 0.1
+	egg.Parent          = model
+	local eggLight      = Instance.new("PointLight")
+	eggLight.Color      = Color3.fromRGB(255, 140, 70)
+	eggLight.Brightness = 2.5
+	eggLight.Range      = 10
+	eggLight.Parent     = egg
+
+	-- Progress bar floating over the egg.
+	local bb          = Instance.new("BillboardGui")
+	bb.Name           = "EggProgress"
+	bb.Size           = UDim2.fromOffset(42, 6)
+	bb.StudsOffset    = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
+	bb.AlwaysOnTop    = true
+	bb.LightInfluence = 0
+	bb.MaxDistance    = 220
+	bb.Parent         = egg
+	local barBg       = Instance.new("Frame")
+	barBg.Size        = UDim2.fromScale(1, 1)
+	barBg.BackgroundColor3 = Color3.fromRGB(12, 8, 16)
+	barBg.BackgroundTransparency = 0.25
+	barBg.BorderSizePixel = 0
+	barBg.Parent      = bb
+	local bgCorner    = Instance.new("UICorner"); bgCorner.CornerRadius = UDim.new(1, 0); bgCorner.Parent = barBg
+	local fill        = Instance.new("Frame")
+	fill.Size         = UDim2.fromScale(0, 1)
+	fill.BackgroundColor3 = Color3.fromRGB(255, 150, 70)
+	fill.BorderSizePixel = 0
+	fill.Parent       = barBg
+	local fillCorner  = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
+
+	-- Pop the egg up out of the sac + breathe while it fills.
+	TweenService:Create(egg, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Size = EGG_FULL }):Play()
+	TweenService:Create(egg,
+		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Size = EGG_FULL * 1.12 }):Play()
+	TweenService:Create(fill,
+		TweenInfo.new(Config.MOTHER_EGGSAC_INCUBATION, Enum.EasingStyle.Linear),
+		{ Size = UDim2.fromScale(1, 1) }):Play()
+
+	task.wait(Config.MOTHER_EGGSAC_INCUBATION)
+
+	if egg.Parent == nil then release(); return end
+	local hatchPos = egg.Position
+	egg:Destroy()
+	spawnEggHatchVFX(hatchPos)
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
+	if buildingData[ccId] and unitManagerRef then
+		unitManagerRef.spawnForDeployer(ccId, player, Vector3.new(hatchPos.X, 0, hatchPos.Z), "Embryo")
+	end
+	release()
+end
+
+-- Purchase one Egg Sacs upgrade for `player`'s Mother `ccId`: charges the cost, bumps
+-- the level, plants the new pair of nests, and stamps the level on the model (an
+-- attribute the client MotherPanel reads to render the tile). Returns whether it bought.
+function BuildingManager.upgradeEggSacsForPlayer(player: any, ccId: string): boolean
+	local data = buildingData[ccId]
+	if not data or data.buildingType ~= "CommandCenter" then return false end
+	if data.owner ~= player then return false end
+	if data.isConstructing then return false end
+	if not isHollowed(player) then return false end
+
+	local level = eggSacLevel[ccId] or 0
+	if level >= Config.MOTHER_EGGSAC_MAX_LEVEL then return false end
+	if not resourceManagerRef or not resourceManagerRef.spend(player, Config.MOTHER_EGGSAC_COST) then return false end
+
+	local newLevel = level + 1
+	eggSacLevel[ccId] = newLevel
+
+	local model = buildingsFolder:FindFirstChild(ccId) :: Model?
+	if model then
+		plantEggSacNests(model, data.base, ccId,
+			level * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL,
+			newLevel * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL)
+		model:SetAttribute("EggSacLevel", newLevel)
+	end
+	return true
+end
+
 -- ── Server-callable production (shared by remote handlers + AI swarm bots) ──────
 -- Births one egg from `player`'s Lamprey Nest. Returns true if a slot was
 -- reserved and production started. Safe for AI (fake) players — uses FireAllClients.
@@ -2683,6 +2839,10 @@ function BuildingManager.damage(id: string, amount: number)
 	testSupplyLevel[id]   = nil
 	testRateLevel[id]     = nil
 	nestEggs[id]          = nil
+	eggSacLevel[id]       = nil
+	eggSacNests[id]       = nil
+	eggSacTimer[id]       = nil
+	eggSacInFlight[id]    = nil
 	engState[id]          = nil
 	engResearchEnd[id]    = nil
 	engUpdateAcc[id]      = nil
@@ -2697,7 +2857,7 @@ function BuildingManager.damage(id: string, amount: number)
 	end
 
 	if wasCC then
-		-- A player can own several Command Centers (Biter → Mother stacks them). Only
+		-- A player can own several Command Centers (Embryo → Mother stacks them). Only
 		-- eliminate when the LAST one falls; otherwise re-point the primary CC id to a
 		-- surviving Mother and keep the player in the game.
 		local remaining: string? = nil
@@ -2783,6 +2943,10 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		testRateLevel[id]     = nil
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
+		eggSacLevel[id]       = nil
+		eggSacNests[id]       = nil
+		eggSacTimer[id]       = nil
+		eggSacInFlight[id]    = nil
 		engState[id]          = nil
 		engResearchEnd[id]    = nil
 		engUpdateAcc[id]      = nil
@@ -2881,10 +3045,10 @@ function BuildingManager.placeInstantForPlayer(player: any, position: Vector3, b
 	return ok, id
 end
 
--- Polyp / Biter morph: instantly create a fully-built structure at `position`,
--- bypassing build-zone / prerequisite / cost gates (the unit already paid to exist).
+-- Embryo morph: instantly create a fully-built structure at `position`, bypassing
+-- build-zone / prerequisite / cost gates (the unit already paid to exist).
 -- `turretUpgrade` (optional) pre-applies a turret path, e.g. "Creepy". CommandCenter
--- is allowed here even if the player already owns one (Biter → Mother can stack CCs).
+-- is allowed here even if the player already owns one (Embryo → Mother can stack CCs).
 -- Returns the new building id, or nil if the footprint is off-map.
 function BuildingManager.morphStructureForPlayer(player: any, position: Vector3, buildingType: string, turretUpgrade: string?): string?
 	local snapped = snapGrid(position)
@@ -3132,6 +3296,31 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
+		-- ── Mother Egg Sacs autospawn ──────────────────────────────────────────
+		-- Each Mother that has bought Egg Sacs keeps a clutch of Embryos alive up to its
+		-- capacity (level × 4), hatching a fresh egg from one of its planted nests on an
+		-- interval whenever alive + incubating Embryos fall short. Free (the upgrade paid).
+		for id, data in buildingData do
+			if data.buildingType ~= "CommandCenter" or data.isConstructing then continue end
+			local level = eggSacLevel[id] or 0
+			if level <= 0 then continue end
+			local nests = eggSacNests[id]
+			if not nests or #nests == 0 then continue end
+
+			eggSacTimer[id] = (eggSacTimer[id] or 0) + dt
+			if eggSacTimer[id] < Config.MOTHER_EGGSAC_INTERVAL then continue end
+			eggSacTimer[id] -= Config.MOTHER_EGGSAC_INTERVAL
+
+			local capacity = Config.eggSacCapacity(level)
+			local alive    = unitManagerRef and unitManagerRef.getDeployerAliveCount(id) or 0
+			local pending  = eggSacInFlight[id] or 0
+			if alive + pending >= capacity then continue end
+
+			local nestPos = nests[math.random(1, #nests)]
+			eggSacInFlight[id] = pending + 1
+			task.spawn(produceEggSacEmbryo, id, data.owner, nestPos)
+		end
+
 		-- ── Command Center passive income ──────────────────────────────────────
 		ccIncomeAccum += dt
 		if ccIncomeAccum >= Config.CC_PASSIVE_INTERVAL then
@@ -3353,24 +3542,18 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		ccMoveTargets[ccId] = Vector3.new(pos.X, 0, pos.Z)
 	end)
 
-	-- ── ResearchBrain remote (Hollowed Brain → "Biter Genome") ────────────
-	-- A 3-second research that, on completion, sets the owner's "BiterGenome" player
-	-- attribute (replicates to their client), unlocking Biter evolution. Per-player:
-	-- once any Brain finishes it, every Biter can evolve.
-	RemoteHandler.get(Config.REMOTES.ResearchBrain).OnServerEvent:Connect(function(player, brainId)
-		if type(brainId) ~= "string" then return end
-		local data = buildingData[brainId]
-		if not data or data.buildingType ~= "Brain" or data.owner ~= player then return end
+	-- ── UnlockEvolve remote (Hollowed Mother → "Evolve") ──────────────────
+	-- A one-time purchase on the Mother that spends MOTHER_EVOLVE_COST and sets the
+	-- owner's "EmbryoGenome" player attribute (replicates to their client), unlocking
+	-- every Embryo's evolution options. Per-player: once unlocked, all Embryos can evolve.
+	RemoteHandler.get(Config.REMOTES.UnlockEvolve).OnServerEvent:Connect(function(player, ccId)
+		if type(ccId) ~= "string" then return end
+		local data = buildingData[ccId]
+		if not data or data.buildingType ~= "CommandCenter" or data.owner ~= player then return end
 		if data.isConstructing then return end
-		if player:GetAttribute("BiterGenome") == true then return end
-		if brainGenomeResearching[player.UserId] then return end
-		brainGenomeResearching[player.UserId] = true
-		task.delay(Config.BITER_GENOME_TIME, function()
-			brainGenomeResearching[player.UserId] = nil
-			if player and player.Parent then
-				player:SetAttribute("BiterGenome", true)
-			end
-		end)
+		if player:GetAttribute("EmbryoGenome") == true then return end
+		if not resourceManagerRef or not resourceManagerRef.spend(player, Config.MOTHER_EVOLVE_COST) then return end
+		player:SetAttribute("EmbryoGenome", true)
 	end)
 
 	-- ── PlaceBuilding remote ──────────────────────────────────────────────
@@ -3613,6 +3796,15 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			-- `true` 8th arg flags a fresh upgrade so the client plays the empower FX.
 			updateRemote:FireClient(player, id, unitType, progress, level, Config.bonfireCapacity(level), nextCost, true)
 		end
+	end)
+
+	-- ── UpgradeEggSacs remote (Hollowed Mother Egg Sacs purchase) ───────────────
+	-- Buys one Egg Sacs upgrade on the Mother: plants a new pair of nests and raises
+	-- the auto-spawn Embryo cap. The model's EggSacLevel attribute (set inside the
+	-- upgrade fn) replicates the new level back to the client MotherPanel.
+	RemoteHandler.get(Config.REMOTES.UpgradeEggSacs).OnServerEvent:Connect(function(player, ccId)
+		if type(ccId) ~= "string" then return end
+		BuildingManager.upgradeEggSacsForPlayer(player, ccId)
 	end)
 
 	-- ── TEST building remotes (separate Supply + Spawn Rate upgrades) ───────────

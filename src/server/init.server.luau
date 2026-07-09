@@ -181,46 +181,44 @@ BuildingManager.setOnCCDestroyed(function(player)
 	UnitManager.removeAllUnitsFor(player)
 	BuildingManager.removeAllBuildingsFor(player)
 
-	if player.UserId > 0 then
-		local totalReal = 0
-		local remainingWithCC = {}
-		for _, p in Players:GetPlayers() do
-			if p.UserId > 0 then
-				totalReal += 1
-				if BuildingManager.hasCommandCenter(p) then
-					table.insert(remainingWithCC, p)
-				end
-			end
-		end
-		if totalReal >= 2 and #remainingWithCC == 1 then
-			-- Don't reset stats yet — triggerEndGame collects them first
-			triggerEndGame(remainingWithCC[1].UserId, "elimination")
-		else
-			-- Not the final 1v1: show this player a DEFEAT screen with PLAY AGAIN
-			-- instead of silently respawning. Gather their stats before resetting.
-			local rs    = ResearchManager.getStats(player)
-			local stats = {
-				[tostring(player.UserId)] = {
-					kills           = rs.kills,
-					unitsTrained    = rs.unitsTrained,
-					buildingsBuilt  = rs.buildingsBuilt,
-					resourcesEarned = ResourceManager.getTotalEarned(player),
-				},
-			}
-			local duration = math.max(0, math.floor(os.clock() - gameStartTime))
+	-- Who is still in the match — real players AND AI bots that own a Command Center?
+	-- If exactly one commander is left and it is a real player, they've wiped out every
+	-- enemy (including all AI bots in a solo skirmish) → declare their victory. This runs
+	-- before the respawn logic below, so a defeated AI is not immediately rebuilt.
+	local remaining = BuildingManager.getCommanderUserIdsWithCC()
+	if #remaining == 1 and remaining[1] > 0 then
+		triggerEndGame(remaining[1], "elimination")
+		return
+	end
 
-			ResourceManager.reset(player)
-			ResearchManager.resetPlayer(player)
-			playerBasePos[player.UserId] = nil
-			-- NeedCommandCenter resets the client HUD (it hides the win overlay);
-			-- fire it first so the defeat screen shows on top of a clean state.
-			RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-			RemoteHandler.get(Config.REMOTES.ShowDefeatScreen):FireClient(player, stats, duration)
-		end
-	else
+	if player.UserId > 0 then
+		-- The match isn't decided yet (enemies remain): show this player a DEFEAT screen
+		-- with PLAY AGAIN instead of silently respawning. Gather their stats first.
+		local rs    = ResearchManager.getStats(player)
+		local stats = {
+			[tostring(player.UserId)] = {
+				kills           = rs.kills,
+				unitsTrained    = rs.unitsTrained,
+				buildingsBuilt  = rs.buildingsBuilt,
+				resourcesEarned = ResourceManager.getTotalEarned(player),
+			},
+		}
+		local duration = math.max(0, math.floor(os.clock() - gameStartTime))
+
 		ResourceManager.reset(player)
 		ResearchManager.resetPlayer(player)
-		AIManager.resetBot(player.UserId)
+		playerBasePos[player.UserId] = nil
+		-- NeedCommandCenter resets the client HUD (it hides the win overlay);
+		-- fire it first so the defeat screen shows on top of a clean state.
+		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
+		RemoteHandler.get(Config.REMOTES.ShowDefeatScreen):FireClient(player, stats, duration)
+	else
+		-- An AI bot lost its last CC but other commanders remain: eliminate it for the
+		-- rest of this round (it won't rebuild) rather than respawning it, so the player
+		-- can defeat every enemy and win. resetAllBots brings it back next round.
+		ResourceManager.reset(player)
+		ResearchManager.resetPlayer(player)
+		AIManager.eliminateBot(player.UserId)
 	end
 end)
 

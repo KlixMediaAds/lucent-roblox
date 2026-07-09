@@ -500,6 +500,14 @@ local function buildingModel(bid: string): Model?
 	return (parent and parent:IsA("Model")) and parent :: Model or nil
 end
 
+-- What a selection/hover SelectionBox should adorn. A Model box spans the whole model's
+-- bounding box, which for the Hollowed Mother balloons out to cover her sprawling ground
+-- tentacles + egg-sac nests. When the model carries a "ClickHitbox" part (the Mother's
+-- tight body-sized selection volume), adorn that instead so the box hugs the creature.
+local function selectionAdornee(model: Model): Instance
+	return model:FindFirstChild("ClickHitbox") or model
+end
+
 -- Show/clear the thin white hover outline.
 local function setHover(bid: string?)
 	if bid == hoverBuildingId then return end
@@ -524,7 +532,7 @@ local function setHover(bid: string?)
 	if not model then return end
 
 	local box                = Instance.new("SelectionBox")
-	box.Adornee              = model
+	box.Adornee              = selectionAdornee(model)
 	box.Color3               = Color3.fromRGB(255, 255, 255)
 	box.LineThickness        = 0.05
 	box.SurfaceTransparency  = 1
@@ -563,7 +571,7 @@ local function selectBuilding(bid: string?)
 	if not model then return end
 
 	local box                = Instance.new("SelectionBox")
-	box.Adornee              = model
+	box.Adornee              = selectionAdornee(model)
 	box.Color3               = Color3.fromRGB(80, 255, 180)
 	box.LineThickness        = 0.10
 	box.SurfaceTransparency  = 0.78
@@ -627,7 +635,7 @@ local function multiSelectBuildingsOnScreen(primaryId: string)
 		local model2 = buildingModel(bid)
 		if not model2 then continue end
 		local box               = Instance.new("SelectionBox")
-		box.Adornee             = model2
+		box.Adornee             = selectionAdornee(model2)
 		box.Color3              = Color3.fromRGB(80, 255, 180)
 		box.LineThickness       = 0.10
 		box.SurfaceTransparency = 0.78

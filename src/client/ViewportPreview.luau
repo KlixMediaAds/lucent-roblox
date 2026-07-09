@@ -210,6 +210,26 @@ function ViewportPreview.forLeech(arched: boolean, pixelSize: Vector2, teamColor
 	end)
 end
 
+-- Preview of the Mother's Egg Sacs nest — the same fleshy egg-clutch nest planted in
+-- the world, with a bright incubating egg settled in its bowl so the tile reads as
+-- "a nest with an egg in it". Used by the Mother command card's Egg Sacs tile.
+function ViewportPreview.forEggSacNest(pixelSize: Vector2, teamColor: BrickColor?): ViewportFrame
+	return build(pixelSize, function(vpf)
+		UnitVisuals.buildMotherNestDecor(vpf, CFrame.new(), teamColor or BrickColor.new("Bright violet"), false)
+		-- A prominent glowing egg sitting in the clutch (matches the live hatch egg).
+		local egg      = Instance.new("Part")
+		egg.Shape      = Enum.PartType.Ball
+		egg.Size       = Vector3.new(2.4, 3.0, 2.4)
+		egg.CFrame     = CFrame.new(0, 2.4, 0)
+		egg.Color      = Color3.fromRGB(255, 120, 60)
+		egg.Material   = Enum.Material.Neon
+		egg.Anchored   = true
+		egg.CanCollide = false
+		egg.CastShadow = false
+		egg.Parent     = vpf
+	end)
+end
+
 -- A bespoke icon for the Bonfire's "Empower" upgrade: a violet flame crowned by a
 -- glowing gold up-chevron (capacity/speed rising). Built here so it renders with the
 -- same framing/lighting as the other 3D slot icons.

@@ -204,6 +204,138 @@ function TerrainManager.generate(seed: number?)
 		symMode, math.floor(l2a)))
 end
 
+-- ── Walled terrain ─────────────────────────────────────────────────────────────
+-- A maze-like alternative to the tiered map: instead of ramped plateaus you can walk
+-- up, the map is carved by tall winding rock walls (one STEP higher than the ground)
+-- topped here and there by lone rock spikes ("specs"). The walls have NO ramps, so
+-- units and structures can never mount them — they're pure barriers. Every wall segment
+-- is registered as a TerrainObstacle so building placement, the forest, the minimap and
+-- (via NavGrid) unit pathing all treat it as solid and route around it. The logical
+-- ground stays flat (terrainPlan = nil): everything off the walls sits at GROUND_TOP.
+
+local WALL_TOP    = GROUND_TOP + STEP   -- wall crest — one elevation level up
+local WALL_THICK  = 18                  -- wall width (studs); ≥ NavGrid CELL so it blocks cells
+local SPEC_CHANCE = 0.10                -- chance a wall vertex sprouts a spike above the crest
+
+-- Keep walls clear of the four corner base spots (mirrors PLAYER_BASES in init.server)
+-- so an auto-placed Command Center never lands boxed in by rock.
+local BASE_SPOTS = {
+	Vector2.new(-120, -280), Vector2.new(120, 280),
+	Vector2.new(120, -280), Vector2.new(-120, 280),
+}
+local BASE_CLEAR = 110
+
+function TerrainManager.generateWalled(seed: number?)
+	terrainPlan = nil
+	if obstaclesFolder then obstaclesFolder:Destroy(); obstaclesFolder = nil end
+	Terrain:Clear()
+	fillBaseGround()
+
+	obstaclesFolder        = Instance.new("Folder")
+	obstaclesFolder.Name   = "TerrainObstacles"
+	obstaclesFolder.Parent = workspace
+
+	local rng = Random.new(seed or math.floor(os.clock() * 7919))
+	local mirrorZ = rng:NextInteger(1, 2) == 1   -- reflect the layout across z=0 or x=0
+	local LIM = HALF - 24
+
+	local function nearBase(x: number, z: number): boolean
+		for _, b in BASE_SPOTS do
+			local dx, dz = x - b.X, z - b.Y
+			if dx * dx + dz * dz < BASE_CLEAR * BASE_CLEAR then return true end
+		end
+		return false
+	end
+
+	-- Mirror a point across the symmetry axis so both halves of the map match.
+	local function mirror(x: number, z: number): (number, number)
+		if mirrorZ then return x, -z else return -x, z end
+	end
+
+	-- Fill one rock wall segment (rotated to follow the run) + drop a square obstacle
+	-- so the analytic blockers see it. Optionally sprout a thin spike at the vertex.
+	local function segment(ax: number, az: number, bx: number, bz: number)
+		local dx, dz = bx - ax, bz - az
+		local segLen = math.sqrt(dx * dx + dz * dz)
+		if segLen < 0.5 then return end
+		local mx, mz = (ax + bx) / 2, (az + bz) / 2
+		local yMid   = (BODY_BOTTOM + WALL_TOP) / 2
+		local look   = Vector3.new(mx + dx, yMid, mz + dz)
+		Terrain:FillBlock(
+			CFrame.lookAt(Vector3.new(mx, yMid, mz), look),
+			Vector3.new(WALL_THICK, WALL_TOP - BODY_BOTTOM, segLen + WALL_THICK),
+			CLIFF_MAT
+		)
+		addObstacle(ax, az, WALL_THICK / 2, WALL_THICK / 2, WALL_TOP - GROUND_TOP)
+	end
+
+	local function spike(x: number, z: number)
+		local specTop = WALL_TOP + rng:NextNumber(STEP * 0.6, STEP * 1.7)
+		local w       = rng:NextNumber(4, 7)
+		Terrain:FillBlock(
+			CFrame.new(x, (BODY_BOTTOM + specTop) / 2, z),
+			Vector3.new(w, specTop - BODY_BOTTOM, w),
+			CLIFF_MAT
+		)
+	end
+
+	-- Build one windy wall run from A→B: march along it while wobbling perpendicular
+	-- with a sine so it snakes. Each vertex becomes a segment (+ obstacle) and, rarely,
+	-- a spike. Skips any stretch that would crowd a base corner. Mirrored for symmetry.
+	local function windyRun(ax: number, az: number, bx: number, bz: number)
+		local dx, dz = bx - ax, bz - az
+		local len    = math.sqrt(dx * dx + dz * dz)
+		if len < 1 then return end
+		local dirx, dirz   = dx / len, dz / len
+		local perpx, perpz = -dirz, dirx
+		local steps  = math.max(2, math.floor(len / 12))
+		local phase  = rng:NextNumber(0, math.pi * 2)
+		local freq   = rng:NextNumber(1.5, 3.2) * math.pi / len
+		local amp    = rng:NextNumber(22, 46)
+
+		local pts: { Vector2 } = {}
+		for s = 0, steps do
+			local t   = s / steps
+			local off = math.sin(phase + freq * len * t) * amp
+			local px  = math.clamp(ax + dirx * len * t + perpx * off, -LIM, LIM)
+			local pz  = math.clamp(az + dirz * len * t + perpz * off, -LIM, LIM)
+			table.insert(pts, Vector2.new(px, pz))
+		end
+
+		for i = 1, #pts - 1 do
+			local a, b = pts[i], pts[i + 1]
+			if nearBase(a.X, a.Y) or nearBase(b.X, b.Y) then continue end
+			-- Original run.
+			segment(a.X, a.Y, b.X, b.Y)
+			if rng:NextNumber(0, 1) < SPEC_CHANCE then spike(a.X, a.Y) end
+			-- Mirrored twin.
+			local max, maz = mirror(a.X, a.Y)
+			local mbx, mbz = mirror(b.X, b.Y)
+			segment(max, maz, mbx, mbz)
+			if rng:NextNumber(0, 1) < SPEC_CHANCE then spike(max, maz) end
+		end
+	end
+
+	-- A handful of runs snaking across the central band (endpoints kept off the corners
+	-- and edges). Mirroring doubles them into a fair, symmetric barrier layout.
+	local runs = rng:NextInteger(4, 6)
+	for _ = 1, runs do
+		local ax = rng:NextNumber(-260, 260)
+		local az = rng:NextNumber(-210, 210)
+		local bx = rng:NextNumber(-260, 260)
+		local bz = rng:NextNumber(-210, 210)
+		-- Bias toward longer runs so walls actually divide space.
+		if (Vector2.new(ax, az) - Vector2.new(bx, bz)).Magnitude < 160 then
+			bx = math.clamp(ax + (bx - ax) * 2.4, -260, 260)
+			bz = math.clamp(az + (bz - az) * 2.4, -210, 210)
+		end
+		windyRun(ax, az, bx, bz)
+	end
+
+	print(string.format("[TerrainManager] walled map — %d runs, %s symmetry",
+		runs, mirrorZ and "z" or "x"))
+end
+
 -- ── Lane mode terrain ─────────────────────────────────────────────────────────
 -- Clears all platforms and fills rocky walls on both sides of a 300-stud-wide
 -- corridor centred on X=0.  Players start at the south end (Z≈−290), AI at

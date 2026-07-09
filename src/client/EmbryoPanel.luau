@@ -1,19 +1,19 @@
 --!strict
 --[[
-    BiterPanel — command-card menu shown when one or more owned Biters are selected.
+    EmbryoPanel — command-card menu shown when one or more owned Embryos are selected.
     Renders as a 2×2 tile grid.
 
-    A Biter has no options until the player researches "Biter Genome" at a Brain (tracked
-    as the "BiterGenome" player attribute). Before then the grid is empty. Once researched
-    it offers three evolutions: Lamprey, Hagfish, Mother — each sends Network.evolveBiter,
-    and the server despawns the Biter and spawns the chosen unit/structure in its place.
+    An Embryo has no options until the player buys the Mother's "Evolve" unlock (tracked
+    as the "EmbryoGenome" player attribute). Before then the grid is empty. Once unlocked
+    it offers three evolutions: Lamprey, Hagfish, Mother — each sends Network.evolveEmbryo,
+    and the server despawns the Embryo and spawns the chosen unit/structure in its place.
 ]]
 
 local Players     = game:GetService("Players")
 local CommandCard = require(script.Parent:WaitForChild("CommandCard"))
 
-local BiterPanel  = {}
-local OWNER       = "biter"
+local EmbryoPanel = {}
+local OWNER       = "embryo"
 local localPlayer = Players.LocalPlayer
 
 local LAMPREY_COL = Color3.fromRGB(120, 190,  60)
@@ -32,17 +32,17 @@ local activeIds:  { string } = {}
 local networkRef: any
 local genomeConn: RBXScriptConnection? = nil
 
-function BiterPanel.init(network: any)
+function EmbryoPanel.init(network: any)
 	networkRef = network
 end
 
-local function genomeReady(): boolean
-	return localPlayer:GetAttribute("BiterGenome") == true
+local function evolveReady(): boolean
+	return localPlayer:GetAttribute("EmbryoGenome") == true
 end
 
 local function buildPage(): CommandCard.Page
 	local slots: { CommandCard.Slot } = {}
-	if genomeReady() then
+	if evolveReady() then
 		for i, opt in OPTIONS do
 			table.insert(slots, {
 				index   = i,
@@ -51,14 +51,14 @@ local function buildPage(): CommandCard.Page
 				color   = opt.color,
 				desc    = opt.desc,
 				onClick = function()
-					for _, id in activeIds do networkRef.evolveBiter(id, opt.key) end
+					for _, id in activeIds do networkRef.evolveEmbryo(id, opt.key) end
 				end,
 			})
 		end
 	end
-	-- No genome yet → empty grid (Biter is a plain combatant until then).
+	-- Evolve not unlocked yet → empty grid (Embryo is a plain combatant until then).
 	local n = #activeIds
-	local header = (n > 1) and ("BITERS ×" .. n) or "BITER"
+	local header = (n > 1) and ("EMBRYOS ×" .. n) or "EMBRYO"
 	return { header = header, slots = slots, cols = 2 }
 end
 
@@ -69,26 +69,26 @@ local function renderIfActive()
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
-function BiterPanel.show(ids: { string })
+function EmbryoPanel.show(ids: { string })
 	activeIds = ids
-	-- Re-render if the genome unlocks while a Biter is selected.
+	-- Re-render if the Evolve unlock lands while an Embryo is selected.
 	if not genomeConn then
-		genomeConn = localPlayer:GetAttributeChangedSignal("BiterGenome"):Connect(renderIfActive)
+		genomeConn = localPlayer:GetAttributeChangedSignal("EmbryoGenome"):Connect(renderIfActive)
 	end
 	CommandCard.show(OWNER, buildPage())
 end
 
-function BiterPanel.hide()
+function EmbryoPanel.hide()
 	activeIds = {}
 	CommandCard.hide(OWNER)
 end
 
-function BiterPanel.refreshIfVisible()
+function EmbryoPanel.refreshIfVisible()
 	renderIfActive()
 end
 
-function BiterPanel.isActive(): boolean
+function EmbryoPanel.isActive(): boolean
 	return #activeIds > 0 and CommandCard.isOwner(OWNER)
 end
 
-return BiterPanel
+return EmbryoPanel

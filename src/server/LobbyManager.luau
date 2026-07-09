@@ -28,9 +28,29 @@ local LobbyManager = {}
 local readyMap:        { [number]: boolean } = {}
 local rerollCooldown   = false
 local active           = true
-local terrainEnabled   = true   -- tiered terrain is on by default
+-- Terrain style cycles Layered → Walled → Off (the lobby "TERRAIN" button).
+--   Layered — the tiered, ramped plateau map (default).
+--   Walled  — winding rock walls units must route around (no ramps).
+--   Off     — flat ground.
+local TERRAIN_ORDER    = { "Layered", "Walled", "Off" }
+local terrainMode      = "Layered"
 local terrainManagerRef: any = nil
 local currentGamemode  = "Default"
+
+-- Regenerate the world terrain for the current gamemode + terrain style. Lane mode
+-- always uses its corridor walls regardless of the terrain style.
+local function regenTerrain()
+	if not terrainManagerRef then return end
+	if currentGamemode == "Lane" then
+		terrainManagerRef.generateLane()
+	elseif terrainMode == "Layered" then
+		terrainManagerRef.generate()
+	elseif terrainMode == "Walled" then
+		terrainManagerRef.generateWalled()
+	else
+		terrainManagerRef.clear()
+	end
+end
 
 -- AI configuration (replaces the old per-personality queue).
 local MAX_AI           = 3
@@ -70,7 +90,7 @@ local function syncAll(mineralManager)
 	RemoteHandler.get(Config.REMOTES.LobbySync):FireAllClients(
 		buildReadyList(),
 		mineralManager.getUnclaimedPositions(),
-		terrainEnabled,
+		terrainMode,
 		buildSettings(),
 		currentGamemode
 	)
@@ -114,11 +134,11 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 
 	terrainManagerRef = terrainManager
 
-	-- Terrain defaults on, so generate the tiered map immediately for the lobby.
+	-- Terrain defaults to Layered, so generate the tiered map immediately for the lobby.
 	-- Deposits were already placed by MineralManager.init (on flat Y=0 ground);
 	-- resnap them onto the freshly raised tiers so none end up buried.
-	if terrainEnabled and terrainManagerRef and currentGamemode == "Default" then
-		terrainManagerRef.generate()
+	if terrainManagerRef and currentGamemode == "Default" then
+		regenTerrain()
 		mineralManager.resnapDeposits()
 	end
 
@@ -131,7 +151,7 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 				player,
 				buildReadyList(),
 				mineralManager.getUnclaimedPositions(),
-				terrainEnabled,
+				terrainMode,
 				buildSettings(),
 				currentGamemode
 			)
@@ -158,27 +178,21 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		if rerollCooldown then return end
 		rerollCooldown = true
 		resetAllReady()
-		-- Regenerate terrain first so the rerolled deposits snap onto the new tiers.
-		if currentGamemode == "Lane" and terrainManagerRef then
-			terrainManagerRef.generateLane()
-		elseif terrainEnabled and terrainManagerRef then
-			terrainManagerRef.generate()
-		end
+		-- Regenerate terrain first so the rerolled deposits snap onto the new layout.
+		regenTerrain()
 		mineralManager.rerollDeposits()
 		syncAll(mineralManager)
 		task.delay(3, function() rerollCooldown = false end)
 	end)
 
+	-- Cycle the terrain style: Layered → Walled → Off → Layered.
 	RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle).OnServerEvent:Connect(function(_player)
 		if not active then return end
-		if currentGamemode == "Lane" then return end  -- terrain toggle disabled in lane mode
-		terrainEnabled = not terrainEnabled
+		if currentGamemode == "Lane" then return end  -- terrain style locked in lane mode
+		local idx = table.find(TERRAIN_ORDER, terrainMode) or 1
+		terrainMode = TERRAIN_ORDER[(idx % #TERRAIN_ORDER) + 1]
 		resetAllReady()
-		if terrainEnabled and terrainManagerRef then
-			terrainManagerRef.generate()
-		elseif not terrainEnabled and terrainManagerRef then
-			terrainManagerRef.clear()
-		end
+		regenTerrain()
 		-- Terrain heights changed under the existing deposits — resnap them.
 		mineralManager.resnapDeposits()
 		syncAll(mineralManager)
@@ -191,13 +205,7 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		if currentGamemode == gamemode then return end
 		currentGamemode = gamemode
 		resetAllReady()
-		if currentGamemode == "Lane" and terrainManagerRef then
-			terrainManagerRef.generateLane()
-		elseif terrainEnabled and terrainManagerRef then
-			terrainManagerRef.generate()
-		else
-			terrainManagerRef.clear()
-		end
+		regenTerrain()
 		-- Terrain heights changed under the existing deposits — resnap them.
 		mineralManager.resnapDeposits()
 		syncAll(mineralManager)

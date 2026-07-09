@@ -107,8 +107,7 @@ Config.UNIT_TYPES = {
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 	-- ── Hollowed race (trained from the Mother) — MVP single black parts ──
 	Leech         = { cost = 50,  size = Vector3.new(4, 3, 5) },  -- burrows to become a passive-income structure
-	Biter      = { cost = 40,  size = Vector3.new(4, 4, 4) },  -- simple melee combatant
-	Polyp         = { cost = 60,  size = Vector3.new(4, 4, 4) },  -- morphs into structures (later); inert for now
+	Embryo        = { cost = 40,  size = Vector3.new(4, 4, 4) },  -- simple melee combatant; evolves once the Mother's Evolve is unlocked
 }
 
 -- Field upgrade: a selected Survivor can be re-kitted into a Sniper (command-card
@@ -130,11 +129,10 @@ Config.LEECH_BURROW_SINK      = 0     -- Leech no longer sinks: it arches up (ra
 Config.LEECH_ANCHOR_DELAY_MIN = 0.5   -- min seconds head-up before a Leech anchors
 Config.LEECH_ANCHOR_DELAY_MAX = 3.0   -- max seconds head-up before a Leech anchors
 
--- Polyp (Hollowed): morphs instantly into one of two structures — the Brain or a
--- Creepy Turret. The Brain researches "Biter Genome" (a per-player flag stored on the
--- player as a "BiterGenome" attribute), which unlocks Biter evolution.
-Config.BRAIN_SIZE          = Vector3.new(8, 8, 8)  -- MVP black-part structure footprint
-Config.BITER_GENOME_TIME   = 3    -- seconds to research Biter Genome at a Brain
+-- Embryo (Hollowed) evolution unlock: purchased once at the Mother (its "Evolve"
+-- option). On purchase the server sets the owner's "EmbryoGenome" player attribute,
+-- which unlocks every Embryo's evolution options (Lamprey / Hagfish / Mother).
+Config.MOTHER_EVOLVE_COST  = 150   -- one-time cost of the Mother's Evolve unlock
 
 -- Foundry: a large industrial structure (4× the Command Center footprint) that
 -- passively produces income. Every active mineral deposit within FOUNDRY_BOOST_RADIUS
@@ -147,8 +145,8 @@ Config.FOUNDRY_BOOST_PER_DEPOSIT = 0.15  -- +15% income per active nearby deposi
 Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting deposit per income tick
 
 -- Units (shared movement config)
-Config.UNIT_MOVE_SPEED        = { Survivor = 26, Sniper = 22, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24, Leech = 18, Biter = 24, Polyp = 14 }
-Config.UNIT_ACCEL             = { Survivor = 12, Sniper = 10, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14, Leech = 8,  Biter = 12, Polyp = 6 }
+Config.UNIT_MOVE_SPEED        = { Survivor = 26, Sniper = 22, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24, Leech = 18, Embryo = 24 }
+Config.UNIT_ACCEL             = { Survivor = 12, Sniper = 10, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14, Leech = 8,  Embryo = 12 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -228,6 +226,21 @@ Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10
 -- Hollowed Mother — spits an egg into the area in front of it (toward the camera)
 -- that incubates under a progress bar, then hatches into the trained unit.
 Config.MOTHER_EGG_INCUBATION   = 8.0  -- seconds from the egg settling to hatch
+
+-- Hollowed Mother "Egg Sacs" upgrade — a repeatable per-Mother purchase (replacing the
+-- old manual Embryo option). Each purchase plants a pair of fleshy nests on the Mother's
+-- flanks and raises the auto-spawn Embryo cap by MOTHER_EGGSAC_PER_LEVEL. Embryos then
+-- hatch from those nests for free, refilling toward the cap on an interval.
+Config.MOTHER_EGGSAC_COST        = 150  -- resources per Egg Sacs purchase
+Config.MOTHER_EGGSAC_MAX_LEVEL   = 4    -- purchases allowed per Mother
+Config.MOTHER_EGGSAC_PER_LEVEL   = 4    -- +max Embryos in the autospawn per purchase
+Config.MOTHER_EGGSAC_NESTS_PER_LEVEL = 2  -- nests planted around the Mother per purchase
+Config.MOTHER_EGGSAC_INCUBATION  = 6.0  -- seconds an autospawned Embryo egg incubates in its nest
+Config.MOTHER_EGGSAC_INTERVAL    = 3.5  -- seconds between autospawn attempts per Mother
+-- Max Embryos auto-spawned once `level` Egg Sacs purchases have been made.
+function Config.eggSacCapacity(level: number): number
+	return math.max(0, level) * Config.MOTHER_EGGSAC_PER_LEVEL
+end
 
 -- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest
 -- births eggs: instead of settling them around its own footprint, the nest LAUNCHES
@@ -431,7 +444,7 @@ Config.VISION_DEFAULT = 40
 Config.VISION_RADIUS  = {
 	CommandCenter = 75, Foundry = 55, Turret = 40, EngineeringPost = 50,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
-	LampreyNest = 50, TEST = 55, Brain = 45,
+	LampreyNest = 50, TEST = 55,
 }
 
 -- Mutant turret → creepy soldier spawning
@@ -446,14 +459,14 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15, TEST = 12 }
-Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0, Leech = 0, Biter = 0, Polyp = 0 }
+Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0, Leech = 0, Embryo = 0 }
 
 -- Combat / Health
-Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Biter = 70,  Polyp = 120 }
-Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600, Brain = 500 }
-Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Biter = 14,  Polyp = 0 }
-Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Biter = 14,  Polyp = 0 }
-Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Biter = 0.9, Polyp = 1.0 }
+Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70 }
+Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
+Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14 }
+Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14 }
+Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
@@ -540,10 +553,10 @@ Config.REMOTES = {
 	SetNestRally            = "SetNestRally",
 	ForfeitMatch            = "ForfeitMatch",
 	TrainFromMother         = "TrainFromMother",
+	UpgradeEggSacs          = "UpgradeEggSacs",
 	ToggleBurrow            = "ToggleBurrow",
-	MorphPolyp              = "MorphPolyp",
-	ResearchBrain           = "ResearchBrain",
-	EvolveBiter             = "EvolveBiter",
+	UnlockEvolve            = "UnlockEvolve",
+	EvolveEmbryo            = "EvolveEmbryo",
 	LeechHarvest            = "LeechHarvest",
 	MotherEggLand           = "MotherEggLand",
 	SellBuilding            = "SellBuilding",

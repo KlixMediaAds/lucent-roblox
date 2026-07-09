@@ -26,12 +26,18 @@ local HALF          = 432    -- map half-extent (studs)
 local EDGE_MARGIN   = 16     -- keep trees off the boundary walls
 local SPACING       = 30     -- base grid spacing between candidate spots
 local JITTER        = 12     -- random offset applied within each cell
-local SKIP_CHANCE   = 0.16   -- fraction of candidate spots left empty
 local DEPOSIT_CLEAR = 16     -- no tree within this radius of a resource deposit
 local BUILDING_PAD  = 12     -- min clearance from a non-CC building at gen time
 local TRUNK_R       = 1.5    -- trunk radius (added to a unit's reach)
 local CELL          = 24     -- spatial-hash cell size (studs)
 local MAX_TREES     = 820    -- hard safety cap on tree count
+
+-- Forest is placed with Perlin noise so trees gather into organic groves separated by
+-- open clearings, rather than an even sprinkle. Density at a spot = the noise value; a
+-- candidate is planted only where density clears the threshold, and denser cores plant
+-- more reliably (the probability tracks the density).
+local NOISE_SCALE   = 0.012  -- lower → larger groves + clearings
+local NOISE_THRESH  = 0.50   -- density (0..1) a spot must clear to grow a tree
 
 -- ── State ───────────────────────────────────────────────────────────────────
 type Tree = { id: number, pos: Vector3, model: Model }
@@ -279,28 +285,37 @@ function ForestManager.generate()
 	local deposits = mineralManagerRef and mineralManagerRef.getUnclaimedPositions() or {}
 	local lim      = HALF - EDGE_MARGIN
 
+	-- Fresh noise offset per generation so each match's groves differ.
+	local nox = rng:NextNumber(-500, 500)
+	local noz = rng:NextNumber(-500, 500)
+
 	local x = -lim
 	while x <= lim do
 		local z = -lim
 		while z <= lim do
-			if counter < MAX_TREES and rng:NextNumber(0, 1) >= SKIP_CHANCE then
-				local px  = math.clamp(x + rng:NextNumber(-JITTER, JITTER), -lim, lim)
-				local pz  = math.clamp(z + rng:NextNumber(-JITTER, JITTER), -lim, lim)
-				local py  = terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz) or 0
+			if counter < MAX_TREES then
+				local px = math.clamp(x + rng:NextNumber(-JITTER, JITTER), -lim, lim)
+				local pz = math.clamp(z + rng:NextNumber(-JITTER, JITTER), -lim, lim)
+				-- Perlin density in 0..1; grow only in the groves (noise above the
+				-- threshold), and let denser cores plant more reliably.
+				local dens = math.noise(px * NOISE_SCALE + nox, pz * NOISE_SCALE + noz, 0.5) + 0.5
+				if dens > NOISE_THRESH and rng:NextNumber(0, 1) < dens then
+					local py  = terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz) or 0
 					local pos = Vector3.new(px, py, pz)
 					-- (pos.Y is the real surface so the tree isn't buried under a tier)
-				if not depositTooClose(pos, deposits)
-					and not onTerrainObstacle(pos)
-					and not nearBuilding(pos) then
-					counter += 1
-					local id    = counter
-					local model = buildTreeModel(pos, id)
-					model.Parent = forestFolder
-					local t: Tree = { id = id, pos = pos, model = model }
-					trees[id] = t
-					addToGrid(t)
-					-- Spread the part creation over a few frames to avoid a hitch.
-					if counter % 100 == 0 then task.wait() end
+					if not depositTooClose(pos, deposits)
+						and not onTerrainObstacle(pos)
+						and not nearBuilding(pos) then
+						counter += 1
+						local id    = counter
+						local model = buildTreeModel(pos, id)
+						model.Parent = forestFolder
+						local t: Tree = { id = id, pos = pos, model = model }
+						trees[id] = t
+						addToGrid(t)
+						-- Spread the part creation over a few frames to avoid a hitch.
+						if counter % 100 == 0 then task.wait() end
+					end
 				end
 			end
 			z += SPACING

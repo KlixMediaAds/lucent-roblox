@@ -21,6 +21,7 @@ local MAX_SLOPE = 0.6   -- ramp slope ≈0.43 (passable); cliff slope ≈1.0 (bl
 
 local terrainRef: any = nil
 local heights: { { number } } = {}
+local blocked: { { boolean } } = {}   -- cell centre sits inside a TerrainObstacle (e.g. a walled-map wall)
 
 local function cellCenter(i: number, j: number): (number, number)
 	return ORIGIN + (i - 1) * CELL, ORIGIN + (j - 1) * CELL
@@ -36,6 +37,13 @@ local function heightAt(x: number, z: number): number
 	return terrainRef and terrainRef.heightAt(x, z) or 0
 end
 
+-- Whether a point sits inside a terrain obstacle (walled-map walls). A half-extent of
+-- CELL/2 makes a cell count as blocked when a wall clips through its centre area.
+local function obstacleAt(x: number, z: number): boolean
+	if not (terrainRef and terrainRef.isPositionBlocked) then return false end
+	return terrainRef.isPositionBlocked(Vector3.new(x, 0, z), CELL / 2, CELL / 2)
+end
+
 function NavGrid.setTerrainManager(tm: any)
 	terrainRef = tm
 end
@@ -44,14 +52,23 @@ end
 function NavGrid.rebuild()
 	for i = 1, DIM do
 		heights[i] = heights[i] or {}
+		blocked[i] = blocked[i] or {}
 		for j = 1, DIM do
 			local x, z = cellCenter(i, j)
 			heights[i][j] = heightAt(x, z)
+			blocked[i][j] = obstacleAt(x, z)
 		end
 	end
 end
 
+-- Blocked-cell test at a world point (nearest cell). Used by the straight-line check.
+local function cellBlockedAt(x: number, z: number): boolean
+	local i, j = worldToCell(x, z)
+	return blocked[i] ~= nil and blocked[i][j] == true
+end
+
 local function passable(i: number, j: number, ni: number, nj: number): boolean
+	if (blocked[i] and blocked[i][j]) or (blocked[ni] and blocked[ni][nj]) then return false end
 	local ha = heights[i] and heights[i][j]
 	local hb = heights[ni] and heights[ni][nj]
 	if ha == nil or hb == nil then return false end
@@ -72,8 +89,11 @@ function NavGrid.lineClear(from: Vector3, to: Vector3): boolean
 	local segDist = dist / steps
 	local prevH   = heightAt(from.X, from.Z)
 	for s = 1, steps do
-		local t = s / steps
-		local h = heightAt(from.X + dx * t, from.Z + dz * t)
+		local t  = s / steps
+		local sx = from.X + dx * t
+		local sz = from.Z + dz * t
+		if cellBlockedAt(sx, sz) then return false end
+		local h = heightAt(sx, sz)
 		if math.abs(h - prevH) > MAX_SLOPE * segDist then return false end
 		prevH = h
 	end

@@ -73,7 +73,7 @@ local vpLines:     { Frame }           = {}  -- 4 viewport rectangle edges
 -- CC avatar icons (one per Command Center building)
 local ccIcons:      { [string]: Frame }  = {}
 local ccIconOwners: { [string]: number } = {}  -- building id → userId
-local enemyMarks:   { Frame }            = {}  -- persistent enemy-structure crosshairs
+local enemyMarks:   { [string]: Frame }  = {}  -- enemy-structure crosshairs, keyed by building id
 local thumbCache:   { [number]: string } = {}  -- userId → thumbnail URL
 local thumbLoading: { [number]: boolean } = {}
 
@@ -739,11 +739,29 @@ end
 
 -- ── Enemy-structure crosshair ─────────────────────────────────────────────────
 
--- Draws a persistent squared crosshair at a world position to flag a discovered
--- enemy structure. The square "forms" with a brief scale-in + fade animation.
+-- Draws a squared crosshair at a world position to flag a discovered enemy structure.
+-- The square "forms" with a brief scale-in + fade animation. `buildingId` ties the mark
+-- to the specific enemy building so it is removed when that building is destroyed (the
+-- enemy defeated) — not left lingering on the map.
 local C_CROSSHAIR = Color3.fromRGB(255, 60, 50)
-function MiniMap.markEnemyStructure(worldPos: Vector3)
+
+-- Fade a crosshair out, then destroy it.
+local function fadeOutEnemyMark(box: Frame)
+	if not box.Parent then box:Destroy(); return end
+	for _, d in box:GetDescendants() do
+		if d:IsA("UIStroke") then
+			TweenService:Create(d, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+		elseif d:IsA("Frame") then
+			TweenService:Create(d :: Frame, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+		end
+	end
+	task.delay(0.32, function() box:Destroy() end)
+end
+
+function MiniMap.markEnemyStructure(worldPos: Vector3, buildingId: string?)
 	if not canvas then return end
+	-- One crosshair per building; ignore repeat sightings.
+	if buildingId and enemyMarks[buildingId] then return end
 	local u, v = w2m(worldPos.X, worldPos.Z)
 
 	local SQ = 20  -- final square side (px)
@@ -775,7 +793,28 @@ function MiniMap.markEnemyStructure(worldPos: Vector3)
 	tick(true)
 	tick(false)
 
-	table.insert(enemyMarks, box)
+	local key = buildingId or ("_pos_" .. tostring(u) .. "_" .. tostring(v))
+	enemyMarks[key] = box
+
+	-- Remove the crosshair once the enemy building it flags is destroyed. The model
+	-- (and its Base) live in workspace.Buildings; when the Base is destroyed the enemy
+	-- structure is gone, so fade the mark out instead of leaving it stuck on the map.
+	if buildingId then
+		local buildings = workspace:FindFirstChild("Buildings")
+		local model     = buildings and buildings:FindFirstChild(buildingId)
+		local base      = model and model:FindFirstChild("Base")
+		if base and base:IsA("BasePart") then
+			base.Destroying:Connect(function()
+				if enemyMarks[key] == box then enemyMarks[key] = nil end
+				fadeOutEnemyMark(box)
+			end)
+		else
+			-- Model already gone (destroyed before we marked it) — don't leave a ghost.
+			enemyMarks[key] = nil
+			box:Destroy()
+			return
+		end
+	end
 
 	-- "Form" animation: start large + invisible, snap inward to final size.
 	box.Size = UDim2.fromOffset(SQ * 2.4, SQ * 2.4)
@@ -803,6 +842,21 @@ function MiniMap.clearEnemyStructures()
 		if m.Parent then m:Destroy() end
 	end
 	enemyMarks = {}
+end
+
+-- Sweep: drop any crosshairs whose enemy building no longer exists in the world
+-- (a safety net alongside the per-building Destroying hook, e.g. if a building model
+-- is removed without a Destroying signal reaching us).
+function MiniMap.pruneDeadEnemyStructures()
+	local buildings = workspace:FindFirstChild("Buildings")
+	for key, box in enemyMarks do
+		if key:sub(1, 5) == "_pos_" then continue end   -- positional marks have no building id
+		local model = buildings and buildings:FindFirstChild(key)
+		if not model or not model:FindFirstChild("Base") then
+			enemyMarks[key] = nil
+			fadeOutEnemyMark(box)
+		end
+	end
 end
 
 -- ── Return-to-CC button API ───────────────────────────────────────────────────
@@ -865,6 +919,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 			syncBuildingDots(buildingsF, buildingDots, myStr)
 			syncCCIcons(buildingsF, myStr)
 			syncPartDots(minersF,   minerDots,   myStr, DOT_MINER, C_MINER,    C_MINER)
+			MiniMap.pruneDeadEnemyStructures()
 		end
 
 		updateViewport()

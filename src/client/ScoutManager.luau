@@ -47,9 +47,10 @@ local localUserId = localPlayer.UserId
 local myStr       = tostring(localUserId)
 
 -- ── Injected refs ─────────────────────────────────────────────────────────────
-local network:    any
-local fogManager: any
-local miniMap:    any
+local network:      any
+local fogManager:   any
+local miniMap:      any
+local cameraModule: any
 
 -- ── Tunables ──────────────────────────────────────────────────────────────────
 local SCOUT_TICK     = 2.0   -- s between scout re-assignment passes
@@ -97,6 +98,20 @@ local iconHolder:  Frame?      = nil
 local menuFrame:   Frame?      = nil   -- clip wrapper that wipes the row open
 local menuContent: Frame?      = nil   -- auto-sizing row of mode buttons inside the wrapper
 local statusLabel: TextLabel?  = nil   -- "Scouting…" status shown beside the toggle
+
+-- Eye "camera jumper" that pops above the pill the cursor rests on (see the eye block).
+local eyeBtn:      TextButton? = nil
+local eyeScale:    UIScale?    = nil
+local eyeMode:     string? = nil       -- mode the eye is currently shown for (nil = hidden)
+local eyeHoverMode: string? = nil      -- pill the cursor is currently over
+local eyeHoverEye  = false             -- cursor is over the eye itself
+local eyeToken     = 0                 -- cancels stale reveal timers
+-- The DEFEND eye is offered even at 0 units, but once clicked it stays hidden until the
+-- player pans the camera again (jumping home while already home is pointless).
+local defendEyeSuppressed = false
+local onPillEnter: (string) -> ()      -- forward (defined with the eye helpers)
+local onPillLeave: (string) -> ()
+
 local menuOpen   = false
 local currentIconType: string? = nil
 local setMenuOpen  -- forward (defined with the UI)
@@ -651,7 +666,7 @@ end
 
 -- Enemy structure spotted by a scout: rally the scouts home and drop them to idle.
 -- Attack / Defend units keep doing their jobs.
-local function onEnemyStructureFound(worldPos: Vector3)
+local function onEnemyStructureFound(worldPos: Vector3, buildingId: string?)
 	local scoutIds = unitsInMode("scout")
 	if #scoutIds == 0 then return end
 
@@ -667,7 +682,7 @@ local function onEnemyStructureFound(worldPos: Vector3)
 	if cc then network.moveUnits(scoutIds, cc) end
 
 	if updatePanel then updatePanel() end
-	miniMap.markEnemyStructure(worldPos)
+	miniMap.markEnemyStructure(worldPos, buildingId)
 	showAlert(C.RED, reportType, "⚠  ENEMY DISCOVERED", "Enemy structure found! Scouts are falling back to base.")
 end
 
@@ -766,6 +781,10 @@ local function refreshIcon()
 		if menuFrame then menuFrame.Visible = false; menuFrame.Size = UDim2.fromOffset(0, MENU_H) end
 		if statusLabel then statusLabel.Visible = false end
 		menuOpen = false
+		-- Army gone → drop any eye (defined later; clear inline).
+		eyeToken += 1
+		eyeMode = nil
+		if eyeBtn then eyeBtn.Visible = false end
 		return
 	end
 	iconBtn.Visible = true
@@ -778,6 +797,145 @@ local function refreshIcon()
 		vpf.ZIndex   = 52
 		vpf.Parent   = iconHolder
 	end
+end
+
+-- ── Eye "camera jumper" ──────────────────────────────────────────────────────────
+-- Hovering a pill for a full second (when that order has ≥1 unit) pops a 👁 above it.
+-- Clicking the eye snaps the camera to that order's forces:
+--   • DEFEND — flies home to the base (same as the [R] recenter).
+--   • ATTACK — jumps to a random attacking troop and follows it until it dies or the
+--              player pans away.
+--   • SCOUT  — jumps to a random one of the OUTERMOST scouts and follows it (each press
+--              re-rolls a new outer scout).
+local EYE_GAP = 2   -- absolute px the eye's bottom floats above the pill's top edge
+
+local function homeBasePos(): Vector3?
+	local ref = (defendCentroid ~= Vector3.zero and defendCentroid) or armyCentroid() or Vector3.zero
+	return nearestOwnCC(ref)
+end
+
+-- Perform the camera jump for `mode` (called when its eye is clicked).
+local function jumpForMode(mode: string)
+	if not cameraModule then return end
+
+	if mode == "defend" then
+		local home = homeBasePos()
+		if home then cameraModule.returnToBase(home) end
+
+	elseif mode == "attack" then
+		local live: { BasePart } = {}
+		for _, id in unitsInMode("attack") do
+			local p = ownUnits[id]
+			if p and p.Parent then live[#live + 1] = p end
+		end
+		if #live > 0 then
+			local part = live[math.random(1, #live)]
+			cameraModule.setFocus(part.Position)   -- instant jump…
+			cameraModule.followPart(part)          -- …then lock on until it dies / player pans
+		end
+
+	elseif mode == "scout" then
+		-- Rank scouts by distance from home, jump to a random one of the outermost, and
+		-- follow it (until it dies or the player pans).
+		local home = homeBasePos() or armyCentroid() or Vector3.zero
+		local ranked: { { part: BasePart, d: number } } = {}
+		for _, id in unitsInMode("scout") do
+			local p = ownUnits[id]
+			if p and p.Parent then
+				ranked[#ranked + 1] = { part = p, d = (p.Position - home).Magnitude }
+			end
+		end
+		if #ranked > 0 then
+			table.sort(ranked, function(a, b) return a.d > b.d end)
+			local outer = math.max(1, math.ceil(#ranked * 0.4))   -- the farthest ~40%
+			local pick  = ranked[math.random(1, outer)]
+			cameraModule.setFocus(pick.part.Position)   -- instant jump…
+			cameraModule.followPart(pick.part)          -- …then follow it
+		end
+	end
+end
+
+-- An order's eye is offered when the row is open and either it has units, or it's DEFEND
+-- (always available) and not currently suppressed.
+local function eyeAllowed(mode: string): boolean
+	if not menuOpen then return false end
+	if mode == "defend" then return not defendEyeSuppressed end
+	return countInMode(mode) > 0
+end
+
+-- Park the eye centred just above the hovered pill. The pills live under a UIScale'd
+-- ScreenGui, so convert their absolute screen rect back into the gui's local space.
+local function positionEye()
+	if not (eyeBtn and eyeMode) then return end
+	local m = modeButtons[eyeMode]
+	if not m then return end
+	local scale = math.max(UILib.hudScaleFactor(), 0.01)
+	local ap, asz = m.btn.AbsolutePosition, m.btn.AbsoluteSize
+	local cx = (ap.X + asz.X / 2) / scale
+	local ty = ap.Y / scale   -- pill top edge, in gui-local space
+	-- Anchored at its centre (0.5, 0.5), so EYE_GAP places the eye's middle above the pill.
+	eyeBtn.Position = UDim2.fromOffset(math.floor(cx), math.floor(ty - EYE_GAP))
+end
+
+local function hideEye()
+	if not eyeBtn then return end
+	eyeMode = nil
+	eyeBtn.Visible = false
+end
+
+local function showEye(mode: string)
+	if not (eyeBtn and eyeScale) then return end
+	if eyeMode == mode and eyeBtn.Visible then positionEye(); return end   -- already up; don't re-animate
+	eyeMode = mode
+	positionEye()
+	eyeBtn.Visible          = true
+	eyeBtn.TextTransparency = 1
+	eyeScale.Scale          = 0.8
+	-- A gentle fade-in over 0.3s.
+	TweenService:Create(eyeBtn,
+		TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ TextTransparency = 0 }):Play()
+	TweenService:Create(eyeScale,
+		TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Scale = 1 }):Play()
+end
+
+-- After the DEFEND eye jumps home, keep it hidden until the player pans the camera away
+-- from the home focus (moving the camera "re-arms" the jump-home eye).
+local function armDefendSuppression()
+	defendEyeSuppressed = true
+	if not cameraModule then return end
+	task.spawn(function()
+		task.wait(0.75)   -- let the fly-home animation settle first
+		local home = cameraModule.getFocus()
+		while defendEyeSuppressed do
+			if (cameraModule.getFocus() - home).Magnitude > 4 then
+				defendEyeSuppressed = false
+				-- If the cursor never left the DEFEND pill, pop the eye back right away.
+				if eyeHoverMode == "defend" and menuOpen then showEye("defend") end
+				break
+			end
+			task.wait(0.1)
+		end
+	end)
+end
+
+-- Pill hover → reveal the eye immediately (no delay) when the order allows it. Leaving
+-- grants a short grace so the cursor can travel up onto the eye.
+onPillEnter = function(mode: string)
+	if modeLocked(mode) then return end
+	eyeHoverMode = mode
+	if eyeMode and eyeMode ~= mode then hideEye() end
+	eyeToken += 1
+	if eyeAllowed(mode) then showEye(mode) end
+end
+
+onPillLeave = function(mode: string)
+	if eyeHoverMode == mode then eyeHoverMode = nil end
+	eyeToken += 1   -- cancel any pending reveal
+	task.delay(0.12, function()
+		if eyeHoverMode == nil and not eyeHoverEye then hideEye() end
+	end)
 end
 
 -- ── Pill slider input ──────────────────────────────────────────────────────────
@@ -850,6 +1008,10 @@ local function makeModeButton(parent: Frame, mode: string, label: string, color:
 	b.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then beginPillPress(mode) end
 	end)
+
+	-- Hovering the pill arms the 1-second eye reveal for this order.
+	b.MouseEnter:Connect(function() if onPillEnter then onPillEnter(mode) end end)
+	b.MouseLeave:Connect(function() if onPillLeave then onPillLeave(mode) end end)
 
 	modeButtons[mode] = { btn = b, stroke = st, color = color, fill = fill, nameLbl = nameLbl, countLbl = countLbl }
 end
@@ -992,6 +1154,8 @@ local function createPanel()
 				if not menuOpen and menuFrame then menuFrame.Visible = false end
 			end)
 			tw:Play()
+			eyeToken += 1   -- cancel a pending reveal; the row is closing
+			hideEye()
 		end
 		updatePanel()
 	end
@@ -1011,7 +1175,7 @@ local function createPanel()
 		local my = closeToken
 		task.delay(0.12, function()
 			if my ~= closeToken then return end
-			if hoverIcon or hoverMenu or hoverZone or pillPressMode then return end
+			if hoverIcon or hoverMenu or hoverZone or pillPressMode or eyeHoverEye then return end
 			if menuOpen then setMenuOpen(false) end
 		end)
 	end
@@ -1100,6 +1264,53 @@ local function createPanel()
 		scheduleMenuClose()
 	end)
 
+	-- Eye "camera jumper": a plain 👁 (no frame/outline) that floats just above whichever
+	-- pill is hovered, inside the command bar (see the eye block).
+	local eye                   = Instance.new("TextButton")
+	eye.Name                    = "CommandEye"
+	eye.Size                    = UDim2.fromOffset(22, 22)
+	eye.AnchorPoint             = Vector2.new(0.5, 0.5)
+	eye.BackgroundTransparency  = 1
+	eye.AutoButtonColor         = false
+	eye.Font                    = Enum.Font.GothamBold
+	eye.Text                    = "👁"
+	eye.TextSize                = 20
+	eye.TextColor3              = C.TEXT
+	eye.TextStrokeTransparency  = 0.4   -- slight stroke keeps the glyph legible over the world
+	eye.Visible                 = false
+	eye.ZIndex                  = 60
+	eye.Parent                  = sg
+	local escale                = Instance.new("UIScale")
+	escale.Parent               = eye
+	eyeBtn   = eye
+	eyeScale = escale
+
+	eye.MouseEnter:Connect(function()
+		eyeHoverEye = true
+		openMenuHover()
+	end)
+	eye.MouseLeave:Connect(function()
+		eyeHoverEye = false
+		task.delay(0.12, function()
+			if eyeHoverMode == nil and not eyeHoverEye then hideEye() end
+		end)
+		scheduleMenuClose()
+	end)
+	eye.MouseButton1Click:Connect(function()
+		local m = eyeMode
+		-- DEFEND is clickable even at 0 units; the others need someone to look at.
+		if not m or (m ~= "defend" and countInMode(m) <= 0) then hideEye(); return end
+		-- A quick confirm-squish, then run the jump and tuck the eye away.
+		if eyeScale then
+			TweenService:Create(eyeScale,
+				TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Scale = 1.25 }):Play()
+		end
+		jumpForMode(m)
+		if m == "defend" then armDefendSuppression() end   -- stays hidden until the camera pans
+		task.delay(0.12, hideEye)
+	end)
+
 	updatePanel()
 end
 
@@ -1121,20 +1332,21 @@ end
 
 -- ── Public API ────────────────────────────────────────────────────────────────────
 
-function ScoutManager.init(net: any, _cameraModule: any, fog: any, mini: any)
-	network    = net
-	fogManager = fog
-	miniMap    = mini
+function ScoutManager.init(net: any, camera: any, fog: any, mini: any)
+	network      = net
+	cameraModule = camera
+	fogManager   = fog
+	miniMap      = mini
 
 	createPanel()
 
-	fogManager.onEnemyBuildingDiscovered(function(_bid: string, pos: Vector3)
+	fogManager.onEnemyBuildingDiscovered(function(bid: string, pos: Vector3)
 		-- Any first sighting of an enemy structure unlocks ATTACK (latched).
 		if not enemyFound then
 			enemyFound = true
 			if updatePanel then updatePanel() end
 		end
-		onEnemyStructureFound(pos)
+		onEnemyStructureFound(pos, bid)
 	end)
 
 	network.onUnitSpawned(function(id: string, ownerId: number, _pos: Vector3)
@@ -1177,6 +1389,11 @@ function ScoutManager.reset()
 	globalMode   = nil
 	currentIconType = nil
 	menuOpen = false
+	eyeToken += 1
+	eyeMode = nil
+	eyeHoverMode = nil
+	eyeHoverEye = false
+	if eyeBtn then eyeBtn.Visible = false end
 	if iconHolder then iconHolder:ClearAllChildren() end
 	if iconBtn   then iconBtn.Visible = false end
 	if menuFrame then menuFrame.Visible = false; menuFrame.Size = UDim2.fromOffset(0, MENU_H) end

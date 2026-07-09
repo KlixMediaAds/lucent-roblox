@@ -1759,6 +1759,17 @@ function AIManager.setSwarmMode(on: boolean)
 	swarmMode = on and true or false
 end
 
+-- Permanently knock a bot out of the current match (its CC was destroyed). It stops
+-- thinking/rebuilding and idles until the next round's resetAllBots respawns it. Used
+-- so a player can actually wipe out every enemy and be declared the winner, instead of
+-- defeated AIs instantly rebuilding a new Command Center.
+function AIManager.eliminateBot(userId: number)
+	local ai = botByUserId[userId]
+	if not ai then return end
+	ai.eliminated = true
+	ai.hasCC      = false
+end
+
 function AIManager.resetBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end
@@ -1768,6 +1779,7 @@ function AIManager.resetBot(userId: number)
 	assignArchetype(ai)
 
 	ai.hasCC             = false
+	ai.eliminated        = false   -- fresh round → the bot is back in play
 	ai.swarmTechGranted  = false
 	ai.swarmEggToggle    = false
 	ai.builtMines        = 0
@@ -1929,7 +1941,8 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		swarmTechGranted = false,
 		swarmEggToggle   = false,
 
-		hasCC = false,
+		hasCC      = false,
+		eliminated = false,   -- true once this bot's CC is destroyed mid-match; stays down until the next round
 
 		builtMines    = 0,
 		builtBarracks = 0,
@@ -2017,6 +2030,9 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 	task.spawn(function()
 		while true do
 			local dt = task.wait(0.5)
+			-- Eliminated bots idle (they don't rebuild a CC) until the next round's
+			-- resetAllBots clears the flag and respawns them fresh.
+			if ai.eliminated then continue end
 			ai.strategyTimer += dt
 			ai.reactionTimer += dt
 

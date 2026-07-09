@@ -130,6 +130,7 @@ local sndStart:      Sound
 local aiCountBtn:    TextButton
 local aiDiffBtn:     TextButton
 local gamemodeBtn:   TextButton
+local terrainBtn:    TextButton
 
 local depositDots: { Frame } = {}
 local terrainDots: { Frame } = {}
@@ -138,7 +139,7 @@ local settingsExpanded    = false
 -- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
 local selectedFaction     = "Humans"
 local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel } } = {}
-local lobbyTerrainEnabled = false
+local lobbyTerrainMode    = "Layered"   -- Layered | Walled | Off
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
 
@@ -265,11 +266,23 @@ local function syncDeposits(positions: { Vector3 })
 end
 
 -- ── Terrain preview ───────────────────────────────────────────────────────────
-local function syncTerrain(enabled: boolean)
-	lobbyTerrainEnabled = enabled
+local TERRAIN_COLORS = {
+	Layered = Color3.fromRGB(120, 200, 130),
+	Walled  = Color3.fromRGB(196, 150, 110),
+	Off     = C_SUBTEXT,
+}
+local function syncTerrain(mode: string)
+	lobbyTerrainMode = mode or "Layered"
+	if terrainBtn then
+		local c = TERRAIN_COLORS[lobbyTerrainMode] or C_TITLE
+		terrainBtn.Text       = lobbyTerrainMode:upper()
+		terrainBtn.TextColor3  = c
+		local st = terrainBtn:FindFirstChildOfClass("UIStroke")
+		if st then st.Color = c; st.Transparency = 0.35 end
+	end
 	for _, dot in terrainDots do dot:Destroy() end
 	terrainDots = {}
-	if not enabled or not mapCanvas then return end
+	if lobbyTerrainMode == "Off" or not mapCanvas then return end
 	local folder = workspace:FindFirstChild("TerrainObstacles")
 	if not folder then return end
 	for _, part in folder:GetChildren() do
@@ -950,6 +963,10 @@ local function buildSettingsColumn()
 	gamemodeBtn.BackgroundColor3 = C_READY_ON  -- reads as the active selection
 	rowY += ROW_STEP
 
+	-- Terrain (cycles Layered → Walled → Off)
+	terrainBtn = settingRow(settingsPanel, rowY, "TERRAIN", "LAYERED", TERRAIN_COLORS.Layered, true)
+	rowY += ROW_STEP
+
 	-- AI Difficulty (cycles Easy/Medium/Hard/Nightmare)
 	aiDiffBtn = settingRow(settingsPanel, rowY, "AI DIFFICULTY", "MEDIUM", C_GOLD, true)
 	rowY += ROW_STEP
@@ -1140,17 +1157,17 @@ function LobbyUI.init(onGameStart: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.LobbySync).OnClientEvent:Connect(
 		function(
 			readyList: { { name: string, userId: number, ready: boolean } },
-			positions: { Vector3 },
-			terrainOn: boolean,
-			settings:  { aiCount: number, aiDifficulty: string }?,
-			gamemode:  string?
+			positions:   { Vector3 },
+			terrainMode: string,
+			settings:    { aiCount: number, aiDifficulty: string }?,
+			gamemode:    string?
 		)
 			syncPlayers(readyList)
 			applySettings(settings)
 			syncRoster(readyList, settings or lastSettings)
 			applyGamemode(gamemode)
 			syncDeposits(positions)
-			syncTerrain(terrainOn)
+			syncTerrain(terrainMode)
 		end
 	)
 
@@ -1170,6 +1187,11 @@ function LobbyUI.init(onGameStart: (string) -> ())
 	gamemodeBtn.MouseButton1Click:Connect(function()
 		local next = lobbyGamemode == "Swarm" and "Default" or "Swarm"
 		RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(next)
+	end)
+
+	-- Terrain cycles Layered → Walled → Off (server owns the sequence + regen).
+	terrainBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle):FireServer()
 	end)
 
 	RemoteHandler.get(Config.REMOTES.LobbyStart).OnClientEvent:Connect(function()

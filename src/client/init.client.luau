@@ -37,9 +37,7 @@ local TestPanel      = require(script:WaitForChild("TestPanel"))
 local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
 local MotherPanel    = require(script:WaitForChild("MotherPanel"))
 local LeechPanel     = require(script:WaitForChild("LeechPanel"))
-local PolypPanel     = require(script:WaitForChild("PolypPanel"))
-local BiterPanel     = require(script:WaitForChild("BiterPanel"))
-local BrainPanel     = require(script:WaitForChild("BrainPanel"))
+local EmbryoPanel    = require(script:WaitForChild("EmbryoPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local Jumpscare      = require(script:WaitForChild("Jumpscare"))
@@ -415,9 +413,7 @@ CCMobilePanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end)
 MotherPanel.init(Network, function() return currentResources end)
 LeechPanel.init(Network)
-PolypPanel.init(Network)
-BiterPanel.init(Network)
-BrainPanel.init(Network)
+EmbryoPanel.init(Network)
 DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
@@ -485,6 +481,7 @@ end
 
 -- ── /shader chat command ──────────────────────────────────────────────────────
 -- /shader 1  → enable Gloomy Atmosphere preset
+-- /shader 2  → enable 60·30·10 cinematic tri-tone grade
 -- /shader 0  → disable and restore original lighting
 do
 	Players.LocalPlayer.Chatted:Connect(function(msg)
@@ -591,7 +588,6 @@ local function hideBuildingPanels()
 	CCMobilePanel.hide()
 	TestPanel.hide()
 	MotherPanel.hide()
-	BrainPanel.hide()
 end
 
 HUD.wire(Network, UnitController, BuildingPlacer, hideBuildingPanels, function()
@@ -701,9 +697,7 @@ local function enterCCMode()
 	CCMobilePanel.hide()
 	MotherPanel.hide()
 	LeechPanel.hide()
-	PolypPanel.hide()
-	BiterPanel.hide()
-	BrainPanel.hide()
+	EmbryoPanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
@@ -802,28 +796,24 @@ end)
 
 -- ── Unit command cards (Survivor upgrade + Hollowed units) ─────────────────────
 -- Selecting owned units opens that unit's option grid: Survivor → Upgrade to Sniper;
--- Leech → Burrow/Unburrow; Polyp → morph (Brain/Creepy Turret); Biter → evolve (once
--- Biter Genome is researched, else an empty grid). Any selection lacking a given type
--- hides its panel (a building selection clears the unit selection first, so this fires
--- with an empty list then).
+-- Leech → Burrow/Unburrow; Embryo → evolve (once the Mother's Evolve unlock is bought,
+-- else an empty grid). Any selection lacking a given type hides its panel (a building
+-- selection clears the unit selection first, so this fires with an empty list then).
 UnitController.onUnitsSelected(function(ids: { string })
 	local survivorIds: { string } = {}
 	local leechIds:    { string } = {}
-	local polypIds:    { string } = {}
-	local biterIds:    { string } = {}
+	local embryoIds:   { string } = {}
 	for _, id in ids do
 		local t = UnitController.getUnitType(id)
 		if     t == "Survivor" then table.insert(survivorIds, id)
 		elseif t == "Leech"    then table.insert(leechIds, id)
-		elseif t == "Polyp"    then table.insert(polypIds, id)
-		elseif t == "Biter"    then table.insert(biterIds, id)
+		elseif t == "Embryo"   then table.insert(embryoIds, id)
 		end
 	end
 
 	if #survivorIds > 0 then SurvivorPanel.show(survivorIds) else SurvivorPanel.hide() end
 	if #leechIds    > 0 then LeechPanel.show(leechIds)       else LeechPanel.hide()    end
-	if #polypIds    > 0 then PolypPanel.show(polypIds)       else PolypPanel.hide()    end
-	if #biterIds    > 0 then BiterPanel.show(biterIds)       else BiterPanel.hide()    end
+	if #embryoIds   > 0 then EmbryoPanel.show(embryoIds)     else EmbryoPanel.hide()   end
 end)
 
 -- ── Bonfire panel ──────────────────────────────────────────────────────────────
@@ -957,13 +947,6 @@ local OTHER_STRUCT_NAME: { [string]: string } = {
 	Relay = "RELAY", Monument = "MONUMENT",
 }
 UnitController.onOtherBuildingSelected(function(bid: string?, btype: string?)
-	if bid and btype == "Brain" then
-		-- The Hollowed Brain has its own research card (Biter Genome).
-		CommandCard.hide("other")
-		BrainPanel.show(bid)
-		return
-	end
-	BrainPanel.hide()
 	if bid then
 		local name = (btype and (OTHER_STRUCT_NAME[btype] or btype) or "STRUCTURE"):upper()
 		CommandCard.showMessage("other", name, "Upgrades coming soon!")

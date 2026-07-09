@@ -4,7 +4,10 @@
     Center). Renders as a larger 2×2 tile grid (cols = 2).
 
     Rooted (structure) state → four options:
-        Leech · Land Moth · Polyp   (each instant-trains beside the Mother)
+        Leech · Egg Sacs · Evolve    (Leech instant-trains beside the Mother; Egg Sacs is
+                                      a repeatable upgrade that plants nests which auto-hatch
+                                      Embryos; Evolve is a one-time unlock that lets this
+                                      player's Embryos evolve)
         Uproot                       (lift the Mother into a moveable unit)
 
     Mobile (uprooted) state → a single option:
@@ -15,6 +18,8 @@
     in via setMobileState() from init.client's CCMobileSync handler.
 ]]
 
+local Workspace         = game:GetService("Workspace")
+local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
@@ -25,26 +30,46 @@ local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 local MotherPanel = {}
 local C           = UILib.C
 local OWNER       = "mother"
+local localPlayer = Players.LocalPlayer
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeCCId:   string? = nil
 local networkRef:   any
 local resourcesFn:  (() -> number)?
 local isMobile      = false
+local eggSacConn:   RBXScriptConnection? = nil
+local evolveConn:   RBXScriptConnection? = nil
 
 -- ── Colours ───────────────────────────────────────────────────────────────────
 local LEECH_COL    = Color3.fromRGB(120, 190,  90)
-local MOTH_COL     = Color3.fromRGB(170, 100, 220)
-local POLYP_COL    = Color3.fromRGB(150, 150, 160)
+local EGGSAC_COL   = Color3.fromRGB(255, 140,  70)
+local EVOLVE_COL   = Color3.fromRGB(190,  90, 210)
 local UPROOT_COL   = Color3.fromRGB( 20, 200, 160)
 local DOWNROOT_COL = Color3.fromRGB(225, 130,  20)
 
 type Opt = { key: string, name: string, icon: string, color: Color3, desc: string }
+-- Leech is the only direct train (index 1); the Egg Sacs upgrade (index 2), the Evolve
+-- unlock (index 3), and Uproot (index 4) are built separately in buildPage().
 local OPTIONS: { Opt } = {
 	{ key = "Leech", name = "LEECH", icon = "🪱", color = LEECH_COL, desc = "Spawn a Leech. Select it to burrow for passive income." },
-	{ key = "Biter", name = "BITER", icon = "🦟", color = MOTH_COL,  desc = "Spawn a Biter — a simple melee combatant (can evolve once Biter Genome is researched)." },
-	{ key = "Polyp", name = "POLYP", icon = "⬤",  color = POLYP_COL, desc = "Spawn a Polyp. Select it to morph into a Brain or Creepy Turret." },
 }
+
+-- Whether this player has already bought the Evolve unlock (server-set attribute).
+local function evolveUnlocked(): boolean
+	return localPlayer:GetAttribute("EmbryoGenome") == true
+end
+
+-- The live EggSacLevel is replicated on the Mother's model as an attribute (stamped by
+-- the server on each purchase), so the panel reads it straight off the workspace model.
+local function activeMotherModel(): Instance?
+	if not activeCCId then return nil end
+	local bf = Workspace:FindFirstChild("Buildings")
+	return bf and bf:FindFirstChild(activeCCId) or nil
+end
+local function eggSacLevel(): number
+	local m = activeMotherModel()
+	return m and (m:GetAttribute("EggSacLevel") :: number? or 0) or 0
+end
 
 -- ── Page builder ────────────────────────────────────────────────────────────────
 local function buildPage(): CommandCard.Page
@@ -65,10 +90,12 @@ local function buildPage(): CommandCard.Page
 	end
 
 	local res = resourcesFn and resourcesFn() or 0
-	for i, opt in OPTIONS do
+
+	-- Leech (grid slot 1) — direct train beside the Mother.
+	for _, opt in OPTIONS do
 		local cost = (Config.UNIT_TYPES :: any)[opt.key].cost
 		local slot: CommandCard.Slot = {
-			index   = i,
+			index   = 1,
 			name    = opt.name,
 			icon    = opt.icon,
 			color   = opt.color,
@@ -90,8 +117,62 @@ local function buildPage(): CommandCard.Page
 		table.insert(slots, slot)
 	end
 
+	-- Egg Sacs upgrade (grid slot 2) — repeatable purchase that plants nests + raises
+	-- the auto-spawn Embryo cap. Level is read live off the Mother model's attribute.
+	local level    = eggSacLevel()
+	local maxLevel  = Config.MOTHER_EGGSAC_MAX_LEVEL
+	local maxed     = level >= maxLevel
+	local sacCost   = Config.MOTHER_EGGSAC_COST
 	table.insert(slots, {
-		index   = #OPTIONS + 1,
+		index   = 2,
+		name    = "EGG SACS",
+		color   = EGGSAC_COL,
+		-- 3D thumbnail of the egg nest (with an egg in it) instead of an emoji.
+		viewportKey     = "eggsacnest",
+		viewportFactory = function() return ViewportPreview.forEggSacNest(Vector2.new(64, 64)) end,
+		cost    = maxed and nil or sacCost,
+		badge   = "Lv " .. level .. "/" .. maxLevel,
+		enabled = (not maxed) and res >= sacCost,
+		locked  = maxed,
+		desc    = maxed
+			and ("Egg Sacs maxed — the Mother auto-hatches up to " .. Config.eggSacCapacity(level) .. " Embryos from her nests.")
+			or ("Grow an Egg Sac cluster: plants nests beside the Mother that auto-hatch Embryos for free. +"
+				.. Config.MOTHER_EGGSAC_PER_LEVEL .. " max Embryos per tier (" .. maxLevel .. " tiers)."),
+		onClick = function()
+			if not activeCCId then return end
+			if eggSacLevel() >= maxLevel then return end
+			if (resourcesFn and resourcesFn() or 0) < sacCost then return end
+			networkRef.upgradeEggSacs(activeCCId)
+		end,
+	})
+
+	-- Evolve unlock (grid slot 3) — one-time purchase that lets this player's Embryos
+	-- evolve (Lamprey / Hagfish / Mother) from their own command card. Reads the live
+	-- EmbryoGenome player attribute to flip between purchasable and unlocked/✓.
+	local evolved     = evolveUnlocked()
+	local evolveCost  = Config.MOTHER_EVOLVE_COST
+	table.insert(slots, {
+		index   = 3,
+		name    = "EVOLVE",
+		icon    = "🧬",
+		color   = EVOLVE_COL,
+		cost    = evolved and nil or evolveCost,
+		badge   = evolved and "✓" or nil,
+		enabled = (not evolved) and res >= evolveCost,
+		locked  = evolved,
+		desc    = evolved
+			and "Evolution unlocked — select an Embryo to evolve it into a Lamprey, Hagfish, or Mother."
+			or "Unlock Embryo evolution: your Embryos can then morph into a Lamprey, Hagfish, or a new Mother.",
+		onClick = function()
+			if not activeCCId then return end
+			if evolveUnlocked() then return end
+			if (resourcesFn and resourcesFn() or 0) < evolveCost then return end
+			networkRef.unlockEvolve(activeCCId)
+		end,
+	})
+
+	table.insert(slots, {
+		index   = 4,
 		name    = "UPROOT",
 		icon    = "⬆",
 		color   = UPROOT_COL,
@@ -118,11 +199,22 @@ end
 
 function MotherPanel.show(ccId: string)
 	activeCCId = ccId
+	-- Live-refresh the Egg Sacs tile when this Mother's level changes (purchase lands).
+	if eggSacConn then eggSacConn:Disconnect(); eggSacConn = nil end
+	local model = activeMotherModel()
+	if model then
+		eggSacConn = model:GetAttributeChangedSignal("EggSacLevel"):Connect(renderIfActive)
+	end
+	-- Live-refresh the Evolve tile when the unlock lands for this player.
+	if not evolveConn then
+		evolveConn = localPlayer:GetAttributeChangedSignal("EmbryoGenome"):Connect(renderIfActive)
+	end
 	CommandCard.show(OWNER, buildPage())
 end
 
 function MotherPanel.hide()
 	activeCCId = nil
+	if eggSacConn then eggSacConn:Disconnect(); eggSacConn = nil end
 	CommandCard.hide(OWNER)
 end
 

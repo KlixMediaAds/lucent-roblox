@@ -1235,6 +1235,93 @@ function UnitVisuals.buildLampreyNestDecor(parent: Instance, groundCF: CFrame, t
 	end
 end
 
+-- ── Mother "Egg Sacs" nest ─────────────────────────────────────────────────────
+-- A compact fleshy egg clutch planted beside the Hollowed Mother when the Egg Sacs
+-- upgrade is purchased. It matches the Mother's dark-maroon flesh with a team-coloured
+-- glow: a low muscular mound ringed by a few short tentacle stalks curling inward over
+-- a cluster of translucent egg sacs. Purely decorative — autospawned Embryo eggs settle
+-- at the nest's centre (handled server-side). `groundCF` is the world CFrame of the
+-- nest's base; parts are anchored under `parent` (the Mother's model).
+function UnitVisuals.buildMotherNestDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh (matches Mother)
+	local cBelly  = Color3.fromRGB(58, 34, 40)   -- lighter flesh
+	local cEgg    = Color3.fromRGB(255, 120, 60) -- warm orange egg glow (matches Mother eggs)
+	local cAccent = teamColor.Color
+	local V       = Vector3.new
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3,
+		material: Enum.Material, shape: Enum.PartType?): Part
+		local p      = Instance.new("Part")
+		p.Name       = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.CanQuery   = false
+		p.Parent     = parent
+		return p
+	end
+	local function worldPt(v: Vector3): Vector3
+		return (groundCF * CFrame.new(v)).Position
+	end
+	local function seg(name: string, a: Vector3, b: Vector3, thick: number, color: Color3, material: Enum.Material)
+		local p = dp(name, Vector3.one, CFrame.new(), color, material)
+		UnitVisuals.orientYBetween(p, worldPt(a), worldPt(b), thick)
+	end
+
+	-- Low muscular mound + lighter flesh rim (the sac wall).
+	dp("Mound", V(6.4, 2.2, 6.4), CFrame.new(0, 0.6, 0), cHide, Enum.Material.Slate, Enum.PartType.Ball)
+	local rim = dp("Rim", V(5.6, 1.6, 5.6), CFrame.new(0, 1.1, 0), cBelly, Enum.Material.Slate, Enum.PartType.Ball)
+
+	-- A clutch of translucent egg sacs nestled in the bowl (the "SacEgg_" parts glow).
+	local clutch = {
+		{ V( 0.0, 1.9, 0.0), 2.0 },
+		{ V( 1.5, 1.6, 0.6), 1.4 },
+		{ V(-1.4, 1.6, 0.7), 1.4 },
+		{ V( 0.5, 1.6, -1.4), 1.3 },
+	}
+	for i, e in clutch do
+		local egg = dp("SacEgg_" .. i, V(e[2], e[2] * 1.15, e[2]), CFrame.new(e[1]), cEgg, Enum.Material.Neon, Enum.PartType.Ball)
+		egg.Transparency = 0.25
+	end
+
+	-- Five short tentacle stalks curling up-and-inward over the clutch, tips glowing.
+	local BT, TT = 0.9, 0.32
+	for i = 1, 5 do
+		local az      = (i - 1) / 5 * math.pi * 2 + 0.4
+		local outward = V(math.cos(az), 0, math.sin(az))
+		local rootR   = 2.6
+		local root    = V(outward.X * rootR, 0.8, outward.Z * rootR)
+		local M       = 3
+		local pts     = { root }
+		local pos     = root
+		for j = 1, M do
+			local s    = j / M
+			-- rise then arch inward over the clutch
+			local dir  = (Vector3.yAxis * math.cos(s * 1.7) - outward * math.sin(s * 1.7)).Unit
+			pos        = pos + dir * 1.5
+			pts[j + 1] = pos
+		end
+		for j = 1, M do
+			local th = BT + (TT - BT) * ((j - 1) / M)
+			seg("NestStalk_" .. i .. "_" .. j, pts[j], pts[j + 1], th, cHide, Enum.Material.Slate)
+		end
+		dp("NestTip_" .. i, V(0.6, 0.6, 0.6), CFrame.new(pts[M + 1]), cAccent, Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	if withFX then
+		local light      = Instance.new("PointLight")
+		light.Color      = cEgg
+		light.Brightness = 1.8
+		light.Range      = 10
+		light.Parent     = rim
+	end
+end
+
 -- Preview-only static Leech: the sideways blood-worm the client LeechBody draws — a
 -- clean tapering body (no spine knuckles) with a rounded head and two neon eye specks.
 -- Geometry mirrors LeechBody so the thumbnail matches the live unit.

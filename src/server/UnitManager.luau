@@ -429,9 +429,9 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	part.Anchored       = true
 	part.CastShadow     = false
 
-	-- CreepySoldier + Biter/Polyp: MVP single black parts (no blueprint geometry yet).
+	-- CreepySoldier + Embryo: MVP single black parts (no blueprint geometry yet).
 	-- (Leech is drawn client-side by LeechBody — see the invisible-pivot block below.)
-	if unitType == "CreepySoldier" or unitType == "Biter" or unitType == "Polyp" then
+	if unitType == "CreepySoldier" or unitType == "Embryo" then
 		part.BrickColor = BrickColor.new("Black")
 		part.Color      = Color3.fromRGB(10, 10, 12)
 		part.Material   = Enum.Material.Slate
@@ -877,7 +877,7 @@ function UnitManager.spawnUnitNow(player: Player, position: Vector3, unitType: s
 	return spawnUnit(player, position, unitType)
 end
 
--- Remove a living unit immediately (used by the Polyp morph + Biter evolve). Mirrors the
+-- Remove a living unit immediately (used by the Embryo evolve). Mirrors the
 -- heartbeat's dead-unit cleanup: drop decorators, decrement the owner's unit count,
 -- destroy the part, and clear any deployer bookkeeping. Returns the unit's world position
 -- (so the caller can spawn a structure/unit where it stood).
@@ -1889,7 +1889,7 @@ function UnitManager.init(resourceManager)
 			-- Downed soldiers hold position (they still shoot via the combat scan below,
 			-- just never chase); active rescuers are busy hauling.
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
-				and data.unitType ~= "Leech" and data.unitType ~= "Polyp"  -- non-combat Hollowed units
+				and data.unitType ~= "Leech"  -- non-combat Hollowed unit
 				and not data.immobilized and not data.draggingId
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
@@ -2729,7 +2729,9 @@ function UnitManager.init(resourceManager)
 	-- a jittered ring just outside the Mother's footprint.
 	RemoteHandler.get(Config.REMOTES.TrainFromMother).OnServerEvent:Connect(function(player, ccId, unitType)
 		if type(ccId) ~= "string" or type(unitType) ~= "string" then return end
-		if unitType ~= "Leech" and unitType ~= "Biter" and unitType ~= "Polyp" then return end
+		-- Embryos are no longer trained by hand — they auto-hatch from the Egg Sacs
+		-- upgrade's nests (see BuildingManager). Only the Leech is trained here now.
+		if unitType ~= "Leech" then return end
 		local typeDef = Config.UNIT_TYPES[unitType]
 		if not typeDef then return end
 
@@ -2809,33 +2811,14 @@ function UnitManager.init(resourceManager)
 		(bv :: BoolValue).Value = nowBurrowed
 	end)
 
-	-- ── Polyp morph → structure (Brain / Creepy Turret) ──────────────────────────
-	-- The Polyp instantly becomes the chosen structure at its spot (it already paid to
-	-- exist, so the morph is free). BuildingManager.morphStructureForPlayer bypasses the
-	-- normal build-zone / prerequisite / cost gates.
-	RemoteHandler.get(Config.REMOTES.MorphPolyp).OnServerEvent:Connect(function(player, polypId, structureType)
-		if type(polypId) ~= "string" or type(structureType) ~= "string" then return end
-		if not buildingManagerRef then return end
-		local data = units[polypId]
-		if not data or data.owner ~= player or data.unitType ~= "Polyp" then return end
+	-- ── Embryo evolve → Lamprey / Hagfish / Mother (needs the Mother's Evolve unlock) ──
+	RemoteHandler.get(Config.REMOTES.EvolveEmbryo).OnServerEvent:Connect(function(player, embryoId, targetType)
+		if type(embryoId) ~= "string" or type(targetType) ~= "string" then return end
+		if player:GetAttribute("EmbryoGenome") ~= true then return end
+		local data = units[embryoId]
+		if not data or data.owner ~= player or data.unitType ~= "Embryo" then return end
 		if data.hp <= 0 or data.dying then return end
-		local pos = despawnUnit(polypId)
-		if not pos then return end
-		if structureType == "Brain" then
-			buildingManagerRef.morphStructureForPlayer(player, pos, "Brain")
-		elseif structureType == "CreepyTurret" then
-			buildingManagerRef.morphStructureForPlayer(player, pos, "Turret", "Creepy")
-		end
-	end)
-
-	-- ── Biter evolve → Lamprey / Hagfish / Mother (needs Biter Genome) ───────────
-	RemoteHandler.get(Config.REMOTES.EvolveBiter).OnServerEvent:Connect(function(player, biterId, targetType)
-		if type(biterId) ~= "string" or type(targetType) ~= "string" then return end
-		if player:GetAttribute("BiterGenome") ~= true then return end
-		local data = units[biterId]
-		if not data or data.owner ~= player or data.unitType ~= "Biter" then return end
-		if data.hp <= 0 or data.dying then return end
-		local pos = despawnUnit(biterId)
+		local pos = despawnUnit(embryoId)
 		if not pos then return end
 		if targetType == "Lamprey" or targetType == "Hagfish" then
 			spawnUnit(player, pos, targetType)

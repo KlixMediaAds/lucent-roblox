@@ -114,10 +114,17 @@ function Camera.init()
 	-- Priority > Camera (200) so this runs AFTER Roblox's built-in camera script
 	-- and overwrites whatever it set, keeping full control of cam.CFrame.
 	RunService:BindToRenderStep("RTSCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
-		-- Follow mode: lock focus onto the tracked part (e.g. the descending Core
-		-- pod) and skip WASD/edge panning until the follow is released.
+		-- Follow mode: lock focus onto the tracked part and skip edge panning until the
+		-- follow is released. It releases when the tracked part dies (Parent gone) or the
+		-- player takes manual control (WASD/QE pan-rotate or a middle-mouse drag) — edge
+		-- panning is intentionally NOT an override so a follow triggered from a bottom-
+		-- corner UI click doesn't cancel itself instantly.
 		if followTarget then
-			if followTarget.Parent then
+			local manualOverride = midDrag
+				or UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.S)
+				or UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.D)
+				or UserInputService:IsKeyDown(Enum.KeyCode.Q) or UserInputService:IsKeyDown(Enum.KeyCode.E)
+			if followTarget.Parent and not manualOverride then
 				focus = Vector3.new(followTarget.Position.X, 0, followTarget.Position.Z)
 				apply()
 				return
@@ -176,6 +183,7 @@ function Camera.getYaw(): number
 end
 
 function Camera.setFocus(pos: Vector3)
+	followTarget = nil   -- an explicit jump is a manual override; drop any active follow
 	focus = Vector3.new(pos.X, 0, pos.Z)
 	apply()
 end

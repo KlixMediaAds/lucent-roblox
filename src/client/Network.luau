@@ -228,9 +228,19 @@ function Network.moveMobileCC(ccId: string, pos: Vector3)
 	RemoteHandler.get(Config.REMOTES.MoveMobileCC):FireServer(ccId, pos)
 end
 
--- ccId, unitType: the Hollowed Mother trains a unit beside itself (Leech/Biter/Polyp)
+-- ccId, unitType: the Hollowed Mother trains a unit beside itself (Leech)
 function Network.trainFromMother(ccId: string, unitType: string)
 	RemoteHandler.get(Config.REMOTES.TrainFromMother):FireServer(ccId, unitType)
+end
+
+-- ccId: buy one Egg Sacs upgrade on the Mother (plants nests + raises the Embryo cap)
+function Network.upgradeEggSacs(ccId: string)
+	RemoteHandler.get(Config.REMOTES.UpgradeEggSacs):FireServer(ccId)
+end
+
+-- ccId: buy the Mother's one-time Evolve unlock (lets Embryos evolve thereafter)
+function Network.unlockEvolve(ccId: string)
+	RemoteHandler.get(Config.REMOTES.UnlockEvolve):FireServer(ccId)
 end
 
 -- unitId: toggle a Leech between burrowed (structure/income) and mobile
@@ -238,19 +248,9 @@ function Network.toggleBurrow(unitId: string)
 	RemoteHandler.get(Config.REMOTES.ToggleBurrow):FireServer(unitId)
 end
 
--- polypId, structureType ("Brain"/"CreepyTurret"): morph a Polyp into a structure
-function Network.morphPolyp(polypId: string, structureType: string)
-	RemoteHandler.get(Config.REMOTES.MorphPolyp):FireServer(polypId, structureType)
-end
-
--- brainId: begin the Brain's Biter-Genome research (unlocks Biter evolution)
-function Network.researchBrain(brainId: string)
-	RemoteHandler.get(Config.REMOTES.ResearchBrain):FireServer(brainId)
-end
-
--- biterId, targetType ("Lamprey"/"Hagfish"/"Mother"): evolve a Biter
-function Network.evolveBiter(biterId: string, targetType: string)
-	RemoteHandler.get(Config.REMOTES.EvolveBiter):FireServer(biterId, targetType)
+-- embryoId, targetType ("Lamprey"/"Hagfish"/"Mother"): evolve an Embryo
+function Network.evolveEmbryo(embryoId: string, targetType: string)
+	RemoteHandler.get(Config.REMOTES.EvolveEmbryo):FireServer(embryoId, targetType)
 end
 
 -- unitId: a burrowed Leech just paid out income → play its harvest animation
