@@ -686,6 +686,26 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	-- otherwise a single move / attack-move. Mirrors the classic behaviour.
 	local function issueClickOrder(ground: Vector3?)
 		if not rmbAtkMove then
+			-- Right-click an owned Roller with other units selected → those units climb in.
+			local ownUnitId = hitUnit()
+			if ownUnitId then
+				local ownType = UnitController.getUnitType(ownUnitId)
+				if ownType == "Roller" then
+					local riders: { string } = {}
+					for _, sid in selected do
+						if sid ~= ownUnitId and UnitController.getUnitType(sid) ~= "Roller" then
+							table.insert(riders, sid)
+						end
+					end
+					if #riders > 0 then
+						maybeUnitVoice()
+						network.rollerMount(ownUnitId, riders)
+						if ground then spawnMovePing(ground, false) end
+						if onMoveIssuedCb then onMoveIssuedCb(selected) end
+						return
+					end
+				end
+			end
 			local enemyUnitId = hitEnemyUnit()
 			if enemyUnitId then
 				maybeUnitVoice()

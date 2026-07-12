@@ -214,11 +214,15 @@ local AI_COLORS = {
 	BrickColor.new("Bright orange"),
 }
 
+-- Diagonal mirrors (M(x,z) = (z,x)) of the human PLAYER_BASES in init.server, placed in
+-- the NW half. assignBase() below picks the AI spot farthest from existing CCs, which for
+-- a lone human at the SE corner is index 1 (the NW corner) — its exact diagonal twin — so
+-- the main matchup lands on a mirror pair and both sides get an identical map.
 local AI_BASES = {
-	Vector3.new( 120, 0,  120),
-	Vector3.new(-120, 0,  120),
-	Vector3.new( 120, 0, -120),
-	Vector3.new(-120, 0, -120),
+	Vector3.new(-250, 0,  250),
+	Vector3.new( -70, 0,  290),
+	Vector3.new(-290, 0,   70),
+	Vector3.new(-170, 0,  170),
 }
 
 -- ── Module state ──────────────────────────────────────────────────────────────
@@ -468,7 +472,7 @@ local THREAT_BUILDING = {
 	Turret = 30, CreepyBlob = 35, Deployer = 50, Relay = 15,
 }
 local THREAT_UNIT = {
-	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Survivor = 20,
+	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Roller = 24, Survivor = 20,
 	Foamer = 18, CreepySoldier = 15, Hagfish = 14, Medic = 10, Harvester = 8,
 }
 

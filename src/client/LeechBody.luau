@@ -95,6 +95,9 @@ local SUCK_DIP     = 0.4           -- how far the mouth pulls the head-end down 
 -- cue, played when the leech digs in / pulls out (see the RenderStepped loop).
 local HARVEST_SND_ID = "rbxassetid://9125703168"
 local BURROW_SND_ID  = "rbxassetid://139990035476921"
+-- Played the moment the reared-up leech lowers its head and plants it into the ground
+-- at the end of the burrow/anchor animation (the "heads touch the ground" cue).
+local ANCHOR_SND_ID  = "rbxassetid://9125892982"
 
 local CULL_SQ = 300 * 300
 
@@ -142,6 +145,7 @@ type Entry = {
 	burrowBlend:   number,
 	anchorBlend:   number,
 	anchorDelay:   number,
+	anchorPlanted: boolean,   -- head-plant sound already played for the current burrow
 	burrowTime:    number,
 	archClock:     number,
 	wasBurrowed:   boolean,
@@ -287,6 +291,7 @@ function LeechBody.attach(unitId: string, body: BasePart)
 		burrowBlend    = b0 and 1 or 0,
 		anchorBlend    = b0 and 1 or 0,    -- already-burrowed leeches start planted
 		anchorDelay    = ANCHOR_DELAY_MIN + math.random() * (ANCHOR_DELAY_MAX - ANCHOR_DELAY_MIN),
+		anchorPlanted  = b0,   -- already-planted leeches shouldn't re-fire the cue
 		burrowTime     = b0 and 999 or 0,
 		archClock      = phase,
 		wasBurrowed    = b0,
@@ -478,9 +483,10 @@ function LeechBody.init(cam: Camera)
 					-- quest for the server's AnchorDelay before planting the head — so the
 					-- head-plant lines up with when this leech's first income tick is due
 					-- (each leech in a batch gets its own delay). Fall back to a local roll.
-					e.archDir     = randomHorizDir()
-					e.burrowTime  = 0
-					e.anchorDelay = (body:GetAttribute("AnchorDelay") :: number?)
+					e.archDir      = randomHorizDir()
+					e.burrowTime   = 0
+					e.anchorPlanted = false   -- re-arm the head-plant cue for this dig-in
+					e.anchorDelay  = (body:GetAttribute("AnchorDelay") :: number?)
 						or (ANCHOR_DELAY_MIN + math.random() * (ANCHOR_DELAY_MAX - ANCHOR_DELAY_MIN))
 				end
 				if e.head.LocalTransparencyModifier < 0.5 then
@@ -493,6 +499,15 @@ function LeechBody.init(cam: Camera)
 			if burrowed then e.burrowTime += dt end
 			local anchorTarget = (burrowed and e.burrowTime >= e.anchorDelay) and 1 or 0
 			e.anchorBlend += (anchorTarget - e.anchorBlend) * math.min(dt * ANCHOR_EASE, 1)
+
+			-- The head finishes lowering into the ground → play the plant/impact cue once
+			-- per dig-in (only while the body is visible, i.e. not hidden behind fog).
+			if not e.anchorPlanted and anchorTarget == 1 and e.anchorBlend >= 0.9 then
+				e.anchorPlanted = true
+				if e.head.LocalTransparencyModifier < 0.5 then
+					playSoundAt(e.head.Position, ANCHOR_SND_ID, 0.9)
+				end
+			end
 
 			-- Advance clocks (slither quickens with movement)
 			e.animClock += dt * (0.35 + speedF) * SLITHER_FREQ * math.pi * 2

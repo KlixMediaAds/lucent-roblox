@@ -13,6 +13,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config            = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
@@ -21,6 +22,7 @@ local OWNER      = "leech"
 
 local BURROW_COL   = Color3.fromRGB(120, 190,  90)
 local UNBURROW_COL = Color3.fromRGB(210, 170,  70)
+local EVOLVE_COL   = Color3.fromRGB(150,  70, 150)
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeIds:   { string } = {}
@@ -94,8 +96,23 @@ function LeechPanel._buildPage(): CommandCard.Page
 		}
 	end
 
+	-- EVOLVE → Watcher (slow ranged cluster of eyes). Always offered; the server
+	-- charges LEECH_EVOLVE_COST and swaps each selected Leech for a Watcher in place.
+	local evolveSlot: CommandCard.Slot = {
+		index   = 2,
+		name    = "EVOLVE",
+		icon    = "👁",
+		color   = EVOLVE_COL,
+		desc    = (n > 1)
+			and ("Evolve all " .. n .. " Leeches into Watchers — slow, drifting clusters of eyes with a ranged gaze attack. (" .. Config.LEECH_EVOLVE_COST .. " each)")
+			or ("Evolve into a Watcher — a slow, drifting cluster of eyes with a ranged gaze attack. (" .. Config.LEECH_EVOLVE_COST .. ")"),
+		onClick = function()
+			for _, id in activeIds do networkRef.evolveLeech(id) end
+		end,
+	}
+
 	local header = (n > 1) and ("LEECHES ×" .. n) or "LEECH"
-	return { header = header, slots = { slot }, cols = 2 }
+	return { header = header, slots = { slot, evolveSlot }, cols = 2 }
 end
 
 local function clearConns()

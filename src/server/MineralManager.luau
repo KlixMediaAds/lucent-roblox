@@ -68,20 +68,25 @@ local function generateDeposits()
 	local SPREAD   = Config.DEPOSIT_SPREAD
 	local MIN_DIST = GRID * 2
 
+	-- Deposits are mirrored across the main diagonal (z = x) — the same axis the forest
+	-- and the player/AI bases are mirrored across — so both diagonal halves of the map
+	-- (and therefore both starting corners) get an identical economy. Cluster centres are
+	-- seeded in the NW half (z > x) and each deposit is twinned to its mirror (z, x).
 	local pairCount = math.floor(Config.CLUSTER_COUNT / 2)
-	local zMin = math.ceil(Config.CLUSTER_MIN_DIST / 2 / GRID) * GRID
+	local diagMin   = math.ceil(Config.CLUSTER_MIN_DIST / 2 / GRID) * GRID  -- keep centres off the diagonal
 	local halfCenters: { Vector3 } = {}
 	for _ = 1, 3000 do
 		if #halfCenters >= pairCount then break end
 		local x         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
-		local z         = math.round(math.random(zMin, SPREAD)    / GRID) * GRID
+		local z         = math.round(math.random(-SPREAD, SPREAD) / GRID) * GRID
+		if z - x < diagMin then continue end   -- NW half only, clear of the diagonal
 		local candidate = Vector3.new(x, 0, z)
 		if candidate.Magnitude < 60 then continue end
 
 		local valid = true
 		for _, c in halfCenters do
 			if (c                             - candidate).Magnitude < Config.CLUSTER_MIN_DIST then valid = false; break end
-			if (Vector3.new(c.X, 0, -c.Z)    - candidate).Magnitude < Config.CLUSTER_MIN_DIST then valid = false; break end
+			if (Vector3.new(c.Z, 0, c.X)     - candidate).Magnitude < Config.CLUSTER_MIN_DIST then valid = false; break end
 		end
 		if valid then table.insert(halfCenters, candidate) end
 	end
@@ -96,10 +101,10 @@ local function generateDeposits()
 			local x     = math.round((center.X + math.cos(angle) * dist) / GRID) * GRID
 			local z     = math.round((center.Z + math.sin(angle) * dist) / GRID) * GRID
 
-			if math.abs(z) < GRID * 2 then continue end
+			if z - x < GRID * 2 then continue end   -- stay off the diagonal so twins don't overlap
 
-			local candidate = Vector3.new(x, 0,  z)
-			local mirrored  = Vector3.new(x, 0, -z)
+			local candidate = Vector3.new(x, 0, z)
+			local mirrored  = Vector3.new(z, 0, x)   -- diagonal mirror across z = x
 			if candidate.Magnitude < 60 then continue end
 			if mirrored.Magnitude  < 60 then continue end
 

@@ -248,9 +248,29 @@ function Network.toggleBurrow(unitId: string)
 	RemoteHandler.get(Config.REMOTES.ToggleBurrow):FireServer(unitId)
 end
 
--- embryoId, targetType ("Lamprey"/"Hagfish"/"Mother"): evolve an Embryo
+-- embryoId, targetType ("Lamprey"/"Hagfish"/"Roller"/"Mother"): evolve an Embryo
 function Network.evolveEmbryo(embryoId: string, targetType: string)
 	RemoteHandler.get(Config.REMOTES.EvolveEmbryo):FireServer(embryoId, targetType)
+end
+
+-- leechId: evolve a Leech in place into a Watcher (slow ranged cluster of eyes)
+function Network.evolveLeech(leechId: string)
+	RemoteHandler.get(Config.REMOTES.EvolveLeech):FireServer(leechId)
+end
+
+-- rollerId, unitIds: send these owned units to climb into the Roller (right-click)
+function Network.rollerMount(rollerId: string, unitIds: { string })
+	RemoteHandler.get(Config.REMOTES.RollerMount):FireServer(rollerId, unitIds)
+end
+
+-- rollerId: board owned units already standing near the Roller (command-card button)
+function Network.rollerMountNearby(rollerId: string)
+	RemoteHandler.get(Config.REMOTES.RollerMountNearby):FireServer(rollerId)
+end
+
+-- rollerId: eject all of a Roller's passengers
+function Network.rollerDismount(rollerId: string)
+	RemoteHandler.get(Config.REMOTES.RollerDismount):FireServer(rollerId)
 end
 
 -- unitId: a burrowed Leech just paid out income → play its harvest animation

@@ -44,6 +44,14 @@ type UnitData = {
 	rollerChargingOut  : boolean?,  -- bouncing back from charge
 	rollerChargeTarget : Vector3?,  -- charge destination
 	rollerChargeHome   : Vector3?,  -- position to return to after charge
+	-- Roller mount system (see Config.ROLLER_MOUNT_*): carried units stay LIVE and are
+	-- snapped to a seat ON TOP of their Roller each heartbeat (so their real model rides
+	-- along). While aboard, a rider's own AI is suspended and it's pulled out of the
+	-- spatial grid, so enemies can't target it. `carrying` is the Roller's ordered list of
+	-- rider ids; `carriedBy` tags each rider with its Roller.
+	carrying           : { string }?,     -- (Roller) ids of units riding on top; nil/empty = none
+	carriedBy          : string?,         -- (rider) the Roller id currently carrying this unit
+	mountTargetId      : string?,         -- this unit is walking toward this Roller to climb in
 	-- Foamer deploy state machine
 	foamState       : string?,    -- nil = not a foamer; "mobile"|"deploying"|"deployed"|"undeploying"
 	foamDeployStart : number?,    -- tick() when current transition began
@@ -69,6 +77,11 @@ type UnitData = {
 	-- Leech (Hollowed): burrowed = rooted underground, paying passive income (structure state)
 	burrowed      : boolean?,
 	burrowIncomeAt: number?,         -- os.clock() throttle for the next burrow income payout
+	autoBurrow    : boolean?,        -- freshly-spawned Leech: burrow itself on reaching its scatter point
+	-- Bloody-footprint trail: a unit that walks through a blood stain tracks it a few steps.
+	lastStepPos   : Vector3?,        -- position at the last footstep sample (distance throttle)
+	bloodStepsLeft: number?,         -- footsteps of blood still on its feet (counts down as it walks)
+	bloodColor    : Color3?,         -- colour of the blood currently tracked
 	-- Body CFrame at the last decorator sync. Decorators are only re-CFramed when this
 	-- changes, so idle units cost zero property writes / replication per heartbeat.
 	decorLastCF   : CFrame?,
@@ -112,6 +125,12 @@ local SEP_DIST   = 5.5   -- studs: same-team separation trigger radius
 local SEP_PUSH   = 0.18  -- studs pushed per frame per overlapping neighbour
 local MOVE_BOUND = 427   -- studs: clamp units inside the ±432 boundary walls
 local HP_BAR_SHOW_SECS = 3
+
+-- Bloody-footprint trail: a unit samples the ground every FOOTSTEP_DIST studs; stepping
+-- on a blood stain re-inks its feet for TRAIL_STEPS footprints, which it drops as it
+-- walks on (leaving a trail that carries out of the pool).
+local FOOTSTEP_DIST = 3.5
+local TRAIL_STEPS   = 6
 
 -- Spatial grid rebuilt each Heartbeat; maps a packed (cx, cz) integer key to the
 -- list of unit IDs in that cell.  GRID_CELL > SEP_DIST so separation queries cover
@@ -162,11 +181,11 @@ local playerStatMult:  { [number]: { [string]: StatMult } } = {}
 local playerUpgradeLog: { [number]: { string } } = {}
 
 -- Unit types a Light research may roll, with player-facing plural names.
-local UPGRADE_UNITS: { string } = { "Survivor", "Sniper", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish", "Broodmother" }
+local UPGRADE_UNITS: { string } = { "Survivor", "Sniper", "Tank", "Howitzer", "Foamer", "Elite", "Medic", "Lamprey", "Hagfish", "Broodmother", "Roller" }
 local UPGRADE_UNIT_NAME: { [string]: string } = {
 	Survivor = "Survivors", Sniper = "Snipers", Tank = "Tanks", Howitzer = "Howitzers", Foamer = "Foamers",
 	Elite = "Elites", Medic = "Medics", Lamprey = "Lampreys", Hagfish = "Hagfish",
-	Broodmother = "Broodmothers",
+	Broodmother = "Broodmothers", Roller = "Rollers",
 }
 -- Stats a Light research may roll: { field key, player-facing name }.
 local UPGRADE_STATS: { { field: string, name: string } } = {
@@ -195,6 +214,7 @@ local function rebuildSpatialGrid()
 	end
 	gridOccupiedCount = 0
 	for id, data in units do
+		if data.carriedBy then continue end   -- riding on a Roller: not targetable while aboard
 		local pos = data.part.Position
 		local cx  = math.floor(pos.X / GRID_CELL) + GRID_OFFSET
 		local cz  = math.floor(pos.Z / GRID_CELL) + GRID_OFFSET
@@ -528,6 +548,25 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 10.0, 0) end  -- above the anemone mass + crown tendrils
 	end
+	if unitType == "Roller" then
+		-- The armored disc is drawn client-side (RollerBody); the body part is an
+		-- invisible, ground-snapped pivot (centre sits size.Y/2 = the wheel radius
+		-- above the terrain, so the rim rests on the ground).
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 6.5, 0) end  -- just above the top of the wheel
+		-- Mount system: starts empty; the client RollerPanel reads these attributes.
+		part:SetAttribute("Passengers", 0)
+		part:SetAttribute("MountCap", Config.ROLLER_MOUNT_CAPACITY)
+	end
+	if unitType == "Watcher" then
+		-- The floating cluster of eyes is drawn client-side (WatcherBody); the body part
+		-- is an invisible, ground-snapped pivot for movement/targeting (centre sits
+		-- size.Y/2 above the terrain).
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 3.5, 0) end  -- just above the top of the eye cluster
+	end
 	units[id] = {
 		part        = part,
 		owner       = player,
@@ -548,6 +587,25 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		accel       = acc,
 		focusBldId  = nil,
 	}
+
+	-- Leech: don't idle at the nest. Crawl 3–5 tiles out on a random heading to open
+	-- ground, then burrow (heartbeat handles the burrow on arrival via data.autoBurrow).
+	if unitType == "Leech" then
+		local d    = units[id]
+		local ang  = math.random() * math.pi * 2
+		local dist = Config.LEECH_SCATTER_MIN
+			+ math.random() * (Config.LEECH_SCATTER_MAX - Config.LEECH_SCATTER_MIN)
+		local dest = position + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
+		if navGridRef then
+			local path = navGridRef.findPath(position, dest)
+			d.path    = path
+			d.pathIdx = 1
+			d.target  = path[1]
+		else
+			d.target = dest
+		end
+		d.autoBurrow = true
+	end
 
 	playerUnitCount[player.UserId] = (playerUnitCount[player.UserId] or 0) + 1
 	RemoteHandler.get(Config.REMOTES.UnitSpawned):FireAllClients(id, player.UserId, part.Position)
@@ -582,6 +640,52 @@ local function orderMove(data: UnitData, slot: Vector3)
 		data.pathIdx = nil
 		data.target  = slot
 	end
+end
+
+-- ── Leech burrow state ─────────────────────────────────────────────────────────
+-- Put a Leech into (or out of) its burrowed structure state: rooted underground,
+-- paying passive income. Shared by the manual ToggleBurrow handler and the
+-- auto-burrow a freshly-spawned Leech runs on reaching its scatter point.
+local function setLeechBurrowed(data: UnitData, on: boolean)
+	data.burrowed    = on
+	data.velocity    = Vector3.zero
+	data.target      = nil
+	data.path        = nil
+	data.pathIdx     = nil
+	data.aggroId     = nil
+	data.aggroHome   = nil
+	data.atkMoveDest = nil
+	data.autoBurrow  = nil   -- one-shot; clear so a later unburrow stays manual
+
+	local part = data.part
+
+	-- Roll a per-burrow anchoring delay: the leech rears up and quests for this long
+	-- before planting its head. Offset the first income tick by it so a batch anchored
+	-- together desyncs and pays out organically. The client reads AnchorDelay to match
+	-- its head-plant to the same moment. (Reset on unburrow.)
+	if on then
+		local anchorDelay = Config.LEECH_ANCHOR_DELAY_MIN
+			+ math.random() * (Config.LEECH_ANCHOR_DELAY_MAX - Config.LEECH_ANCHOR_DELAY_MIN)
+		part:SetAttribute("AnchorDelay", anchorDelay)
+		data.burrowIncomeAt = os.clock() + anchorDelay + Config.LEECH_BURROW_INTERVAL
+	else
+		data.burrowIncomeAt = nil
+	end
+
+	local groundY = terrainManagerRef and terrainManagerRef.surfaceHeightAt(part.Position.X, part.Position.Z)
+		or (part.Position.Y - part.Size.Y / 2)
+	local restY = groundY + part.Size.Y / 2 + 0.1
+	part.Position = Vector3.new(part.Position.X,
+		on and (restY - Config.LEECH_BURROW_SINK) or restY,
+		part.Position.Z)
+
+	local bv = part:FindFirstChild("Burrowed") :: BoolValue?
+	if not bv then
+		bv = Instance.new("BoolValue")
+		bv.Name = "Burrowed"
+		bv.Parent = part
+	end
+	(bv :: BoolValue).Value = on
 end
 
 -- ── Wounded-soldier rescue links ───────────────────────────────────────────────
@@ -897,6 +1001,146 @@ local function despawnUnit(id: string): Vector3?
 	return pos
 end
 
+-- ── Roller mount system ─────────────────────────────────────────────────────────
+-- How a passenger contributes to its Roller once inside.
+local function classifyPassenger(unitType: string): string
+	if unitType == "Embryo" then return "neutral" end
+	local range = (Config.UNIT_ATTACK_RANGE :: any)[unitType] or 0
+	if range >= Config.ROLLER_MOUNT_RANGED_MIN then return "ranged" end
+	return "melee"
+end
+
+-- Any unit type may ride except another Roller (no nesting).
+local function isMountableType(unitType: string): boolean
+	return unitType ~= "Roller" and Config.UNIT_TYPES[unitType] ~= nil
+end
+
+-- Publish the passenger count (client RollerPanel reads these attributes).
+local function syncRollerAttrs(roller: UnitData)
+	if roller.part then
+		roller.part:SetAttribute("Passengers", roller.carrying and #roller.carrying or 0)
+		roller.part:SetAttribute("MountCap", Config.ROLLER_MOUNT_CAPACITY)
+	end
+end
+
+-- Show/hide a unit's floating health bar (used to hide a rider's bar while it's aboard).
+local function setHealthBarEnabled(data: UnitData, on: boolean)
+	local bb = data.part and data.part:FindFirstChild("HealthBar") :: BillboardGui?
+	if bb then bb.Enabled = on end
+end
+
+-- One-shot 3D mount/dismount cue. Played from a throwaway anchored part (not the
+-- Roller itself) so it still sounds when the Roller is destroyed on death.
+local ROLLER_MOUNT_SOUND = "rbxassetid://140702055224501"
+local function playRollerMountSound(pos: Vector3)
+	local p         = Instance.new("Part")
+	p.Anchored      = true
+	p.CanCollide    = false
+	p.CanQuery      = false
+	p.Transparency  = 1
+	p.Size          = Vector3.new(1, 1, 1)
+	p.Position      = pos
+	p.Parent        = workspace
+	local s              = Instance.new("Sound")
+	s.SoundId            = ROLLER_MOUNT_SOUND
+	s.Volume             = 0.75
+	s.RollOffMinDistance = 8
+	s.RollOffMaxDistance = 130
+	s.RollOffMode        = Enum.RollOffMode.Linear
+	s.Parent             = p
+	s:Play()
+	s.Ended:Once(function() if p.Parent then p:Destroy() end end)
+	Debris:AddItem(p, 6)
+end
+
+-- Fold a live unit into a Roller as a passenger: keep it alive but suspend its AI, pull
+-- it out of the spatial grid (untargetable), and ride it on top from here on.
+local function mountUnitInto(rollerId: string, unitId: string): boolean
+	local roller = units[rollerId]
+	local rider  = units[unitId]
+	if not roller or not rider then return false end
+	if roller.unitType ~= "Roller" or roller.hp <= 0 or roller.dying then return false end
+	if roller.owner ~= rider.owner then return false end
+	if not isMountableType(rider.unitType) then return false end
+	if rider.carriedBy then return false end
+	roller.carrying = roller.carrying or {}
+	if #roller.carrying >= Config.ROLLER_MOUNT_CAPACITY then return false end
+
+	table.insert(roller.carrying, unitId)
+	rider.carriedBy     = rollerId
+	-- Suspend the rider's own orders/AI while aboard; the Roller drives its combat.
+	rider.velocity      = Vector3.zero
+	rider.target, rider.path, rider.pathIdx           = nil, nil, nil
+	rider.aggroId, rider.aggroHome, rider.focusBldId  = nil, nil, nil
+	rider.atkMoveDest, rider.mountTargetId            = nil, nil
+	-- Re-phase its attack timer so two same-type riders fire out of sync.
+	rider.attackTimer   = math.random() * (rider.attackRate or 1)
+	rider.part.CanQuery = false            -- not click-selectable while riding
+	setHealthBarEnabled(rider, false)      -- hide its floating bar on top
+	syncRollerAttrs(roller)
+	if roller.part then playRollerMountSound(roller.part.Position) end
+	return true
+end
+
+-- Snap a carried rider to its seat on top of the Roller for one frame. Seats are spread
+-- across the top along the axle and scale to however many riders are aboard; the rider's
+-- lower body sinks into the shell so it reads as sitting in an open turret.
+local function positionCarried(roller: UnitData, riderId: string, rider: UnitData)
+	local rp     = roller.part
+	local center = rp.Position
+	local lv     = rp.CFrame.LookVector
+	local fwd    = Vector3.new(lv.X, 0, lv.Z)
+	if fwd.Magnitude < 0.01 then fwd = Vector3.new(0, 0, -1) end
+	fwd          = fwd.Unit
+	local right  = fwd:Cross(Vector3.yAxis).Unit
+
+	-- This rider's index within the Roller's seat list.
+	local list  = roller.carrying or {}
+	local cnt   = math.max(#list, 1)
+	local idx   = 1
+	for i, uid in list do if uid == riderId then idx = i; break end end
+
+	local slot    = idx - (cnt + 1) / 2                     -- centred: … -0.5, 0.5 … (0 when solo)
+	local spacing = math.max(rider.part.Size.X * 0.9, 2.4)
+	local hatchY  = rp.Size.Y * 0.5 * 0.75                  -- seat height above the Roller centre
+	local sink    = rider.part.Size.Y * 0.32               -- lower body tucked into the shell
+	local seat    = center
+		+ Vector3.new(0, hatchY + sink, 0)
+		+ right * (slot * spacing)
+	rider.part.CFrame = CFrame.lookAt(seat, seat + fwd)
+end
+
+-- Release a single rider from its carrier (carrier gone, or dismounting): restore its
+-- selectability + health bar so normal AI resumes next heartbeat.
+local function freeCarried(rider: UnitData)
+	rider.carriedBy = nil
+	if rider.part then rider.part.CanQuery = true end
+	setHealthBarEnabled(rider, true)
+	rider.velocity    = Vector3.zero
+	rider.decorLastCF = nil
+end
+
+-- Spill every rider off a Roller (dismount button, or on the Roller's death). Riders stay
+-- the same live units — they're just placed back on the ground around the Roller.
+local function dismountAll(roller: UnitData, at: Vector3)
+	local list = roller.carrying
+	if not list or #list == 0 then return end
+	for i, uid in list do
+		local rider = units[uid]
+		if rider then
+			freeCarried(rider)
+			local ang  = (i / #list) * math.pi * 2 + math.random() * 0.6
+			local dist = roller.part and (roller.part.Size.X * 0.5 + 3) or 6
+			local gp   = at + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
+			local gy   = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(gp.X, gp.Z)) or at.Y
+			rider.part.CFrame = CFrame.new(gp.X, gy + rider.part.Size.Y * 0.5 + 0.1, gp.Z)
+		end
+	end
+	roller.carrying = {}
+	syncRollerAttrs(roller)
+	playRollerMountSound(at)
+end
+
 -- Spawns a unit for a Deployer and records it in the tracking tables.
 -- Deployed units automatically attack-march toward enemy territory at no resource cost.
 function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3, unitType: string?)
@@ -1152,15 +1396,23 @@ local BLOOD_DEATH_SOUNDS = {
 }
 local BIOLOGICAL_UNIT: { [string]: boolean } = {
 	Survivor = true, Sniper = true, Elite = true, Medic = true, CreepySoldier = true,
-	Lamprey = true, Hagfish = true, Broodmother = true,
+	Lamprey = true, Hagfish = true, Broodmother = true, Leech = true, Embryo = true,
+	Roller = true, Watcher = true,
+}
+
+-- Per-type death-sound override: a unit listed here plays this single clip on death
+-- instead of the random blood roll (used for units with a distinct death cry). Units
+-- that aren't biological still get their death sound this way, but no gore.
+local DEATH_SOUND_OVERRIDE: { [string]: string } = {
+	Leech = "rbxassetid://9125892855",
 }
 
 -- 1-in-N chance a dying soldier is decapitated instead of a normal gore burst.
 local SOLDIER_DECAP_CHANCE = 0.1
 
--- 1-in-15 chance a dying soldier lets out a death scream (layered over the blood).
-local SOLDIER_SCREAM_CHANCE = 1 / 15
-local SOLDIER_SCREAM_ID     = "rbxassetid://136401198004658"
+-- Every dying soldier lets out a death scream (layered over the blood).
+local SOLDIER_SCREAM_CHANCE = 1
+local SOLDIER_SCREAM_ID     = "rbxassetid://115196347669370"
 
 -- Overkill grading: how far the killing blow drove HP below zero, relative to the
 -- unit's max HP, picks the gore tier (1–3). A clean kill ruptures normally; a
@@ -1178,8 +1430,9 @@ end
 -- spray/gibs/pool; ~1 soldier in 10 instead loses its head in a geyser of blood
 -- and ragdolls to the ground (reuses its live parts as the corpse, so MUST run
 -- before the body root is destroyed).
-local function spawnDeathFX(unitType: string, part: BasePart, level: number?)
-	if not BIOLOGICAL_UNIT[unitType] then return end
+local function spawnDeathFX(unitType: string, part: BasePart, level: number?, maxHp: number?)
+	local override = DEATH_SOUND_OVERRIDE[unitType]
+	if not BIOLOGICAL_UNIT[unitType] and not override then return end
 	local pos = part.Position
 
 	local anchor        = Instance.new("Part")
@@ -1194,7 +1447,7 @@ local function spawnDeathFX(unitType: string, part: BasePart, level: number?)
 	anchor.Parent       = workspace
 
 	local s                = Instance.new("Sound")
-	s.SoundId              = BLOOD_DEATH_SOUNDS[math.random(1, #BLOOD_DEATH_SOUNDS)]
+	s.SoundId              = override or BLOOD_DEATH_SOUNDS[math.random(1, #BLOOD_DEATH_SOUNDS)]
 	s.Volume               = 0.5625   -- gore SFX, -25%
 	s.PlaybackSpeed        = 0.85 + math.random() * 0.4   -- ~0.85×–1.25× pitch jitter
 	s.RollOffMode          = Enum.RollOffMode.Linear
@@ -1216,10 +1469,14 @@ local function spawnDeathFX(unitType: string, part: BasePart, level: number?)
 	end
 	Debris:AddItem(anchor, 6)
 
-	if unitType == "Survivor" and math.random() < SOLDIER_DECAP_CHANCE then
-		GoreManager.decapitate(part)
-	else
-		GoreManager.spawn(unitType, pos, level)
+	-- Gore is only for flesh-and-blood units; override-only units (e.g. Leech) just
+	-- get their death sound above.
+	if BIOLOGICAL_UNIT[unitType] then
+		if unitType == "Survivor" and math.random() < SOLDIER_DECAP_CHANCE then
+			GoreManager.decapitate(part)
+		else
+			GoreManager.spawn(unitType, pos, level, maxHp)
+		end
 	end
 end
 
@@ -1230,7 +1487,7 @@ end
 -- in `units` (flagged `dying`) so the loops skip it until the timer fires.
 local function beginBroodmotherDeath(id: string, data: UnitData)
 	if data.dying then return end
-	spawnDeathFX(data.unitType, data.part, goreLevel(data))
+	spawnDeathFX(data.unitType, data.part, goreLevel(data), data.maxHp)
 	data.dying          = true
 	data.target         = nil
 	data.path           = nil
@@ -1322,7 +1579,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 			beginBroodmotherDeath(bestId, data)
 			return true, hitPos
 		end
-		spawnDeathFX(data.unitType, data.part, goreLevel(data))
+		spawnDeathFX(data.unitType, data.part, goreLevel(data), data.maxHp)
 		releaseDragLinks(bestId)
 		unitDecorators[bestId] = nil
 		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
@@ -1538,6 +1795,19 @@ function UnitManager.init(resourceManager)
 			-- death timer (beginBroodmotherDeath) removes it.
 			if data.dying then continue end
 
+			-- ── Carried passenger: snapped to a seat on top of its Roller ─────────
+			-- Its own AI is suspended (the Roller fires ranged riders + grinds with melee
+			-- riders — see the Roller attack block). If the carrier is gone, become free.
+			if data.carriedBy then
+				local roller = units[data.carriedBy]
+				if roller and roller.hp > 0 and not roller.dying and roller.unitType == "Roller" then
+					data.velocity = Vector3.zero
+					positionCarried(roller, id, data)
+					continue
+				end
+				freeCarried(data)   -- carrier lost: resume normal AI this frame
+			end
+
 			-- A burrowed Leech is in a structure state: rooted underground, paying out
 			-- passive income each interval, never moving or attacking. Skip all of its
 			-- unit AI until it unburrows.
@@ -1555,6 +1825,111 @@ function UnitManager.init(resourceManager)
 					RemoteHandler.get(Config.REMOTES.LeechHarvest):FireAllClients(id)
 				end
 				continue
+			end
+
+			-- ── Mount intent: walk into a Roller and climb in ─────────────────────
+			-- Set when the player right-clicks (or "mount nearby"s) a Roller. The rider
+			-- heads for the Roller and is folded in as a passenger once it's close enough.
+			if data.mountTargetId then
+				local roller = units[data.mountTargetId]
+				if not roller or roller.hp <= 0 or roller.dying or roller.unitType ~= "Roller"
+					or roller.owner ~= data.owner then
+					data.mountTargetId = nil
+				else
+					local rp   = roller.part.Position
+					local mp   = data.part.Position
+					local dist = math.sqrt((rp.X - mp.X)^2 + (rp.Z - mp.Z)^2)
+					if dist <= Config.ROLLER_MOUNT_RANGE then
+						if roller.carrying and #roller.carrying >= Config.ROLLER_MOUNT_CAPACITY then
+							data.mountTargetId = nil   -- Roller filled up before we arrived
+						elseif mountUnitInto(data.mountTargetId, id) then
+							continue                    -- this unit is now carried on top
+						end
+					else
+						-- Steer toward the Roller; drop any competing orders while boarding.
+						data.aggroId, data.aggroHome, data.focusBldId, data.atkMoveDest = nil, nil, nil, nil
+						data.path, data.pathIdx = nil, nil
+						data.target = Vector3.new(rp.X, 0, rp.Z)
+					end
+				end
+			end
+
+			-- ── Roller passengers: ranged riders fire from on top ─────────────────
+			-- Each ranged rider fires its OWN shot on its OWN timer (re-phased at boarding
+			-- so they never fire in unison). When several enemies are in range they spread
+			-- onto different targets so you see each projectile individually, only doubling
+			-- up on one foe once every other target has been claimed. Shots visibly leave
+			-- the rider's seat (its live part), so it looks like the real unit is firing.
+			if data.unitType == "Roller" and data.carrying and #data.carrying > 0 then
+				local rPos    = data.part.Position
+				local ownerStr= tostring(data.owner.UserId)
+				local claimed: { [string]: boolean } = {}   -- targets already shot at this frame
+				for _, uid in data.carrying do
+					local pass = units[uid]
+					if not pass then continue end
+					if classifyPassenger(pass.unitType) ~= "ranged" then continue end
+					pass.attackTimer += dt
+					if pass.attackTimer < pass.attackRate then continue end
+					local fromP = pass.part.Position   -- rider's seat on top of the Roller
+					-- Prefer the nearest UNCLAIMED enemy; keep a claimed fallback so a lone
+					-- enemy still takes both shots rather than one rider holding fire.
+					local tgtId: string?, tgtPos: Vector3?, best  = nil, nil, math.huge
+					local fbId:  string?, fbPos:  Vector3?, fbBest = nil, nil, math.huge
+					fillGridScratch(rPos, pass.attackRange)
+					for gi = 1, gridScratchN do
+						local oid   = gridScratch[gi]
+						local other = units[oid]
+						if not other or other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == ownerStr then continue end
+						local d = (other.part.Position - rPos).Magnitude
+						if d > pass.attackRange then continue end
+						if claimed[oid] then
+							if d < fbBest then fbBest = d; fbId = oid; fbPos = other.part.Position end
+						elseif d < best then
+							best = d; tgtId = oid; tgtPos = other.part.Position
+						end
+					end
+					if not tgtId then tgtId, tgtPos = fbId, fbPos end   -- all claimed → double up
+					if tgtId then
+						pass.attackTimer = 0
+						claimed[tgtId] = true
+						local other = units[tgtId]
+						other.hp -= calcDamage(other, pass.attackDmg)
+						applyHP(other, true)
+						if other.hp <= 0 then table.insert(toRemove, tgtId) end
+						unitHitRemote:FireAllClients(fromP, (tgtPos :: Vector3) + Vector3.new(0, 2, 0), pass.unitType)
+					elseif buildingManagerRef then
+						local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(rPos, ownerStr, pass.attackRange)
+						if bId and bPos then
+							pass.attackTimer = 0
+							buildingManagerRef.damage(bId, pass.attackDmg)
+							unitHitRemote:FireAllClients(fromP, bPos, pass.unitType)
+						end
+					end
+				end
+			end
+
+			-- ── Bloody footprints ─────────────────────────────────────────────
+			-- Sampled every FOOTSTEP_DIST studs walked: stepping on a blood stain re-inks
+			-- the feet, and while inked the unit drops a fading footprint each step, so it
+			-- tracks a trail through and out of the pool.
+			do
+				local ppos = data.part.Position
+				local last = data.lastStepPos
+				if not last then
+					data.lastStepPos = ppos
+				elseif (ppos - last).Magnitude >= FOOTSTEP_DIST then
+					data.lastStepPos = ppos
+					local col = GoreManager.bloodColorAt(ppos.X, ppos.Z)
+					if col then
+						data.bloodColor     = col
+						data.bloodStepsLeft = TRAIL_STEPS
+					end
+					if data.bloodStepsLeft and data.bloodStepsLeft > 0 and data.bloodColor then
+						GoreManager.leaveFootprint(ppos, data.bloodColor)
+						data.bloodStepsLeft -= 1
+					end
+				end
 			end
 
 			-- ── Wounded-soldier collapse roll ─────────────────────────────────
@@ -1787,6 +2162,10 @@ function UnitManager.init(resourceManager)
 								if data.atkMoveDest and (pos - data.atkMoveDest).Magnitude < 3 then
 									data.atkMoveDest = nil
 								end
+							end
+							-- A freshly-spawned Leech reached its scatter point: burrow itself.
+							if data.autoBurrow and data.hp > 0 then
+								setLeechBurrowed(data, true)
 							end
 						end
 					else
@@ -2424,6 +2803,57 @@ function UnitManager.init(resourceManager)
 							end
 						end
 					end
+				elseif data.unitType == "Roller" then
+					-- Roller: melee grind — nearest enemy unit first, else a building. Each
+					-- carried MELEE rider adds its damage to the grind (see mount system).
+					local dmg = data.attackDmg
+					if data.carrying then
+						for _, uid in data.carrying do
+							local p = units[uid]
+							if p and classifyPassenger(p.unitType) == "melee" then
+								dmg += p.attackDmg * Config.ROLLER_MOUNT_MELEE_MULT
+							end
+						end
+					end
+					local bestId2, bestDist2 = nil :: string?, math.huge
+					fillGridScratch(myPos, atkRange)
+					for gi = 1, gridScratchN do
+						local otherId = gridScratch[gi]
+						local other = units[otherId]
+						if not other or other.hp <= 0 then continue end
+						if tostring(other.owner.UserId) == myOwnerStr then continue end
+						local d = (other.part.Position - myPos).Magnitude
+						if d <= atkRange and d < bestDist2 then bestDist2 = d; bestId2 = otherId end
+					end
+					if bestId2 then
+						local other = units[bestId2]
+						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
+						other.hp -= calcDamage(other, dmg)
+						applyHP(other, true)
+						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+					elseif buildingManagerRef then
+						local bId: string?, bPos: Vector3?
+						if data.focusBldId then
+							local bf    = workspace:FindFirstChild("Buildings")
+							local model = bf and bf:FindFirstChild(data.focusBldId)
+							local base  = model and model:FindFirstChild("Base")
+							if base and (base :: BasePart).Parent then
+								local bp = base :: BasePart
+								if (bp.Position - myPos).Magnitude <= atkRange then
+									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
+								end
+							else
+								data.focusBldId = nil
+							end
+						end
+						if not bId then
+							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
+						end
+						if bId and bPos then
+							buildingManagerRef.damage(bId, dmg)
+							hitPos = bPos
+						end
+					end
 				else
 					-- Survivors / Elite / Sniper: nearest enemy unit first, fall back to
 					-- buildings. The Sniper out-ranges its own sight, so it must never
@@ -2653,7 +3083,10 @@ function UnitManager.init(resourceManager)
 					and d.owner.UserId > 0 and d.owner.Parent then
 					unitDiedRemote:FireClient(d.owner, d.unitType, d.part.Position)
 				end
-				spawnDeathFX(d.unitType, d.part, goreLevel(d))
+				if d.unitType == "Roller" and d.carrying and #d.carrying > 0 then
+						dismountAll(d, d.part.Position)   -- riders spill off on death (kept alive)
+					end
+					spawnDeathFX(d.unitType, d.part, goreLevel(d), d.maxHp)
 				releaseDragLinks(id)
 				unitDecorators[id] = nil
 				playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
@@ -2772,58 +3205,102 @@ function UnitManager.init(resourceManager)
 		if not data or data.owner ~= player then return end
 		if data.unitType ~= "Leech" or data.hp <= 0 or data.dying then return end
 
-		local nowBurrowed = not data.burrowed
-		data.burrowed       = nowBurrowed
-		data.velocity       = Vector3.zero
-		data.target         = nil
-		data.aggroId        = nil
-		data.aggroHome      = nil
-		data.atkMoveDest    = nil
-
-		local part    = data.part
-
-		-- Roll a per-burrow anchoring delay: the leech rears up and quests for this long
-		-- before planting its head. Offset the first income tick by it so a batch anchored
-		-- together desyncs and pays out organically. The client reads AnchorDelay to match
-		-- its head-plant to the same moment. (Reset on unburrow.)
-		if nowBurrowed then
-			local anchorDelay = Config.LEECH_ANCHOR_DELAY_MIN
-				+ math.random() * (Config.LEECH_ANCHOR_DELAY_MAX - Config.LEECH_ANCHOR_DELAY_MIN)
-			part:SetAttribute("AnchorDelay", anchorDelay)
-			data.burrowIncomeAt = os.clock() + anchorDelay + Config.LEECH_BURROW_INTERVAL
-		else
-			data.burrowIncomeAt = nil
-		end
-
-		local groundY = terrainManagerRef and terrainManagerRef.surfaceHeightAt(part.Position.X, part.Position.Z)
-			or (part.Position.Y - part.Size.Y / 2)
-		local restY = groundY + part.Size.Y / 2 + 0.1
-		part.Position = Vector3.new(part.Position.X,
-			nowBurrowed and (restY - Config.LEECH_BURROW_SINK) or restY,
-			part.Position.Z)
-
-		local bv = part:FindFirstChild("Burrowed") :: BoolValue?
-		if not bv then
-			bv = Instance.new("BoolValue")
-			bv.Name = "Burrowed"
-			bv.Parent = part
-		end
-		(bv :: BoolValue).Value = nowBurrowed
+		setLeechBurrowed(data, not data.burrowed)
 	end)
 
-	-- ── Embryo evolve → Lamprey / Hagfish / Mother (needs the Mother's Evolve unlock) ──
+	-- ── Embryo evolve → Lamprey / Hagfish / Roller / Mother (available to every Embryo) ──
 	RemoteHandler.get(Config.REMOTES.EvolveEmbryo).OnServerEvent:Connect(function(player, embryoId, targetType)
 		if type(embryoId) ~= "string" or type(targetType) ~= "string" then return end
-		if player:GetAttribute("EmbryoGenome") ~= true then return end
 		local data = units[embryoId]
 		if not data or data.owner ~= player or data.unitType ~= "Embryo" then return end
 		if data.hp <= 0 or data.dying then return end
 		local pos = despawnUnit(embryoId)
 		if not pos then return end
-		if targetType == "Lamprey" or targetType == "Hagfish" then
+		if targetType == "Lamprey" or targetType == "Hagfish" or targetType == "Roller" then
 			spawnUnit(player, pos, targetType)
 		elseif targetType == "Mother" and buildingManagerRef then
 			buildingManagerRef.morphStructureForPlayer(player, pos, "CommandCenter")
+		end
+	end)
+
+	-- ── Leech evolve → Watcher (slow, ranged cluster of eyes) ──────────────────────
+	-- Charges LEECH_EVOLVE_COST, then despawns the Leech and spawns a Watcher in its
+	-- place. Works whether the Leech is mobile or burrowed.
+	RemoteHandler.get(Config.REMOTES.EvolveLeech).OnServerEvent:Connect(function(player, leechId)
+		if type(leechId) ~= "string" then return end
+		local data = units[leechId]
+		if not data or data.owner ~= player or data.unitType ~= "Leech" then return end
+		if data.hp <= 0 or data.dying then return end
+		if not resourceManagerRef or not resourceManagerRef.spend(player, Config.LEECH_EVOLVE_COST) then return end
+		local pos = despawnUnit(leechId)
+		if not pos then
+			-- Refund if the Leech vanished between the checks and the despawn.
+			resourceManagerRef.add(player, Config.LEECH_EVOLVE_COST)
+			return
+		end
+		spawnUnit(player, pos, "Watcher")
+	end)
+
+	-- ── Roller mount system ────────────────────────────────────────────────────────
+	-- How many more riders a Roller can still accept (passengers already aboard +
+	-- riders already walking in count against the cap).
+	local function rollerSlotsLeft(rollerId: string, roller: UnitData): number
+		local used = roller.carrying and #roller.carrying or 0
+		for _, other in units do
+			if other.mountTargetId == rollerId then used += 1 end
+		end
+		return Config.ROLLER_MOUNT_CAPACITY - used
+	end
+
+	-- Right-click / drag specific units into a Roller: give them a mount intent so
+	-- they walk over and climb in (up to the remaining capacity).
+	RemoteHandler.get(Config.REMOTES.RollerMount).OnServerEvent:Connect(function(player, rollerId, unitIds)
+		if type(rollerId) ~= "string" or type(unitIds) ~= "table" then return end
+		local roller = units[rollerId]
+		if not roller or roller.owner ~= player or roller.unitType ~= "Roller" or roller.hp <= 0 or roller.dying then return end
+		local slots = rollerSlotsLeft(rollerId, roller)
+		for _, uid in unitIds do
+			if slots <= 0 then break end
+			if type(uid) ~= "string" then continue end
+			local rider = units[uid]
+			if rider and rider.owner == player and rider.hp > 0 and not rider.dying and not rider.carriedBy
+				and isMountableType(rider.unitType) and rider.mountTargetId ~= rollerId then
+				rider.mountTargetId = rollerId
+				slots -= 1
+			end
+		end
+	end)
+
+	-- "Mount nearby" (Roller command-card button): auto-board owned units already within
+	-- ROLLER_MOUNT_RANGE, nearest first, up to the remaining capacity.
+	RemoteHandler.get(Config.REMOTES.RollerMountNearby).OnServerEvent:Connect(function(player, rollerId)
+		if type(rollerId) ~= "string" then return end
+		local roller = units[rollerId]
+		if not roller or roller.owner ~= player or roller.unitType ~= "Roller" or roller.hp <= 0 or roller.dying then return end
+		local slots = rollerSlotsLeft(rollerId, roller)
+		if slots <= 0 then return end
+		local rPos = roller.part.Position
+		local near: { { id: string, d: number } } = {}
+		for uid, rider in units do
+			if uid == rollerId or rider.owner ~= player or rider.hp <= 0 or rider.dying or rider.carriedBy then continue end
+			if not isMountableType(rider.unitType) or rider.mountTargetId == rollerId then continue end
+			local d = (rider.part.Position - rPos).Magnitude
+			if d <= Config.ROLLER_MOUNT_RANGE then table.insert(near, { id = uid, d = d }) end
+		end
+		table.sort(near, function(a, b) return a.d < b.d end)
+		for i = 1, math.min(slots, #near) do
+			local rider = units[near[i].id]
+			if rider then rider.mountTargetId = rollerId end
+		end
+	end)
+
+	-- Dismount: spill all riders back out around the Roller.
+	RemoteHandler.get(Config.REMOTES.RollerDismount).OnServerEvent:Connect(function(player, rollerId)
+		if type(rollerId) ~= "string" then return end
+		local roller = units[rollerId]
+		if not roller or roller.owner ~= player or roller.unitType ~= "Roller" then return end
+		if roller.carrying and #roller.carrying > 0 then
+			dismountAll(roller, roller.part.Position)
 		end
 	end)
 

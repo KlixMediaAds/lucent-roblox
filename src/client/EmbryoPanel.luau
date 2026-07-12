@@ -3,60 +3,51 @@
     EmbryoPanel — command-card menu shown when one or more owned Embryos are selected.
     Renders as a 2×2 tile grid.
 
-    An Embryo has no options until the player buys the Mother's "Evolve" unlock (tracked
-    as the "EmbryoGenome" player attribute). Before then the grid is empty. Once unlocked
-    it offers three evolutions: Lamprey, Hagfish, Mother — each sends Network.evolveEmbryo,
+    Every Embryo can evolve straight away (no unlock required): the grid always offers
+    four evolutions — Lamprey, Hagfish, Roller, Mother — each sends Network.evolveEmbryo,
     and the server despawns the Embryo and spawns the chosen unit/structure in its place.
 ]]
 
-local Players     = game:GetService("Players")
 local CommandCard = require(script.Parent:WaitForChild("CommandCard"))
 
 local EmbryoPanel = {}
 local OWNER       = "embryo"
-local localPlayer = Players.LocalPlayer
 
 local LAMPREY_COL = Color3.fromRGB(120, 190,  60)
 local HAGFISH_COL = Color3.fromRGB( 90, 200, 150)
+local ROLLER_COL  = Color3.fromRGB(150,  70, 110)
 local MOTHER_COL  = Color3.fromRGB( 40,  40,  48)
 
 type Opt = { key: string, name: string, icon: string, color: Color3, desc: string }
 local OPTIONS: { Opt } = {
 	{ key = "Lamprey", name = "LAMPREY", icon = "🐍", color = LAMPREY_COL, desc = "Evolve into a Lamprey." },
 	{ key = "Hagfish", name = "HAGFISH", icon = "🪱", color = HAGFISH_COL, desc = "Evolve into a Hagfish." },
+	{ key = "Roller",  name = "ROLLER",  icon = "⚙", color = ROLLER_COL,  desc = "Evolve into a Roller — a fast, armored grinder." },
 	{ key = "Mother",  name = "MOTHER",  icon = "⬛", color = MOTHER_COL,  desc = "Evolve into a new Mother (Command Center)." },
 }
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeIds:  { string } = {}
 local networkRef: any
-local genomeConn: RBXScriptConnection? = nil
 
 function EmbryoPanel.init(network: any)
 	networkRef = network
 end
 
-local function evolveReady(): boolean
-	return localPlayer:GetAttribute("EmbryoGenome") == true
-end
-
 local function buildPage(): CommandCard.Page
 	local slots: { CommandCard.Slot } = {}
-	if evolveReady() then
-		for i, opt in OPTIONS do
-			table.insert(slots, {
-				index   = i,
-				name    = opt.name,
-				icon    = opt.icon,
-				color   = opt.color,
-				desc    = opt.desc,
-				onClick = function()
-					for _, id in activeIds do networkRef.evolveEmbryo(id, opt.key) end
-				end,
-			})
-		end
+	for i, opt in OPTIONS do
+		table.insert(slots, {
+			index   = i,
+			name    = opt.name,
+			icon    = opt.icon,
+			color   = opt.color,
+			desc    = opt.desc,
+			onClick = function()
+				for _, id in activeIds do networkRef.evolveEmbryo(id, opt.key) end
+			end,
+		})
 	end
-	-- Evolve not unlocked yet → empty grid (Embryo is a plain combatant until then).
 	local n = #activeIds
 	local header = (n > 1) and ("EMBRYOS ×" .. n) or "EMBRYO"
 	return { header = header, slots = slots, cols = 2 }
@@ -71,10 +62,6 @@ end
 -- ── Public API ────────────────────────────────────────────────────────────────
 function EmbryoPanel.show(ids: { string })
 	activeIds = ids
-	-- Re-render if the Evolve unlock lands while an Embryo is selected.
-	if not genomeConn then
-		genomeConn = localPlayer:GetAttributeChangedSignal("EmbryoGenome"):Connect(renderIfActive)
-	end
 	CommandCard.show(OWNER, buildPage())
 end
 

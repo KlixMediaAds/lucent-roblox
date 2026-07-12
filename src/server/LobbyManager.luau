@@ -29,11 +29,11 @@ local readyMap:        { [number]: boolean } = {}
 local rerollCooldown   = false
 local active           = true
 -- Terrain style cycles Layered → Walled → Off (the lobby "TERRAIN" button).
---   Layered — the tiered, ramped plateau map (default).
+--   Layered — the tiered, ramped plateau map.
 --   Walled  — winding rock walls units must route around (no ramps).
---   Off     — flat ground.
+--   Off     — flat ground (default).
 local TERRAIN_ORDER    = { "Layered", "Walled", "Off" }
-local terrainMode      = "Layered"
+local terrainMode      = "Off"
 local terrainManagerRef: any = nil
 local currentGamemode  = "Default"
 
@@ -134,9 +134,10 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 
 	terrainManagerRef = terrainManager
 
-	-- Terrain defaults to Layered, so generate the tiered map immediately for the lobby.
-	-- Deposits were already placed by MineralManager.init (on flat Y=0 ground);
-	-- resnap them onto the freshly raised tiers so none end up buried.
+	-- Apply the default terrain style (Off = flat) for the lobby immediately. Deposits
+	-- were already placed by MineralManager.init (on flat Y=0 ground); resnap them in case
+	-- the style raises tiers under them (a no-op change for flat, but keeps this robust
+	-- if the default is ever set back to Layered/Walled).
 	if terrainManagerRef and currentGamemode == "Default" then
 		regenTerrain()
 		mineralManager.resnapDeposits()

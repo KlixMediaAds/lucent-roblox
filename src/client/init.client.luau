@@ -23,6 +23,8 @@ local LampreyBody    = require(script:WaitForChild("LampreyBody"))
 local HagfishBody    = require(script:WaitForChild("HagfishBody"))
 local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
 local LeechBody      = require(script:WaitForChild("LeechBody"))
+local RollerBody     = require(script:WaitForChild("RollerBody"))
+local WatcherBody    = require(script:WaitForChild("WatcherBody"))
 local MotherEggBody  = require(script:WaitForChild("MotherEggBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
@@ -38,6 +40,7 @@ local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
 local MotherPanel    = require(script:WaitForChild("MotherPanel"))
 local LeechPanel     = require(script:WaitForChild("LeechPanel"))
 local EmbryoPanel    = require(script:WaitForChild("EmbryoPanel"))
+local RollerPanel    = require(script:WaitForChild("RollerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local Jumpscare      = require(script:WaitForChild("Jumpscare"))
@@ -51,6 +54,7 @@ local LobbyUI         = require(script:WaitForChild("LobbyUI"))
 local MainMenu        = require(script:WaitForChild("MainMenu"))
 local ShaderManager   = require(script:WaitForChild("ShaderManager"))
 local ViewportPreview = require(script:WaitForChild("ViewportPreview"))
+local AmbientAudio    = require(script:WaitForChild("AmbientAudio"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
 task.spawn(function()
@@ -73,19 +77,43 @@ task.spawn(function()
 	end
 end)
 
--- Global UI click sound: every GuiButton (anywhere in PlayerGui, lobby or in-game)
--- plays this on activation. Hooking PlayerGui descendants covers buttons made by
--- any module, including ones created later, without touching each call site.
+-- Global UI click + hover sounds: every GuiButton (anywhere in PlayerGui, lobby or
+-- in-game) plays a click on activation and a soft two-layer cue on hover. Hooking
+-- PlayerGui descendants covers buttons made by any module, including ones created
+-- later, without touching each call site.
 do
 	local clickSound       = Instance.new("Sound")
 	clickSound.Name        = "UIClick"
 	clickSound.SoundId     = "rbxassetid://139804904213958"
 	clickSound.Volume      = 0.5
 	clickSound.Parent      = SoundService
+
+	-- Hover: a pebble tap leads, and a ceramic tick follows 0.25 s later. The ceramic
+	-- gets a random pitch so sweeping a row of buttons never sounds like the same sample;
+	-- the pebble stays at its natural pitch.
+	local HOVER_CERAMIC = "rbxassetid://132354646581778"
+	local HOVER_PEBBLE  = "rbxassetid://9117267146"
+	local function playHoverClip(id: string, vary: boolean)
+		local s           = Instance.new("Sound")
+		s.SoundId         = id
+		s.Volume          = 0.35
+		if vary then
+			s.PlaybackSpeed = 0.85 + math.random() * 0.4   -- ~0.85×–1.25× random pitch
+		end
+		s.Parent          = SoundService
+		s:Play()
+		s.Ended:Once(function() s:Destroy() end)
+	end
+	local function playHover()
+		playHoverClip(HOVER_PEBBLE, false)                                    -- pebble leads, fixed pitch
+		task.delay(0.25, function() playHoverClip(HOVER_CERAMIC, true) end)   -- ceramic 0.25 s behind, varied
+	end
+
 	local playerGui        = Players.LocalPlayer:WaitForChild("PlayerGui")
 	local function hook(inst: Instance)
 		if inst:IsA("GuiButton") then
 			inst.Activated:Connect(function() clickSound:Play() end)
+			inst.MouseEnter:Connect(playHover)
 		end
 	end
 	for _, d in playerGui:GetDescendants() do hook(d) end
@@ -273,6 +301,8 @@ LampreyBody.init(workspace.CurrentCamera)
 HagfishBody.init(workspace.CurrentCamera)
 BroodmotherBody.init(workspace.CurrentCamera)
 LeechBody.init(workspace.CurrentCamera)
+RollerBody.init(workspace.CurrentCamera)
+WatcherBody.init(workspace.CurrentCamera)
 MotherEggBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 SwarmGrass.init(workspace.CurrentCamera)
@@ -281,6 +311,7 @@ MotherCrown.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
 BuildingPlacer.setNotEnoughResourcesFn(function()
+	HUD.playErrorSound()
 	HUD.showNotification("⚠  Not enough resources", Color3.fromRGB(230, 60, 60))
 end)
 
@@ -305,6 +336,10 @@ horrorAmbience.Looped     = true
 horrorAmbience.Volume     = AMBIENCE_VOLUME
 horrorAmbience.Parent     = SoundService
 horrorAmbience:Play()
+
+-- Environmental bed: a constant 2D wind loop + a 3D field of cricket/cicada emitters
+-- across the map (see AmbientAudio). Started here so it shares the match's lifetime.
+AmbientAudio.start()
 
 local firstAttackSongPlayed = false
 
@@ -414,6 +449,7 @@ CCMobilePanel.init(Network,
 MotherPanel.init(Network, function() return currentResources end)
 LeechPanel.init(Network)
 EmbryoPanel.init(Network)
+RollerPanel.init(Network)
 DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
@@ -487,6 +523,19 @@ do
 	Players.LocalPlayer.Chatted:Connect(function(msg)
 		local arg = msg:match("^%s*/shader%s+(.+)$")
 		if arg then ShaderManager.handleCommand(arg) end
+	end)
+end
+
+-- ── /debug sound chat command ─────────────────────────────────────────────────
+-- Toggles glowing neon markers at every ambient sound emitter so their spatial
+-- distribution is visible in-world (crickets = dark blue).
+do
+	local soundDebugOn = false
+	Players.LocalPlayer.Chatted:Connect(function(msg)
+		if msg:lower():match("^%s*/debug%s+sound%s*$") then
+			soundDebugOn = not soundDebugOn
+			AmbientAudio.setDebugVisible(soundDebugOn)
+		end
 	end)
 end
 
@@ -698,6 +747,7 @@ local function enterCCMode()
 	MotherPanel.hide()
 	LeechPanel.hide()
 	EmbryoPanel.hide()
+	RollerPanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
@@ -803,17 +853,20 @@ UnitController.onUnitsSelected(function(ids: { string })
 	local survivorIds: { string } = {}
 	local leechIds:    { string } = {}
 	local embryoIds:   { string } = {}
+	local rollerIds:   { string } = {}
 	for _, id in ids do
 		local t = UnitController.getUnitType(id)
 		if     t == "Survivor" then table.insert(survivorIds, id)
 		elseif t == "Leech"    then table.insert(leechIds, id)
 		elseif t == "Embryo"   then table.insert(embryoIds, id)
+		elseif t == "Roller"   then table.insert(rollerIds, id)
 		end
 	end
 
 	if #survivorIds > 0 then SurvivorPanel.show(survivorIds) else SurvivorPanel.hide() end
 	if #leechIds    > 0 then LeechPanel.show(leechIds)       else LeechPanel.hide()    end
 	if #embryoIds   > 0 then EmbryoPanel.show(embryoIds)     else EmbryoPanel.hide()   end
+	if #rollerIds   > 0 then RollerPanel.show(rollerIds)     else RollerPanel.hide()   end
 end)
 
 -- ── Bonfire panel ──────────────────────────────────────────────────────────────
@@ -1371,6 +1424,10 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			BroodmotherBody.attach(unitId, part)
 		elseif tv and tv.Value == "Leech" then
 			LeechBody.attach(unitId, part)
+		elseif tv and tv.Value == "Roller" then
+			RollerBody.attach(unitId, part)
+		elseif tv and tv.Value == "Watcher" then
+			WatcherBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -1390,6 +1447,12 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 end)
 
 Network.onResourceSync(function(amount: number)
+	-- A drop in the balance means the server just charged for a purchase (the only path
+	-- that lowers resources is a successful spend) — chime the shared purchase-confirm
+	-- cue. Skip the match-start / play-again reset, which snaps back to STARTING_RESOURCES.
+	if amount < currentResources and amount ~= Config.STARTING_RESOURCES then
+		HUD.playSuccessSound()
+	end
 	currentResources = amount
 	-- Re-render every command-card page whose tiles/tooltip depend on affordability,
 	-- so purchasable/insufficient states update live (not only on next interaction).
@@ -3568,6 +3631,20 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 	if unitType == "Broodmother" then
 		-- Tendrils glow + the orbiting glowing-orb swarm forms (all VFX on the body).
 		BroodmotherBody.triggerAttackNear(fromPos)
+		return
+	end
+
+	if unitType == "Roller" then
+		-- Melee grinder — no projectile. The shell revs and throws sparks as it
+		-- grinds the target (all VFX handled on the body).
+		RollerBody.triggerAttackNear(fromPos)
+		return
+	end
+
+	if unitType == "Watcher" then
+		-- Ranged gaze — the nearest Watcher's eyes lock onto the target and fire a
+		-- brief converging glare beam (all VFX handled on the body).
+		WatcherBody.triggerGazeNear(fromPos, toPos)
 		return
 	end
 

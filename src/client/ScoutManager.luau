@@ -118,7 +118,9 @@ local setMenuOpen  -- forward (defined with the UI)
 type ModeBtn = { btn: TextButton, stroke: UIStroke, color: Color3, fill: Frame, nameLbl: TextLabel, countLbl: TextLabel }
 local modeButtons: { [string]: ModeBtn } = {}
 
-local MENU_H      = 32     -- height of the command row
+local MENU_H      = 32     -- height of the command row (the pills)
+local EYE_ROOM    = 34     -- extra headroom above the pills the menu reserves for the eye
+local MENU_FRAME_H = MENU_H + EYE_ROOM   -- full menu-wrapper height (pills sit at its bottom)
 local ICON        = 46
 -- Command toggle lives at the bottom-left, just to the right of the minimap.
 local MAP_SPAN    = 148   -- minimap border footprint (144 + 4)
@@ -141,6 +143,20 @@ local function playSound(id: number, volume: number)
 	s.Parent  = SoundService
 	s:Play()
 	s.Ended:Connect(function() s:Destroy() end)
+end
+
+-- Army-command pill press cue: one clip, but each order gets its own fixed pitch
+-- (defend low, scout mid, attack high) so the three read distinctly — no random variation.
+local ARMY_CMD_ID    = 102609652962425
+local ARMY_CMD_PITCH: { [string]: number } = { defend = 0.82, scout = 1.0, attack = 1.2 }
+local function playArmyCommand(mode: string)
+	local s           = Instance.new("Sound")
+	s.SoundId         = "rbxassetid://" .. ARMY_CMD_ID
+	s.Volume          = 0.6
+	s.PlaybackSpeed   = ARMY_CMD_PITCH[mode] or 1.0
+	s.Parent          = SoundService
+	s:Play()
+	s.Ended:Once(function() s:Destroy() end)
 end
 
 local function unitTypeOf(part: BasePart): string
@@ -335,7 +351,7 @@ local function showAlert(accent: Color3, unitType: string, header: string, body:
 
 	activeCard = card
 	TweenService:Create(card, SLIDE_IN, { Position = cardShown() }):Play()
-	playSound(104003605923230, 0.55)
+	playSound(138317894393091, 0.55)   -- enemy-spotted cue
 
 	task.delay(5, function()
 		if activeCard == card then dismissCard() end
@@ -778,7 +794,7 @@ local function refreshIcon()
 	local t = topUnitType()
 	if not t then
 		iconBtn.Visible = false
-		if menuFrame then menuFrame.Visible = false; menuFrame.Size = UDim2.fromOffset(0, MENU_H) end
+		if menuFrame then menuFrame.Visible = false; menuFrame.Size = UDim2.fromOffset(0, MENU_FRAME_H) end
 		if statusLabel then statusLabel.Visible = false end
 		menuOpen = false
 		-- Army gone → drop any eye (defined later; clear inline).
@@ -807,7 +823,7 @@ end
 --              player pans away.
 --   • SCOUT  — jumps to a random one of the OUTERMOST scouts and follows it (each press
 --              re-rolls a new outer scout).
-local EYE_GAP = 2   -- absolute px the eye's bottom floats above the pill's top edge
+local EYE_GAP = 3   -- local px the eye's bottom overlaps onto the pill's top edge
 
 local function homeBasePos(): Vector3?
 	local ref = (defendCentroid ~= Vector3.zero and defendCentroid) or armyCentroid() or Vector3.zero
@@ -863,18 +879,17 @@ local function eyeAllowed(mode: string): boolean
 	return countInMode(mode) > 0
 end
 
--- Park the eye centred just above the hovered pill. The pills live under a UIScale'd
--- ScreenGui, so convert their absolute screen rect back into the gui's local space.
+-- Park the eye right on top of the hovered pill. It's parented straight to the pill and
+-- positioned with SCALE (bottom-centre anchored at the pill's top-centre), so it inherits
+-- the pill's exact HUD UIScale and always sits flush on the pill — no pixel math.
 local function positionEye()
 	if not (eyeBtn and eyeMode) then return end
 	local m = modeButtons[eyeMode]
 	if not m then return end
-	local scale = math.max(UILib.hudScaleFactor(), 0.01)
-	local ap, asz = m.btn.AbsolutePosition, m.btn.AbsoluteSize
-	local cx = (ap.X + asz.X / 2) / scale
-	local ty = ap.Y / scale   -- pill top edge, in gui-local space
-	-- Anchored at its centre (0.5, 0.5), so EYE_GAP places the eye's middle above the pill.
-	eyeBtn.Position = UDim2.fromOffset(math.floor(cx), math.floor(ty - EYE_GAP))
+	eyeBtn.Parent   = m.btn
+	-- Y offset +EYE_GAP nudges the eye's bottom a hair onto the pill top so it reads as
+	-- sitting ON the pill rather than hovering over a gap.
+	eyeBtn.Position = UDim2.new(0.5, 0, 0, EYE_GAP)
 end
 
 local function hideEye()
@@ -962,13 +977,25 @@ local function makeModeButton(parent: Frame, mode: string, label: string, color:
 	b.AutoButtonColor        = false
 	b.Text                   = ""
 	b.LayoutOrder            = order
-	b.ClipsDescendants       = true
+	-- NOT clipped: the eye floats above the pill's top edge (see the eye block). The fill
+	-- bar is clipped by its own holder instead so it keeps the rounded pill shape.
+	b.ClipsDescendants       = false
 	b.ZIndex                 = 51
 	b.Parent                 = parent
 	UILib.corner(b, 8)
 	local st = UILib.stroke(b, color, 1.4)
 
-	-- Fill bar: the mode's committed fraction of the whole army.
+	-- Fill bar: the mode's committed fraction of the whole army. Lives in a full-size
+	-- clipping holder so it stays inside the pill's rounded corners.
+	local fillClip              = Instance.new("Frame")
+	fillClip.Name               = "FillClip"
+	fillClip.Size               = UDim2.fromScale(1, 1)
+	fillClip.BackgroundTransparency = 1
+	fillClip.ClipsDescendants   = true
+	fillClip.ZIndex             = 51
+	fillClip.Parent             = b
+	UILib.corner(fillClip, 8)
+
 	local fill                  = Instance.new("Frame")
 	fill.Name                   = "Fill"
 	fill.AnchorPoint            = Vector2.new(0, 0.5)
@@ -978,7 +1005,7 @@ local function makeModeButton(parent: Frame, mode: string, label: string, color:
 	fill.BackgroundTransparency = 0.62
 	fill.BorderSizePixel        = 0
 	fill.ZIndex                 = 51
-	fill.Parent                 = b
+	fill.Parent                 = fillClip
 
 	local nameLbl                   = Instance.new("TextLabel")
 	nameLbl.Size                    = UDim2.new(1, -34, 1, 0)
@@ -1067,12 +1094,14 @@ local function createPanel()
 	local ROW_Y   = UDim.new(1, -(ICON_BOTTOM + ICON // 2))
 
 	-- Command row: a clipped wrapper whose width wipes open, so the buttons appear to
-	-- push out of the toggle. The inner content auto-sizes to hug the buttons.
+	-- push out of the toggle. The inner content auto-sizes to hug the buttons. The wrapper
+	-- is taller than the pills (MENU_FRAME_H) with the pills pinned to its BOTTOM, leaving
+	-- headroom on top for the eye to pop up into without being clipped away.
 	local menu               = Instance.new("Frame")
 	menu.Name                = "CommandMenu"
-	menu.AnchorPoint         = Vector2.new(0, 0.5)
-	menu.Position            = UDim2.new(0, ROW_X, ROW_Y.Scale, ROW_Y.Offset)
-	menu.Size                = UDim2.fromOffset(0, MENU_H)
+	menu.AnchorPoint         = Vector2.new(0, 1)   -- pinned by its bottom edge
+	menu.Position            = UDim2.new(0, ROW_X, ROW_Y.Scale, ROW_Y.Offset + MENU_H // 2)
+	menu.Size                = UDim2.fromOffset(0, MENU_FRAME_H)
 	menu.ClipsDescendants    = true
 	menu.BackgroundTransparency = 1
 	menu.Visible             = false
@@ -1082,8 +1111,8 @@ local function createPanel()
 
 	local content            = Instance.new("Frame")
 	content.Name             = "Content"
-	content.AnchorPoint      = Vector2.new(0, 0.5)
-	content.Position         = UDim2.new(0, 0, 0.5, 0)
+	content.AnchorPoint      = Vector2.new(0, 1)    -- pills hug the wrapper's bottom
+	content.Position         = UDim2.new(0, 0, 1, 0)
 	content.Size             = UDim2.fromOffset(0, MENU_H)
 	content.AutomaticSize    = Enum.AutomaticSize.X
 	content.BackgroundTransparency = 1
@@ -1141,15 +1170,15 @@ local function createPanel()
 				if not modeLocked(mode) then visible += 1 end
 			end
 			local target = visible > 0 and (visible * PILL_W + (visible - 1) * PILL_PAD + 6) or 0
-			menuFrame.Size = UDim2.fromOffset(0, MENU_H)
+			menuFrame.Size = UDim2.fromOffset(0, MENU_FRAME_H)
 			TweenService:Create(menuFrame,
 				TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-				{ Size = UDim2.fromOffset(target, MENU_H) }
+				{ Size = UDim2.fromOffset(target, MENU_FRAME_H) }
 			):Play()
 		else
 			local tw = TweenService:Create(menuFrame,
 				TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-				{ Size = UDim2.fromOffset(0, MENU_H) })
+				{ Size = UDim2.fromOffset(0, MENU_FRAME_H) })
 			tw.Completed:Connect(function()
 				if not menuOpen and menuFrame then menuFrame.Visible = false end
 			end)
@@ -1221,7 +1250,8 @@ local function createPanel()
 		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
 		if not pillPressMode then return end
 		if not pillDragged then
-			setGlobalMode(pillPressMode)   -- clean click = commit everyone
+			playArmyCommand(pillPressMode)   -- per-order fixed-pitch cue
+			setGlobalMode(pillPressMode)     -- clean click = commit everyone
 		end
 		pillPressMode = nil
 		scheduleMenuClose()                -- collapse if the cursor has left the mixer
@@ -1264,17 +1294,18 @@ local function createPanel()
 		scheduleMenuClose()
 	end)
 
-	-- Eye "camera jumper": a plain 👁 (no frame/outline) that floats just above whichever
-	-- pill is hovered, inside the command bar (see the eye block).
+	-- Eye "camera jumper": a plain 👁 (no frame/outline). It's reparented onto whichever
+	-- pill is hovered (see positionEye) and anchored bottom-centre so it sits right on the
+	-- pill's top edge, inheriting the pill's HUD UIScale. Sized in local px like the pills.
 	local eye                   = Instance.new("TextButton")
 	eye.Name                    = "CommandEye"
-	eye.Size                    = UDim2.fromOffset(22, 22)
-	eye.AnchorPoint             = Vector2.new(0.5, 0.5)
+	eye.Size                    = UDim2.fromOffset(MENU_H - 6, MENU_H - 6)
+	eye.AnchorPoint             = Vector2.new(0.5, 1)   -- bottom-centre lands on the pill top
 	eye.BackgroundTransparency  = 1
 	eye.AutoButtonColor         = false
 	eye.Font                    = Enum.Font.GothamBold
 	eye.Text                    = "👁"
-	eye.TextSize                = 20
+	eye.TextSize                = MENU_H - 6
 	eye.TextColor3              = C.TEXT
 	eye.TextStrokeTransparency  = 0.4   -- slight stroke keeps the glyph legible over the world
 	eye.Visible                 = false
@@ -1300,6 +1331,7 @@ local function createPanel()
 		local m = eyeMode
 		-- DEFEND is clickable even at 0 units; the others need someone to look at.
 		if not m or (m ~= "defend" and countInMode(m) <= 0) then hideEye(); return end
+		playSound(137887356175873, 0.6)   -- eye camera-jump cue
 		-- A quick confirm-squish, then run the jump and tuck the eye away.
 		if eyeScale then
 			TweenService:Create(eyeScale,
@@ -1307,8 +1339,21 @@ local function createPanel()
 				{ Scale = 1.25 }):Play()
 		end
 		jumpForMode(m)
-		if m == "defend" then armDefendSuppression() end   -- stays hidden until the camera pans
-		task.delay(0.12, hideEye)
+		if m == "defend" then
+			-- DEFEND jumps home, then tucks away until the camera pans (re-arming it).
+			armDefendSuppression()
+			task.delay(0.12, hideEye)
+		elseif eyeScale then
+			-- SCOUT / ATTACK: the eye stays put so the player can click again to re-roll a
+			-- new troop to follow. Just settle the confirm-squish back to rest.
+			task.delay(0.1, function()
+				if eyeScale then
+					TweenService:Create(eyeScale,
+						TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Scale = 1 }):Play()
+				end
+			end)
+		end
 	end)
 
 	updatePanel()

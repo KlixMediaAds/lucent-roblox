@@ -18,7 +18,8 @@
 	showMessage() — render a centered message (e.g. "Upgrades coming soon!").
 ]]
 
-local TweenService = game:GetService("TweenService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local UILib = require(script.Parent:WaitForChild("UILib"))
 local C     = UILib.C
@@ -28,9 +29,14 @@ local CommandCard = {}
 -- ── Palette (flat SC2-style steel/blue-grey) ─────────────────────────────────────
 local PANEL_BG   = Color3.fromRGB(13, 16, 23)
 local TILE_BG    = Color3.fromRGB(24, 30, 40)
-local TILE_BG_HI = Color3.fromRGB(36, 45, 60)
+local TILE_BG_HI = Color3.fromRGB(48, 62, 84)    -- hover: a distinct, brighter steel
 local BORDER     = Color3.fromRGB(56, 70, 92)
-local BORDER_HI  = Color3.fromRGB(140, 172, 206)
+local BORDER_HI  = Color3.fromRGB(150, 184, 220)
+
+-- Hover feel + success-press flash.
+local HOVER_ICON  = 1.10                          -- icon zoom while hovered
+local FLASH_FILL  = Color3.fromRGB(196, 231, 255) -- bright wash on a successful press
+local FLASH_EDGE  = Color3.fromRGB(224, 242, 255) -- edge pulse on that press
 local BORDER_RED = Color3.fromRGB(150, 72, 72)
 local BEVEL_HI   = Color3.fromRGB(70, 86, 110)   -- top edge highlight
 local BEVEL_LO   = Color3.fromRGB(8, 11, 16)      -- bottom edge shadow
@@ -109,9 +115,15 @@ local frame:      Frame?
 local headerBar:  Frame?
 local headerLbl:  TextLabel?
 local msgLbl:     TextLabel?
-local hint:       TextLabel?   -- "[Space] for menu" prompt shown when nothing selected
+local hint:       TextLabel?   -- camera/menu prompt shown when nothing selected
 local vpStash:    Frame?
 local currentOwner: string? = nil
+
+-- The empty-grid prompt first teaches camera movement, then swaps to the menu hint once
+-- the player has actually panned with WASD (a one-time, cross-faded transition).
+local HINT_WASD  = "[WASD] to move camera"
+local HINT_SPACE = "[Space] for menu"
+local wasdUsed   = false
 
 local vpCache: { [string]: ViewportFrame } = {}
 
@@ -122,6 +134,8 @@ type Tile = {
 	btn:      TextButton,
 	stroke:   UIStroke,
 	holder:   Frame,
+	iconScale: UIScale,
+	flash:    Frame,
 	hotkey:   TextLabel,
 	badge:    TextLabel,
 	track:    Frame,
@@ -131,6 +145,7 @@ type Tile = {
 	restColor: Color3,
 	restBg:    Color3,
 	locked:    boolean,
+	enabled:   boolean,
 }
 local tiles: { Tile } = {}
 
@@ -163,6 +178,31 @@ end
 
 -- ── Tile factory ────────────────────────────────────────────────────────────────
 local TI = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Success-press flash timings.
+local FLASH_BLOOM = TweenInfo.new(0.4,  Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FLASH_POP   = TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+-- Celebrate a successful press: a bright wash blooms over the tile and fades out, the
+-- edge pulses, and the icon punches up. Because the cursor is still on the tile after a
+-- click, the edge + icon settle back to the HOVER pose (not rest) so nothing flickers.
+-- The bloom + icon-pop live outside applySlot's reset, so they survive a re-render the
+-- purchase may trigger (e.g. resources dropping).
+local function flashTile(tile: Tile)
+	local ov = tile.flash
+	ov.BackgroundTransparency = 0.1
+	ov.Visible                = true
+	local bloom = TweenService:Create(ov, FLASH_BLOOM, { BackgroundTransparency = 1 })
+	bloom.Completed:Once(function() ov.Visible = false end)
+	bloom:Play()
+
+	tile.stroke.Color     = FLASH_EDGE
+	tile.stroke.Thickness = 3
+	TweenService:Create(tile.stroke, FLASH_BLOOM, { Color = BORDER_HI, Thickness = 2 }):Play()
+
+	tile.iconScale.Scale = 1.28
+	TweenService:Create(tile.iconScale, FLASH_POP, { Scale = HOVER_ICON }):Play()
+end
 
 local function makeTile(parent: Instance, index: number): Tile
 	local row = math.floor((index - 1) / COLS)
@@ -213,13 +253,19 @@ local function makeTile(parent: Instance, index: number): Tile
 	bevelBot.ZIndex                = 16
 	bevelBot.Parent                = btn
 
-	-- Icon holder (near full-bleed, small inset)
+	-- Icon holder (near full-bleed, small inset). Centre-anchored so its UIScale zooms
+	-- the icon from the middle of the tile (btn clips the overflow).
 	local holder                   = Instance.new("Frame")
 	holder.Name                    = "IconHolder"
 	holder.Size                    = UDim2.fromScale(1, 1)
+	holder.Position                = UDim2.fromScale(0.5, 0.5)
+	holder.AnchorPoint             = Vector2.new(0.5, 0.5)
 	holder.BackgroundTransparency  = 1
 	holder.ZIndex                  = 14
 	holder.Parent                  = btn
+	local iconScale                = Instance.new("UIScale")
+	iconScale.Scale                = 1
+	iconScale.Parent               = holder
 
 	local hotkey                   = Instance.new("TextLabel")
 	hotkey.Name                    = "Hotkey"
@@ -273,27 +319,47 @@ local function makeTile(parent: Instance, index: number): Tile
 	fill.Parent                    = track
 	UILib.corner(fill, 1)
 
+	-- Success-press bloom: a bright full-tile wash on top that fades out. Hidden at rest
+	-- and non-interactive (plain Frame — doesn't steal the button's clicks).
+	local flash                    = Instance.new("Frame")
+	flash.Name                     = "Flash"
+	flash.Size                     = UDim2.fromScale(1, 1)
+	flash.BackgroundColor3         = FLASH_FILL
+	flash.BackgroundTransparency   = 1
+	flash.BorderSizePixel          = 0
+	flash.Visible                  = false
+	flash.ZIndex                   = 19
+	flash.Parent                   = btn
+	UILib.corner(flash, 3)
+
 	local tile: Tile = {
 		wrapper = wrapper, btn = btn, stroke = stroke, holder = holder,
+		iconScale = iconScale, flash = flash,
 		hotkey = hotkey, badge = badge, track = track, fill = fill,
-		onClick = nil, tip = nil, restColor = BORDER, restBg = TILE_BG, locked = false,
+		onClick = nil, tip = nil, restColor = BORDER, restBg = TILE_BG,
+		locked = false, enabled = true,
 	}
 
 	btn.MouseButton1Click:Connect(function()
 		if tile.onClick then tile.onClick() end
+		-- A "successful" press = an affordable, unlocked option (the disabled/red state
+		-- means unaffordable → the click just plays the error cue, no celebratory flash).
+		if tile.enabled and not tile.locked then flashTile(tile) end
 	end)
 	btn.MouseEnter:Connect(function()
 		hoveredIndex = index
 		if not tile.locked then
-			TweenService:Create(btn,    TI, { BackgroundColor3 = TILE_BG_HI }):Play()
-			TweenService:Create(stroke, TI, { Color = BORDER_HI, Thickness = 1.5 }):Play()
+			TweenService:Create(btn,    TI, { BackgroundColor3 = TILE_BG_HI, BackgroundTransparency = 0 }):Play()
+			TweenService:Create(stroke, TI, { Color = BORDER_HI, Thickness = 2 }):Play()
+			TweenService:Create(iconScale, TI, { Scale = HOVER_ICON }):Play()
 		end
 		if tile.tip then showTip(tile.tip) end
 	end)
 	btn.MouseLeave:Connect(function()
 		if hoveredIndex == index then hoveredIndex = nil end
-		TweenService:Create(btn,    TI, { BackgroundColor3 = tile.restBg }):Play()
+		TweenService:Create(btn,    TI, { BackgroundColor3 = tile.restBg, BackgroundTransparency = tile.locked and 0.3 or 0.04 }):Play()
 		TweenService:Create(stroke, TI, { Color = tile.restColor, Thickness = 1 }):Play()
+		TweenService:Create(iconScale, TI, { Scale = 1 }):Play()
 		hideTip()
 	end)
 
@@ -319,7 +385,8 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 	tile.wrapper.Size     = UDim2.fromOffset(tilePx, tilePx)
 	tile.wrapper.Position = UDim2.fromOffset(x, y)
 	tile.wrapper.Visible  = true
-	tile.locked = locked
+	tile.locked  = locked
+	tile.enabled = enabled
 
 	local wantVp: ViewportFrame? = nil
 	if slot.viewportKey and slot.viewportFactory then
@@ -349,10 +416,14 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 	local restBg    = locked and MONO_BG or TILE_BG
 	tile.restColor        = restColor
 	tile.restBg           = restBg
-	tile.stroke.Color     = restColor
-	tile.stroke.Thickness = 1
-	tile.btn.BackgroundColor3       = restBg
-	tile.btn.BackgroundTransparency = locked and 0.3 or 0.04
+	-- If this tile is under the cursor, keep the hover pose across the re-render (a
+	-- resource tick can re-render mid-hover) instead of snapping back to rest.
+	local hovering = hoveredIndex == slot.index and not locked
+	tile.stroke.Color     = hovering and BORDER_HI or restColor
+	tile.stroke.Thickness = hovering and 2 or 1
+	tile.btn.BackgroundColor3       = hovering and TILE_BG_HI or restBg
+	tile.btn.BackgroundTransparency = hovering and 0 or (locked and 0.3 or 0.04)
+	tile.iconScale.Scale            = hovering and HOVER_ICON or 1
 	for _, ch in tile.holder:GetChildren() do
 		if ch:IsA("ViewportFrame") then
 			ch.ImageColor3       = locked and MONO_TINT or Color3.fromRGB(255, 255, 255)
@@ -437,7 +508,8 @@ function CommandCard.init(sg: ScreenGui)
 	fStroke.Transparency           = 0.2
 	frame = f
 
-	-- "[Space] for menu" prompt — occupies the grid spot whenever nothing is selected.
+	-- Camera / menu prompt — occupies the grid spot whenever nothing is selected. Starts
+	-- as the WASD camera hint, then cross-fades to the [Space] menu hint on first WASD use.
 	local hl                       = Instance.new("TextLabel")
 	hl.Name                        = "SpaceHint"
 	hl.Size                        = UDim2.fromOffset(CommandCard.FRAME_W, CommandCard.FRAME_H)
@@ -452,7 +524,7 @@ function CommandCard.init(sg: ScreenGui)
 	hl.TextStrokeTransparency      = 0.5
 	hl.TextStrokeColor3            = Color3.new(0, 0, 0)
 	hl.TextWrapped                 = true
-	hl.Text                        = "[Space] for menu"
+	hl.Text                        = wasdUsed and HINT_SPACE or HINT_WASD
 	hl.Visible                     = true
 	hl.ZIndex                      = 9
 	hl.Parent                      = own
@@ -460,6 +532,29 @@ function CommandCard.init(sg: ScreenGui)
 	local hlStroke                 = UILib.stroke(hl, BORDER, 1)
 	hlStroke.Transparency          = 0.45
 	hint = hl
+
+	-- First WASD press: cross-fade the hint from the camera prompt to the menu prompt.
+	local wasdConn: RBXScriptConnection? = nil
+	wasdConn = UserInputService.InputBegan:Connect(function(input, gpe)
+		if gpe then return end
+		local k = input.KeyCode
+		if k ~= Enum.KeyCode.W and k ~= Enum.KeyCode.A
+			and k ~= Enum.KeyCode.S and k ~= Enum.KeyCode.D then return end
+		wasdUsed = true
+		if wasdConn then wasdConn:Disconnect(); wasdConn = nil end
+		if not hint then return end
+		local fadeOut = TweenService:Create(hint,
+			TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ TextTransparency = 1, TextStrokeTransparency = 1 })
+		fadeOut.Completed:Connect(function()
+			if not hint then return end
+			hint.Text = HINT_SPACE
+			TweenService:Create(hint,
+				TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ TextTransparency = 0, TextStrokeTransparency = 0.5 }):Play()
+		end)
+		fadeOut:Play()
+	end)
 
 	-- Centered "coming soon" message (hidden unless showMessage is used)
 	local mg                       = Instance.new("TextLabel")

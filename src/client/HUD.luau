@@ -1335,11 +1335,36 @@ end
 -- ── Error sound ──────────────────────────────────────────────────────────────
 local function playErrorSound()
 	local s = Instance.new("Sound")
-	s.SoundId = "rbxassetid://125485586882683"
+	s.SoundId = "rbxassetid://9113923981"
 	s.Volume  = 1
 	s.Parent  = SoundService
 	s:Play()
 	s.Ended:Once(function() s:Destroy() end)
+end
+
+-- Exposed so other systems (e.g. BuildingPlacer's can't-afford path) play the same
+-- insufficient-funds / unable-to-purchase cue.
+function HUD.playErrorSound()
+	playErrorSound()
+end
+
+-- ── Success sound ─────────────────────────────────────────────────────────────
+-- Played when a purchase actually commits (unit spawned, building placed, upgrade
+-- bought). Exposed so every purchase path shares one confirmation cue. The cue layers
+-- a couple of clips together for a richer confirmation.
+local SUCCESS_SOUND_IDS = {
+	"rbxassetid://70793938100698",
+	"rbxassetid://124702008706576",   -- "mythical" flourish
+}
+function HUD.playSuccessSound()
+	for _, id in SUCCESS_SOUND_IDS do
+		local s = Instance.new("Sound")
+		s.SoundId = id
+		s.Volume  = 1
+		s.Parent  = SoundService
+		s:Play()
+		s.Ended:Once(function() s:Destroy() end)
+	end
 end
 
 -- ── Notification toast ────────────────────────────────────────────────────────

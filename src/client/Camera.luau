@@ -4,6 +4,7 @@ local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
+local AudioDucker       = require(script.Parent:WaitForChild("AudioDucker"))
 
 local Camera    = {}
 local cam       = workspace.CurrentCamera
@@ -31,6 +32,12 @@ local edgePanSuppressed = false
 -- When set, the camera locks its focus onto this part each frame (used to follow
 -- the incoming Core drop pod). WASD panning is suspended while following.
 local followTarget: BasePart? = nil
+
+-- While a teleport is being audio-ducked, the camera is frozen at its current pose so
+-- the actual jump happens only at the silent low point of the fade (see setFocus). This
+-- gates follow/pan too, so a followPart() issued right after setFocus can't snap the
+-- camera early and re-expose the pop we're hiding.
+local teleportHeld = false
 
 -- Screen shake: a single decaying amplitude jittered into the camera position each
 -- frame. Camera.shake(amp) tops it up (strongest concurrent shake wins); it bleeds
@@ -111,9 +118,18 @@ function Camera.init()
 		end
 	end)
 
+	AudioDucker.init()
+
 	-- Priority > Camera (200) so this runs AFTER Roblox's built-in camera script
 	-- and overwrites whatever it set, keeping full control of cam.CFrame.
 	RunService:BindToRenderStep("RTSCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		-- Frozen mid-teleport-duck: hold the current pose (audio is fading out) until the
+		-- duck's low point moves the focus and clears the hold. Ignores follow/pan/return.
+		if teleportHeld then
+			apply()
+			return
+		end
+
 		-- Follow mode: lock focus onto the tracked part and skip edge panning until the
 		-- follow is released. It releases when the tracked part dies (Parent gone) or the
 		-- player takes manual control (WASD/QE pan-rotate or a middle-mouse drag) — edge
@@ -184,8 +200,17 @@ end
 
 function Camera.setFocus(pos: Vector3)
 	followTarget = nil   -- an explicit jump is a manual override; drop any active follow
-	focus = Vector3.new(pos.X, 0, pos.Z)
-	apply()
+	returning    = false -- …and any return-to-base fly, so neither fights the frozen hold
+	local dest   = Vector3.new(pos.X, 0, pos.Z)
+	-- Freeze now (synchronously, before any followPart() the caller issues next line), then
+	-- fade the 3D mix out, jump at silence, and fade back in. If a newer setFocus interrupts,
+	-- its own jump clears the hold — see AudioDucker.duckTeleport.
+	teleportHeld = true
+	AudioDucker.duckTeleport(function()
+		focus        = dest
+		teleportHeld = false
+		apply()
+	end)
 end
 
 -- Smoothly fly the camera back to `pos` (the Command Center), restoring the

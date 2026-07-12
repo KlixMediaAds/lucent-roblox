@@ -257,14 +257,16 @@ for _, player in Players:GetPlayers() do
 end
 
 -- ── Symmetric player base positions ──────────────────────────────────────────
--- CCs are placed in 180°-opposite pairs so each player starts on a different
--- side of the map.  Assigned in join order (1st human gets index 1, etc.).
+-- Bases sit in the SE half of the map (below the main diagonal z = x). Their AI
+-- counterparts (AIManager.AI_BASES) are the exact diagonal mirrors M(x,z) = (z,x) in
+-- the NW half, so — with the forest and ore deposits also mirrored across z = x — a
+-- human and the opposing AI start in identical surroundings. Assigned in join order.
 -- Y = COMMAND_CENTER_SIZE.Y / 2 so the base sits on the Y=0 floor.
 local PLAYER_BASES: { Vector3 } = {
-	Vector3.new(-120, Config.COMMAND_CENTER_SIZE.Y / 2, -280),  -- south-west
-	Vector3.new( 120, Config.COMMAND_CENTER_SIZE.Y / 2,  280),  -- north-east (opposite)
-	Vector3.new( 120, Config.COMMAND_CENTER_SIZE.Y / 2, -280),  -- south-east
-	Vector3.new(-120, Config.COMMAND_CENTER_SIZE.Y / 2,  280),  -- north-west (opposite)
+	Vector3.new(250, Config.COMMAND_CENTER_SIZE.Y / 2, -250),  -- SE corner (primary)
+	Vector3.new(290, Config.COMMAND_CENTER_SIZE.Y / 2,  -70),  -- east edge
+	Vector3.new( 70, Config.COMMAND_CENTER_SIZE.Y / 2, -290),  -- south edge
+	Vector3.new(170, Config.COMMAND_CENTER_SIZE.Y / 2, -170),  -- inner SE
 }
 
 -- Lane mode bases: players at the south end (Z≈−290), AI at the north end (Z≈+290)

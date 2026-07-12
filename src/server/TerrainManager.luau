@@ -217,11 +217,14 @@ local WALL_TOP    = GROUND_TOP + STEP   -- wall crest — one elevation level up
 local WALL_THICK  = 18                  -- wall width (studs); ≥ NavGrid CELL so it blocks cells
 local SPEC_CHANCE = 0.10                -- chance a wall vertex sprouts a spike above the crest
 
--- Keep walls clear of the four corner base spots (mirrors PLAYER_BASES in init.server)
--- so an auto-placed Command Center never lands boxed in by rock.
+-- Keep walls clear of every starting base spot — the SE-half PLAYER_BASES in init.server
+-- and their diagonal-mirror AI_BASES in AIManager — so an auto-placed Command Center
+-- never lands boxed in by rock.
 local BASE_SPOTS = {
-	Vector2.new(-120, -280), Vector2.new(120, 280),
-	Vector2.new(120, -280), Vector2.new(-120, 280),
+	Vector2.new(250, -250), Vector2.new(-250, 250),   -- SE / NW corner pair
+	Vector2.new(290,  -70), Vector2.new( -70, 290),
+	Vector2.new( 70, -290), Vector2.new(-290,  70),
+	Vector2.new(170, -170), Vector2.new(-170, 170),
 }
 local BASE_CLEAR = 110
 

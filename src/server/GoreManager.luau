@@ -45,22 +45,35 @@ local BLOOD: { [string]: Blood } = {
 	Medic         = { spray = RED,   pool = RED_DK,   bone = true  },
 	Lamprey       = { spray = EEL,   pool = EEL_DK,   bone = false },
 	Hagfish       = { spray = EEL,   pool = EEL_DK,   bone = false },
+	Leech         = { spray = EEL,   pool = EEL_DK,   bone = false },
+	Embryo        = { spray = EEL,   pool = EEL_DK,   bone = false },
+	Roller        = { spray = EEL,   pool = EEL_DK,   bone = false },
 	CreepySoldier = { spray = ICHOR, pool = ICHOR_DK, bone = false },
 	Broodmother   = { spray = ICHOR, pool = ICHOR_DK, bone = false },
 }
 local DEFAULT_BLOOD: Blood = { spray = RED, pool = RED_DK, bone = true }
 
--- Scales gib count, particle volume and pool radius with the unit's mass.
-local SCALE: { [string]: number } = {
-	Survivor = 1.0, Sniper = 1.0, Elite = 1.25, Medic = 1.0, CreepySoldier = 1.0,
-	Lamprey = 1.7, Hagfish = 1.4, Broodmother = 3.2,
-}
+-- Blood volume scales dynamically with the unit's max HP: gib count, particle volume
+-- and pool radius all track this. BASE_HP (a Survivor) maps to scale 1.0; a 420-HP
+-- Broodmother lands near 3.2, a 55-HP grunt near 0.75.
+local BASE_HP = 80
+local function scaleForHp(maxHp: number?): number
+	return math.clamp(((maxHp or BASE_HP) / BASE_HP) ^ 0.68, 0.6, 3.6)
+end
 
--- ── Pool registry (global cap) ──────────────────────────────────────────────────
+-- ── Stain registry (global cap + blood-detection for footprint trails) ───────────
+-- Every ground stain (pools + splatter) is registered as a "spot": its centre, radius,
+-- colour and expiry. This bounds the total stain part count AND lets units detect when
+-- they're standing in blood so they can track a footprint trail out of it.
 
 local goreFolder: Folder? = nil
-local pools: { BasePart } = {}
-local MAX_POOLS = 48
+type Spot = { disc: BasePart, x: number, z: number, r2: number, color: Color3, expire: number }
+local spots: { Spot } = {}
+local MAX_SPOTS = 320   -- cap on live ground stains (they now linger ~2 min, so bound them)
+
+-- Ground blood lingers ~2 minutes: it holds fully wet, then dries/fades over POOL_FADE.
+local POOL_HOLD = 112
+local POOL_FADE = 8
 
 local function folder(): Folder
 	if goreFolder and goreFolder.Parent then return goreFolder end
@@ -74,12 +87,35 @@ local function folder(): Folder
 	return goreFolder
 end
 
-local function registerPool(p: BasePart)
-	table.insert(pools, p)
-	while #pools > MAX_POOLS do
-		local old = table.remove(pools, 1)
-		if old then old:Destroy() end
+local function registerSpot(disc: BasePart, x: number, z: number, r: number, color: Color3, lifetime: number)
+	spots[#spots + 1] = { disc = disc, x = x, z = z, r2 = r * r, color = color, expire = os.clock() + lifetime }
+	while #spots > MAX_SPOTS do
+		local old = table.remove(spots, 1)
+		if old and old.disc.Parent then old.disc:Destroy() end
 	end
+end
+
+local function removeSpotByDisc(disc: BasePart)
+	for i = #spots, 1, -1 do
+		if spots[i].disc == disc then table.remove(spots, i); return end
+	end
+end
+
+-- Colour of a blood stain the (x, z) point sits inside, or nil. Prunes expired spots as
+-- it scans. Cheap: spots are capped and the caller throttles by distance walked.
+function GoreManager.bloodColorAt(x: number, z: number): Color3?
+	local now = os.clock()
+	for i = #spots, 1, -1 do
+		local s = spots[i]
+		if now >= s.expire then
+			if s.disc.Parent then s.disc:Destroy() end
+			table.remove(spots, i)
+		else
+			local dx, dz = x - s.x, z - s.z
+			if dx * dx + dz * dz <= s.r2 then return s.color end
+		end
+	end
+	return nil
 end
 
 -- ── Ground probe ────────────────────────────────────────────────────────────────
@@ -110,7 +146,7 @@ end
 -- ── Stain spawners ──────────────────────────────────────────────────────────────
 
 local function spawnStain(groundPos: Vector3, normal: Vector3, color: Color3,
-	diameter: number, hold: number, fade: number, isPool: boolean)
+	diameter: number, hold: number, fade: number)
 	local thickness = 0.1
 	local disc        = Instance.new("Part")
 	disc.Shape        = Enum.PartType.Cylinder
@@ -125,7 +161,8 @@ local function spawnStain(groundPos: Vector3, normal: Vector3, color: Color3,
 	disc.Color        = color
 	disc.Transparency = 0.15
 	disc.Parent       = folder()
-	if isPool then registerPool(disc) end
+	-- Registered so it counts toward the cap AND so units can detect they're in blood.
+	registerSpot(disc, groundPos.X, groundPos.Z, diameter * 0.5, color, hold + fade)
 
 	-- Spread out from the impact, then dry + fade away.
 	TweenService:Create(disc, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -136,10 +173,44 @@ local function spawnStain(groundPos: Vector3, normal: Vector3, color: Color3,
 			{ Transparency = 1 })
 		t:Play()
 		t.Completed:Once(function()
-			local i = table.find(pools, disc)
-			if i then table.remove(pools, i) end
+			removeSpotByDisc(disc)
 			disc:Destroy()
 		end)
+	end)
+end
+
+-- A bloody footprint smear a unit leaves as it tracks blood. It fades out in discrete
+-- steps (transparency climbs every STEP seconds) over TRAIL_SECS, then vanishes — a
+-- trail behind a unit that walked through gore. Not registered as a spot, so trails
+-- can't spawn further trails.
+local FOOT_START_T = 0.35
+local TRAIL_SECS   = 3
+local TRAIL_STEP   = 0.25
+function GoreManager.leaveFootprint(pos: Vector3, color: Color3)
+	local groundPos, normal = groundBelow(pos)
+	local d           = 1.5 + math.random() * 0.9
+	local disc        = Instance.new("Part")
+	disc.Shape        = Enum.PartType.Cylinder
+	disc.Size         = Vector3.new(0.1, d, d)
+	disc.CFrame       = discCF(groundPos, normal)
+	disc.Anchored     = true
+	disc.CanCollide   = false
+	disc.CanQuery     = false
+	disc.CanTouch     = false
+	disc.CastShadow   = false
+	disc.Material     = Enum.Material.Glass
+	disc.Color        = color
+	disc.Transparency = FOOT_START_T
+	disc.Parent       = folder()
+
+	task.spawn(function()
+		local steps = math.floor(TRAIL_SECS / TRAIL_STEP)   -- 12 steps over 3 s
+		for step = 1, steps do
+			task.wait(TRAIL_STEP)
+			if not disc.Parent then return end
+			disc.Transparency = FOOT_START_T + (1 - FOOT_START_T) * (step / steps)
+		end
+		disc:Destroy()
 	end)
 end
 
@@ -423,7 +494,7 @@ function GoreManager.decapitate(body: BasePart)
 
 	-- A wide pool spreads from where they fell.
 	local groundPos, normal = groundBelow(baseCF.Position)
-	spawnStain(groundPos, normal, RED_DK, 4.5 + math.random() * 2.0, 16, 7, true)
+	spawnStain(groundPos, normal, RED_DK, 4.5 + math.random() * 2.0, POOL_HOLD, POOL_FADE)
 end
 
 -- ── Public API ──────────────────────────────────────────────────────────────────
@@ -442,9 +513,9 @@ local TIER: { Tier } = {
 
 -- Full death gore at a biological unit's position. `level` (1–3, default 1) is the
 -- gore tier — how gruesome the death is; see TIER above.
-function GoreManager.spawn(unitType: string, pos: Vector3, level: number?)
+function GoreManager.spawn(unitType: string, pos: Vector3, level: number?, maxHp: number?)
 	local info  = BLOOD[unitType] or DEFAULT_BLOOD
-	local scale = SCALE[unitType] or 1
+	local scale = scaleForHp(maxHp)
 	local lv    = math.clamp(math.floor(level or 1), 1, 3)
 	local t     = TIER[lv]
 
@@ -463,7 +534,7 @@ function GoreManager.spawn(unitType: string, pos: Vector3, level: number?)
 
 	local groundPos, normal = groundBelow(pos)
 	-- Main pool.
-	spawnStain(groundPos, normal, info.pool, (3.0 + math.random() * 1.5) * scale * t.pool, 14, 6, true)
+	spawnStain(groundPos, normal, info.pool, (3.0 + math.random() * 1.5) * scale * t.pool, POOL_HOLD, POOL_FADE)
 	-- Scattered splatter around it — flung further at higher tiers.
 	local splats = math.clamp(math.floor(3 * scale * t.splats + 0.5), 3, 22)
 	for _ = 1, splats do
@@ -471,7 +542,7 @@ function GoreManager.spawn(unitType: string, pos: Vector3, level: number?)
 		local r   = (1.5 + math.random() * 3.0) * scale * t.reach
 		local sp  = groundPos + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r)
 		local gPos, gN = groundBelow(sp + Vector3.new(0, 2, 0))
-		spawnStain(gPos, gN, info.pool, (0.8 + math.random() * 1.4) * scale, 10, 4, false)
+		spawnStain(gPos, gN, info.pool, (0.8 + math.random() * 1.4) * scale, POOL_HOLD, POOL_FADE)
 	end
 end
 
@@ -483,7 +554,7 @@ end
 
 -- Wipe all gore (call on match reset).
 function GoreManager.clear()
-	pools = {}
+	spots = {}
 	if goreFolder then goreFolder:Destroy(); goreFolder = nil end
 	local f = workspace:FindFirstChild("GoreFX")
 	if f then f:Destroy() end

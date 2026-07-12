@@ -139,7 +139,7 @@ local settingsExpanded    = false
 -- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
 local selectedFaction     = "Humans"
 local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel } } = {}
-local lobbyTerrainMode    = "Layered"   -- Layered | Walled | Off
+local lobbyTerrainMode    = "Off"   -- Layered | Walled | Off (server owns the authoritative value)
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
 
@@ -272,7 +272,7 @@ local TERRAIN_COLORS = {
 	Off     = C_SUBTEXT,
 }
 local function syncTerrain(mode: string)
-	lobbyTerrainMode = mode or "Layered"
+	lobbyTerrainMode = mode or "Off"
 	if terrainBtn then
 		local c = TERRAIN_COLORS[lobbyTerrainMode] or C_TITLE
 		terrainBtn.Text       = lobbyTerrainMode:upper()
