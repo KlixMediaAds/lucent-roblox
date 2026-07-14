@@ -359,6 +359,9 @@ local function applyHP(data: UnitData, tookDamage: boolean?)
 	-- Notify the owner that their army is under attack here (throttled per region).
 	if tookDamage and data.hp > 0 then
 		AlertManager.report(data.owner, data.part.Position, "army")
+		-- Stamp when this unit was last hit so the client's camera-hop eye can give
+		-- recently-attacked units priority (see ScoutManager hopOrder).
+		data.part:SetAttribute("LastHit", workspace:GetServerTimeNow())
 	end
 	local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
 	if not bb then return end
@@ -566,6 +569,13 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		part.Transparency = 1
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 3.5, 0) end  -- just above the top of the eye cluster
+	end
+	if unitType == "Needler" then
+		-- The spherical body + single long insect arm is drawn client-side (NeedlerBody);
+		-- the body part is an invisible, ground-snapped pivot for movement/targeting.
+		part.Transparency = 1
+		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.StudsOffset = Vector3.new(0, 3.0, 0) end  -- just above the spherical body
 	end
 	units[id] = {
 		part        = part,
@@ -1076,15 +1086,18 @@ local function mountUnitInto(rollerId: string, unitId: string): boolean
 	-- Re-phase its attack timer so two same-type riders fire out of sync.
 	rider.attackTimer   = math.random() * (rider.attackRate or 1)
 	rider.part.CanQuery = false            -- not click-selectable while riding
+	-- Tell the client body animators to hold the idle pose while aboard (the part is
+	-- dragged along by the Roller each frame, which would otherwise read as walking).
+	rider.part:SetAttribute("Carried", true)
 	setHealthBarEnabled(rider, false)      -- hide its floating bar on top
 	syncRollerAttrs(roller)
 	if roller.part then playRollerMountSound(roller.part.Position) end
 	return true
 end
 
--- Snap a carried rider to its seat on top of the Roller for one frame. Seats are spread
--- across the top along the axle and scale to however many riders are aboard; the rider's
--- lower body sinks into the shell so it reads as sitting in an open turret.
+-- Snap a carried rider to its seat on the Roller for one frame. The disc's axle runs
+-- along `right` (it rolls about that axis), so riders sit on its two flat side faces at
+-- the wheel's centre height — one to the left, one to the right — facing the Roller's front.
 local function positionCarried(roller: UnitData, riderId: string, rider: UnitData)
 	local rp     = roller.part
 	local center = rp.Position
@@ -1096,17 +1109,14 @@ local function positionCarried(roller: UnitData, riderId: string, rider: UnitDat
 
 	-- This rider's index within the Roller's seat list.
 	local list  = roller.carrying or {}
-	local cnt   = math.max(#list, 1)
 	local idx   = 1
 	for i, uid in list do if uid == riderId then idx = i; break end end
 
-	local slot    = idx - (cnt + 1) / 2                     -- centred: … -0.5, 0.5 … (0 when solo)
-	local spacing = math.max(rider.part.Size.X * 0.9, 2.4)
-	local hatchY  = rp.Size.Y * 0.5 * 0.75                  -- seat height above the Roller centre
-	local sink    = rider.part.Size.Y * 0.32               -- lower body tucked into the shell
-	local seat    = center
-		+ Vector3.new(0, hatchY + sink, 0)
-		+ right * (slot * spacing)
+	-- Alternate riders onto the left / right of the axle, tucked in toward the centre.
+	local halfAxle   = rp.Size.X * 0.5                       -- half the disc's width (its flat side)
+	local sideOffset = halfAxle * 0.5 + rider.part.Size.X * 0.15
+	local sideSign   = if idx % 2 == 1 then -1 else 1        -- 1st rider left, 2nd rider right
+	local seat       = center + right * (sideSign * sideOffset)  -- centre height, near the middle
 	rider.part.CFrame = CFrame.lookAt(seat, seat + fwd)
 end
 
@@ -1114,8 +1124,13 @@ end
 -- selectability + health bar so normal AI resumes next heartbeat.
 local function freeCarried(rider: UnitData)
 	rider.carriedBy = nil
-	if rider.part then rider.part.CanQuery = true end
-	setHealthBarEnabled(rider, true)
+	if rider.part then
+		rider.part.CanQuery = true
+		rider.part:SetAttribute("Carried", nil)   -- resume normal walk/idle gait
+	end
+	-- Only restore the bar if the unit is actually hurt — a full-HP unit shows no bar,
+	-- and forcing it on would leave a healthy dismounted unit with a bar stuck visible.
+	setHealthBarEnabled(rider, rider.hp < rider.maxHp)
 	rider.velocity    = Vector3.zero
 	rider.decorLastCF = nil
 end
@@ -1397,7 +1412,7 @@ local BLOOD_DEATH_SOUNDS = {
 local BIOLOGICAL_UNIT: { [string]: boolean } = {
 	Survivor = true, Sniper = true, Elite = true, Medic = true, CreepySoldier = true,
 	Lamprey = true, Hagfish = true, Broodmother = true, Leech = true, Embryo = true,
-	Roller = true, Watcher = true,
+	Roller = true, Watcher = true, Needler = true,
 }
 
 -- Per-type death-sound override: a unit listed here plays this single clip on death
@@ -2988,6 +3003,7 @@ function UnitManager.init(resourceManager)
 		-- ── Separation pass ────────────────────────────────────────────────────
 		for id, data in units do
 			if data.dying then continue end   -- a collapsing Broodmother stays put
+			if data.carriedBy then continue end   -- riding a Roller: positionCarried owns its seat
 			if data.immobilized or data.draggingId then continue end  -- rescue pass owns these
 			local myPos = data.part.Position
 			local myStr = tostring(data.owner.UserId)
@@ -3006,6 +3022,9 @@ function UnitManager.init(resourceManager)
 						if otherId == id then continue end
 						local other = units[otherId]
 						if not other then continue end
+						-- A rider that mounted this tick is still in the (start-of-tick) grid;
+						-- don't let it shove its Roller off course from the seat it's sitting in.
+						if other.carriedBy then continue end
 						if tostring(other.owner.UserId) ~= myStr then continue end
 						local dx   = myPos.X - other.part.Position.X
 						local dz   = myPos.Z - other.part.Position.Z
@@ -3208,37 +3227,43 @@ function UnitManager.init(resourceManager)
 		setLeechBurrowed(data, not data.burrowed)
 	end)
 
-	-- ── Embryo evolve → Lamprey / Hagfish / Roller / Mother (available to every Embryo) ──
+	-- ── Embryo evolve → Lamprey / Hagfish / Roller / Needler (available to every Embryo) ──
 	RemoteHandler.get(Config.REMOTES.EvolveEmbryo).OnServerEvent:Connect(function(player, embryoId, targetType)
 		if type(embryoId) ~= "string" or type(targetType) ~= "string" then return end
 		local data = units[embryoId]
 		if not data or data.owner ~= player or data.unitType ~= "Embryo" then return end
 		if data.hp <= 0 or data.dying then return end
+		if targetType ~= "Lamprey" and targetType ~= "Hagfish" and targetType ~= "Roller" and targetType ~= "Needler" then return end
 		local pos = despawnUnit(embryoId)
 		if not pos then return end
-		if targetType == "Lamprey" or targetType == "Hagfish" or targetType == "Roller" then
-			spawnUnit(player, pos, targetType)
-		elseif targetType == "Mother" and buildingManagerRef then
-			buildingManagerRef.morphStructureForPlayer(player, pos, "CommandCenter")
-		end
+		spawnUnit(player, pos, targetType)
 	end)
 
-	-- ── Leech evolve → Watcher (slow, ranged cluster of eyes) ──────────────────────
-	-- Charges LEECH_EVOLVE_COST, then despawns the Leech and spawns a Watcher in its
-	-- place. Works whether the Leech is mobile or burrowed.
-	RemoteHandler.get(Config.REMOTES.EvolveLeech).OnServerEvent:Connect(function(player, leechId)
+	-- ── Leech evolve → Watcher (ranged cluster of eyes) or Mother (Command Center) ──
+	-- Charges the appropriate cost, then despawns the Leech and spawns the chosen
+	-- unit/structure in its place. Works whether the Leech is mobile or burrowed.
+	RemoteHandler.get(Config.REMOTES.EvolveLeech).OnServerEvent:Connect(function(player, leechId, targetType)
 		if type(leechId) ~= "string" then return end
+		if targetType == nil then targetType = "Watcher" end -- back-compat with older clients
+		if targetType ~= "Watcher" and targetType ~= "Mother" then return end
 		local data = units[leechId]
 		if not data or data.owner ~= player or data.unitType ~= "Leech" then return end
 		if data.hp <= 0 or data.dying then return end
-		if not resourceManagerRef or not resourceManagerRef.spend(player, Config.LEECH_EVOLVE_COST) then return end
+		if targetType == "Mother" and not buildingManagerRef then return end
+
+		local cost = (targetType == "Mother") and Config.LEECH_MOTHER_COST or Config.LEECH_EVOLVE_COST
+		if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
 		local pos = despawnUnit(leechId)
 		if not pos then
 			-- Refund if the Leech vanished between the checks and the despawn.
-			resourceManagerRef.add(player, Config.LEECH_EVOLVE_COST)
+			resourceManagerRef.add(player, cost)
 			return
 		end
-		spawnUnit(player, pos, "Watcher")
+		if targetType == "Mother" then
+			buildingManagerRef.morphStructureForPlayer(player, pos, "CommandCenter")
+		else
+			spawnUnit(player, pos, "Watcher")
+		end
 	end)
 
 	-- ── Roller mount system ────────────────────────────────────────────────────────

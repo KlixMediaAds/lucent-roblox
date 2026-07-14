@@ -1367,6 +1367,17 @@ function HUD.playSuccessSound()
 	end
 end
 
+-- ── Notification sound ─────────────────────────────────────────────────────────
+-- One shared blip played whenever a notification toast appears. A single reused Sound
+-- (rather than a fresh instance each time) so a burst of toasts doesn't pile up voices.
+local notifSound       = Instance.new("Sound")
+notifSound.SoundId     = "rbxassetid://71092634771595"
+notifSound.Volume      = 0.6
+notifSound.Parent      = SoundService
+function HUD.playNotificationSound()
+	notifSound:Play()
+end
+
 -- ── Notification toast ────────────────────────────────────────────────────────
 -- Shows a small pill at the top-right that auto-dismisses after 4 s.
 -- Multiple calls stack vertically (each new toast appears below the previous).
@@ -1385,6 +1396,7 @@ end
 function HUD.showNotification(msg: string, color: Color3?)
 	local sg = localPlayer.PlayerGui:FindFirstChild("RTSHUD") :: ScreenGui?
 	if not sg then return end
+	HUD.playNotificationSound()
 
 	local col = color or C.TEXT
 

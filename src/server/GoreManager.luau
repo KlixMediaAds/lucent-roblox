@@ -48,6 +48,7 @@ local BLOOD: { [string]: Blood } = {
 	Leech         = { spray = EEL,   pool = EEL_DK,   bone = false },
 	Embryo        = { spray = EEL,   pool = EEL_DK,   bone = false },
 	Roller        = { spray = EEL,   pool = EEL_DK,   bone = false },
+	Needler       = { spray = EEL,   pool = EEL_DK,   bone = false },
 	CreepySoldier = { spray = ICHOR, pool = ICHOR_DK, bone = false },
 	Broodmother   = { spray = ICHOR, pool = ICHOR_DK, bone = false },
 }

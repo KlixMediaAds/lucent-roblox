@@ -106,11 +106,14 @@ local eyeMode:     string? = nil       -- mode the eye is currently shown for (n
 local eyeHoverMode: string? = nil      -- pill the cursor is currently over
 local eyeHoverEye  = false             -- cursor is over the eye itself
 local eyeToken     = 0                 -- cancels stale reveal timers
--- The DEFEND eye is offered even at 0 units, but once clicked it stays hidden until the
--- player pans the camera again (jumping home while already home is pointless).
-local defendEyeSuppressed = false
 local onPillEnter: (string) -> ()      -- forward (defined with the eye helpers)
 local onPillLeave: (string) -> ()
+
+-- Camera-hop cursor per mode: each eye press walks one step down that mode's priority
+-- order (recently-attacked units first). Reset to 0 whenever the eye is freshly revealed
+-- so the first click after a hover always lands on the top-priority (most-embattled) unit.
+local UNDER_ATTACK_WINDOW = 10   -- s; a unit hit this recently gets camera-hop priority
+local jumpCursor: { [string]: number } = { scout = 0, attack = 0, defend = 0 }
 
 local menuOpen   = false
 local currentIconType: string? = nil
@@ -351,7 +354,7 @@ local function showAlert(accent: Color3, unitType: string, header: string, body:
 
 	activeCard = card
 	TweenService:Create(card, SLIDE_IN, { Position = cardShown() }):Play()
-	playSound(138317894393091, 0.55)   -- enemy-spotted cue
+	playSound(80171931860010, 0.55)   -- enemy-spotted cue
 
 	task.delay(5, function()
 		if activeCard == card then dismissCard() end
@@ -680,26 +683,17 @@ local function releaseUnits(ids: { string })
 	end
 end
 
--- Enemy structure spotted by a scout: rally the scouts home and drop them to idle.
--- Attack / Defend units keep doing their jobs.
+-- Enemy structure spotted: mark it on the minimap and raise the sighting alert. Scouts
+-- KEEP scouting — discovering the enemy no longer recalls them or switches the scout
+-- order off. Attack / Defend units carry on with their jobs as before.
 local function onEnemyStructureFound(worldPos: Vector3, buildingId: string?)
+	miniMap.markEnemyStructure(worldPos, buildingId)
+
 	local scoutIds = unitsInMode("scout")
-	if #scoutIds == 0 then return end
+	if #scoutIds == 0 then return end   -- nobody scouting → no report portrait to show
 
 	local reportType = unitTypeOf(ownUnits[scoutIds[1]])
-	for _, id in scoutIds do
-		assign[id] = nil
-		scouts[id] = nil
-	end
-	if globalMode == "scout" then globalMode = nil end
-
-	local centroid = armyCentroid() or workspace.CurrentCamera.CFrame.Position
-	local cc = nearestOwnCC(centroid)
-	if cc then network.moveUnits(scoutIds, cc) end
-
-	if updatePanel then updatePanel() end
-	miniMap.markEnemyStructure(worldPos, buildingId)
-	showAlert(C.RED, reportType, "⚠  ENEMY DISCOVERED", "Enemy structure found! Scouts are falling back to base.")
+	showAlert(C.RED, reportType, "⚠  ENEMY DISCOVERED", "Enemy structure located — scouts press on.")
 end
 
 -- ── New unit incorporation ──────────────────────────────────────────────────────
@@ -819,15 +813,53 @@ end
 -- Hovering a pill for a full second (when that order has ≥1 unit) pops a 👁 above it.
 -- Clicking the eye snaps the camera to that order's forces:
 --   • DEFEND — flies home to the base (same as the [R] recenter).
---   • ATTACK — jumps to a random attacking troop and follows it until it dies or the
---              player pans away.
---   • SCOUT  — jumps to a random one of the OUTERMOST scouts and follows it (each press
---              re-rolls a new outer scout).
+--   • ATTACK / SCOUT — hop to that order's highest-priority troop and follow it (until it
+--              dies or the player pans). Priority = units hit in the last 10s first (most
+--              recent first), then outermost/most-forward; each further press steps to the
+--              next-lower priority, wrapping around.
 local EYE_GAP = 3   -- local px the eye's bottom overlaps onto the pill's top edge
 
 local function homeBasePos(): Vector3?
 	local ref = (defendCentroid ~= Vector3.zero and defendCentroid) or armyCentroid() or Vector3.zero
 	return nearestOwnCC(ref)
+end
+
+-- Camera-hop priority order for a mode's live units. Units hit within the last
+-- UNDER_ATTACK_WINDOW seconds come first (most-recently-hit first), then the rest ordered
+-- outermost-first (farthest from home = most forward/engaged). Fully deterministic so each
+-- successive eye press walks one unit down the list ("next least priority").
+local function hopOrder(ids: { string }, home: Vector3): { BasePart }
+	local now = workspace:GetServerTimeNow()
+	local hot:  { { part: BasePart, t: number } } = {}   -- under attack recently
+	local cold: { { part: BasePart, d: number } } = {}   -- everyone else
+	for _, id in ids do
+		local p = ownUnits[id]
+		if p and p.Parent then
+			local lastHit = p:GetAttribute("LastHit")
+			if typeof(lastHit) == "number" and now - lastHit <= UNDER_ATTACK_WINDOW then
+				hot[#hot + 1]  = { part = p, t = lastHit }
+			else
+				cold[#cold + 1] = { part = p, d = (p.Position - home).Magnitude }
+			end
+		end
+	end
+	table.sort(hot,  function(a, b) return a.t > b.t end)   -- most recently attacked first
+	table.sort(cold, function(a, b) return a.d > b.d end)   -- then outermost first
+	local order: { BasePart } = {}
+	for _, e in hot  do order[#order + 1] = e.part end
+	for _, e in cold do order[#order + 1] = e.part end
+	return order
+end
+
+-- Jump the camera to the next unit in `mode`'s priority order and follow it, advancing the
+-- per-mode cursor so repeated presses step through the list (embattled units first).
+local function hopToNext(mode: string, home: Vector3)
+	local order = hopOrder(unitsInMode(mode), home)
+	if #order == 0 then return end
+	jumpCursor[mode] = (jumpCursor[mode] % #order) + 1   -- 1,2,…,#order,1,… (wraps)
+	local part = order[jumpCursor[mode]]
+	cameraModule.setFocus(part.Position)   -- instant jump…
+	cameraModule.followPart(part)          -- …then follow until it dies / the player pans
 end
 
 -- Perform the camera jump for `mode` (called when its eye is clicked).
@@ -838,44 +870,19 @@ local function jumpForMode(mode: string)
 		local home = homeBasePos()
 		if home then cameraModule.returnToBase(home) end
 
-	elseif mode == "attack" then
-		local live: { BasePart } = {}
-		for _, id in unitsInMode("attack") do
-			local p = ownUnits[id]
-			if p and p.Parent then live[#live + 1] = p end
-		end
-		if #live > 0 then
-			local part = live[math.random(1, #live)]
-			cameraModule.setFocus(part.Position)   -- instant jump…
-			cameraModule.followPart(part)          -- …then lock on until it dies / player pans
-		end
-
-	elseif mode == "scout" then
-		-- Rank scouts by distance from home, jump to a random one of the outermost, and
-		-- follow it (until it dies or the player pans).
+	elseif mode == "attack" or mode == "scout" then
+		-- Recently-attacked troops get first dibs on the camera; each press hops to the
+		-- next-lower priority (see hopOrder).
 		local home = homeBasePos() or armyCentroid() or Vector3.zero
-		local ranked: { { part: BasePart, d: number } } = {}
-		for _, id in unitsInMode("scout") do
-			local p = ownUnits[id]
-			if p and p.Parent then
-				ranked[#ranked + 1] = { part = p, d = (p.Position - home).Magnitude }
-			end
-		end
-		if #ranked > 0 then
-			table.sort(ranked, function(a, b) return a.d > b.d end)
-			local outer = math.max(1, math.ceil(#ranked * 0.4))   -- the farthest ~40%
-			local pick  = ranked[math.random(1, outer)]
-			cameraModule.setFocus(pick.part.Position)   -- instant jump…
-			cameraModule.followPart(pick.part)          -- …then follow it
-		end
+		hopToNext(mode, home)
 	end
 end
 
 -- An order's eye is offered when the row is open and either it has units, or it's DEFEND
--- (always available) and not currently suppressed.
+-- (always available — jumping home works whenever the row is open).
 local function eyeAllowed(mode: string): boolean
 	if not menuOpen then return false end
-	if mode == "defend" then return not defendEyeSuppressed end
+	if mode == "defend" then return true end
 	return countInMode(mode) > 0
 end
 
@@ -901,6 +908,7 @@ end
 local function showEye(mode: string)
 	if not (eyeBtn and eyeScale) then return end
 	if eyeMode == mode and eyeBtn.Visible then positionEye(); return end   -- already up; don't re-animate
+	jumpCursor[mode] = 0   -- fresh reveal → the first click starts at the top priority
 	eyeMode = mode
 	positionEye()
 	eyeBtn.Visible          = true
@@ -913,26 +921,6 @@ local function showEye(mode: string)
 	TweenService:Create(eyeScale,
 		TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
 		{ Scale = 1 }):Play()
-end
-
--- After the DEFEND eye jumps home, keep it hidden until the player pans the camera away
--- from the home focus (moving the camera "re-arms" the jump-home eye).
-local function armDefendSuppression()
-	defendEyeSuppressed = true
-	if not cameraModule then return end
-	task.spawn(function()
-		task.wait(0.75)   -- let the fly-home animation settle first
-		local home = cameraModule.getFocus()
-		while defendEyeSuppressed do
-			if (cameraModule.getFocus() - home).Magnitude > 4 then
-				defendEyeSuppressed = false
-				-- If the cursor never left the DEFEND pill, pop the eye back right away.
-				if eyeHoverMode == "defend" and menuOpen then showEye("defend") end
-				break
-			end
-			task.wait(0.1)
-		end
-	end)
 end
 
 -- Pill hover → reveal the eye immediately (no delay) when the order allows it. Leaving
@@ -1036,9 +1024,22 @@ local function makeModeButton(parent: Frame, mode: string, label: string, color:
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then beginPillPress(mode) end
 	end)
 
-	-- Hovering the pill arms the 1-second eye reveal for this order.
-	b.MouseEnter:Connect(function() if onPillEnter then onPillEnter(mode) end end)
-	b.MouseLeave:Connect(function() if onPillLeave then onPillLeave(mode) end end)
+	-- Eye-reveal hover zone: a transparent catcher that covers the pill AND the EYE_ROOM
+	-- headroom above it (where the eye pops up), so the eye appears when the cursor is
+	-- merely near the pill vertically — not only when directly on top of it. It's inactive
+	-- (never sinks input), so pill drag/click and the eye's own click still work, and it's
+	-- the SOLE source of onPillEnter/Leave for this pill so leaving the pill for the
+	-- headroom above doesn't false-trigger a hide (the zone still contains the cursor).
+	local hoverZone              = Instance.new("Frame")
+	hoverZone.Name               = "EyeHoverZone"
+	hoverZone.AnchorPoint        = Vector2.new(0.5, 1)     -- bottom pinned to the pill's bottom
+	hoverZone.Position           = UDim2.new(0.5, 0, 1, 0)
+	hoverZone.Size               = UDim2.new(1, 0, 0, MENU_H + EYE_ROOM)  -- pill + headroom above
+	hoverZone.BackgroundTransparency = 1
+	hoverZone.ZIndex             = 50   -- below the pill fill/labels (51+) and the eye (60)
+	hoverZone.Parent             = b
+	hoverZone.MouseEnter:Connect(function() if onPillEnter then onPillEnter(mode) end end)
+	hoverZone.MouseLeave:Connect(function() if onPillLeave then onPillLeave(mode) end end)
 
 	modeButtons[mode] = { btn = b, stroke = st, color = color, fill = fill, nameLbl = nameLbl, countLbl = countLbl }
 end
@@ -1329,31 +1330,26 @@ local function createPanel()
 	end)
 	eye.MouseButton1Click:Connect(function()
 		local m = eyeMode
-		-- DEFEND is clickable even at 0 units; the others need someone to look at.
-		if not m or (m ~= "defend" and countInMode(m) <= 0) then hideEye(); return end
+		-- DEFEND is clickable even at 0 units; the others need someone to look at. Nothing
+		-- to jump to → just ignore the click (never hide the eye on click).
+		if not m or (m ~= "defend" and countInMode(m) <= 0) then return end
 		playSound(137887356175873, 0.6)   -- eye camera-jump cue
-		-- A quick confirm-squish, then run the jump and tuck the eye away.
+		-- A quick confirm-squish, then run the jump. The eye ALWAYS stays put afterwards so
+		-- the player can click again (re-roll a troop to follow, or re-jump home); it only
+		-- vanishes once the cursor leaves the pill+eye region, never on the click itself.
 		if eyeScale then
 			TweenService:Create(eyeScale,
 				TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 				{ Scale = 1.25 }):Play()
 		end
 		jumpForMode(m)
-		if m == "defend" then
-			-- DEFEND jumps home, then tucks away until the camera pans (re-arming it).
-			armDefendSuppression()
-			task.delay(0.12, hideEye)
-		elseif eyeScale then
-			-- SCOUT / ATTACK: the eye stays put so the player can click again to re-roll a
-			-- new troop to follow. Just settle the confirm-squish back to rest.
-			task.delay(0.1, function()
-				if eyeScale then
-					TweenService:Create(eyeScale,
-						TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-						{ Scale = 1 }):Play()
-				end
-			end)
-		end
+		task.delay(0.1, function()
+			if eyeScale then
+				TweenService:Create(eyeScale,
+					TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+					{ Scale = 1 }):Play()
+			end
+		end)
 	end)
 
 	updatePanel()

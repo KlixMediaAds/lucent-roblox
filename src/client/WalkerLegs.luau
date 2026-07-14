@@ -210,6 +210,9 @@ function WalkerLegs.init(cam: Camera)
 			local moved     = (bpos - e.lastPos).Magnitude
 			e.lastPos       = bpos
 			local rawSpeed  = moved / math.max(dt, 0.001)
+				-- Riding a Roller: the body is dragged along, but the walker holds its idle
+				-- stance (facing still follows the server-set CFrame = Roller's front).
+				if body:GetAttribute("Carried") then rawSpeed = 0 end
 			local alpha     = if rawSpeed > e.smoothSpeed then 0.25 else 0.07
 			e.smoothSpeed   = e.smoothSpeed + (rawSpeed - e.smoothSpeed) * alpha
 

@@ -688,6 +688,9 @@ function BroodmotherBody.init(cam: Camera)
 			local frameMove = (bpos - last).Magnitude
 			e.lastPos       = bpos
 			local spd       = frameMove / math.max(dt, 0.001)
+			-- Riding a Roller: the body is dragged along, but it holds its idle sway
+			-- (facing still follows the server-set CFrame = Roller's front).
+			if body:GetAttribute("Carried") then spd = 0 end
 			local alpha     = if spd > e.smoothSpeed then 0.3 else 0.08
 			e.smoothSpeed  += (spd - e.smoothSpeed) * alpha
 			local speedF    = math.clamp(e.smoothSpeed / FULL_SPEED, 0, 1)

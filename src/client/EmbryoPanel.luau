@@ -4,8 +4,8 @@
     Renders as a 2×2 tile grid.
 
     Every Embryo can evolve straight away (no unlock required): the grid always offers
-    four evolutions — Lamprey, Hagfish, Roller, Mother — each sends Network.evolveEmbryo,
-    and the server despawns the Embryo and spawns the chosen unit/structure in its place.
+    four evolutions — Lamprey, Hagfish, Roller, Needler — each sends Network.evolveEmbryo,
+    and the server despawns the Embryo and spawns the chosen unit in its place.
 ]]
 
 local CommandCard = require(script.Parent:WaitForChild("CommandCard"))
@@ -16,14 +16,14 @@ local OWNER       = "embryo"
 local LAMPREY_COL = Color3.fromRGB(120, 190,  60)
 local HAGFISH_COL = Color3.fromRGB( 90, 200, 150)
 local ROLLER_COL  = Color3.fromRGB(150,  70, 110)
-local MOTHER_COL  = Color3.fromRGB( 40,  40,  48)
+local NEEDLER_COL = Color3.fromRGB(170, 100,  60)
 
 type Opt = { key: string, name: string, icon: string, color: Color3, desc: string }
 local OPTIONS: { Opt } = {
 	{ key = "Lamprey", name = "LAMPREY", icon = "🐍", color = LAMPREY_COL, desc = "Evolve into a Lamprey." },
 	{ key = "Hagfish", name = "HAGFISH", icon = "🪱", color = HAGFISH_COL, desc = "Evolve into a Hagfish." },
 	{ key = "Roller",  name = "ROLLER",  icon = "⚙", color = ROLLER_COL,  desc = "Evolve into a Roller — a fast, armored grinder." },
-	{ key = "Mother",  name = "MOTHER",  icon = "⬛", color = MOTHER_COL,  desc = "Evolve into a new Mother (Command Center)." },
+	{ key = "Needler", name = "NEEDLER", icon = "🦂", color = NEEDLER_COL, desc = "Evolve into a Needler — a slow stalker that hauls itself along on one long insect arm and strikes with it." },
 }
 
 -- ── State ─────────────────────────────────────────────────────────────────────

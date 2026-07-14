@@ -25,6 +25,7 @@ local BroodmotherBody = require(script:WaitForChild("BroodmotherBody"))
 local LeechBody      = require(script:WaitForChild("LeechBody"))
 local RollerBody     = require(script:WaitForChild("RollerBody"))
 local WatcherBody    = require(script:WaitForChild("WatcherBody"))
+local NeedlerBody    = require(script:WaitForChild("NeedlerBody"))
 local MotherEggBody  = require(script:WaitForChild("MotherEggBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
 local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
@@ -84,7 +85,7 @@ end)
 do
 	local clickSound       = Instance.new("Sound")
 	clickSound.Name        = "UIClick"
-	clickSound.SoundId     = "rbxassetid://139804904213958"
+	clickSound.SoundId     = "rbxassetid://87204053561751"
 	clickSound.Volume      = 0.5
 	clickSound.Parent      = SoundService
 
@@ -112,7 +113,10 @@ do
 	local playerGui        = Players.LocalPlayer:WaitForChild("PlayerGui")
 	local function hook(inst: Instance)
 		if inst:IsA("GuiButton") then
-			inst.Activated:Connect(function() clickSound:Play() end)
+			-- Click SFX only on the lobby READY button and the radial menu nodes.
+			if inst.Name == "ReadyButton" or inst.Name == "NodeBtn" then
+				inst.Activated:Connect(function() clickSound:Play() end)
+			end
 			inst.MouseEnter:Connect(playHover)
 		end
 	end
@@ -303,6 +307,7 @@ BroodmotherBody.init(workspace.CurrentCamera)
 LeechBody.init(workspace.CurrentCamera)
 RollerBody.init(workspace.CurrentCamera)
 WatcherBody.init(workspace.CurrentCamera)
+NeedlerBody.init(workspace.CurrentCamera)
 MotherEggBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
 SwarmGrass.init(workspace.CurrentCamera)
@@ -1428,6 +1433,8 @@ Network.onUnitSpawned(function(unitId: string, _ownerId: number, _pos: Vector3)
 			RollerBody.attach(unitId, part)
 		elseif tv and tv.Value == "Watcher" then
 			WatcherBody.attach(unitId, part)
+		elseif tv and tv.Value == "Needler" then
+			NeedlerBody.attach(unitId, part)
 		end
 		-- Apply upgrade visuals if already researched
 		if _ownerId == localUserId then
@@ -1580,6 +1587,7 @@ end)
 -- ── Toast notification helper ─────────────────────────────────────────────────
 local function showNotification(text: string, color: Color3?)
 	local sg      = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+	HUD.playNotificationSound()
 	local lbl     = Instance.new("TextLabel")
 	lbl.Size      = UDim2.fromOffset(460, 44)
 	lbl.Position  = UDim2.new(0.5, -230, 0, 72)
@@ -1904,7 +1912,7 @@ Network.onAttackAlert(function(worldPos: Vector3, category: string)
 		firstAttackSongPlayed = true
 		local stinger   = Instance.new("Sound")
 		stinger.Name    = "FirstAttackStinger"
-		stinger.SoundId = "rbxassetid://138112098699544"
+		stinger.SoundId = "rbxassetid://135010752626049"
 		stinger.Volume  = FIRST_ATTACK_VOLUME
 		stinger.Parent  = SoundService
 		stinger:Play()
@@ -3645,6 +3653,13 @@ Network.onUnitHit(function(fromPos: Vector3, toPos: Vector3, unitType: string)
 		-- Ranged gaze — the nearest Watcher's eyes lock onto the target and fire a
 		-- brief converging glare beam (all VFX handled on the body).
 		WatcherBody.triggerGazeNear(fromPos, toPos)
+		return
+	end
+
+	if unitType == "Needler" then
+		-- Stationary melee — the nearest Needler cocks its long arm up and snaps it
+		-- down at the target (mantis-shrimp strike; all VFX handled on the body).
+		NeedlerBody.triggerAttackNear(fromPos, toPos)
 		return
 	end
 

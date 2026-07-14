@@ -181,6 +181,9 @@ function SpiderLegs.init(cam: Camera)
 			local moved    = (bpos - e.lastPos).Magnitude
 			e.lastPos      = bpos
 			local rawSpeed = moved / math.max(dt, 0.001)
+				-- Riding a Roller: the body is dragged along, but the unit holds its idle
+				-- stance (facing still follows the server-set CFrame = Roller's front).
+				if body:GetAttribute("Carried") then rawSpeed = 0 end
 
 			-- Smooth with a fast-rise / slow-fall filter so legs ease in/out
 			-- naturally rather than snapping when the server update ticks.

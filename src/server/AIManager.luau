@@ -472,7 +472,7 @@ local THREAT_BUILDING = {
 	Turret = 30, CreepyBlob = 35, Deployer = 50, Relay = 15,
 }
 local THREAT_UNIT = {
-	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Roller = 24, Survivor = 20,
+	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Needler = 26, Roller = 24, Survivor = 20,
 	Foamer = 18, CreepySoldier = 15, Hagfish = 14, Medic = 10, Harvester = 8,
 }
 

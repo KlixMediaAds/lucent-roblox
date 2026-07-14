@@ -434,6 +434,8 @@ local function hitUnit(): string?
 	if not result then return nil end
 	local inst = result.Instance
 	for id, info in knownUnits do
+		-- Riders aboard a Roller aren't clickable (they're tagged "Carried" by the server).
+		if info.part:GetAttribute("Carried") then continue end
 		-- Match the pivot part itself OR any descendant (e.g. the Leech's roomy
 		-- invisible ClickHitbox), so clicking the visible body selects the unit.
 		if info.ownerId == localPlayer.UserId
@@ -468,6 +470,7 @@ local function hitEnemyUnit(): string?
 	if not result then return nil end
 	local inst = result.Instance
 	for id, info in knownUnits do
+		if info.part:GetAttribute("Carried") then continue end   -- riders aboard a Roller
 		if info.ownerId ~= localPlayer.UserId
 			and (info.part == inst or inst:IsDescendantOf(info.part)) then
 			return id
@@ -653,6 +656,7 @@ local function boxSelect(x0: number, y0: number, x1: number, y1: number)
 	selected = {}
 	for id, info in knownUnits do
 		if info.ownerId ~= localPlayer.UserId then continue end
+		if info.part:GetAttribute("Carried") then continue end   -- riders aboard a Roller
 		local sp = workspace.CurrentCamera:WorldToViewportPoint(info.part.Position)
 		if sp.X >= x0 and sp.X <= x1 and sp.Y >= y0 and sp.Y <= y1 and sp.Z > 0 then
 			table.insert(selected, id)

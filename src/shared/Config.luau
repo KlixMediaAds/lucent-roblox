@@ -110,6 +110,7 @@ Config.UNIT_TYPES = {
 	Embryo        = { cost = 40,  size = Vector3.new(4, 4, 4) },  -- simple melee combatant; evolves once the Mother's Evolve is unlocked
 	Roller        = { cost = 130, size = Vector3.new(6, 10, 10) }, -- armored rolling disc (Whirlipede-like), evolves from an Embryo; visuals drawn client-side (RollerBody)
 	Watcher       = { cost = 90,  size = Vector3.new(6, 6, 6)  }, -- slow-drifting cluster of eyes (hagfish-eye inspired), evolves from a Leech; ranged gaze attack; visuals drawn client-side (WatcherBody)
+	Needler       = { cost = 100, size = Vector3.new(4, 6, 4)  }, -- spherical body + side eyes + a single long two-jointed insect arm, evolves from an Embryo; anchored-pull gait, stationary mantis-shrimp melee strike; visuals drawn client-side (NeedlerBody)
 }
 
 -- Field upgrade: a selected Survivor can be re-kitted into a Sniper (command-card
@@ -139,6 +140,7 @@ Config.LEECH_SCATTER_MAX      = 60    -- max studs a new Leech crawls out before
 -- A selected Leech can evolve in place into a Watcher (a slow, ranged cluster of eyes).
 -- The server charges this, despawns the Leech, and spawns a Watcher where it stood.
 Config.LEECH_EVOLVE_COST      = 70    -- one-time cost to evolve a Leech into a Watcher
+Config.LEECH_MOTHER_COST      = 100   -- one-time cost to evolve a Leech into a Mother (Command Center)
 
 -- Roller mount system: the armored Roller can carry up to CAPACITY units inside.
 -- MELEE passengers (short attack range) add their damage to the Roller's grind;
@@ -167,8 +169,8 @@ Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting
 
 -- Units (shared movement config)
 -- Roller moves 1.5× as fast as the Lamprey (13 → ~20); a heavy disc builds momentum, so its accel is low-ish.
-Config.UNIT_MOVE_SPEED        = { Survivor = 26, Sniper = 22, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24, Leech = 18, Embryo = 24, Roller = 20, Watcher = 7 }
-Config.UNIT_ACCEL             = { Survivor = 12, Sniper = 10, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14, Leech = 8,  Embryo = 12, Roller = 6, Watcher = 2 }
+Config.UNIT_MOVE_SPEED        = { Survivor = 26, Sniper = 22, Tank = 14, Howitzer = 9,  Elite = 20, Medic = 22, Foamer = 11, Lamprey = 13, Hagfish = 15, Broodmother = 8, CreepySoldier = 24, Leech = 18, Embryo = 24, Roller = 20, Watcher = 7, Needler = 10 }
+Config.UNIT_ACCEL             = { Survivor = 12, Sniper = 10, Tank = 4,  Howitzer = 3,  Elite = 8,  Medic = 10, Foamer = 3,  Lamprey = 3,  Hagfish = 4,  Broodmother = 3, CreepySoldier = 14, Leech = 8,  Embryo = 12, Roller = 6, Watcher = 2, Needler = 3 }
 Config.UNIT_FORMATION_SPACING = 7
 Config.UNIT_AGGRO_RADIUS      = 40   -- studs; idle/A-move units spot enemies here
 Config.UNIT_LEASH_RANGE       = 55   -- studs from aggro-start before retreating
@@ -481,16 +483,16 @@ Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
 Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15, TEST = 12 }
-Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0, Leech = 0, Embryo = 0, Roller = 0, Watcher = 0 }
+Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0, Leech = 0, Embryo = 0, Roller = 0, Watcher = 0, Needler = 0 }
 
 -- Combat / Health
 -- Roller: heavily armored (high HP), but its bite is a constant grind — low damage
 -- per hit at a very fast attack rate (short melee range so it rolls right up and stays).
-Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 220, Watcher = 170 }
+Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 220, Watcher = 170, Needler = 140 }
 Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
-Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20 }
-Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54 }
-Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8 }
+Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20, Needler = 42 }
+Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }
+Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance

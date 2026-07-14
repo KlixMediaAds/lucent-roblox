@@ -23,6 +23,7 @@ local OWNER      = "leech"
 local BURROW_COL   = Color3.fromRGB(120, 190,  90)
 local UNBURROW_COL = Color3.fromRGB(210, 170,  70)
 local EVOLVE_COL   = Color3.fromRGB(150,  70, 150)
+local MOTHER_COL   = Color3.fromRGB( 40,  40,  48)
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeIds:   { string } = {}
@@ -107,12 +108,27 @@ function LeechPanel._buildPage(): CommandCard.Page
 			and ("Evolve all " .. n .. " Leeches into Watchers — slow, drifting clusters of eyes with a ranged gaze attack. (" .. Config.LEECH_EVOLVE_COST .. " each)")
 			or ("Evolve into a Watcher — a slow, drifting cluster of eyes with a ranged gaze attack. (" .. Config.LEECH_EVOLVE_COST .. ")"),
 		onClick = function()
-			for _, id in activeIds do networkRef.evolveLeech(id) end
+			for _, id in activeIds do networkRef.evolveLeech(id, "Watcher") end
+		end,
+	}
+
+	-- EVOLVE → Mother (a new Command Center). The server charges LEECH_MOTHER_COST and
+	-- morphs each selected Leech into a Mother structure where it stood.
+	local motherSlot: CommandCard.Slot = {
+		index   = 3,
+		name    = "MOTHER",
+		icon    = "⬛",
+		color   = MOTHER_COL,
+		desc    = (n > 1)
+			and ("Evolve all " .. n .. " Leeches into new Mothers (Command Centers). (" .. Config.LEECH_MOTHER_COST .. " each)")
+			or ("Evolve into a new Mother — a Command Center. (" .. Config.LEECH_MOTHER_COST .. ")"),
+		onClick = function()
+			for _, id in activeIds do networkRef.evolveLeech(id, "Mother") end
 		end,
 	}
 
 	local header = (n > 1) and ("LEECHES ×" .. n) or "LEECH"
-	return { header = header, slots = { slot, evolveSlot }, cols = 2 }
+	return { header = header, slots = { slot, evolveSlot, motherSlot }, cols = 2 }
 end
 
 local function clearConns()

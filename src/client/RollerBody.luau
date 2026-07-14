@@ -55,13 +55,26 @@ local ROLL_GAIN  = 1.1        -- slight over-roll beyond the physical rate (sell
 local GRIND_TIME = 0.55       -- seconds the shell revs + sparks after a grind hit
 local GRIND_SPIN = 24.0       -- radians/sec the shell whirls while grinding a target
 
--- Rolling sound: a 1-s clip looped while moving, its volume + pitch tracking speed
--- with a randomised pitch wobble so it never sounds mechanically constant. The clip
--- is quiet, so it's boosted well above the default volume.
-local ROLL_SOUND_ID  = "rbxassetid://17812230504"
-local ROLL_VOL_MAX   = 3.0    -- peak volume at full speed (clip is quiet → boosted ~3×)
-local ROLL_PITCH_MIN = 0.82   -- randomised pitch-wobble range …
-local ROLL_PITCH_MAX = 1.28   -- … multiplied on top of the speed-based pitch
+-- Movement sound: a short clip re-triggered every MOVE_INTERVAL seconds while the Roller
+-- moves, layered across a small pool of voices so the triggers overlap instead of cutting
+-- each other off. Its pitch tracks speed and eases (light acceleration) so you clearly hear
+-- it rev up as the Roller starts and wind down as it stops. 3D-positional off the pivot.
+local MOVE_SOUND_ID  = "rbxassetid://9125703162"
+-- Organic pulses (not a constant stream): a slow envelope swells and ebbs, and voices only
+-- fire while it's above PULSE_GATE — bursts of sound separated by breathing rests in the
+-- trough. Pulse + burst rates rise with speed and wander a little so it's never metronomic.
+local PULSE_RATE_MIN = 0.7    -- pulses/sec at crawl
+local PULSE_RATE_MAX = 1.7    -- pulses/sec at full speed
+local PULSE_GATE     = 0.4    -- envelope level above which voices fire (the "on" part of a pulse)
+local BURST_INT_SLOW = 0.11   -- retrigger spacing within a pulse at crawl
+local BURST_INT_FAST = 0.05   -- retrigger spacing within a pulse at full speed
+local PULSE_JITTER   = 0.35   -- ± randomization on burst spacing (organic feel)
+local MOVE_VOLUME    = 0.8    -- lowered 60% from 2.0
+local PITCH_MIN      = 0.6    -- pitch at rest / crawl
+local PITCH_MAX      = 1.8    -- pitch at full speed
+local PITCH_ACCEL    = 2.5    -- how fast pitch eases toward the speed target (lower = more glide)
+local SND_POOL_N     = 8      -- overlapping voices
+local MOVE_SPEED_EPS = 2.0    -- smoothed studs/s above which the Roller counts as "moving"
 
 local CULL_SQ    = 300 * 300
 
@@ -110,11 +123,13 @@ type Entry = {
 	mouth:       BasePart,
 	sparkHost:   BasePart,
 	sparks:      ParticleEmitter,
-	rollSound:   Sound,
-	sndVol:      number,
+	sndPool:     { Sound },
+	sndIdx:      number,
 	pitchCur:    number,
-	pitchTarget: number,
-	pitchTimer:  number,
+	pulseClock:  number,
+	dirtHost:    BasePart,
+	dirt:        ParticleEmitter,
+	moveTimer:   number,
 	prevPos:     Vector3?,
 	roll:        number,
 	smoothSpeed: number,
@@ -164,6 +179,44 @@ local function makeSparks(host: BasePart): ParticleEmitter
 	pe.Acceleration   = Vector3.new(0, -40, 0)
 	pe.Rotation       = NumberRange.new(0, 360)
 	pe.RotSpeed       = NumberRange.new(-200, 200)
+	pe.Rate           = 0
+	pe.EmissionDirection = Enum.NormalId.Front
+	pe.Parent         = host
+	return pe
+end
+
+-- Dust kicked up from the trailing contact patch while the Roller rolls. Hosted on a
+-- part parked low behind the shell (its Front faces backward), so a soft, low, tan dust
+-- cloud puffs out behind and settles quickly — a subtle trail rather than heavy smoke.
+local function makeDirt(host: BasePart): ParticleEmitter
+	local pe          = Instance.new("ParticleEmitter")
+	pe.Texture        = "rbxasset://textures/particles/smoke_main.dds"
+	pe.Color          = ColorSequence.new({
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB(150, 128, 96)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(122, 102, 74)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB(96,  80,  58)),
+	})
+	pe.LightEmission  = 0
+	pe.LightInfluence = 1
+	-- Puff open from small to a soft cloud, then thin out as it dissipates.
+	pe.Size           = NumberSequence.new({
+		NumberSequenceKeypoint.new(0,   0.4),
+		NumberSequenceKeypoint.new(0.3, 1.1),
+		NumberSequenceKeypoint.new(1,   1.8),
+	})
+	-- Start faint, briefly firm up, then fade fully — keeps it wispy, never a solid blob.
+	pe.Transparency   = NumberSequence.new({
+		NumberSequenceKeypoint.new(0,   0.7),
+		NumberSequenceKeypoint.new(0.2, 0.45),
+		NumberSequenceKeypoint.new(1,   1.0),
+	})
+	pe.Lifetime       = NumberRange.new(0.35, 0.6)
+	pe.Speed          = NumberRange.new(2, 6)      -- gentle — it lingers low, not a jet
+	pe.Drag           = 4                          -- air-drag so grit slows and hangs
+	pe.SpreadAngle    = Vector2.new(40, 22)
+	pe.Acceleration   = Vector3.new(0, -14, 0)     -- soft settle back down
+	pe.Rotation       = NumberRange.new(0, 360)
+	pe.RotSpeed       = NumberRange.new(-60, 60)
 	pe.Rate           = 0
 	pe.EmissionDirection = Enum.NormalId.Front
 	pe.Parent         = host
@@ -223,16 +276,23 @@ function RollerBody.attach(unitId: string, body: BasePart)
 	sparkHost.Transparency = 1
 	local sparks    = makeSparks(sparkHost)
 
-	-- Looping rolling sound, emitted from the moving pivot (3D-positional).
-	local rollSound              = Instance.new("Sound")
-	rollSound.SoundId            = ROLL_SOUND_ID
-	rollSound.Looped             = true
-	rollSound.Volume             = 0
-	rollSound.RollOffMinDistance = 10
-	rollSound.RollOffMaxDistance = 150
-	rollSound.RollOffMode        = Enum.RollOffMode.Linear
-	rollSound.Parent             = body
-	rollSound:Play()
+	local dirtHost  = makePart(unitId, C_BODY, Enum.Material.SmoothPlastic)
+	dirtHost.Transparency = 1
+	local dirt      = makeDirt(dirtHost)
+
+	-- Pool of overlapping movement voices (see the update loop for the 0.25 s cadence).
+	local sndPool: { Sound } = {}
+	for _ = 1, SND_POOL_N do
+		local s              = Instance.new("Sound")
+		s.SoundId            = MOVE_SOUND_ID
+		s.Looped             = false
+		s.Volume             = MOVE_VOLUME
+		s.RollOffMinDistance = 10
+		s.RollOffMaxDistance = 150
+		s.RollOffMode        = Enum.RollOffMode.Linear
+		s.Parent             = body
+		table.insert(sndPool, s)
+	end
 
 	local n     = tonumber(unitId:match("%d+")) or 0
 	local phase = n * 0.6180339887
@@ -254,11 +314,13 @@ function RollerBody.attach(unitId: string, body: BasePart)
 		mouth       = mouth,
 		sparkHost   = sparkHost,
 		sparks      = sparks,
-		rollSound   = rollSound,
-		sndVol      = 0,
-		pitchCur    = 1,
-		pitchTarget = 1,
-		pitchTimer  = 0,
+		sndPool     = sndPool,
+		sndIdx      = 1,
+		pitchCur    = PITCH_MIN,
+		pulseClock  = 0,
+		dirtHost    = dirtHost,
+		dirt        = dirt,
+		moveTimer   = 0,
 		prevPos     = nil,
 		roll        = phase * 6.28,
 		smoothSpeed = 0,
@@ -282,10 +344,10 @@ function RollerBody.detach(unitId: string)
 		for _, p in t.segs do if p.Parent then p:Destroy() end end
 		if t.tip.Parent then t.tip:Destroy() end
 	end
-	for _, p in { e.core, e.mouth, e.sparkHost } do
+	for _, p in { e.core, e.mouth, e.sparkHost, e.dirtHost } do
 		if p.Parent then p:Destroy() end
 	end
-	if e.rollSound.Parent then e.rollSound:Destroy() end
+	for _, s in e.sndPool do if s.Parent then s:Destroy() end end
 end
 
 -- Rev + spark the nearest Roller to a grind origin.
@@ -415,6 +477,11 @@ local function layout(e: Entry, sc: number, speedF: number)
 
 	-- Park the spark emitter at the leading edge (front of the shell).
 	e.sparkHost.CFrame = CFrame.lookAt(center + fwd * (Rs * 0.9), center + fwd * (Rs * 2))
+
+	-- Park the dirt emitter at the trailing contact patch (behind + below the shell), its
+	-- Front facing backward-up so grit sprays out behind the Roller.
+	local dirtPos = center - fwd * (Rs * 0.55) - up * (Rs * 0.5)
+	e.dirtHost.CFrame = CFrame.lookAt(dirtPos, dirtPos - fwd + up * 0.5)
 end
 
 -- ── Init + animation loop ─────────────────────────────────────────────────────
@@ -457,18 +524,37 @@ function RollerBody.init(cam: Camera)
 			-- Tentacle ripple flows faster the quicker it moves.
 			e.tentClock += dt * TENT_FREQ * (1 + 0.6 * speedF)
 
-			-- Rolling sound: fade in with speed; pitch rises with speed and wobbles
-			-- randomly so it never sounds like one flat looped tone.
-			e.pitchTimer -= dt
-			if e.pitchTimer <= 0 then
-				e.pitchTimer  = 0.22 + math.random() * 0.35
-				e.pitchTarget = ROLL_PITCH_MIN + math.random() * (ROLL_PITCH_MAX - ROLL_PITCH_MIN)
+			-- Movement sound: pitch eases toward a speed-driven target (light acceleration),
+			-- so it audibly revs up on start and winds down on stop.
+			local pitchTarget = PITCH_MIN + speedF * (PITCH_MAX - PITCH_MIN)
+			e.pitchCur += (pitchTarget - e.pitchCur) * math.min(1, dt * PITCH_ACCEL)
+
+			-- Organic pulses: a slow envelope swells and ebbs; voices fire only on the crest
+			-- of each pulse (bursts) and rest in the trough — never a flat constant stream.
+			local isMoving = e.smoothSpeed > MOVE_SPEED_EPS
+			if isMoving then
+				local pulseRate = PULSE_RATE_MIN + speedF * (PULSE_RATE_MAX - PULSE_RATE_MIN)
+				e.pulseClock += dt * pulseRate * math.pi * 2
+				local level = math.sin(e.pulseClock) * 0.5 + 0.5   -- 0 (trough) → 1 (crest)
+
+				e.moveTimer -= dt
+				if level > PULSE_GATE and e.moveTimer <= 0 then
+					local burstInt = BURST_INT_SLOW + speedF * (BURST_INT_FAST - BURST_INT_SLOW)
+					e.moveTimer = burstInt * (1 + (math.random() * 2 - 1) * PULSE_JITTER)
+					local s  = e.sndPool[e.sndIdx]
+					e.sndIdx = e.sndIdx % SND_POOL_N + 1
+					-- Volume swells with the pulse; a little per-hit pitch wobble keeps it organic.
+					s.Volume        = MOVE_VOLUME * (0.2 + 0.8 * level)
+					s.PlaybackSpeed = e.pitchCur * (1 + (math.random() * 2 - 1) * 0.06)
+					s:Play()
+				end
+			else
+				e.moveTimer  = 0
+				e.pulseClock = 0        -- next move starts a fresh pulse
 			end
-			e.pitchCur += (e.pitchTarget - e.pitchCur) * math.min(1, dt * 6)
-			local targetVol = if speedF > 0.05 then math.clamp(0.35 + speedF, 0, 1) * ROLL_VOL_MAX else 0
-			e.sndVol += (targetVol - e.sndVol) * math.min(1, dt * 8)
-			e.rollSound.Volume        = e.sndVol
-			e.rollSound.PlaybackSpeed = e.pitchCur * (0.8 + speedF * 0.6)
+
+			-- Dust kicked up from behind, heavier the faster it rolls.
+			e.dirt.Rate = if isMoving then 40 * (0.3 + 0.7 * speedF) else 0
 
 			local sc = body.Size.Y / BASE_HEIGHT
 			layout(e, sc, speedF)

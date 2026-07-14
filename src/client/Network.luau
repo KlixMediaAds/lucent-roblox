@@ -253,9 +253,10 @@ function Network.evolveEmbryo(embryoId: string, targetType: string)
 	RemoteHandler.get(Config.REMOTES.EvolveEmbryo):FireServer(embryoId, targetType)
 end
 
--- leechId: evolve a Leech in place into a Watcher (slow ranged cluster of eyes)
-function Network.evolveLeech(leechId: string)
-	RemoteHandler.get(Config.REMOTES.EvolveLeech):FireServer(leechId)
+-- leechId, targetType ("Watcher"/"Mother"): evolve a Leech in place — into a Watcher
+-- (slow ranged cluster of eyes) or a Mother (a new Command Center)
+function Network.evolveLeech(leechId: string, targetType: string)
+	RemoteHandler.get(Config.REMOTES.EvolveLeech):FireServer(leechId, targetType)
 end
 
 -- rollerId, unitIds: send these owned units to climb into the Roller (right-click)

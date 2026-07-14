@@ -65,7 +65,7 @@ local MAP_X_CLOSED      = math.floor((DESIGN_W - MAP_BORDER) / 2)      -- 218 (c
 
 -- Game-start sounds
 local SND_COUNTDOWN = "rbxassetid://131999546232546"
-local SND_START     = "rbxassetid://137938748294875"
+local SND_START     = "rbxassetid://75131546063270"
 
 -- Minimap constants — must match MiniMap.luau (used by the game-start slide)
 local MINIMAP_SIZE = 180
@@ -91,6 +91,7 @@ local C_READY_DOT   = Color3.fromRGB(110, 224, 175)
 local C_WAITING_DOT = Color3.fromRGB(206,  92,  92)
 local C_SLOT        = Color3.fromRGB( 20,  25,  36)   -- inactive value button
 local C_SLOT_DIS    = Color3.fromRGB( 16,  19,  27)   -- disabled (coming soon)
+local C_FACTION_SEL = Color3.fromRGB( 46,  38,  22)   -- selected faction card (gold-tinted fill)
 local C_TERRAIN_DOT = Color3.fromRGB( 80,  68,  58)
 
 -- AI difficulty accent colors
@@ -138,7 +139,7 @@ local isReady             = false
 local settingsExpanded    = false
 -- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
 local selectedFaction     = "Humans"
-local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel } } = {}
+local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel, vpf: ViewportFrame, badge: TextLabel } } = {}
 local lobbyTerrainMode    = "Off"   -- Layered | Walled | Off (server owns the authoritative value)
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
@@ -851,15 +852,21 @@ local function setSettingsExpanded(expanded: boolean, instant: boolean?)
 	end
 end
 
--- Highlight whichever faction card is currently chosen (gold border + brighter fill).
+-- Highlight whichever faction card is currently chosen. The selected card gets a
+-- gold-tinted fill, a thick full-opacity gold border, a lifted "✓ SELECTED" badge and
+-- crisp text; the other card is clearly dimmed so the choice is unmistakable.
 local function applyFactionVisual()
 	for f, refs in factionCards do
 		local sel = f == selectedFaction
-		refs.card.BackgroundColor3 = sel and C_PANEL_HI or C_SLOT
-		refs.stroke.Color          = sel and C_GOLD or C_BORDER
-		refs.stroke.Thickness      = sel and 2 or 1
-		refs.stroke.Transparency   = sel and 0 or 0.35
-		refs.name.TextColor3       = sel and C_GOLD or C_TEXT
+		refs.card.BackgroundColor3      = sel and C_FACTION_SEL or C_SLOT
+		refs.card.BackgroundTransparency = sel and 0 or 0.35
+		refs.stroke.Color               = sel and C_GOLD or C_BORDER
+		refs.stroke.Thickness           = sel and 3 or 1
+		refs.stroke.Transparency        = sel and 0 or 0.6
+		refs.name.TextColor3            = sel and C_GOLD or C_SUBTEXT
+		refs.name.Font                  = sel and Enum.Font.GothamBlack or Enum.Font.GothamBold
+		refs.vpf.ImageTransparency      = sel and 0 or 0.55
+		refs.badge.Visible              = sel
 	end
 end
 
@@ -908,9 +915,24 @@ local function buildFactionSection(parent: Instance, y: number)
 		local nameLbl = label(card, d.label, 13, C_TEXT, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 0, 18), UDim2.new(0, 0, 1, -24), Enum.TextXAlignment.Center)
 
+		-- "✓ SELECTED" pill pinned to the top-left corner; shown only on the chosen card.
+		local badge = Instance.new("TextLabel")
+		badge.Name             = "SelBadge"
+		badge.Text             = "✓ SELECTED"
+		badge.Font             = Enum.Font.GothamBlack
+		badge.TextSize         = 10
+		badge.TextColor3       = C_BG
+		badge.BackgroundColor3 = C_GOLD
+		badge.Size             = UDim2.fromOffset(74, 16)
+		badge.Position         = UDim2.fromOffset(6, 6)
+		badge.ZIndex           = 5
+		badge.Visible          = false
+		badge.Parent           = card
+		corner(badge, 4)
+
 		local faction = d.faction
 		card.MouseButton1Click:Connect(function() setFaction(faction) end)
-		factionCards[faction] = { card = card, stroke = st, name = nameLbl }
+		factionCards[faction] = { card = card, stroke = st, name = nameLbl, vpf = vpf, badge = badge }
 	end
 
 	applyFactionVisual()  -- default (Humans) reads as selected without a network call
