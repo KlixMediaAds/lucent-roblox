@@ -60,6 +60,10 @@ type UnitData = {
 	-- Foam debuff received by any unit (including non-foamers)
 	foamedUntil     : number?,    -- tick() when foam expires on this unit; nil = not foamed
 	foamDotAccum    : number?,    -- accumulated dt for 1-s DoT tick
+	foamedBy        : string?,    -- owner id str of the foamer, so its DoT kill is credited
+	-- Kill attribution: owner id str of whoever landed the fatal blow. Set at each combat
+	-- damage site; the central death-removal loop reads it to credit "enemy units destroyed".
+	killedBy        : string?,
 	-- Hagfish
 	attackLockUntil : number?,    -- tick() until which a hagfish stays rooted mid-attack
 	-- Broodmother glowing-orb aura
@@ -74,6 +78,9 @@ type UnitData = {
 	draggedBy     : { string }?,     -- (casualty) unit ids currently hauling this soldier (≤ DRAG_SLOTS)
 	draggingId    : string?,         -- (rescuer) the casualty unit id this soldier is hauling
 	healingAtCC   : boolean?,        -- casualty has been brought home and is regenerating
+	-- Needler merge: how many Needler bodies are folded into this one (1 = a lone
+	-- Needler). Stats are summed on merge; the client draws mergeCount radial arms.
+	mergeCount    : number?,
 	-- Leech (Hollowed): burrowed = rooted underground, paying passive income (structure state)
 	burrowed      : boolean?,
 	burrowIncomeAt: number?,         -- os.clock() throttle for the next burrow income payout
@@ -170,6 +177,11 @@ local GROUND_CACHE_MAX = 500000  -- safety cap; wipe-and-refill beyond this
 -- Live unit count per player userId (for unit cap enforcement).
 local playerUnitCount: { [number]: number } = {}
 local MAX_UNITS_PER_PLAYER = 30
+
+-- Universal "enemy units destroyed" tally per combatant owner id string (players AND
+-- AI, unlike ResearchManager which is player-only). Drives the end-screen performance
+-- graph so every commander's kill curve can be charted. Reset each match.
+local killTally: { [string]: number } = {}
 
 -- ── Engineering Post random upgrades ────────────────────────────────────────────
 -- Per-player, per-unit-type stat multipliers granted by Light research. Applied to
@@ -576,6 +588,8 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		part.Transparency = 1
 		local bb = part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.StudsOffset = Vector3.new(0, 3.0, 0) end  -- just above the spherical body
+		-- Merge stack size (read by the client NeedlerBody to draw its radial arms).
+		part:SetAttribute("NeedlerCount", 1)
 	end
 	units[id] = {
 		part        = part,
@@ -615,6 +629,10 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 			d.target = dest
 		end
 		d.autoBurrow = true
+	end
+
+	if unitType == "Needler" then
+		units[id].mergeCount = 1
 	end
 
 	playerUnitCount[player.UserId] = (playerUnitCount[player.UserId] or 0) + 1
@@ -1301,6 +1319,11 @@ function UnitManager.removeAllUnitsFor(player: any)
 	end
 end
 
+-- Universal per-owner kill tally (players AND AI), for the end-screen performance graph.
+function UnitManager.getKillTally(): { [string]: number }
+	return killTally
+end
+
 function UnitManager.resetAll()
 	for id, data in units do
 		if data.part and data.part.Parent then data.part:Destroy() end
@@ -1310,6 +1333,7 @@ function UnitManager.resetAll()
 	playerUnitCount  = {}
 	playerStatMult   = {}
 	playerUpgradeLog = {}
+	killTally        = {}
 	table.clear(groundYCache)   -- terrain may regenerate for the next match
 	groundYCacheN = 0
 	GoreManager.clear()
@@ -1911,7 +1935,7 @@ function UnitManager.init(resourceManager)
 						local other = units[tgtId]
 						other.hp -= calcDamage(other, pass.attackDmg)
 						applyHP(other, true)
-						if other.hp <= 0 then table.insert(toRemove, tgtId) end
+						if other.hp <= 0 then other.killedBy = ownerStr; table.insert(toRemove, tgtId) end
 						unitHitRemote:FireAllClients(fromP, (tgtPos :: Vector3) + Vector3.new(0, 2, 0), pass.unitType)
 					elseif buildingManagerRef then
 						local bId, bPos = buildingManagerRef.getNearestEnemyBuilding(rPos, ownerStr, pass.attackRange)
@@ -2372,10 +2396,11 @@ function UnitManager.init(resourceManager)
 								other.foamedUntil  = now + Config.FOAMER_FOAM_DURATION
 								other.foamDotAccum = 0
 							end
+							other.foamedBy = fmStr   -- credit the foamer for any later DoT kill
 							-- Small direct-hit damage
 							other.hp -= calcDamage(other, data.attackDmg)
 							applyHP(other, true)
-							if other.hp <= 0 then table.insert(toRemove, fmBest) end
+							if other.hp <= 0 then other.killedBy = fmStr; table.insert(toRemove, fmBest) end
 							-- Face the target
 							local flatDir = Vector3.new(hitPos.X - fmPos.X, 0, hitPos.Z - fmPos.Z)
 							if flatDir.Magnitude > 0.1 then
@@ -2441,7 +2466,7 @@ function UnitManager.init(resourceManager)
 							if (other.part.Position - bPos).Magnitude > auraR then continue end
 							other.hp -= calcDamage(other, data.attackDmg)
 							applyHP(other, true)
-							if other.hp <= 0 then table.insert(toRemove, oid) end
+							if other.hp <= 0 then other.killedBy = bStr; table.insert(toRemove, oid) end
 						end
 					end
 					if bt - (data.broodAuraStart :: number) >= Config.BROODMOTHER_ACTIVE_TIME then
@@ -2613,7 +2638,7 @@ function UnitManager.init(resourceManager)
 								other.hp -= calcDamage(other, splashDmg)
 								applyHP(other, true)
 								if hasConcussion then other.slowUntil = slowEnd end
-								if other.hp <= 0 then table.insert(toRemove, otherId) end
+								if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, otherId) end
 							end
 						end
 					end
@@ -2662,7 +2687,7 @@ function UnitManager.init(resourceManager)
 							other.hp -= calcDamage(other, shotDmg)
 							applyHP(other, true)
 							if hasConcussion and other.hp > 0 then other.slowUntil = slowEnd end
-							if other.hp <= 0 then table.insert(toRemove, bestId2) end
+							if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 							for _ = 1, shotCount do
 								local ox = (math.random() - 0.5) * 2 * spreadR
 								local oz = (math.random() - 0.5) * 2 * spreadR
@@ -2716,7 +2741,7 @@ function UnitManager.init(resourceManager)
 							if other and other.hp > 0 then
 								other.hp -= calcDamage(other, data.attackDmg)
 								applyHP(other, true)
-								if other.hp <= 0 then table.insert(toRemove, tId) end
+								if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, tId) end
 							end
 							local tp = other and other.part.Position or myPos
 							strikeAt(tp.X, tp.Z)
@@ -2782,7 +2807,7 @@ function UnitManager.init(resourceManager)
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= calcDamage(other, data.attackDmg)
 						applyHP(other, true)
-						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+						if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 						if not data.rollerCharging and not data.rollerChargingOut then
 							data.rollerCharging     = true
 							local chargeDir = (other.part.Position - myPos)
@@ -2845,7 +2870,7 @@ function UnitManager.init(resourceManager)
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= calcDamage(other, dmg)
 						applyHP(other, true)
-						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+						if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 					elseif buildingManagerRef then
 						local bId: string?, bPos: Vector3?
 						if data.focusBldId then
@@ -2895,7 +2920,7 @@ function UnitManager.init(resourceManager)
 						hitPos = other.part.Position + Vector3.new(0, other.part.Size.Y * 0.5, 0)
 						other.hp -= calcDamage(other, data.attackDmg)
 						applyHP(other, true)
-						if other.hp <= 0 then table.insert(toRemove, bestId2) end
+						if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 					elseif buildingManagerRef then
 						local bId: string?, bPos: Vector3?
 						if data.focusBldId then
@@ -2937,6 +2962,7 @@ function UnitManager.init(resourceManager)
 						pos      = Vector3.new(hitPos.X, 0, hitPos.Z),
 						elapsed  = 0,
 						dotAccum = 0,
+						owner    = tostring(data.owner.UserId),   -- for kill credit on burn deaths
 					}
 				end
 			end
@@ -2957,7 +2983,7 @@ function UnitManager.init(resourceManager)
 					dotData.foamDotAccum = (dotData.foamDotAccum :: number) - 1.0
 					dotData.hp -= Config.FOAMER_FOAM_DOT
 					applyHP(dotData, true)
-					if dotData.hp <= 0 then table.insert(toRemove, dotId) end
+					if dotData.hp <= 0 then dotData.killedBy = dotData.foamedBy; table.insert(toRemove, dotId) end
 				end
 			end
 		end
@@ -2992,7 +3018,7 @@ function UnitManager.init(resourceManager)
 							if (udata.part.Position - fz.pos).Magnitude > FIRE_R then continue end
 							udata.hp -= dmgTick
 							applyHP(udata, true)
-							if udata.hp <= 0 then table.insert(toRemove, uid) end
+							if udata.hp <= 0 then udata.killedBy = fz.owner; table.insert(toRemove, uid) end
 						end
 					end
 				end
@@ -3080,9 +3106,18 @@ function UnitManager.init(resourceManager)
 		end
 
 		-- Remove dead units
+		local killCredit: { [string]: number } = {}   -- attacker id str → kills this frame
 		for _, id in toRemove do
 			local d = units[id]
 			if d then
+				-- Tally "enemy units destroyed" for whoever landed the fatal blow. killedBy is
+				-- set at each combat damage site; cleared here so a unit that is re-listed
+				-- (e.g. a Broodmother mid-collapse) is never counted twice. Applied in one
+				-- batched sync below rather than a remote fire per kill.
+				if d.killedBy and d.killedBy ~= tostring(d.owner.UserId) then
+					killCredit[d.killedBy] = (killCredit[d.killedBy] or 0) + 1
+					d.killedBy = nil
+				end
 				if d.trapperHarpooned then
 					for tId, _ in d.trapperHarpooned do
 						local tgt = units[tId]
@@ -3116,6 +3151,12 @@ function UnitManager.init(resourceManager)
 					unitToDeployer[id] = nil
 					if deployerUnits[dep] then deployerUnits[dep][id] = nil end
 				end
+			end
+		end
+		for attackerStr, n in killCredit do
+			killTally[attackerStr] = (killTally[attackerStr] or 0) + n   -- universal (incl. AI)
+			if researchManagerRef then
+				researchManagerRef.recordEnemyKills(attackerStr, n)      -- player-only research
 			end
 		end
 	end)
@@ -3327,6 +3368,60 @@ function UnitManager.init(resourceManager)
 		if roller.carrying and #roller.carrying > 0 then
 			dismountAll(roller, roller.part.Position)
 		end
+	end)
+
+	-- ── Needler merge (command-card button) ─────────────────────────────────────────
+	-- Fold the nearest owned Needler within range into the selected one, stacking their
+	-- bodies. A merge is refused if the two stacks together would exceed the cap, so a
+	-- 3 + 3 or a 4 + 2 request finds no partner and does nothing (see Config comment).
+	RemoteHandler.get(Config.REMOTES.MergeNeedler).OnServerEvent:Connect(function(player, needlerId)
+		if type(needlerId) ~= "string" then return end
+		local data = units[needlerId]
+		if not data or data.owner ~= player or data.unitType ~= "Needler" then return end
+		if data.hp <= 0 or data.dying then return end
+		local myCount = data.mergeCount or 1
+		if myCount >= Config.NEEDLER_MERGE_MAX then return end
+
+		-- Nearest owned Needler whose bodies can fold in without exceeding the cap.
+		local pos    = data.part.Position
+		local bestId  : string? = nil
+		local bestD   = math.huge
+		for uid, other in units do
+			if uid == needlerId then continue end
+			if other.owner ~= player or other.unitType ~= "Needler" then continue end
+			if other.hp <= 0 or other.dying then continue end
+			if myCount + (other.mergeCount or 1) > Config.NEEDLER_MERGE_MAX then continue end
+			local d = (other.part.Position - pos).Magnitude
+			if d < bestD then bestD = d; bestId = uid end
+		end
+		if not bestId or bestD > Config.NEEDLER_MERGE_RANGE then return end
+
+		local other    = units[bestId]
+		local newCount = myCount + (other.mergeCount or 1)
+
+		-- No HP or damage is lost in the fusion — the two bodies' stats simply sum.
+		data.mergeCount = newCount
+		data.maxHp     += other.maxHp
+		data.hp        += other.hp
+		data.attackDmg += other.attackDmg
+		-- Longer legs reach a little further; the heavier mass hauls itself a bit slower.
+		local baseRange = (Config.UNIT_ATTACK_RANGE :: any).Needler or 14
+		local baseSpeed = (Config.UNIT_MOVE_SPEED  :: any).Needler or 10
+		data.attackRange = baseRange + (newCount - 1) * 5
+		data.moveSpeed   = baseSpeed * (1 - 0.06 * (newCount - 1))
+
+		-- Grow the invisible pivot's XZ footprint so clicks/targeting match the wider
+		-- body. Y is left alone — ground-snapping and the client body scale key off it.
+		local base = Config.UNIT_TYPES.Needler.size
+		local f    = 1 + 0.32 * (newCount - 1)
+		data.part.Size = Vector3.new(base.X * f, base.Y, base.Z * f)
+		data.part:SetAttribute("NeedlerCount", newCount)
+
+		local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
+		if bb then bb.Size = UDim2.new(0, hpBarWidth(data.maxHp), 0, 4) end
+
+		-- Consume the absorbed Needler (its client body detaches when the part dies).
+		despawnUnit(bestId)
 	end)
 
 	RemoteHandler.get(Config.REMOTES.MoveUnits).OnServerEvent:Connect(function(player, ids, targetPos)

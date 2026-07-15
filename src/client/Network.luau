@@ -274,6 +274,11 @@ function Network.rollerDismount(rollerId: string)
 	RemoteHandler.get(Config.REMOTES.RollerDismount):FireServer(rollerId)
 end
 
+-- needlerId: fold the nearest owned Needler within range into this one (merge ability)
+function Network.mergeNeedler(needlerId: string)
+	RemoteHandler.get(Config.REMOTES.MergeNeedler):FireServer(needlerId)
+end
+
 -- unitId: a burrowed Leech just paid out income → play its harvest animation
 function Network.onLeechHarvest(fn: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.LeechHarvest).OnClientEvent:Connect(fn)
@@ -306,6 +311,33 @@ end
 -- Player chose "Leave Match" — forfeit the current match (server destroys our CC).
 function Network.forfeitMatch()
 	RemoteHandler.get(Config.REMOTES.ForfeitMatch):FireServer()
+end
+
+-- ── Leave / return to the ready-up lobby ────────────────────────────────────────
+-- Request a return to the ready-up menu. Solo → immediate reset; multiplayer → the
+-- server puts a surrender-restart vote to the other players first.
+function Network.leaveToLobby()
+	RemoteHandler.get(Config.REMOTES.LeaveToLobby):FireServer()
+end
+
+-- requesterName: another player wants to surrender + restart → show the vote popup.
+function Network.onSurrenderVote(fn: (requesterName: string) -> ())
+	RemoteHandler.get(Config.REMOTES.SurrenderVote).OnClientEvent:Connect(fn)
+end
+
+-- This player's answer to a pending surrender vote.
+function Network.surrenderVoteResult(accept: boolean)
+	RemoteHandler.get(Config.REMOTES.SurrenderVoteResult):FireServer(accept)
+end
+
+-- message: the pending vote was cancelled/declined → close the popup (message optional).
+function Network.onSurrenderCancel(fn: (message: string) -> ())
+	RemoteHandler.get(Config.REMOTES.SurrenderCancel).OnClientEvent:Connect(fn)
+end
+
+-- The match was reset — show the ready-up menu again.
+function Network.onReturnToLobby(fn: () -> ())
+	RemoteHandler.get(Config.REMOTES.ReturnToLobby).OnClientEvent:Connect(fn)
 end
 
 -- Sell the given structures for a partial refund (server validates ownership).

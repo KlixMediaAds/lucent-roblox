@@ -138,6 +138,20 @@ function ResearchManager.recordEnemyKilled(attackerUserIdStr: string)
 	fireProgressSync(player)
 end
 
+-- Batched variant: credit several kills to one attacker with a single progress sync.
+-- The central death-removal loop can free many units in one frame, so it tallies per
+-- attacker and applies the totals here to avoid one remote fire per kill.
+function ResearchManager.recordEnemyKills(attackerUserIdStr: string, count: number)
+	if count <= 0 then return end
+	local uid = tonumber(attackerUserIdStr)
+	if not uid or uid <= 0 then return end
+	local player = Players:GetPlayerByUserId(uid)
+	if not player then return end
+	local state = getState(player)
+	state.kills += count
+	fireProgressSync(player)
+end
+
 function ResearchManager.recordUnitTrained(player: any, unitType: string)
 	if not player or player.UserId <= 0 then return end
 	local state = getState(player)

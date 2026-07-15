@@ -28,6 +28,7 @@ local LobbyManager = {}
 local readyMap:        { [number]: boolean } = {}
 local rerollCooldown   = false
 local active           = true
+local mineralManagerRef: any = nil   -- stored in init so reopen() can re-sync deposits
 -- Terrain style cycles Layered → Walled → Off (the lobby "TERRAIN" button).
 --   Layered — the tiered, ramped plateau map.
 --   Walled  — winding rock walls units must route around (no ramps).
@@ -70,13 +71,14 @@ type AIEntry = { personality: string, level: number }
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
-local function buildReadyList(): { { name: string, userId: number, ready: boolean } }
+local function buildReadyList(): { { name: string, userId: number, ready: boolean, faction: string } }
 	local list = {}
 	for _, player in Players:GetPlayers() do
 		table.insert(list, {
-			name   = player.Name,
-			userId = player.UserId,
-			ready  = readyMap[player.UserId] == true,
+			name    = player.Name,
+			userId  = player.UserId,
+			ready   = readyMap[player.UserId] == true,
+			faction = player:GetAttribute("Faction") or "Humans",
 		})
 	end
 	return list
@@ -133,6 +135,7 @@ end
 function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntry }, string) -> ())
 
 	terrainManagerRef = terrainManager
+	mineralManagerRef = mineralManager
 
 	-- Apply the default terrain style (Off = flat) for the lobby immediately. Deposits
 	-- were already placed by MineralManager.init (on flat Y=0 ground); resnap them in case
@@ -240,11 +243,31 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		if not active then return end
 		if faction ~= "Humans" and faction ~= "Hollowed" then return end
 		player:SetAttribute("Faction", faction)
+		-- Re-sync so every client's player banners reflect the new race choice.
+		syncAll(mineralManager)
 	end)
 
 	for _, player in Players:GetPlayers() do
 		readyMap[player.UserId] = false
 	end
+end
+
+-- Re-open the lobby after a match (return to the ready-up menu). Re-activates the
+-- lobby, clears every ready flag, and re-syncs all clients so the reopened ready-up
+-- menu shows the current roster/settings. The persistent LobbyReady/… connections made
+-- in init keep working, so readying up starts a fresh match through the same handoff.
+function LobbyManager.reopen()
+	active = true
+	for _, player in Players:GetPlayers() do
+		readyMap[player.UserId] = false
+	end
+	if mineralManagerRef then
+		syncAll(mineralManagerRef)
+	end
+end
+
+function LobbyManager.isActive(): boolean
+	return active
 end
 
 return LobbyManager

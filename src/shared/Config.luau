@@ -494,6 +494,14 @@ Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitz
 Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }
 Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
 
+-- Needler merge ability: a selected Needler folds the nearest owned Needler within
+-- range into itself, stacking their bodies into one (up to NEEDLER_MERGE_MAX). Stacks
+-- of 1–2 keep the single-file drag gait; stacks of 3+ close up and their arms splay
+-- radially outward, walking as a spider. A merge is refused if the two stacks together
+-- would exceed the cap (so 3 + 3 or 4 + 2 is rejected — no stacks over 5).
+Config.NEEDLER_MERGE_MAX   = 5    -- most bodies a single Needler can hold
+Config.NEEDLER_MERGE_RANGE = 55   -- studs to reach the next Needler to merge with
+
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
 
@@ -587,11 +595,19 @@ Config.REMOTES = {
 	RollerMount             = "RollerMount",
 	RollerMountNearby       = "RollerMountNearby",
 	RollerDismount          = "RollerDismount",
+	MergeNeedler            = "MergeNeedler",
 	LeechHarvest            = "LeechHarvest",
 	MotherEggLand           = "MotherEggLand",
 	SellBuilding            = "SellBuilding",
 	ShowDefeatScreen        = "ShowDefeatScreen",
 	PlayAgain               = "PlayAgain",
+	-- Leave / return to the ready-up lobby. Solo → immediate; multiplayer → a
+	-- surrender-restart vote is put to the other players first.
+	LeaveToLobby            = "LeaveToLobby",        -- C→S: request return to the ready-up menu
+	SurrenderVote           = "SurrenderVote",       -- S→C: prompt other players (payload: requester name)
+	SurrenderVoteResult     = "SurrenderVoteResult", -- C→S: a voter's yes/no (payload: accept bool)
+	SurrenderCancel         = "SurrenderCancel",     -- S→C: close the vote popup (payload: message)
+	ReturnToLobby           = "ReturnToLobby",       -- S→C: reset done — show the ready-up menu
 }
 
 return Config

@@ -1774,6 +1774,17 @@ function AIManager.eliminateBot(userId: number)
 	ai.hasCC      = false
 end
 
+-- Every AI bot that took part in this match (id + a readable name), for the end-screen
+-- performance graph. Includes eliminated bots so their kill curve still shows.
+function AIManager.getBotsForGraph(): { { userId: number, name: string } }
+	local out = {}
+	for userId, ai in botByUserId do
+		local label = (ai.archetype and ai.archetype.label) or ai.personality or "Bot"
+		out[#out + 1] = { userId = userId, name = "AI " .. tostring(label) }
+	end
+	return out
+end
+
 function AIManager.resetBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end

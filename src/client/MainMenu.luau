@@ -1,40 +1,56 @@
 --[[
-	MainMenu — the first screen the player sees.
+	MainMenu, the first screen the player sees.
 
-	Deliberately sparse: a black screen with a mild colour glow rising from the
-	bottom edge that slowly drifts through the hue wheel, and two "nodes" that
-	float lazily around the middle, each forever easing toward a fresh nearby spot.
+	A tabbed shell with a persistent tab bar along the top. Selecting a tab swaps
+	the content beneath it while the bar stays put:
 
-	  • BATTLE   → tears the menu down and hands off to onBattle() (the Map/AI lobby).
-	  • TUTORIAL → not wired up yet; clicking it just flashes a "coming soon" hint.
+	  • LUCENT        → the landing panel: wordmark, tagline, and a big JOIN button
+	                    (JOIN just selects the READY UP tab).
+	  • READY UP      → reveals the Map/AI ready-up lobby *beneath* the tab bar by
+	                    hiding this menu's backdrop. The lobby (LobbyUI) is a separate
+	                    ScreenGui at a lower DisplayOrder; we flip it visible/hidden as
+	                    the tab is entered/left, so the bar never disappears. The lobby
+	                    still owns the game-start flow, when its countdown begins it
+	                    calls MainMenu.close() to drop this chrome for the transition.
+	  • TUTORIAL      → an in-menu "How to Play" panel.
+	  • CUSTOMIZATION → not built yet; the panel just reads "Coming soon".
 
-	Everything is client-side and self-contained. A UIScale keeps the node sizes
-	proportional across resolutions; node positions use scale coordinates so they
-	stay centred on any screen.
+	Everything is client-side. A UIScale on the content container keeps the layout
+	proportional across resolutions; the full-screen backdrop lives behind it.
 ]]
 
-local Players      = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
-local RunService   = game:GetService("RunService")
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local UnitVisuals = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UnitVisuals"))
 
 local MainMenu    = {}
 local localPlayer = Players.LocalPlayer
 
--- Reference resolution for the UIScale (node sizes scale off this).
+-- Reference resolution for the content UIScale.
 local DESIGN_W, DESIGN_H = 1280, 720
 
--- Float homes (scale coords) and how far each node wanders from home.
-local WANDER_X = 0.06   -- ± fraction of screen width
-local WANDER_Y = 0.07   -- ± fraction of screen height
+-- Module-level teardown so the lobby's game-start transition can drop this chrome
+-- via MainMenu.close() from outside the init closure.
+local activeClose: (() -> ())? = nil
 
--- Battle-lunge maw
-local N_FANGS  = 16
-local STING_ID = "rbxassetid://135417409504018"   -- shared with the F-key jumpscare
+-- ── Palette ───────────────────────────────────────────────────────────────────
+local C_GOLD    = Color3.fromRGB(232, 196, 120)
+local C_ACCENT  = Color3.fromRGB(120, 224, 255)
+local C_PANEL   = Color3.fromRGB( 12,  15,  22)
+local C_PANEL_HI= Color3.fromRGB( 20,  25,  35)
+local C_BORDER  = Color3.fromRGB( 64,  76,  98)
+local C_TITLE   = Color3.fromRGB(238, 240, 245)
+local C_TEXT    = Color3.fromRGB(206, 214, 228)
+local C_SUBTEXT = Color3.fromRGB(120, 134, 158)
+local C_TAB_OFF = Color3.fromRGB( 16,  20,  28)
 
 -- ── Small helpers ───────────────────────────────────────────────────────────
-local function circle(inst: GuiObject)
+local function corner(inst: GuiObject, r: number)
 	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(1, 0)
+	c.CornerRadius = UDim.new(0, r)
 	c.Parent = inst
 end
 
@@ -46,193 +62,54 @@ local function stroke(inst: GuiObject, color: Color3, thick: number): UIStroke
 	return s
 end
 
--- ── A floating node (Tutorial / Battle) ──────────────────────────────────────
-local function makeNode(
-	parent: Instance, text: string, accent: Color3, homeX: number, homeY: number
-): (TextButton, Frame, UIScale)
-	-- Soft outer glow (a larger, faint accent disc that breathes).
-	local glow = Instance.new("Frame")
-	glow.Name = text .. "Glow"
-	glow.Size = UDim2.fromOffset(196, 196)
-	glow.AnchorPoint = Vector2.new(0.5, 0.5)
-	glow.Position = UDim2.new(0.5, 0, 0.5, 0)
-	glow.BackgroundColor3 = accent
-	glow.BackgroundTransparency = 0.82
-	glow.BorderSizePixel = 0
-	glow.ZIndex = 4
-	circle(glow)
-
-	local btn = Instance.new("TextButton")
-	btn.Name = text .. "Node"
-	btn.Size = UDim2.fromOffset(150, 150)
-	btn.AnchorPoint = Vector2.new(0.5, 0.5)
-	btn.Position = UDim2.new(homeX, 0, homeY, 0)
-	btn.BackgroundColor3 = Color3.fromRGB(9, 11, 16)
-	btn.BackgroundTransparency = 0.15
-	btn.AutoButtonColor = false
-	btn.Text = ""
-	btn.ZIndex = 5
-	btn.Parent = parent
-	circle(btn)
-	local ring = stroke(btn, accent, 2)
-	ring.Transparency = 0.1
-
-	-- Per-node UIScale keeps the orb proportional across resolutions. It lives INSIDE
-	-- the button so it only scales the node (+ its glow/label), never the full-screen
-	-- backdrop, and the button's own scale-based position stays screen-relative.
-	local nodeScale = Instance.new("UIScale")
-	nodeScale.Parent = btn
-
-	-- Inner vertical sheen so the disc reads as a 3D orb, not a flat circle.
-	local sheen = Instance.new("UIGradient")
-	sheen.Rotation = 90
-	sheen.Color = ColorSequence.new(Color3.fromRGB(40, 46, 60), Color3.fromRGB(6, 8, 12))
-	sheen.Parent = btn
-
-	-- The glow rides the button, so parent it to the button and centre it.
-	glow.Parent = btn
-
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.new(1, 0, 1, 0)
-	lbl.BackgroundTransparency = 1
-	lbl.Font = Enum.Font.GothamBold
-	lbl.TextSize = 20
-	lbl.TextColor3 = accent
-	lbl.Text = text
-	lbl.TextYAlignment = Enum.TextYAlignment.Center
-	lbl.ZIndex = 6
-	lbl.Parent = btn
-
-	-- Hover: swell slightly and brighten the ring.
-	btn.MouseEnter:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.16), { Size = UDim2.fromOffset(166, 166) }):Play()
-		TweenService:Create(ring, TweenInfo.new(0.16), { Transparency = 0, Thickness = 3 }):Play()
-	end)
-	btn.MouseLeave:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.16), { Size = UDim2.fromOffset(150, 150) }):Play()
-		TweenService:Create(ring, TweenInfo.new(0.16), { Transparency = 0.1, Thickness = 2 }):Play()
-	end)
-
-	return btn, glow, nodeScale
+local function gradient(inst: GuiObject, c1: Color3, c2: Color3, rot: number): UIGradient
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(c1, c2)
+	g.Rotation = rot
+	g.Parent = inst
+	return g
 end
 
--- Forever ease the node from its current spot to a fresh one near its home.
-local function driftNode(btn: TextButton, homeX: number, homeY: number)
-	local function step()
-		if not btn.Parent then return end
-		local ox = (math.random() - 0.5) * 2 * WANDER_X
-		local oy = (math.random() - 0.5) * 2 * WANDER_Y
-		local dur = 4.5 + math.random() * 3
-		local tw = TweenService:Create(btn,
-			TweenInfo.new(dur, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-			{ Position = UDim2.new(homeX + ox, 0, homeY + oy, 0) })
-		tw.Completed:Connect(step)   -- each tween is fresh → one connection apiece
-		tw:Play()
+local function label(
+	parent: Instance, text: string, size: number, color: Color3, font: Enum.Font,
+	uiSize: UDim2, pos: UDim2, align: Enum.TextXAlignment?
+): TextLabel
+	local l = Instance.new("TextLabel")
+	l.Text = text; l.TextSize = size; l.TextColor3 = color; l.Font = font
+	l.Size = uiSize; l.Position = pos
+	l.BackgroundTransparency = 1
+	l.TextXAlignment = align or Enum.TextXAlignment.Center
+	l.TextYAlignment = Enum.TextYAlignment.Top
+	l.Parent = parent
+	return l
+end
+
+-- Tear down whatever menu is currently up (idempotent). Called on the lobby's
+-- game-start transition so the tab bar doesn't float over the dramatic sequence.
+function MainMenu.close()
+	if activeClose then
+		local fn = activeClose
+		activeClose = nil
+		fn()
 	end
-	step()
-end
-
--- Gentle breathing pulse on a node's outer glow (independent of hover/drift).
-local function breathe(glow: Frame)
-	TweenService:Create(glow,
-		TweenInfo.new(2.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-		{ BackgroundTransparency = 0.6, Size = UDim2.fromOffset(214, 214) }
-	):Play()
-end
-
--- A lamprey-style maw for the Battle lunge: a near-black throat with a blood-red
--- gullet, ringed by white fangs, centred at `atPos`. Its UIScale (returned) is
--- driven up to hurl the mouth at the screen. `fangs` is returned so the ring can
--- be popped into existence a beat before the lunge. Inspired by the F-key jumpscare.
-local function spawnMaw(parent: Instance, atPos: UDim2, sizePx: number): (Frame, UIScale, Frame)
-	local maw = Instance.new("Frame")
-	maw.Name = "BattleMaw"
-	maw.AnchorPoint = Vector2.new(0.5, 0.5)
-	maw.Position = atPos
-	maw.Size = UDim2.fromOffset(sizePx, sizePx)
-	maw.BackgroundTransparency = 1
-	maw.ZIndex = 8
-	maw.Parent = parent
-	local scale = Instance.new("UIScale")
-	scale.Parent = maw
-
-	-- Throat: near-black disc that swallows the view as it grows.
-	local throat = Instance.new("Frame")
-	throat.AnchorPoint = Vector2.new(0.5, 0.5)
-	throat.Position = UDim2.fromScale(0.5, 0.5)
-	throat.Size = UDim2.fromScale(1, 1)
-	throat.BackgroundColor3 = Color3.fromRGB(6, 3, 5)
-	throat.BorderSizePixel = 0
-	throat.ZIndex = 8
-	throat.Parent = maw
-	circle(throat)
-
-	-- Gullet: a blood-red core glowing at the centre of the throat.
-	local gullet = Instance.new("Frame")
-	gullet.AnchorPoint = Vector2.new(0.5, 0.5)
-	gullet.Position = UDim2.fromScale(0.5, 0.5)
-	gullet.Size = UDim2.fromScale(0.55, 0.55)
-	gullet.BackgroundColor3 = Color3.fromRGB(122, 16, 20)
-	gullet.BorderSizePixel = 0
-	gullet.ZIndex = 9
-	gullet.Parent = throat
-	circle(gullet)
-	local gg = Instance.new("UIGradient")
-	gg.Rotation = 90
-	gg.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.05),
-		NumberSequenceKeypoint.new(1, 0.85),
-	})
-	gg.Parent = gullet
-
-	-- Fang ring: white teeth bristling around the rim (radially, tapered to a tip).
-	local fangs = Instance.new("Frame")
-	fangs.Name = "Fangs"
-	fangs.AnchorPoint = Vector2.new(0.5, 0.5)
-	fangs.Position = UDim2.fromScale(0.5, 0.5)
-	fangs.Size = UDim2.fromScale(1, 1)
-	fangs.BackgroundTransparency = 1
-	fangs.ZIndex = 10
-	fangs.Parent = maw
-	local half = sizePx / 2
-	local R = half * 0.92
-	for k = 1, N_FANGS do
-		local a = (k - 0.5) / N_FANGS * math.pi * 2
-		local tooth = Instance.new("Frame")
-		tooth.AnchorPoint = Vector2.new(0.5, 0)                    -- pivot at the rim base
-		tooth.Position = UDim2.fromOffset(half + math.cos(a) * R, half + math.sin(a) * R)
-		tooth.Size = UDim2.fromOffset(sizePx * 0.1, sizePx * 0.24)
-		tooth.Rotation = math.deg(a) + 90                          -- run radially off the rim
-		tooth.BackgroundColor3 = Color3.fromRGB(232, 230, 214)
-		tooth.BorderSizePixel = 0
-		tooth.ZIndex = 10
-		tooth.Parent = fangs
-		local tc = Instance.new("UICorner")
-		tc.CornerRadius = UDim.new(0.5, 0)                          -- rounded fang tip
-		tc.Parent = tooth
-		local tg = Instance.new("UIGradient")
-		tg.Rotation = 90
-		tg.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(1, 0.3),                    -- fade toward the point
-		})
-		tg.Parent = tooth
-	end
-
-	return maw, scale, fangs
 end
 
 -- ── Public init ───────────────────────────────────────────────────────────────
-function MainMenu.init(onBattle: () -> ())
+-- `opts.buildLobby`      builds + shows the ready-up lobby for the first time.
+-- `opts.setLobbyVisible` shows/hides the (already-built) lobby without rebuilding.
+function MainMenu.init(opts: { buildLobby: () -> (), setLobbyVisible: (boolean) -> () })
+	local buildLobby      = opts.buildLobby
+	local setLobbyVisible = opts.setLobbyVisible
+
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "MainMenu"
 	sg.ResetOnSpawn = false
 	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 120   -- above the lobby (100) so it sits in front until dismissed
+	sg.DisplayOrder = 120   -- above the lobby (100) so the bar/panels sit in front
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.Parent = localPlayer:WaitForChild("PlayerGui")
 
-	-- Black backdrop.
+	-- ── Backdrop (full-screen). Hidden when READY UP reveals the lobby beneath. ─
 	local bg = Instance.new("Frame")
 	bg.Name = "Backdrop"
 	bg.Size = UDim2.new(1, 0, 1, 0)
@@ -241,7 +118,7 @@ function MainMenu.init(onBattle: () -> ())
 	bg.ZIndex = 1
 	bg.Parent = sg
 
-	-- Mild colour glow rising from the bottom edge. Its colour cycles slowly; the
+	-- Mild colour glow rising from the bottom edge; its colour cycles slowly and the
 	-- gradient fades it out toward the top so it reads as a soft ground haze.
 	local glow = Instance.new("Frame")
 	glow.Name = "BottomGlow"
@@ -261,61 +138,528 @@ function MainMenu.init(onBattle: () -> ())
 	})
 	glowGrad.Parent = glow
 
-	-- Faint wordmark up top so the empty screen still feels like "somewhere".
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.AnchorPoint = Vector2.new(0.5, 0)
-	title.Position = UDim2.new(0.5, 0, 0.16, 0)
-	title.Size = UDim2.fromOffset(600, 70)
-	title.BackgroundTransparency = 1
-	title.Font = Enum.Font.GothamBlack
-	title.TextSize = 56
-	title.TextColor3 = Color3.fromRGB(228, 232, 240)
-	title.TextTransparency = 0.35
-	title.Text = "LUCENT"
-	title.ZIndex = 3
-	title.Parent = bg
-	local titleStroke = stroke(title, Color3.fromRGB(120, 224, 255), 1)
-	titleStroke.Transparency = 0.8
+	-- ── Scaled content container. Sibling of bg (NOT a child) so hiding bg keeps
+	--    the tab bar visible over the lobby. ────────────────────────────────────
+	local container = Instance.new("Frame")
+	container.Name = "Container"
+	container.Size = UDim2.fromOffset(DESIGN_W, DESIGN_H)
+	container.AnchorPoint = Vector2.new(0.5, 0.5)
+	container.Position = UDim2.new(0.5, 0, 0.5, 0)
+	container.BackgroundTransparency = 1
+	container.ZIndex = 5
+	container.Parent = sg
 
-	-- Two floating nodes near the middle: Tutorial (left) and Battle (right).
-	local C_TUT   = Color3.fromRGB(150, 165, 190)   -- muted (not wired up yet)
-	local C_BATTLE = Color3.fromRGB(232, 196, 120)  -- inviting gold
-	local tutBtn,    tutGlow,    tutScale    = makeNode(bg, "TUTORIAL", C_TUT,    0.37, 0.54)
-	local battleBtn, battleGlow, battleScale = makeNode(bg, "BATTLE",   C_BATTLE, 0.63, 0.54)
-
-	-- Keep the nodes proportional to the viewport (the backdrop stays full-screen).
+	local uiScale = Instance.new("UIScale")
+	uiScale.Parent = container
 	local function rescale()
 		local cam = workspace.CurrentCamera
 		if not cam then return end
 		local vp = cam.ViewportSize
 		if vp.X == 0 or vp.Y == 0 then return end
-		local s = math.min(vp.X / DESIGN_W, vp.Y / DESIGN_H)
-		tutScale.Scale = s
-		battleScale.Scale = s
+		uiScale.Scale = math.min(vp.X / DESIGN_W, vp.Y / DESIGN_H)
 	end
 	rescale()
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
 
-	driftNode(tutBtn, 0.37, 0.54)
-	driftNode(battleBtn, 0.63, 0.54)
-	breathe(tutGlow)
-	breathe(battleGlow)
+	-- Small wordmark up top-left so the tab bar has an anchor.
+	local brand = label(container, "LUCENT", 28, C_TITLE, Enum.Font.GothamBlack,
+		UDim2.fromOffset(320, 38), UDim2.fromOffset(70, 22), Enum.TextXAlignment.Left)
+	gradient(brand, Color3.fromRGB(248, 250, 255), C_GOLD, 90)
+	local brandStroke = stroke(brand, C_GOLD, 1); brandStroke.Transparency = 0.6
 
-	-- "coming soon" hint that flashes when Tutorial is clicked.
-	local hint = Instance.new("TextLabel")
-	hint.Name = "TutorialHint"
-	hint.AnchorPoint = Vector2.new(0.5, 0)
-	hint.Position = UDim2.new(0.37, 0, 0.7, 0)
-	hint.Size = UDim2.fromOffset(240, 24)
-	hint.BackgroundTransparency = 1
-	hint.Font = Enum.Font.GothamMedium
-	hint.TextSize = 15
-	hint.TextColor3 = C_TUT
-	hint.TextTransparency = 1
-	hint.Text = "Coming soon"
-	hint.ZIndex = 6
-	hint.Parent = bg
+	-- ── Tab bar ───────────────────────────────────────────────────────────────
+	-- Kept compact and high so the ready-up lobby, shown beneath it, has room below.
+	local TAB_Y   = 22
+	local TAB_H   = 38
+	local TAB_GAP = 10
+
+	local tabBar = Instance.new("Frame")
+	tabBar.Name = "TabBar"
+	tabBar.AnchorPoint = Vector2.new(1, 0)
+	tabBar.Size = UDim2.fromOffset(720, TAB_H)
+	tabBar.Position = UDim2.fromOffset(DESIGN_W - 70, TAB_Y)
+	tabBar.BackgroundTransparency = 1
+	tabBar.ZIndex = 6
+	tabBar.Parent = container
+	local tabLayout = Instance.new("UIListLayout")
+	tabLayout.FillDirection = Enum.FillDirection.Horizontal
+	tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	tabLayout.Padding = UDim.new(0, TAB_GAP)
+	tabLayout.Parent = tabBar
+
+	-- Divider under the header/tab strip.
+	local headerRule = Instance.new("Frame")
+	headerRule.Name = "HeaderRule"
+	headerRule.Size = UDim2.new(1, -140, 0, 1)
+	headerRule.Position = UDim2.fromOffset(70, TAB_Y + TAB_H + 14)
+	headerRule.BackgroundColor3 = C_BORDER
+	headerRule.BackgroundTransparency = 0.4
+	headerRule.BorderSizePixel = 0
+	headerRule.ZIndex = 5
+	headerRule.Parent = container
+
+	-- ── Content region (holds the Lucent/Tutorial/Customization panels) ─────────
+	local CONTENT_Y = TAB_Y + TAB_H + 30
+	local content = Instance.new("Frame")
+	content.Name = "Content"
+	content.Size = UDim2.new(1, -140, 1, -(CONTENT_Y + 50))
+	content.Position = UDim2.fromOffset(70, CONTENT_Y)
+	content.BackgroundTransparency = 1
+	content.ZIndex = 4
+	content.Parent = container
+
+	-- Registry of tab buttons and their content panels.
+	local tabDefs   = { "Lucent", "ReadyUp", "Tutorial", "Customization" }
+	local tabLabels = { Lucent = "LUCENT", ReadyUp = "READY UP", Tutorial = "TUTORIAL", Customization = "CUSTOMIZATION" }
+	local tabButtons: { [string]: TextButton } = {}
+	local tabUnderlines: { [string]: Frame } = {}
+	local panels: { [string]: Frame } = {}
+	local dismissed = false
+	local activeTab = "Lucent"
+	local lobbyBuilt = false
+
+	local function makeTab(name: string, order: number)
+		local btn = Instance.new("TextButton")
+		btn.Name = name .. "Tab"
+		btn.Size = UDim2.fromOffset(name == "Customization" and 168 or 130, TAB_H)
+		btn.BackgroundColor3 = C_TAB_OFF
+		btn.BackgroundTransparency = 0.2
+		btn.AutoButtonColor = false
+		btn.Font = Enum.Font.GothamBold
+		btn.TextSize = 16
+		btn.TextColor3 = C_SUBTEXT
+		btn.Text = tabLabels[name]
+		btn.LayoutOrder = order
+		btn.ZIndex = 6
+		btn.Parent = tabBar
+		corner(btn, 6)
+		local st = stroke(btn, C_BORDER, 1); st.Transparency = 0.5
+
+		-- Gold underline that appears on the active tab.
+		local underline = Instance.new("Frame")
+		underline.Name = "Underline"
+		underline.AnchorPoint = Vector2.new(0.5, 1)
+		underline.Position = UDim2.new(0.5, 0, 1, -4)
+		underline.Size = UDim2.fromOffset(0, 2)
+		underline.BackgroundColor3 = C_GOLD
+		underline.BorderSizePixel = 0
+		underline.ZIndex = 7
+		underline.Parent = btn
+
+		btn.MouseEnter:Connect(function()
+			if activeTab == name then return end
+			TweenService:Create(btn, TweenInfo.new(0.12), { TextColor3 = C_TEXT, BackgroundTransparency = 0 }):Play()
+			TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0.2, Color = C_ACCENT }):Play()
+		end)
+		btn.MouseLeave:Connect(function()
+			if activeTab == name then return end
+			TweenService:Create(btn, TweenInfo.new(0.12), { TextColor3 = C_SUBTEXT, BackgroundTransparency = 0.2 }):Play()
+			TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0.5, Color = C_BORDER }):Play()
+		end)
+
+		tabButtons[name]    = btn
+		tabUnderlines[name] = underline
+	end
+
+	for i, name in tabDefs do makeTab(name, i) end
+
+	-- ── Panels ────────────────────────────────────────────────────────────────
+	local function newPanel(name: string): Frame
+		local p = Instance.new("Frame")
+		p.Name = name .. "Panel"
+		p.Size = UDim2.new(1, 0, 1, 0)
+		p.BackgroundTransparency = 1
+		p.Visible = false
+		p.ZIndex = 4
+		p.Parent = content
+		panels[name] = p
+		return p
+	end
+
+	-- Forward declaration so the JOIN button can drive tab selection.
+	local setTab
+
+	-- LUCENT: big wordmark, tagline, and a large JOIN button.
+	do
+		local p = newPanel("Lucent")
+
+		local hero = label(p, "LUCENT", 108, C_TITLE, Enum.Font.GothamBlack,
+			UDim2.new(1, 0, 0, 120), UDim2.new(0, 0, 0, 40))
+		gradient(hero, Color3.fromRGB(248, 250, 255), C_GOLD, 90)
+		local heroStroke = stroke(hero, C_GOLD, 1.6); heroStroke.Transparency = 0.5
+
+		label(p, "R E A L - T I M E   S T R A T E G Y", 18, C_SUBTEXT, Enum.Font.GothamMedium,
+			UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 168))
+
+		local join = Instance.new("TextButton")
+		join.Name = "JoinButton"
+		join.AnchorPoint = Vector2.new(0.5, 0)
+		join.Size = UDim2.fromOffset(300, 76)
+		join.Position = UDim2.new(0.5, 0, 0, 240)
+		join.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		join.BorderSizePixel = 0
+		join.AutoButtonColor = false
+		join.Font = Enum.Font.GothamBlack
+		join.TextSize = 30
+		join.TextColor3 = Color3.fromRGB(54, 38, 6)
+		join.Text = "JOIN GAME"
+		join.ZIndex = 5
+		join.Parent = p
+		corner(join, 8)
+		gradient(join, Color3.fromRGB(255, 248, 196), Color3.fromRGB(255, 204, 56), 90)
+		local joinStroke = stroke(join, Color3.fromRGB(255, 226, 120), 2); joinStroke.Transparency = 0.4
+		TweenService:Create(joinStroke,
+			TweenInfo.new(1.0, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{ Transparency = 0.05, Thickness = 3 }
+		):Play()
+		join.MouseEnter:Connect(function()
+			TweenService:Create(join, TweenInfo.new(0.12), { Size = UDim2.fromOffset(316, 80), TextSize = 32 }):Play()
+		end)
+		join.MouseLeave:Connect(function()
+			TweenService:Create(join, TweenInfo.new(0.12), { Size = UDim2.fromOffset(300, 76), TextSize = 30 }):Play()
+		end)
+		join.MouseButton1Click:Connect(function() setTab("ReadyUp") end)
+
+		label(p, "Select a map, add AI, and ready up to begin.", 15, C_SUBTEXT, Enum.Font.Gotham,
+			UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 0, 328))
+	end
+
+	-- TUTORIAL: an in-menu "How to Play" card.
+	do
+		local p = newPanel("Tutorial")
+
+		local card = Instance.new("Frame")
+		card.AnchorPoint = Vector2.new(0.5, 0)
+		card.Size = UDim2.fromOffset(720, 360)
+		card.Position = UDim2.new(0.5, 0, 0, 30)
+		card.BackgroundColor3 = C_PANEL
+		card.BackgroundTransparency = 0.05
+		card.BorderSizePixel = 0
+		card.ZIndex = 5
+		card.Parent = p
+		corner(card, 10)
+		local cs = stroke(card, C_BORDER, 1); cs.Transparency = 0.2
+		gradient(card, C_PANEL_HI, C_PANEL, 90)
+
+		label(card, "◆  HOW TO PLAY", 18, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, -48, 0, 24), UDim2.fromOffset(28, 22), Enum.TextXAlignment.Left)
+
+		local lines = {
+			"Your Command Core is placed automatically at your base, protect it.",
+			"Build Foundries near glowing deposits to bring in resources over time.",
+			"Raise Bonfires to summon your army; upgrade them to grow your forces.",
+			"Select units by dragging a box, then right-click to move or attack.",
+			"Wipe out the enemy Core before they destroy yours to win the match.",
+		}
+		local ly = 66
+		for _, text in lines do
+			-- Bullet diamond
+			local dot = Instance.new("Frame")
+			dot.Size = UDim2.fromOffset(8, 8)
+			dot.Position = UDim2.fromOffset(32, ly + 5)
+			dot.Rotation = 45
+			dot.BackgroundColor3 = C_ACCENT
+			dot.BorderSizePixel = 0
+			dot.ZIndex = 6
+			dot.Parent = card
+			local ln = label(card, text, 16, C_TEXT, Enum.Font.Gotham,
+				UDim2.new(1, -80, 0, 44), UDim2.fromOffset(52, ly), Enum.TextXAlignment.Left)
+			ln.TextWrapped = true
+			ln.ZIndex = 6
+			ly += 52
+		end
+	end
+
+	-- CUSTOMIZATION: a live 3D preview of three Hollowed creatures with two colour
+	-- options, Body (the dark overall flesh) and Signature (the glowing eyes/vents).
+	-- Preview-only for now: the picks recolour the viewport but aren't saved anywhere.
+	do
+		local p = newPanel("Customization")
+
+		-- Colour palettes. The first swatch of each is the canonical Hollowed look.
+		local BODY_COLORS = {
+			{ name = "Void Black",  c = Color3.fromRGB( 44,  42,  56) },  -- original dark flesh
+			{ name = "Ash Grey",    c = Color3.fromRGB( 78,  82,  92) },
+			{ name = "Bone Pale",   c = Color3.fromRGB(126, 116, 100) },
+			{ name = "Blood Hide",  c = Color3.fromRGB( 74,  26,  32) },
+		}
+		local SIG_COLORS = {
+			{ name = "Ember Orange", c = Color3.fromRGB(255, 120,  60) },  -- original glow
+			{ name = "Toxic Green",  c = Color3.fromRGB(120, 255, 140) },
+			{ name = "Void Violet",  c = Color3.fromRGB(190, 110, 255) },
+			{ name = "Ice Cyan",     c = Color3.fromRGB(110, 224, 255) },
+		}
+		local curBody = BODY_COLORS[1].c
+		local curSig  = SIG_COLORS[1].c
+
+		local card = Instance.new("Frame")
+		card.AnchorPoint = Vector2.new(0.5, 0)
+		card.Size = UDim2.fromOffset(900, 440)
+		card.Position = UDim2.new(0.5, 0, 0, 16)
+		card.BackgroundColor3 = C_PANEL
+		card.BackgroundTransparency = 0.05
+		card.BorderSizePixel = 0
+		card.ZIndex = 5
+		card.Parent = p
+		corner(card, 10)
+		local cs = stroke(card, C_BORDER, 1); cs.Transparency = 0.2
+		gradient(card, C_PANEL_HI, C_PANEL, 90)
+
+		label(card, "◆  CUSTOMIZE YOUR HOLLOWED", 18, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, -48, 0, 24), UDim2.fromOffset(28, 20), Enum.TextXAlignment.Left)
+
+		-- "COMING SOON" pill in the top-right corner: this screen is a preview only.
+		local soon = Instance.new("TextLabel")
+		soon.AnchorPoint = Vector2.new(1, 0)
+		soon.Size = UDim2.fromOffset(150, 26)
+		soon.Position = UDim2.fromOffset(900 - 24, 20)
+		soon.BackgroundColor3 = C_GOLD
+		soon.BackgroundTransparency = 0.12
+		soon.BorderSizePixel = 0
+		soon.Font = Enum.Font.GothamBlack
+		soon.TextSize = 13
+		soon.TextColor3 = Color3.fromRGB(30, 24, 10)
+		soon.Text = "COMING SOON"
+		soon.ZIndex = 7
+		soon.Parent = card
+		corner(soon, 6)
+
+		-- ── Live viewport (left) ────────────────────────────────────────────────
+		local vpHolder = Instance.new("Frame")
+		vpHolder.Size = UDim2.fromOffset(520, 356)
+		vpHolder.Position = UDim2.fromOffset(24, 62)
+		vpHolder.BackgroundColor3 = Color3.fromRGB(8, 11, 18)
+		vpHolder.BorderSizePixel = 0
+		vpHolder.ClipsDescendants = true
+		vpHolder.ZIndex = 6
+		vpHolder.Parent = card
+		corner(vpHolder, 8)
+		local vhs = stroke(vpHolder, C_BORDER, 1); vhs.Transparency = 0.35
+		gradient(vpHolder, Color3.fromRGB(14, 18, 28), Color3.fromRGB(7, 9, 15), 90)
+
+		local vpf = Instance.new("ViewportFrame")
+		vpf.Size = UDim2.new(1, 0, 1, 0)
+		vpf.BackgroundTransparency = 1
+		vpf.Ambient = Color3.fromRGB(150, 150, 158)
+		vpf.LightColor = Color3.fromRGB(255, 244, 224)
+		vpf.LightDirection = Vector3.new(-0.6, -1, -0.4)
+		vpf.ZIndex = 6
+		vpf.Parent = vpHolder
+
+		label(vpHolder, "LIVE", 11, C_SUBTEXT, Enum.Font.GothamBold,
+			UDim2.fromOffset(60, 14), UDim2.fromOffset(12, 10), Enum.TextXAlignment.Left).ZIndex = 7
+
+		-- Build three Hollowed creatures, each in its own Model so it can idle. The
+		-- Broodmother (tallest) sits in the centre, flanked by two reared eels.
+		local UNIT_DEFS = {
+			{ t = "Lamprey",     x = -13 },
+			{ t = "Broodmother", x =   0 },
+			{ t = "Hagfish",     x =  15 },
+		}
+		local models:    { Model }   = {}
+		local bases:     { CFrame }  = {}
+		local bodyParts: { BasePart } = {}
+		local sigParts:  { BasePart } = {}
+
+		for _, def in UNIT_DEFS do
+			local m = Instance.new("Model")
+			m.Name = def.t
+			UnitVisuals.buildUnitPreview(m, def.t, BrickColor.new("Really black"))
+
+			-- Classify parts by role: Neon → glowing signature; dark SmoothPlastic →
+			-- body flesh. Teeth/maw/dirt (bright or non-plastic) are left untouched.
+			for _, part in m:GetDescendants() do
+				if part:IsA("BasePart") then
+					if part.Material == Enum.Material.Neon then
+						table.insert(sigParts, part)
+					elseif part.Material == Enum.Material.SmoothPlastic
+						and math.max(part.Color.R, part.Color.G, part.Color.B) < 0.36 then
+						table.insert(bodyParts, part)
+					end
+				end
+			end
+
+			-- Sit its feet on a common ground line at the requested column.
+			local _, size = m:GetBoundingBox()
+			local base = CFrame.new(def.x, size.Y / 2, 0)
+			m:PivotTo(base)
+			m.Parent = vpf
+			table.insert(models, m)
+			table.insert(bases, base)
+		end
+
+		-- Frame a camera on the whole line-up (front-quarter view, slightly above).
+		local minX, minY, minZ =  math.huge,  math.huge,  math.huge
+		local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+		for _, m in models do
+			for _, part in m:GetDescendants() do
+				if part:IsA("BasePart") and part.Transparency < 0.99 then
+					local pp, hs = part.Position, part.Size / 2
+					minX = math.min(minX, pp.X - hs.X); maxX = math.max(maxX, pp.X + hs.X)
+					minY = math.min(minY, pp.Y - hs.Y); maxY = math.max(maxY, pp.Y + hs.Y)
+					minZ = math.min(minZ, pp.Z - hs.Z); maxZ = math.max(maxZ, pp.Z + hs.Z)
+				end
+			end
+		end
+		local center = Vector3.new((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2)
+		local extent = math.max(maxX - minX, maxY - minY) + 4
+		local FOV = 26
+		local dist = (extent / 2) / math.tan(math.rad(FOV / 2)) * 1.08
+		local dir  = Vector3.new(0.34, 0.24, -1).Unit
+		local cam  = Instance.new("Camera")
+		cam.FieldOfView = FOV
+		cam.CFrame = CFrame.lookAt(center + dir * dist, center)
+		cam.Parent = vpf
+		vpf.CurrentCamera = cam
+
+		-- Apply the currently-selected colours to every classified part.
+		local function applyColors()
+			for _, part in bodyParts do part.Color = curBody end
+			for _, part in sigParts  do part.Color = curSig  end
+		end
+		applyColors()
+
+		-- ── Colour options (right) ──────────────────────────────────────────────
+		local OPT_X   = 568
+		local SW_SIZE = 46
+		local SW_GAP  = 14
+
+		local function makeOptionRow(titleText: string, caption: string, y: number,
+			colors: { { name: string, c: Color3 } }, initial: number, onPick: (Color3) -> ()
+		)
+			label(card, titleText, 14, C_GOLD, Enum.Font.GothamBold,
+				UDim2.new(0, 300, 0, 18), UDim2.fromOffset(OPT_X, y), Enum.TextXAlignment.Left)
+			label(card, caption, 12, C_SUBTEXT, Enum.Font.Gotham,
+				UDim2.new(0, 300, 0, 16), UDim2.fromOffset(OPT_X, y + 20), Enum.TextXAlignment.Left)
+
+			local nameLbl = label(card, colors[initial].name, 12, C_TEXT, Enum.Font.GothamMedium,
+				UDim2.new(0, 300, 0, 16), UDim2.fromOffset(OPT_X, y + 44 + SW_SIZE + 8), Enum.TextXAlignment.Left)
+
+			local strokes: { UIStroke } = {}
+			local function select(i: number)
+				for j, st in strokes do
+					local on = j == i
+					st.Color = on and C_GOLD or C_BORDER
+					st.Thickness = on and 3 or 1
+					st.Transparency = on and 0 or 0.5
+				end
+				nameLbl.Text = colors[i].name
+				onPick(colors[i].c)
+			end
+
+			for i, def in colors do
+				local sw = Instance.new("TextButton")
+				sw.Size = UDim2.fromOffset(SW_SIZE, SW_SIZE)
+				sw.Position = UDim2.fromOffset(OPT_X + (i - 1) * (SW_SIZE + SW_GAP), y + 44)
+				sw.BackgroundColor3 = def.c
+				sw.AutoButtonColor = false
+				sw.BorderSizePixel = 0
+				sw.Text = ""
+				sw.ZIndex = 6
+				sw.Parent = card
+				corner(sw, 6)
+				local st = stroke(sw, C_BORDER, 1); st.Transparency = 0.5
+				strokes[i] = st
+				sw.MouseButton1Click:Connect(function() select(i) end)
+			end
+			select(initial)
+		end
+
+		makeOptionRow("BODY", "The creature's overall flesh colour.", 70,
+			BODY_COLORS, 1, function(c) curBody = c; applyColors() end)
+		makeOptionRow("SIGNATURE", "The glow of its eyes, vents and orbs.", 236,
+			SIG_COLORS, 1, function(c) curSig = c; applyColors() end)
+
+		label(card, "Preview only, your picks aren't saved into a match yet.", 12, C_SUBTEXT,
+			Enum.Font.Gotham, UDim2.new(0, 320, 0, 16), UDim2.fromOffset(OPT_X, 400), Enum.TextXAlignment.Left)
+
+		-- ── Idle animation ──────────────────────────────────────────────────────
+		-- Each creature breathes (vertical bob) and sways gently. Runs only while the
+		-- Customization tab is showing; self-disconnects when the menu is torn down.
+		local phase = { 0.0, 1.3, 2.4 }
+		local idleConn: RBXScriptConnection
+		idleConn = RunService.RenderStepped:Connect(function()
+			if not sg.Parent then idleConn:Disconnect(); return end
+			if activeTab ~= "Customization" then return end
+			local now = os.clock()
+			for i, m in models do
+				local ph   = phase[i] or 0
+				local bob  = math.sin(now * 1.5 + ph) * 0.35
+				local sway = math.rad(math.sin(now * 0.8 + ph) * 5)
+				m:PivotTo(bases[i] * CFrame.new(0, bob, 0) * CFrame.Angles(0, sway, 0))
+			end
+		end)
+	end
+
+	-- ── Cameras ───────────────────────────────────────────────────────────────
+	-- The menu's own scriptable view (used by every tab except READY UP, which
+	-- hands the camera to the lobby's overhead shot).
+	local function menuCamera()
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CFrame = CFrame.lookAt(Vector3.new(0, 60, 40), Vector3.new(0, 0, 0))
+	end
+
+	-- ── Tab switching ─────────────────────────────────────────────────────────
+	local function styleTab(name: string, active: boolean)
+		local btn = tabButtons[name]
+		local underline = tabUnderlines[name]
+		local st = btn:FindFirstChildOfClass("UIStroke")
+		if active then
+			btn.TextColor3 = C_GOLD
+			btn.BackgroundTransparency = 0
+			if st then st.Color = C_GOLD; st.Transparency = 0.1 end
+			TweenService:Create(underline, TweenInfo.new(0.18), { Size = UDim2.fromOffset(btn.Size.X.Offset - 24, 2) }):Play()
+		else
+			btn.TextColor3 = C_SUBTEXT
+			btn.BackgroundTransparency = 0.2
+			if st then st.Color = C_BORDER; st.Transparency = 0.5 end
+			underline.Size = UDim2.fromOffset(0, 2)
+		end
+	end
+
+	-- Reveal the ready-up lobby beneath the tab bar: hide the backdrop, and build
+	-- (first time) or re-show the lobby ScreenGui.
+	local function enterLobbyTab()
+		bg.Visible = false
+		if not lobbyBuilt then
+			buildLobby()
+			lobbyBuilt = true
+		else
+			setLobbyVisible(true)
+		end
+	end
+
+	-- Leaving READY UP: hide the lobby, restore the backdrop + menu camera.
+	local function leaveLobbyTab()
+		if lobbyBuilt then setLobbyVisible(false) end
+		bg.Visible = true
+		menuCamera()
+	end
+
+	function setTab(name: string)
+		if dismissed then return end
+		local leavingLobby = (activeTab == "ReadyUp") and (name ~= "ReadyUp")
+		activeTab = name
+		for _, tName in tabDefs do
+			styleTab(tName, tName == name)
+			if panels[tName] then panels[tName].Visible = (tName == name) end
+		end
+		if name == "ReadyUp" then
+			enterLobbyTab()
+		elseif leavingLobby then
+			leaveLobbyTab()
+		end
+	end
+
+	for _, name in tabDefs do
+		local capture = name
+		tabButtons[name].MouseButton1Click:Connect(function() setTab(capture) end)
+	end
+
+	setTab("Lucent")
 
 	-- Slow hue cycle on the bottom glow.
 	local hue = 0.58
@@ -326,115 +670,19 @@ function MainMenu.init(onBattle: () -> ())
 	end)
 
 	-- Present the menu behind a fresh scriptable camera so nothing from the
-	-- default view bleeds through before the player picks a node.
-	task.spawn(function()
-		local cam = workspace.CurrentCamera
-		if cam then
-			cam.CameraType = Enum.CameraType.Scriptable
-			cam.CFrame = CFrame.lookAt(Vector3.new(0, 60, 40), Vector3.new(0, 0, 0))
-		end
-	end)
+	-- default view bleeds through before the player picks a tab.
+	task.spawn(menuCamera)
 
-	-- ── Wiring ──────────────────────────────────────────────────────────────
-	local dismissed = false
-
-	-- Dissolve the whole menu away, revealing the map lobby that sits behind it.
-	local function fadeMenu(dur: number)
-		local fade = TweenInfo.new(dur, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-		pcall(function() TweenService:Create(bg, fade, { BackgroundTransparency = 1 }):Play() end)
-		for _, d in bg:GetDescendants() do
-			if d:IsA("Frame") then
-				pcall(function() TweenService:Create(d, fade, { BackgroundTransparency = 1 }):Play() end)
-			elseif d:IsA("TextLabel") or d:IsA("TextButton") then
-				pcall(function() TweenService:Create(d, fade, { BackgroundTransparency = 1, TextTransparency = 1 }):Play() end)
-			end
-			if d:IsA("UIStroke") then
-				pcall(function() TweenService:Create(d, fade, { Transparency = 1 }):Play() end)
-			end
-		end
-	end
-
-	local function teardown()
+	-- ── Teardown ──────────────────────────────────────────────────────────────
+	-- Register the close hook so MainMenu.close() (fired by the lobby's game-start
+	-- transition) can drop the whole menu, bar and all, for the full-screen
+	-- sequence. The lobby ScreenGui is separate and continues its own transition.
+	activeClose = function()
+		if dismissed then return end
+		dismissed = true
 		if cycleConn then cycleConn:Disconnect() end
 		sg:Destroy()
 	end
-
-	tutBtn.MouseButton1Click:Connect(function()
-		if dismissed then return end
-		-- Not implemented yet: flash the hint and give the node a tiny nudge.
-		hint.TextTransparency = 1
-		TweenService:Create(hint, TweenInfo.new(0.2), { TextTransparency = 0 }):Play()
-		task.delay(1.1, function()
-			TweenService:Create(hint, TweenInfo.new(0.5), { TextTransparency = 1 }):Play()
-		end)
-	end)
-
-	battleBtn.MouseButton1Click:Connect(function()
-		if dismissed then return end
-		dismissed = true
-
-		-- Build the lobby now so it's sitting ready behind the overlay to be revealed.
-		onBattle()
-
-		local nodePos = battleBtn.Position
-		battleBtn.Visible = false
-		tutBtn.Visible    = false
-
-		-- 1-in-10: the node erupts into a lamprey maw that lunges at the screen.
-		-- The other 9 times it's just a clean dissolve into the map lobby.
-		if math.random(1, 10) ~= 1 then
-			fadeMenu(0.45)
-			task.delay(0.5, teardown)
-			return
-		end
-
-		-- The maw takes the Battle node's place: sprout a fang ring where Battle was,
-		-- then hurl it into the screen and dissolve to the lobby.
-		local maw, mawScale, fangs = spawnMaw(bg, nodePos, 150)
-
-		-- Fangs snap into being around the node with a little overshoot.
-		local fangsScale = Instance.new("UIScale")
-		fangsScale.Scale = 0
-		fangsScale.Parent = fangs
-		TweenService:Create(fangsScale,
-			TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-			{ Scale = 1 }):Play()
-
-		local sting = Instance.new("Sound")
-		sting.SoundId = STING_ID
-		sting.Volume  = 0.75
-		sting.Parent  = sg
-
-		-- After the teeth form, hurl the maw at the lens (accelerating scale + drift to
-		-- centre + shake). Past the peak, the whole menu fades out over the reveal.
-		task.delay(0.2, function()
-			sting:Play()
-			local LUNGE = 0.5
-			local el, faded = 0.0, false
-			local sx, sy = nodePos.X.Scale, nodePos.Y.Scale
-			local conn: RBXScriptConnection
-			conn = RunService.RenderStepped:Connect(function(dt)
-				el += dt
-				local t = math.clamp(el / LUNGE, 0, 1)
-				mawScale.Scale = 1 + 27 * (t * t)                  -- accelerating swallow
-				local jit = 0.008 * t
-				maw.Position = UDim2.new(
-					sx + (0.5 - sx) * t + (math.random() - 0.5) * jit, 0,
-					sy + (0.5 - sy) * t + (math.random() - 0.5) * jit, 0)
-
-				-- Cross-fade the menu away past the peak → the map lobby shows through.
-				if t > 0.62 and not faded then
-					faded = true
-					fadeMenu(0.32)
-				end
-
-				if t >= 1 then
-					conn:Disconnect()
-					task.delay(0.34, teardown)   -- teardown also stops the sting
-				end
-			end)
-		end)
-	end)
 end
 
 return MainMenu

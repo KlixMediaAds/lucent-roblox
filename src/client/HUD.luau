@@ -689,12 +689,12 @@ local function createSystemMenu()
 	leaveBtn = menuItem("LEAVE MATCH", 200, Color3.fromRGB(210, 70, 70), function()
 		if not leaveArmed then
 			leaveArmed            = true
-			if leaveBtn then leaveBtn.Text = "CONFIRM — LEAVE MATCH?" end
-			statusLine.Text       = "You will forfeit the match."
+			if leaveBtn then leaveBtn.Text = "CONFIRM — RETURN TO MENU?" end
+			statusLine.Text       = "Return to the ready-up menu (others must agree in multiplayer)."
 			statusLine.TextColor3 = Color3.fromRGB(220, 110, 110)
 			return
 		end
-		Network.forfeitMatch()
+		Network.leaveToLobby()
 		setOpen(false)
 	end)
 

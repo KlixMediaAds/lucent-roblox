@@ -1,5 +1,5 @@
 --[[
-	LobbyUI — full-screen pre-game lobby (reworked).
+	LobbyUI, full-screen pre-game lobby (reworked).
 
 	Resolution independence:
 	  All UI is designed at DESIGN_W×DESIGN_H. A UIScale on `container` scales
@@ -36,40 +36,47 @@ local localPlayer = Players.LocalPlayer
 -- ── Design constants ──────────────────────────────────────────────────────────
 local DESIGN_W   = 960    -- reference design width
 local DESIGN_H   = 900    -- reference design height
-local WORLD_HALF = 432
+
+-- Player banners: up to 4 tall vertical cards (name · profile · chosen race).
+local MAX_BANNERS = 4
+local BANNER_W    = 140
+local BANNER_H    = 300
+local BANNER_GAP  = 12
+local PANEL_PAD   = 16             -- inner padding of the players panel
+local PANEL_HEAD  = 34             -- players-panel header height
 
 -- Layout (design pixels)
-local PREVIEW_PX  = 520            -- map preview side length (~40% bigger than before)
-local MAP_BORDER  = PREVIEW_PX + 4 -- 524
+local PANEL_W     = BANNER_W * MAX_BANNERS + BANNER_GAP * (MAX_BANNERS - 1) + PANEL_PAD * 2  -- 628
 local SETTINGS_W  = 300
-local GAP         = 24             -- gap between settings column and map
-local ROSTER_GAP  = 18             -- vertical gap between map and the bottom row
-local ROW2_H      = 150            -- bottom row height (roster + ready)
-local READY_W     = 210
-local READY_GAP   = 18
-local HEADER_H    = 158            -- title block height at the top
+local GAP         = 24             -- gap between settings column and players panel
+local ROSTER_GAP  = 20             -- vertical gap between panel and the ready button
+local PANEL_H     = BANNER_H + PANEL_HEAD + PANEL_PAD * 2   -- 366
+local READY_W     = 300
+local READY_H     = 92
+local HEADER_H    = 190            -- top margin: status line + clearance for the tab shell
 
--- Derived layout values (design space)
-local CONTENT_W  = SETTINGS_W + GAP + MAP_BORDER         -- 848
-local CONTENT_H  = MAP_BORDER + ROSTER_GAP + ROW2_H      -- 692
+-- Derived layout values (design space). CONTENT_H is floored at 600 so the expanded
+-- settings drop-menu (taller than the players panel) never clips its faction cards.
+local CONTENT_W  = SETTINGS_W + GAP + PANEL_W
+local CONTENT_H  = math.max(PANEL_H + ROSTER_GAP + READY_H, 600)
 local CONTENT_X  = math.floor((DESIGN_W - CONTENT_W) / 2)
 local CONTENT_Y  = HEADER_H + 14
 
--- Collapsible settings: the map + roster + ready live in `rightGroup`, which
+-- Collapsible settings: the players panel + ready button live in `rightGroup`, which
 -- slides between a centered "settings collapsed" position and a shifted-right
 -- "settings expanded" position. The settings panel itself drops open downward.
 local SETTINGS_HEADER_H = 54
 local SETTINGS_COLLAPSED_W = 150                                      -- compact pill when collapsed
-local MAP_X_OPEN        = CONTENT_X + SETTINGS_W + GAP                 -- 380
-local MAP_X_CLOSED      = math.floor((DESIGN_W - MAP_BORDER) / 2)      -- 218 (clears the collapsed pill)
+local PANEL_X_OPEN     = CONTENT_X + SETTINGS_W + GAP
+local PANEL_X_CLOSED   = math.floor((DESIGN_W - PANEL_W) / 2)          -- centered (clears the collapsed pill)
 
 -- Game-start sounds
 local SND_COUNTDOWN = "rbxassetid://131999546232546"
 local SND_START     = "rbxassetid://75131546063270"
 
--- Minimap constants — must match MiniMap.luau (used by the game-start slide)
-local MINIMAP_SIZE = 180
-local MINIMAP_PAD  = 10
+-- Faction → the unit whose 3D preview stands in for the race on a player banner.
+local FACTION_UNIT  = { Humans = "Survivor", Hollowed = "Lamprey" }
+local FACTION_LABEL = { Humans = "HUMANS",   Hollowed = "HOLLOWED" }
 
 -- ── Palette ───────────────────────────────────────────────────────────────────
 -- Wuthering-Waves-inspired: near-black slate, ivory text, signature gold + cyan.
@@ -109,21 +116,16 @@ local glow:          Frame   -- the blue backdrop glow (turns purple as the game
 local silhouetteLayer: Frame -- black silhouette horde during the ready transition
 local container:     Frame
 local uiScaleObj:    UIScale
-local mapBorder:     Frame
-local mapCanvas:     Frame
-local rightGroup:    Frame   -- map + roster + ready (slides aside when settings open)
+local rightGroup:    Frame   -- players panel + ready (slides aside when settings open)
 local settingsPanel: Frame
 local settingsChevron: TextLabel
 local settingsTitleLbl: TextLabel
-local rosterPanel:   Frame
-local rosterContent: Frame
+local playersPanel:  Frame
+local bannersContent: Frame
 local readyBtn:      TextButton
 local readyGrad:     UIGradient
 local readyStroke:   UIStroke
 local statusLbl:     TextLabel
-local titleLbl:      TextLabel
-local titleDeco:     Frame
-local mapLabelRef:   TextLabel
 
 local sndCountdown:  Sound
 local sndStart:      Sound
@@ -133,8 +135,16 @@ local aiDiffBtn:     TextButton
 local gamemodeBtn:   TextButton
 local terrainBtn:    TextButton
 
-local depositDots: { Frame } = {}
-local terrainDots: { Frame } = {}
+local lastRosterSig       = ""      -- roster signature; banners rebuild only when it changes
+-- The game-start callback fired when the lobby's countdown completes. Stored in a module
+-- var so LobbyUI.reopen() can swap it: the FIRST lobby runs the full startGame, a
+-- re-opened lobby (after returning from a match) runs a lightweight resume instead.
+local onGameStartRef: ((string) -> ())? = nil
+-- Fired the instant the game-start countdown/transition begins (before the dramatic
+-- full-screen sequence). Lets an owner (e.g. the MainMenu tab shell) tear down any
+-- chrome it's floating on top of the lobby so the transition reads clean.
+local onStartTransitionRef: (() -> ())? = nil
+local remotesWired        = false   -- one-time guard for the persistent remote connections
 local isReady             = false
 local settingsExpanded    = false
 -- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
@@ -144,7 +154,7 @@ local lobbyTerrainMode    = "Off"   -- Layered | Walled | Off (server owns the a
 local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
 
--- Bright "ready up" palette — pronounced yellow→white gradient
+-- Bright "ready up" palette, pronounced yellow→white gradient
 local C_READY_TOP   = Color3.fromRGB(255, 248, 196)  -- near-white top
 local C_READY_BOT   = Color3.fromRGB(255, 204,  56)  -- saturated yellow bottom
 local C_READY_GLOW  = Color3.fromRGB(255, 226, 120)
@@ -155,13 +165,6 @@ local function updateScale()
 	if not cam then return end
 	local vp = cam.ViewportSize
 	uiScaleObj.Scale = math.min(vp.X / DESIGN_W, vp.Y / DESIGN_H)
-end
-
--- ── World → preview pixel ─────────────────────────────────────────────────────
-local function w2p(wx: number, wz: number): (number, number)
-	local u = (wx + WORLD_HALF) / (WORLD_HALF * 2) * PREVIEW_PX
-	local v = (wz + WORLD_HALF) / (WORLD_HALF * 2) * PREVIEW_PX
-	return u, v
 end
 
 -- ── UI helpers ────────────────────────────────────────────────────────────────
@@ -249,24 +252,7 @@ local function makeBtn(
 	return b
 end
 
--- ── Deposit dots ──────────────────────────────────────────────────────────────
-local function syncDeposits(positions: { Vector3 })
-	while #depositDots > #positions do
-		depositDots[#depositDots]:Destroy(); table.remove(depositDots)
-	end
-	while #depositDots < #positions do
-		local f = Instance.new("Frame")
-		f.Size = UDim2.fromOffset(7, 7); f.AnchorPoint = Vector2.new(0.5, 0.5)
-		f.BackgroundColor3 = C_DEPOSIT; f.BorderSizePixel = 0; f.ZIndex = 5; f.Parent = mapCanvas
-		table.insert(depositDots, f)
-	end
-	for i, pos in positions do
-		local u, v = w2p(pos.X, pos.Z)
-		depositDots[i].Position = UDim2.fromOffset(u, v)
-	end
-end
-
--- ── Terrain preview ───────────────────────────────────────────────────────────
+-- ── Terrain (settings button only; the map preview was removed) ────────────────
 local TERRAIN_COLORS = {
 	Layered = Color3.fromRGB(120, 200, 130),
 	Walled  = Color3.fromRGB(196, 150, 110),
@@ -281,108 +267,166 @@ local function syncTerrain(mode: string)
 		local st = terrainBtn:FindFirstChildOfClass("UIStroke")
 		if st then st.Color = c; st.Transparency = 0.35 end
 	end
-	for _, dot in terrainDots do dot:Destroy() end
-	terrainDots = {}
-	if lobbyTerrainMode == "Off" or not mapCanvas then return end
-	local folder = workspace:FindFirstChild("TerrainObstacles")
-	if not folder then return end
-	for _, part in folder:GetChildren() do
-		if not part:IsA("BasePart") then continue end
-		local pu, pv = w2p(part.Position.X, part.Position.Z)
-		local pw = math.max(4, part.Size.X / (WORLD_HALF * 2) * PREVIEW_PX)
-		local ph = math.max(4, part.Size.Z / (WORLD_HALF * 2) * PREVIEW_PX)
-		local dot = Instance.new("Frame")
-		dot.Size = UDim2.fromOffset(pw, ph); dot.AnchorPoint = Vector2.new(0.5, 0.5)
-		dot.Position = UDim2.fromOffset(pu, pv); dot.BackgroundColor3 = C_TERRAIN_DOT
-		dot.BackgroundTransparency = 0.25; dot.BorderSizePixel = 0; dot.ZIndex = 3
-		dot.Parent = mapCanvas
-		local c2 = Instance.new("UICorner"); c2.CornerRadius = UDim.new(0, 2); c2.Parent = dot
-		table.insert(terrainDots, dot)
-	end
 end
 
--- ── Combatant roster (beneath the map) ─────────────────────────────────────────
--- FFA for now: a single horizontal list of every human player and every AI bot.
-local function makeRosterCard(): (Frame, ImageLabel, Frame, TextLabel, TextLabel)
-	local card = Instance.new("Frame")
-	card.Size = UDim2.new(0, 80, 1, 0)   -- fill the roster row height
-	card.BackgroundColor3 = Color3.fromRGB(17, 21, 31)
-	card.BorderSizePixel = 0
-	corner(card, 6)
-	local cst = stroke(card, C_BORDER, 1); cst.Transparency = 0.45
+-- ── Player banners ─────────────────────────────────────────────────────────────
+-- Up to MAX_BANNERS tall vertical cards, one per combatant. Each shows, top to
+-- bottom: the player name, their profile avatar, and a 3D preview of the race
+-- (faction) they picked. AI opponents and unfilled slots get their own variants.
+local BANNER_PAD  = 10
+local BANNER_IN_W = BANNER_W - BANNER_PAD * 2   -- 120
 
-	-- portrait holder (image for players, color block + glyph for AI)
+-- Build a single banner. `kind` is "player" | "ai" | "empty".
+local function buildBanner(opts: {
+	kind: string, name: string?, userId: number?, faction: string?,
+	ready: boolean?, isLocal: boolean?, diff: string?, diffColor: Color3?,
+}): Frame
+	local card = Instance.new("Frame")
+	card.Size = UDim2.fromOffset(BANNER_W, BANNER_H)
+	card.BackgroundColor3 = opts.kind == "empty" and C_SLOT_DIS or Color3.fromRGB(17, 21, 31)
+	card.BackgroundTransparency = opts.kind == "empty" and 0.35 or 0
+	card.BorderSizePixel = 0
+	corner(card, 8)
+	local cst = stroke(card, C_BORDER, 1)
+	cst.Transparency = opts.kind == "empty" and 0.7 or 0.4
+
+	if opts.kind == "empty" then
+		label(card, "OPEN\nSLOT", 15, C_SUBTEXT, Enum.Font.GothamBold,
+			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0)).TextYAlignment = Enum.TextYAlignment.Center
+		return card
+	end
+
+	local accent = opts.kind == "ai" and (opts.diffColor or C_GOLD) or C_TEXT
+
+	-- Name (top)
+	local nameLbl = label(card, opts.name or "", 14, accent, Enum.Font.GothamBold,
+		UDim2.new(1, -12, 0, 22), UDim2.fromOffset(BANNER_PAD, 8))
+	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+	-- Profile (avatar headshot for players, glyph block for AI)
 	local holder = Instance.new("Frame")
-	holder.Size = UDim2.fromOffset(56, 56)
-	holder.Position = UDim2.new(0.5, 0, 0, 8)
-	holder.AnchorPoint = Vector2.new(0.5, 0)
+	holder.Size = UDim2.fromOffset(BANNER_IN_W, BANNER_IN_W)
+	holder.Position = UDim2.fromOffset(BANNER_PAD, 34)
 	holder.BackgroundColor3 = Color3.fromRGB(10, 13, 20)
 	holder.BorderSizePixel = 0
 	holder.ClipsDescendants = true
 	holder.Parent = card
 	corner(holder, 6)
+	local hst = stroke(holder, C_BORDER, 1); hst.Transparency = 0.5
 
-	local img = Instance.new("ImageLabel")
-	img.Size = UDim2.new(1, 0, 1, 0)
-	img.BackgroundTransparency = 1
-	img.ScaleType = Enum.ScaleType.Crop
-	img.Parent = holder
+	if opts.kind == "ai" then
+		local g = label(holder, "🤖", 54, accent, Enum.Font.GothamBlack,
+			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
+		g.TextYAlignment = Enum.TextYAlignment.Center
+	elseif opts.userId and opts.userId > 0 then
+		local img = Instance.new("ImageLabel")
+		img.Size = UDim2.new(1, 0, 1, 0)
+		img.BackgroundTransparency = 1
+		img.ScaleType = Enum.ScaleType.Crop
+		img.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", opts.userId)
+		img.Parent = holder
+	else
+		-- No valid avatar (e.g. a Studio test session): fall back to a name initial.
+		local g = label(holder, string.sub(opts.name or "?", 1, 1):upper(), 54, C_GOLD,
+			Enum.Font.GothamBlack, UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
+		g.TextYAlignment = Enum.TextYAlignment.Center
+	end
 
-	local glyph = label(holder, "", 22, C_GOLD, Enum.Font.GothamBlack,
-		UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
-	glyph.TextYAlignment = Enum.TextYAlignment.Center
+	-- Race caption + preview
+	local raceY = 34 + BANNER_IN_W + 6   -- 160
+	label(card, opts.kind == "ai" and "DIFFICULTY" or "RACE", 10, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -12, 0, 12), UDim2.fromOffset(BANNER_PAD, raceY), Enum.TextXAlignment.Left)
 
-	local nameLbl = label(card, "", 12, C_TEXT, Enum.Font.GothamMedium,
-		UDim2.new(1, -8, 0, 16), UDim2.new(0, 4, 0, 68))
-	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	local raceBox = Instance.new("Frame")
+	raceBox.Size = UDim2.fromOffset(BANNER_IN_W, BANNER_H - (raceY + 14) - 32)
+	raceBox.Position = UDim2.fromOffset(BANNER_PAD, raceY + 14)
+	raceBox.BackgroundColor3 = Color3.fromRGB(10, 13, 20)
+	raceBox.BackgroundTransparency = 0.35
+	raceBox.BorderSizePixel = 0
+	raceBox.ClipsDescendants = true
+	raceBox.Parent = card
+	corner(raceBox, 6)
 
-	local statusLblC = label(card, "", 11, C_SUBTEXT, Enum.Font.GothamBold,
-		UDim2.new(1, -8, 0, 14), UDim2.new(0, 4, 0, 86))
+	if opts.kind == "ai" then
+		-- AI has no chosen race; show the difficulty prominently instead.
+		local dl = label(raceBox, (opts.diff or "MEDIUM"):upper(), 18, accent, Enum.Font.GothamBlack,
+			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
+		dl.TextYAlignment = Enum.TextYAlignment.Center
+	else
+		local unit = FACTION_UNIT[opts.faction or "Humans"] or "Survivor"
+		local vpf  = ViewportPreview.forUnit(unit, Vector2.new(BANNER_IN_W - 8, raceBox.Size.Y.Offset - 22))
+		vpf.Position = UDim2.fromOffset(4, 2)
+		vpf.Parent = raceBox
+		label(raceBox, FACTION_LABEL[opts.faction or "Humans"] or "HUMANS", 11, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, 0, 0, 16), UDim2.new(0, 0, 1, -18))
+	end
 
-	return card, img, glyph, nameLbl, statusLblC
+	-- Ready / waiting status pill (bottom)
+	local statusLblC = label(card, opts.kind == "ai" and "AI" or (opts.ready and "READY" or "waiting"),
+		11, C_SUBTEXT, Enum.Font.GothamBold,
+		UDim2.new(1, -12, 0, 20), UDim2.new(0, BANNER_PAD, 1, -28))
+	if opts.kind == "ai" then
+		statusLblC.TextColor3 = accent
+	else
+		statusLblC.TextColor3 = opts.ready and C_READY_DOT or C_SUBTEXT
+	end
+
+	-- Highlight the local player's own banner.
+	if opts.isLocal then
+		cst.Color = C_GOLD; cst.Thickness = 2; cst.Transparency = 0
+	end
+
+	return card
 end
 
-local function syncRoster(readyList: { { name: string, userId: number, ready: boolean } }, settings)
-	for _, child in rosterContent:GetChildren() do
+local function syncRoster(readyList: { { name: string, userId: number, ready: boolean, faction: string? } }, settings)
+	local n    = (settings and settings.aiCount) or 0
+	local diff = (settings and settings.aiDifficulty) or "Medium"
+
+	-- Rebuild only when something visible changed (avoids re-rendering 3D previews on
+	-- every sync). Signature captures names, factions, ready flags and the AI config.
+	local parts = { tostring(n), diff }
+	for _, e in readyList do
+		table.insert(parts, string.format("%s|%s|%s", e.name, e.faction or "Humans", tostring(e.ready)))
+	end
+	local sig = table.concat(parts, ";")
+	if sig == lastRosterSig then return end
+	lastRosterSig = sig
+
+	for _, child in bannersContent:GetChildren() do
 		if child:IsA("Frame") then child:Destroy() end
 	end
 
-	-- Human players
-	for _, entry in readyList do
-		local card, img, glyph, nameLbl, statusLblC = makeRosterCard()
-		card.Parent = rosterContent
-		if entry.userId and entry.userId > 0 then
-			img.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", entry.userId)
-			glyph.Text = ""
-		else
-			glyph.Text = string.sub(entry.name, 1, 1):upper()
-		end
-		nameLbl.Text   = entry.name
-		statusLblC.Text = entry.ready and "READY" or "waiting"
-		statusLblC.TextColor3 = entry.ready and C_READY_DOT or C_SUBTEXT
-		if entry.name == localPlayer.Name then
-			local cst = card:FindFirstChildOfClass("UIStroke")
-			if cst then cst.Color = C_GOLD; cst.Thickness = 1.6; cst.Transparency = 0.1 end
-		end
-	end
-
-	-- AI bots (one card per configured AI, all at the chosen difficulty)
-	local n    = (settings and settings.aiCount) or 0
-	local diff = (settings and settings.aiDifficulty) or "Medium"
 	local diffColor = DIFF_COLORS[diff] or C_GOLD
-	for _ = 1, n do
-		local card, img, glyph, nameLbl, statusLblC = makeRosterCard()
-		card.Parent = rosterContent
-		img.Image = ""
-		glyph.Text = "🤖"; glyph.TextColor3 = diffColor; glyph.TextSize = 26
-		nameLbl.Text = "AI Bot"; nameLbl.TextColor3 = diffColor
-		statusLblC.Text = diff:upper(); statusLblC.TextColor3 = diffColor
+	local slots = 0
+
+	-- Human players first.
+	for _, entry in readyList do
+		if slots >= MAX_BANNERS then break end
+		slots += 1
+		buildBanner({
+			kind    = "player",
+			name    = entry.name,
+			userId  = entry.userId,
+			faction = entry.faction or "Humans",
+			ready   = entry.ready,
+			isLocal = entry.name == localPlayer.Name,
+		}).Parent = bannersContent
 	end
 
-	-- Empty-state hint when there are no AI and you're the only player
-	if #readyList == 0 and n == 0 then
-		label(rosterContent, "No combatants", 13, C_SUBTEXT, Enum.Font.Gotham,
-			UDim2.fromOffset(160, 30), UDim2.fromOffset(0, ROW2_H / 2 - 30))
+	-- Then AI opponents.
+	for _ = 1, n do
+		if slots >= MAX_BANNERS then break end
+		slots += 1
+		buildBanner({
+			kind = "ai", name = "AI OPPONENT", diff = diff, diffColor = diffColor,
+		}).Parent = bannersContent
+	end
+
+	-- Fill the rest with empty "open slot" placeholders.
+	while slots < MAX_BANNERS do
+		slots += 1
+		buildBanner({ kind = "empty" }).Parent = bannersContent
 	end
 end
 
@@ -460,7 +504,7 @@ local function fadeFrame(frame: Instance, info: TweenInfo)
 end
 
 -- A rising horde of black silhouettes that surges up from the bottom edge as the
--- match begins — the dramatic foreground of the ready transition.
+-- match begins, the dramatic foreground of the ready transition.
 local function spawnSilhouettes()
 	silhouetteLayer = Instance.new("Frame")
 	silhouetteLayer.Name = "Silhouettes"
@@ -537,6 +581,11 @@ end
 local function playGameStartTransition(onComplete: (string) -> ())
 	readyBtn.Active = false
 
+	-- Let any owning shell drop its chrome before the full-screen sequence plays.
+	if onStartTransitionRef then
+		pcall(onStartTransitionRef)
+	end
+
 	-- Recolor the blue backdrop glow to a foreboding purple as the match begins,
 	-- and surge the black silhouette horde up from the bottom.
 	if glow then
@@ -566,121 +615,54 @@ local function playGameStartTransition(onComplete: (string) -> ())
 		end)
 	end)
 
-	-- Fade out UI (bg stays opaque to hide the camera snap)
+	-- Fade out the lobby UI (bg stays opaque to hide the camera snap).
 	task.delay(1.80, function()
 		local fade = TweenInfo.new(0.38, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-		TweenService:Create(titleLbl,    fade, { TextTransparency = 1 }):Play()
-		TweenService:Create(statusLbl,   fade, { TextTransparency = 1 }):Play()
-		TweenService:Create(mapLabelRef, fade, { TextTransparency = 1 }):Play()
-		if titleDeco then fadeFrame(titleDeco, fade) end
+		TweenService:Create(statusLbl, fade, { TextTransparency = 1 }):Play()
 		fadeFrame(settingsPanel, fade)
-		fadeFrame(rosterPanel,   fade)
+		fadeFrame(playersPanel,  fade)
 		fadeFrame(readyBtn,      fade)
 		task.delay(0.42, function()
 			settingsPanel.Visible = false
-			rosterPanel.Visible   = false
+			playersPanel.Visible  = false
 			readyBtn.Visible      = false
 		end)
 	end)
 
-	-- Map card slide to the minimap corner
-	task.delay(2.00, function()
-		mapBorder.ClipsDescendants = true
-		local absPos  = mapBorder.AbsolutePosition
-		local absSize = mapBorder.AbsoluteSize
-		local canvasAbsPos = mapCanvas.AbsolutePosition
+	-- Hand off to gameplay behind the still-opaque backdrop (this stretch doubles as
+	-- the loading screen), then sweep the silhouette horde up to uncover the world.
+	task.delay(2.60, function()
+		onComplete(lobbyGamemode)
 
-		mapBorder.Size     = UDim2.fromOffset(absSize.X, absSize.Y)
-		mapBorder.Position = UDim2.fromOffset(absPos.X, absPos.Y)
-		mapBorder.ZIndex   = 12
-		mapBorder.Parent   = sg
+		task.delay(1.0, function()
+			-- The big game-start sound fires here, in lockstep with the horde rising.
+			if sndStart then sndStart:Play() end
 
-		mapCanvas.Position = UDim2.fromOffset(canvasAbsPos.X - absPos.X, canvasAbsPos.Y - absPos.Y)
-		mapCanvas.Size     = UDim2.fromOffset(mapCanvas.AbsoluteSize.X, mapCanvas.AbsoluteSize.Y)
-
-		TweenService:Create(mapBorder, TweenInfo.new(0.08), { BackgroundColor3 = C_ACCENT }):Play()
-		task.delay(0.12, function()
-			TweenService:Create(mapBorder, TweenInfo.new(0.22), { BackgroundColor3 = C_BORDER }):Play()
-		end)
-
-		local mmBorder  = MINIMAP_SIZE + 4
-		local slideInfo = TweenInfo.new(0.92, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-
-		-- Land on the live minimap's corner. MiniMap.luau anchors its border at
-		-- UDim2.new(1, -(MAP_SIZE+4+PADDING), 0, PADDING) — top-right — so target that
-		-- (top edge), not the bottom-right the slide used to fly to.
-		TweenService:Create(mapBorder, slideInfo, {
-			Position = UDim2.new(1, -(mmBorder + MINIMAP_PAD), 0, MINIMAP_PAD),
-			Size     = UDim2.fromOffset(mmBorder, mmBorder),
-		}):Play()
-
-		local canvasFinal = math.floor((mmBorder - mapCanvas.AbsoluteSize.X) / 2)
-		TweenService:Create(mapCanvas, slideInfo, {
-			Position = UDim2.fromOffset(canvasFinal, canvasFinal),
-		}):Play()
-
-		task.delay(0.94, function()
-			-- Gentle "arrival" pulse as the card docks (no harsh snap).
-			TweenService:Create(mapBorder, TweenInfo.new(0.16), { BackgroundColor3 = Color3.fromRGB(236, 240, 248) }):Play()
-			task.delay(0.18, function()
-				TweenService:Create(mapBorder, TweenInfo.new(0.40), { BackgroundColor3 = C_BORDER }):Play()
-			end)
-
-			-- Let the docked card settle for a beat before anything fades.
-			task.delay(0.55, function()
-				-- Soft dissolve of the docked map card into the live minimap.
-				local mapFade = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-				TweenService:Create(mapBorder, mapFade, { BackgroundTransparency = 1 }):Play()
-				TweenService:Create(mapCanvas, mapFade, { BackgroundTransparency = 1 }):Play()
-				for _, child in mapCanvas:GetDescendants() do
-					if child:IsA("GuiObject") then
-						pcall(function() TweenService:Create(child, mapFade, { BackgroundTransparency = 1 }):Play() end)
+			local reveal = TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+			TweenService:Create(bg, reveal, { BackgroundTransparency = 1 }):Play()
+			if glow then
+				TweenService:Create(glow, reveal,
+					{ BackgroundTransparency = 1, BackgroundColor3 = Color3.fromRGB(170, 100, 212) }
+				):Play()
+			end
+			if silhouetteLayer then
+				-- Bigger/nearer figures lead the rise for a parallax wipe.
+				for _, fig in silhouetteLayer:GetChildren() do
+					if fig:IsA("Frame") then
+						local xs = fig.Position.X.Scale
+						local lead = math.clamp(fig.AbsoluteSize.Y / 260, 0, 1)
+						task.delay((1 - lead) * 0.5, function()
+							if not fig.Parent then return end
+							TweenService:Create(fig,
+								TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+								{ Position = UDim2.new(xs, 0, -0.8, 0) }   -- rise off the top
+							):Play()
+						end)
 					end
 				end
-
-				task.delay(0.34, function()
-					-- Hand off to gameplay so the world starts loading behind the
-					-- still-opaque backdrop — this stretch doubles as the loading
-					-- screen, so we deliberately take our time here.
-					onComplete(lobbyGamemode)
-
-					-- Hold on the purple silhouette scene for a beat while the game
-					-- builds, then sweep the black horde UP and off the top of the
-					-- screen, uncovering the world as it goes, over a long dissolve.
-					task.delay(1.0, function()
-						-- The big game-start sound fires here, in lockstep with the
-						-- silhouette horde rising to uncover the world.
-						if sndStart then sndStart:Play() end
-
-						local reveal = TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-						TweenService:Create(bg, reveal, { BackgroundTransparency = 1 }):Play()
-						if glow then
-							TweenService:Create(glow, reveal,
-								{ BackgroundTransparency = 1, BackgroundColor3 = Color3.fromRGB(170, 100, 212) }
-							):Play()
-						end
-						if silhouetteLayer then
-							-- Bigger/nearer figures lead the rise for a parallax wipe.
-							-- Slow, even Sine motion so it tracks the start sound's swell.
-							for _, fig in silhouetteLayer:GetChildren() do
-								if fig:IsA("Frame") then
-									local xs = fig.Position.X.Scale
-									local lead = math.clamp(fig.AbsoluteSize.Y / 260, 0, 1)
-									task.delay((1 - lead) * 0.5, function()
-										if not fig.Parent then return end
-										TweenService:Create(fig,
-											TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-											{ Position = UDim2.new(xs, 0, -0.8, 0) }   -- rise off the top
-										):Play()
-									end)
-								end
-							end
-							fadeFrame(silhouetteLayer, TweenInfo.new(2.7, Enum.EasingStyle.Sine, Enum.EasingDirection.Out))
-						end
-						task.delay(3.1, function() sg:Destroy() end)
-					end)
-				end)
-			end)
+				fadeFrame(silhouetteLayer, TweenInfo.new(2.7, Enum.EasingStyle.Sine, Enum.EasingDirection.Out))
+			end
+			task.delay(3.1, function() sg:Destroy() end)
 		end)
 	end)
 end
@@ -689,7 +671,8 @@ end
 local function buildBackdrop()
 	bg = Instance.new("Frame")
 	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C_BG
-	bg.BorderSizePixel = 0; bg.Parent = sg
+	bg.BorderSizePixel = 0; bg.Active = true   -- absorb clicks so nothing behind the lobby is hit
+	bg.Parent = sg
 	gradient(bg, C_BG, C_BG2, 90)
 
 	local deco = Instance.new("Frame")
@@ -755,57 +738,12 @@ local function buildBackdrop()
 	end)
 end
 
--- ── Build: title lockup ─────────────────────────────────────────────────────────
+-- ── Build: status line ──────────────────────────────────────────────────────────
+-- The lobby carries no title of its own, the MainMenu tab shell provides branding
+-- on top. All that lives up here is the ready/countdown status line.
 local function buildTitle()
-	titleDeco = Instance.new("Frame")
-	titleDeco.Name = "TitleDeco"; titleDeco.Size = UDim2.new(1, 0, 0, 130)
-	titleDeco.Position = UDim2.fromOffset(0, 14); titleDeco.BackgroundTransparency = 1
-	titleDeco.ZIndex = 1; titleDeco.Parent = container
-
-	local TITLE_Y = 8
-	local echo = label(titleDeco, "LUCENT", 64, Color3.fromRGB(18, 60, 80), Enum.Font.GothamBlack,
-		UDim2.new(1, 0, 0, 74), UDim2.fromOffset(3, TITLE_Y + 4))
-	echo.TextTransparency = 0.5; echo.ZIndex = 1
-
-	for _, s in { -1, 1 } do
-		local ln = Instance.new("Frame")
-		ln.Size = UDim2.fromOffset(92, 2); ln.AnchorPoint = Vector2.new(0.5, 0.5)
-		ln.Position = UDim2.new(0.5, s * 240, 0, TITLE_Y + 38); ln.Rotation = s * -7
-		ln.BackgroundColor3 = C_GOLD; ln.BorderSizePixel = 0; ln.ZIndex = 2; ln.Parent = titleDeco
-		gradient(ln, C_GOLD, C_BG2, s == -1 and 0 or 180)
-		diamond(titleDeco, 10, C_GOLD, UDim2.new(0.5, s * 188, 0, TITLE_Y + 38), 2)
-		diamond(titleDeco, 5, C_ACCENT, UDim2.new(0.5, s * 292, 0, TITLE_Y + 38), 2)
-	end
-
-	local badge = Instance.new("Frame")
-	badge.Size = UDim2.fromOffset(58, 28); badge.AnchorPoint = Vector2.new(0.5, 0.5)
-	badge.Position = UDim2.new(0.5, 150, 0, TITLE_Y + 16)
-	badge.BackgroundColor3 = C_GOLD; badge.BorderSizePixel = 0; badge.ZIndex = 2; badge.Parent = titleDeco
-	corner(badge, 4)
-	local badgeLbl = label(badge, "RTS", 17, Color3.fromRGB(16, 20, 28), Enum.Font.GothamBold,
-		UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
-	badgeLbl.TextYAlignment = Enum.TextYAlignment.Center; badgeLbl.ZIndex = 3
-
-	local ruleY = TITLE_Y + 74
-	local rule = Instance.new("Frame")
-	rule.Size = UDim2.fromOffset(176, 2); rule.AnchorPoint = Vector2.new(0.5, 0.5)
-	rule.Position = UDim2.new(0.5, 0, 0, ruleY); rule.BackgroundColor3 = C_GOLD
-	rule.BorderSizePixel = 0; rule.ZIndex = 2; rule.Parent = titleDeco
-	diamond(titleDeco, 7, C_GOLD, UDim2.new(0.5, -100, 0, ruleY), 2)
-	diamond(titleDeco, 7, C_GOLD, UDim2.new(0.5,  100, 0, ruleY), 2)
-
-	local tagline = label(titleDeco, "R E A L - T I M E   S T R A T E G Y", 13, C_SUBTEXT,
-		Enum.Font.GothamMedium, UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, ruleY + 12))
-	tagline.ZIndex = 2
-
-	titleLbl = label(container, "LUCENT", 64, C_TITLE, Enum.Font.GothamBlack,
-		UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 14 + TITLE_Y))
-	titleLbl.ZIndex = 3
-	gradient(titleLbl, Color3.fromRGB(248, 250, 255), C_GOLD, 90)
-	local titleGlow = stroke(titleLbl, C_GOLD, 1.4); titleGlow.Transparency = 0.5
-
 	statusLbl = label(container, "Waiting for players to ready up...", 15, C_SUBTEXT, Enum.Font.Gotham,
-		UDim2.new(1, 0, 0, 24), UDim2.fromOffset(0, HEADER_H - 30))
+		UDim2.new(1, 0, 0, 24), UDim2.fromOffset(0, HEADER_H - 34))
 end
 
 -- ── Build: settings column ──────────────────────────────────────────────────────
@@ -835,7 +773,7 @@ local function setSettingsExpanded(expanded: boolean, instant: boolean?)
 	settingsExpanded = expanded
 	local targetW    = expanded and SETTINGS_W or SETTINGS_COLLAPSED_W
 	local targetH    = expanded and CONTENT_H or SETTINGS_HEADER_H
-	local targetMapX = expanded and MAP_X_OPEN or MAP_X_CLOSED
+	local targetMapX = expanded and PANEL_X_OPEN or PANEL_X_CLOSED
 
 	local panelInfo = instant and TweenInfo.new(0)
 		or TweenInfo.new(0.42, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
@@ -997,7 +935,7 @@ local function buildSettingsColumn()
 	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C_TITLE, true)
 	rowY += ROW_STEP
 
-	-- Team / faction: two picture buttons — Humans (a Survivor) vs Hollowed (a Lamprey).
+	-- Team / faction: two picture buttons, Humans (a Survivor) vs Hollowed (a Lamprey).
 	buildFactionSection(settingsPanel, rowY)
 
 	header.MouseButton1Click:Connect(function()
@@ -1005,94 +943,55 @@ local function buildSettingsColumn()
 	end)
 end
 
--- ── Build: map preview ──────────────────────────────────────────────────────────
--- Map, roster and ready all live inside `rightGroup` (relative coordinates) so the
--- whole block can slide aside as a unit when the settings drop-menu opens.
-local function buildMap()
-	mapLabelRef = label(rightGroup, "◆  TACTICAL MAP", 13, C_GOLD, Enum.Font.GothamBold,
-		UDim2.fromOffset(MAP_BORDER, 22), UDim2.fromOffset(0, -26), Enum.TextXAlignment.Left)
+-- ── Build: players panel ────────────────────────────────────────────────────────
+-- The players panel (up to 4 vertical banners) and the ready button live inside
+-- `rightGroup` (relative coordinates) so the whole block can slide aside as a unit
+-- when the settings drop-menu opens.
+local function buildPlayersPanel()
+	playersPanel = Instance.new("Frame")
+	playersPanel.Name = "Players"
+	playersPanel.Size = UDim2.fromOffset(PANEL_W, PANEL_H)
+	playersPanel.Position = UDim2.fromOffset(0, 0)
+	playersPanel.BackgroundColor3 = C_PANEL
+	playersPanel.BackgroundTransparency = 0.04
+	playersPanel.BorderSizePixel = 0
+	playersPanel.Parent = rightGroup
+	corner(playersPanel, 8)
+	local rs = stroke(playersPanel, C_BORDER, 1); rs.Transparency = 0.15
+	gradient(playersPanel, C_PANEL_HI, C_PANEL, 90)
+	cornerBrackets(playersPanel, C_GOLD, 14, 2, 9)
 
-	mapBorder = Instance.new("Frame")
-	mapBorder.Size = UDim2.fromOffset(MAP_BORDER, MAP_BORDER)
-	mapBorder.Position = UDim2.fromOffset(0, 0)
-	mapBorder.BackgroundColor3 = C_BORDER; mapBorder.BorderSizePixel = 0
-	mapBorder.Parent = rightGroup
-	corner(mapBorder, 4)
+	label(playersPanel, "◆  COMBATANTS", 13, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -28, 0, 18), UDim2.fromOffset(16, 10), Enum.TextXAlignment.Left)
+	label(playersPanel, "FREE-FOR-ALL", 10, C_SUBTEXT, Enum.Font.GothamBold,
+		UDim2.new(1, -28, 0, 16), UDim2.fromOffset(16, 11), Enum.TextXAlignment.Right)
 
-	mapCanvas = Instance.new("Frame")
-	mapCanvas.Size = UDim2.fromOffset(PREVIEW_PX, PREVIEW_PX)
-	mapCanvas.Position = UDim2.fromOffset(2, 2)
-	mapCanvas.BackgroundColor3 = Color3.fromRGB(8, 11, 18)
-	mapCanvas.BorderSizePixel = 0; mapCanvas.ClipsDescendants = true
-	mapCanvas.Parent = mapBorder
-	gradient(mapCanvas, Color3.fromRGB(12, 16, 24), Color3.fromRGB(7, 9, 15), 90)
-
-	for _, frac in { 0.25, 0.5, 0.75 } do
-		local h = Instance.new("Frame")
-		h.Size = UDim2.new(1,0,0,1); h.Position = UDim2.new(0,0,frac,0)
-		h.BackgroundColor3 = C_GRID; h.BorderSizePixel = 0; h.ZIndex = 2; h.Parent = mapCanvas
-		local v = Instance.new("Frame")
-		v.Size = UDim2.new(0,1,1,0); v.Position = UDim2.new(frac,0,0,0)
-		v.BackgroundColor3 = C_GRID; v.BorderSizePixel = 0; v.ZIndex = 2; v.Parent = mapCanvas
-	end
-	for _, cfg in {
-		{ size = UDim2.new(1,0,0,1), pos = UDim2.new(0,0,0.5,0) },
-		{ size = UDim2.new(0,1,1,0), pos = UDim2.new(0.5,0,0,0) },
-	} do
-		local c2 = Instance.new("Frame")
-		c2.Size = cfg.size; c2.Position = cfg.pos
-		c2.BackgroundColor3 = C_BORDER; c2.BackgroundTransparency = 0.4; c2.BorderSizePixel = 0
-		c2.ZIndex = 2; c2.Parent = mapCanvas
-	end
-	cornerBrackets(mapCanvas, C_GOLD, 18, 2, 6)
-end
-
--- ── Build: roster + ready ───────────────────────────────────────────────────────
-local function buildRosterAndReady()
-	-- Bottom row sits beneath the map inside `rightGroup`: roster on the left, the
-	-- large READY button at the far right (aligned with the map's right edge).
-	local rowY     = MAP_BORDER + ROSTER_GAP
-	local rosterW  = MAP_BORDER - READY_W - READY_GAP
-
-	rosterPanel = Instance.new("Frame")
-	rosterPanel.Name = "Roster"
-	rosterPanel.Size = UDim2.fromOffset(rosterW, ROW2_H)
-	rosterPanel.Position = UDim2.fromOffset(0, rowY)
-	rosterPanel.BackgroundColor3 = C_PANEL
-	rosterPanel.BackgroundTransparency = 0.04
-	rosterPanel.BorderSizePixel = 0
-	rosterPanel.Parent = rightGroup
-	corner(rosterPanel, 8)
-	local rs = stroke(rosterPanel, C_BORDER, 1); rs.Transparency = 0.15
-	gradient(rosterPanel, C_PANEL_HI, C_PANEL, 90)
-	cornerBrackets(rosterPanel, C_GOLD, 12, 2, 9)
-
-	label(rosterPanel, "◆  COMBATANTS", 12, C_GOLD, Enum.Font.GothamBold,
-		UDim2.new(1, -24, 0, 16), UDim2.fromOffset(12, 8), Enum.TextXAlignment.Left)
-	label(rosterPanel, "FREE-FOR-ALL", 10, C_SUBTEXT, Enum.Font.GothamBold,
-		UDim2.new(1, -24, 0, 14), UDim2.fromOffset(12, 8), Enum.TextXAlignment.Right)
-
-	rosterContent = Instance.new("Frame")
-	rosterContent.Name = "RosterContent"
-	rosterContent.Size = UDim2.new(1, -24, 1, -38)
-	rosterContent.Position = UDim2.fromOffset(12, 30)
-	rosterContent.BackgroundTransparency = 1
-	rosterContent.ClipsDescendants = true
-	rosterContent.Parent = rosterPanel
+	bannersContent = Instance.new("Frame")
+	bannersContent.Name = "Banners"
+	bannersContent.Size = UDim2.new(1, -PANEL_PAD * 2, 0, BANNER_H)
+	bannersContent.Position = UDim2.fromOffset(PANEL_PAD, PANEL_HEAD + PANEL_PAD)
+	bannersContent.BackgroundTransparency = 1
+	bannersContent.Parent = playersPanel
 	local layout = Instance.new("UIListLayout")
 	layout.FillDirection = Enum.FillDirection.Horizontal
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 8)
-	layout.VerticalAlignment = Enum.VerticalAlignment.Center
-	layout.Parent = rosterContent
+	layout.Padding = UDim.new(0, BANNER_GAP)
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Top
+	layout.Parent = bannersContent
+end
 
-	-- Large READY button, bottom-right (aligned with the map's right edge).
-	-- Pronounced bright yellow→white gradient with a pulsing glow so it pops out
-	-- as the clear call-to-action.
+-- ── Build: ready button ─────────────────────────────────────────────────────────
+local function buildReadyButton()
+	-- Large READY button centered beneath the players panel. Pronounced bright
+	-- yellow→white gradient with a pulsing glow so it pops as the call-to-action.
+	local rowY = PANEL_H + ROSTER_GAP
+	local rx   = math.floor((PANEL_W - READY_W) / 2)
+
 	readyBtn = Instance.new("TextButton")
 	readyBtn.Name = "ReadyButton"
-	readyBtn.Size = UDim2.fromOffset(READY_W, ROW2_H)
-	readyBtn.Position = UDim2.fromOffset(rosterW + READY_GAP, rowY)
+	readyBtn.Size = UDim2.fromOffset(READY_W, READY_H)
+	readyBtn.Position = UDim2.fromOffset(rx, rowY)
 	readyBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 	readyBtn.BorderSizePixel = 0
 	readyBtn.AutoButtonColor = false
@@ -1122,8 +1021,38 @@ local function buildRosterAndReady()
 	end)
 end
 
+-- ── Control wiring ──────────────────────────────────────────────────────────────
+-- Per-instance button clicks. Called from buildUI so a freshly (re)built lobby always
+-- has working buttons, even after the previous lobby's ScreenGui was destroyed on
+-- game start. The remote handlers (LobbySync/LobbyStart) are connected once in init and
+-- reference the module-level UI vars, which buildUI reassigns to the fresh instances.
+local function wireControls()
+	readyBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbyReady):FireServer()
+	end)
+	aiDiffBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty):FireServer()
+	end)
+	aiCountBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbySetAICount):FireServer()
+	end)
+	gamemodeBtn.MouseButton1Click:Connect(function()
+		local next = lobbyGamemode == "Swarm" and "Default" or "Swarm"
+		RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(next)
+	end)
+	terrainBtn.MouseButton1Click:Connect(function()
+		RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle):FireServer()
+	end)
+end
+
 -- ── Build UI ────────────────────────────────────────────────────────────────────
 local function buildUI()
+	-- Clear any leftover lobby from a previous build (reopen after a match) and drop the
+	-- stale roster signature so the banners rebuild fresh against the new instances.
+	local old = localPlayer.PlayerGui:FindFirstChild("LobbyUI")
+	if old then old:Destroy() end
+	lastRosterSig = ""
+
 	sg = Instance.new("ScreenGui")
 	sg.Name = "LobbyUI"; sg.ResetOnSpawn = false
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -1140,11 +1069,11 @@ local function buildUI()
 
 	uiScaleObj = Instance.new("UIScale"); uiScaleObj.Scale = 1; uiScaleObj.Parent = container
 
-	-- Map + roster + ready group. Starts at the centered (settings-collapsed) spot.
+	-- Players panel + ready group. Starts at the centered (settings-collapsed) spot.
 	rightGroup = Instance.new("Frame")
 	rightGroup.Name = "RightGroup"
-	rightGroup.Size = UDim2.fromOffset(MAP_BORDER, CONTENT_H)
-	rightGroup.Position = UDim2.fromOffset(MAP_X_CLOSED, CONTENT_Y)
+	rightGroup.Size = UDim2.fromOffset(PANEL_W, CONTENT_H)
+	rightGroup.Position = UDim2.fromOffset(PANEL_X_CLOSED, CONTENT_Y)
 	rightGroup.BackgroundTransparency = 1
 	rightGroup.ClipsDescendants = false
 	rightGroup.Parent = container
@@ -1157,73 +1086,94 @@ local function buildUI()
 
 	buildTitle()
 	buildSettingsColumn()
-	buildMap()
-	buildRosterAndReady()
+	buildPlayersPanel()
+	buildReadyButton()
+	wireControls()
 end
 
--- ── Public init ───────────────────────────────────────────────────────────────
-function LobbyUI.init(onGameStart: (string) -> ())
-	buildUI()
-
-	updateScale()
-	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
-
-	-- Overhead camera
+-- Point the overhead camera at the map (used by init and reopen).
+local function overheadCamera()
 	task.spawn(function()
 		task.wait(0.1)
 		local cam = workspace.CurrentCamera
+		if not cam then return end
 		cam.CameraType = Enum.CameraType.Scriptable
 		cam.CFrame = CFrame.lookAt(Vector3.new(0, 700, 1), Vector3.new(0, 0, 0))
 	end)
+end
+
+-- Connect the persistent lobby remote handlers exactly once. They reference the
+-- module-level UI vars, which buildUI reassigns on every (re)build, so they keep
+-- driving whichever lobby instance is currently up.
+local function wireRemotesOnce()
+	if remotesWired then return end
+	remotesWired = true
 
 	RemoteHandler.get(Config.REMOTES.LobbySync).OnClientEvent:Connect(
 		function(
-			readyList: { { name: string, userId: number, ready: boolean } },
-			positions:   { Vector3 },
+			readyList: { { name: string, userId: number, ready: boolean, faction: string? } },
+			_positions:  { Vector3 },
 			terrainMode: string,
 			settings:    { aiCount: number, aiDifficulty: string }?,
 			gamemode:    string?
 		)
+			-- Ignore syncs that arrive while no lobby is on screen (mid-match).
+			if not sg or not sg.Parent then return end
 			syncPlayers(readyList)
 			applySettings(settings)
 			syncRoster(readyList, settings or lastSettings)
 			applyGamemode(gamemode)
-			syncDeposits(positions)
 			syncTerrain(terrainMode)
 		end
 	)
 
-	readyBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbyReady):FireServer()
-	end)
-
-	aiDiffBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty):FireServer()
-	end)
-
-	aiCountBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbySetAICount):FireServer()
-	end)
-
-	-- Gamemode cycles Default ↔ Swarm.
-	gamemodeBtn.MouseButton1Click:Connect(function()
-		local next = lobbyGamemode == "Swarm" and "Default" or "Swarm"
-		RemoteHandler.get(Config.REMOTES.LobbySetGamemode):FireServer(next)
-	end)
-
-	-- Terrain cycles Layered → Walled → Off (server owns the sequence + regen).
-	terrainBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbyTerrainToggle):FireServer()
-	end)
-
 	RemoteHandler.get(Config.REMOTES.LobbyStart).OnClientEvent:Connect(function()
-		playGameStartTransition(onGameStart)
+		if onGameStartRef then playGameStartTransition(onGameStartRef) end
 	end)
+end
+
+-- ── Public init ───────────────────────────────────────────────────────────────
+function LobbyUI.init(onGameStart: (string) -> ())
+	onGameStartRef = onGameStart
+	buildUI()
+
+	updateScale()
+	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
+	overheadCamera()
+	wireRemotesOnce()
+end
+
+-- Re-open the ready-up menu after a match. Rebuilds the (previously destroyed) lobby UI
+-- and swaps the game-start callback for a lightweight `resume`, the match systems from
+-- the first startGame are still running, so readying up should NOT re-run startGame; it
+-- just plays the transition and lets the server-delivered base drive the rest.
+function LobbyUI.reopen(resume: (string) -> ())
+	onGameStartRef   = resume
+	isReady          = false
+	settingsExpanded = false
+	buildUI()
+	updateScale()
+	overheadCamera()
+	wireRemotesOnce()
 end
 
 -- The locally-chosen team/faction ("Humans" or "Hollowed").
 function LobbyUI.getFaction(): string
 	return selectedFaction
+end
+
+-- Show/hide the (already-built) lobby without destroying it, used by the MainMenu tab
+-- shell so the "READY UP" tab can flip the lobby on and off beneath the persistent tab
+-- bar. Showing re-asserts the overhead camera (a sibling tab may have moved it).
+function LobbyUI.setVisible(visible: boolean)
+	if not sg then return end
+	sg.Enabled = visible
+	if visible then overheadCamera() end
+end
+
+-- Register a callback fired the instant the game-start transition begins.
+function LobbyUI.setOnStartTransition(cb: (() -> ())?)
+	onStartTransitionRef = cb
 end
 
 return LobbyUI

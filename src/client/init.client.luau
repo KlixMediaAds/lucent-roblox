@@ -42,6 +42,7 @@ local MotherPanel    = require(script:WaitForChild("MotherPanel"))
 local LeechPanel     = require(script:WaitForChild("LeechPanel"))
 local EmbryoPanel    = require(script:WaitForChild("EmbryoPanel"))
 local RollerPanel    = require(script:WaitForChild("RollerPanel"))
+local NeedlerPanel   = require(script:WaitForChild("NeedlerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local Jumpscare      = require(script:WaitForChild("Jumpscare"))
@@ -147,6 +148,11 @@ local placedFirstBonfire = false   -- upgrades button stays hidden until the fir
 
 -- Win/lose overlay (forward-declared so enterCCMode can hide it on reset)
 local winOverlay: Frame?
+
+-- Multiplayer surrender-vote popup (built once inside startGame; forward-declared so the
+-- return-to-lobby handler can close it and the network handlers can drive it).
+local showSurrenderVote: (requesterName: string) -> () = function(_) end
+local hideSurrenderVote: () -> () = function() end
 
 -- Monument tracking
 local monumentBuildingId: { [number]: string }       = {}  -- ownerUserId → buildingId
@@ -455,6 +461,7 @@ MotherPanel.init(Network, function() return currentResources end)
 LeechPanel.init(Network)
 EmbryoPanel.init(Network)
 RollerPanel.init(Network)
+NeedlerPanel.init(Network)
 DeployerPanel.init(Network,
 	function(techName) return researchedTechs[techName] == true end,
 	function() return currentResources end,
@@ -753,6 +760,7 @@ local function enterCCMode()
 	LeechPanel.hide()
 	EmbryoPanel.hide()
 	RollerPanel.hide()
+	NeedlerPanel.hide()
 	WorkshopPanel.resetMonument()
 	WorkshopPanel.resetPlayer()
 	HUD.setUpgradesVisible(false)
@@ -764,6 +772,45 @@ end
 
 Network.onNeedCommandCenter(function()
 	enterCCMode()
+end)
+
+-- ── Return to the ready-up menu ─────────────────────────────────────────────────
+-- Find one of the HUD's floating ScreenGuis by name (used to hide the top-right system
+-- menu button while the lobby is up, since it renders above the lobby backdrop).
+local function playerGuiScreen(name: string): ScreenGui?
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local g  = pg and pg:FindFirstChild(name)
+	return (g and g:IsA("ScreenGui")) and g or nil
+end
+
+Network.onReturnToLobby(function()
+	-- The server reset the match → drop everyone back onto the ready-up menu. The match
+	-- systems from the first startGame keep running; readying up delivers a fresh base
+	-- (which reveals the HUD + refocuses the camera) via the normal placement flow.
+	if winOverlay then winOverlay.Visible = false end
+	hideSurrenderVote()
+	enterCCMode()                                   -- reset local match state
+	local sm = playerGuiScreen("RTSSystemMenu")
+	if sm then sm.Enabled = false end               -- hide the ☰ button behind the lobby
+	LobbyUI.reopen(function()
+		-- Resume into gameplay: restore the system menu button; the delivered base
+		-- drives the rest through onOwnCCPlaced.
+		local sm2 = playerGuiScreen("RTSSystemMenu")
+		if sm2 then sm2.Enabled = true end
+	end)
+end)
+
+-- A teammate wants to surrender + restart → show the yes/no vote popup.
+Network.onSurrenderVote(function(requesterName: string)
+	showSurrenderVote(requesterName)
+end)
+
+-- The pending vote was declined or cancelled → close the popup (message optional).
+Network.onSurrenderCancel(function(message: string)
+	hideSurrenderVote()
+	if message and message ~= "" then
+		HUD.showNotification(message, Color3.fromRGB(230, 180, 90))
+	end
 end)
 
 -- Shared handling for "our Command Center is up": reveals the build/research tray
@@ -859,12 +906,14 @@ UnitController.onUnitsSelected(function(ids: { string })
 	local leechIds:    { string } = {}
 	local embryoIds:   { string } = {}
 	local rollerIds:   { string } = {}
+	local needlerIds:  { string } = {}
 	for _, id in ids do
 		local t = UnitController.getUnitType(id)
 		if     t == "Survivor" then table.insert(survivorIds, id)
 		elseif t == "Leech"    then table.insert(leechIds, id)
 		elseif t == "Embryo"   then table.insert(embryoIds, id)
 		elseif t == "Roller"   then table.insert(rollerIds, id)
+		elseif t == "Needler"  then table.insert(needlerIds, id)
 		end
 	end
 
@@ -872,6 +921,7 @@ UnitController.onUnitsSelected(function(ids: { string })
 	if #leechIds    > 0 then LeechPanel.show(leechIds)       else LeechPanel.hide()    end
 	if #embryoIds   > 0 then EmbryoPanel.show(embryoIds)     else EmbryoPanel.hide()   end
 	if #rollerIds   > 0 then RollerPanel.show(rollerIds)     else RollerPanel.hide()   end
+	if #needlerIds  > 0 then NeedlerPanel.show(needlerIds)   else NeedlerPanel.hide()  end
 end)
 
 -- ── Bonfire panel ──────────────────────────────────────────────────────────────
@@ -1710,8 +1760,21 @@ Network.onMonumentProgress(function(ownerUserId: number, timeRemaining: number?)
 end)
 
 -- End screen overlay
+-- Lives in its OWN ScreenGui (not RTSHUD): the shared HUD carries a 2× cluster UIScale
+-- meant for the small bottom cluster, which would inflate this full-screen modal to
+-- ~2× its design size and overflow small displays. Here the card is authored at a fixed
+-- DESIGN size and a single UIScale shrinks it to fit any viewport (never enlarging past
+-- design), so it reads the same, centered and fully on-screen, across every device.
+local END_CARD_W, END_CARD_H = 600, 748
 do
-	local sg      = Players.LocalPlayer.PlayerGui:WaitForChild("RTSHUD") :: ScreenGui
+	local sg               = Instance.new("ScreenGui")
+	sg.Name                = "RTSEndScreen"
+	sg.ResetOnSpawn        = false
+	sg.IgnoreGuiInset      = true
+	sg.DisplayOrder        = 250
+	sg.ZIndexBehavior      = Enum.ZIndexBehavior.Sibling
+	sg.Parent              = Players.LocalPlayer.PlayerGui
+
 	local overlay = Instance.new("Frame")
 	overlay.Name                   = "EndScreen"
 	overlay.Size                   = UDim2.new(1, 0, 1, 0)
@@ -1724,8 +1787,9 @@ do
 
 	local card = Instance.new("Frame")
 	card.Name                   = "Card"
-	card.Size                   = UDim2.new(0, 600, 0, 500)
-	card.Position               = UDim2.new(0.5, -300, 0.5, -250)
+	card.Size                   = UDim2.fromOffset(END_CARD_W, END_CARD_H)
+	card.AnchorPoint            = Vector2.new(0.5, 0.5)
+	card.Position               = UDim2.fromScale(0.5, 0.5)
 	card.BackgroundColor3       = Color3.fromRGB(16, 18, 26)
 	card.BorderSizePixel        = 0
 	card.ZIndex                 = 101
@@ -1733,6 +1797,28 @@ do
 	local cardCorner            = Instance.new("UICorner")
 	cardCorner.CornerRadius     = UDim.new(0, 10)
 	cardCorner.Parent           = card
+
+	-- Responsive fit: uniformly scale the whole card down to fit the viewport (with a
+	-- small margin), never scaling above 1× so it stays crisp at design size on big
+	-- screens. Keeps the fixed internal pixel layout intact while fitting every device.
+	local cardScale             = Instance.new("UIScale")
+	cardScale.Parent            = card
+	local function fitEndCard()
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local vp = cam.ViewportSize
+		if vp.X == 0 or vp.Y == 0 then return end
+		cardScale.Scale = math.min(1, vp.X * 0.94 / END_CARD_W, vp.Y * 0.94 / END_CARD_H)
+	end
+	fitEndCard()
+	local function hookViewport(cam: Camera)
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(fitEndCard)
+		fitEndCard()
+	end
+	if workspace.CurrentCamera then hookViewport(workspace.CurrentCamera) end
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if workspace.CurrentCamera then hookViewport(workspace.CurrentCamera) end
+	end)
 
 	local topBar                = Instance.new("Frame")
 	topBar.Name                 = "TopBar"
@@ -1779,6 +1865,7 @@ do
 	playersSection.Parent       = card
 
 	local div1                  = Instance.new("Frame")
+	div1.Name                   = "Div1"
 	div1.Size                   = UDim2.new(1, -60, 0, 1)
 	div1.Position               = UDim2.new(0, 30, 0, 260)
 	div1.BackgroundColor3       = Color3.fromRGB(55, 62, 80)
@@ -1826,9 +1913,37 @@ do
 		val.Parent              = row
 	end
 
+	-- ── Performance graph (cumulative kills over match time, per player) ────────
+	local graphTitle            = Instance.new("TextLabel")
+	graphTitle.Name             = "GraphTitle"
+	graphTitle.Size             = UDim2.new(1, -60, 0, 18)
+	graphTitle.Position         = UDim2.new(0, 30, 0, 436)
+	graphTitle.BackgroundTransparency = 1
+	graphTitle.Font             = Enum.Font.GothamBold
+	graphTitle.TextSize         = 14
+	graphTitle.Text             = "UNITS DESTROYED OVER TIME (ALL COMMANDERS)"
+	graphTitle.TextColor3       = Color3.fromRGB(150, 165, 195)
+	graphTitle.TextXAlignment   = Enum.TextXAlignment.Left
+	graphTitle.ZIndex           = 102
+	graphTitle.Parent           = card
+
+	local graphFrame            = Instance.new("Frame")
+	graphFrame.Name             = "GraphSection"
+	graphFrame.Size             = UDim2.new(1, -60, 0, 150)
+	graphFrame.Position         = UDim2.new(0, 30, 0, 458)
+	graphFrame.BackgroundColor3 = Color3.fromRGB(11, 13, 20)
+	graphFrame.BackgroundTransparency = 0.25
+	graphFrame.BorderSizePixel  = 0
+	graphFrame.ZIndex           = 102
+	graphFrame.Parent           = card
+	local gfCorner              = Instance.new("UICorner")
+	gfCorner.CornerRadius       = UDim.new(0, 8)
+	gfCorner.Parent             = graphFrame
+
 	local div2                  = Instance.new("Frame")
+	div2.Name                   = "Div2"
 	div2.Size                   = UDim2.new(1, -60, 0, 1)
-	div2.Position               = UDim2.new(0, 30, 0, 428)
+	div2.Position               = UDim2.new(0, 30, 0, 626)
 	div2.BackgroundColor3       = Color3.fromRGB(55, 62, 80)
 	div2.BorderSizePixel        = 0
 	div2.ZIndex                 = 102
@@ -1837,7 +1952,7 @@ do
 	local durationLbl           = Instance.new("TextLabel")
 	durationLbl.Name            = "DurationLabel"
 	durationLbl.Size            = UDim2.new(1, -60, 0, 22)
-	durationLbl.Position        = UDim2.new(0, 30, 0, 438)
+	durationLbl.Position        = UDim2.new(0, 30, 0, 636)
 	durationLbl.BackgroundTransparency = 1
 	durationLbl.Font            = Enum.Font.Gotham
 	durationLbl.TextSize        = 14
@@ -1847,25 +1962,27 @@ do
 	durationLbl.ZIndex          = 102
 	durationLbl.Parent          = card
 
+	-- Small status hint above the buttons (e.g. "Waiting for other players…" while a
+	-- multiplayer surrender vote is out). Not a countdown — the screen waits for a click.
 	local returnLbl             = Instance.new("TextLabel")
 	returnLbl.Name              = "ReturnLabel"
-	returnLbl.Size              = UDim2.new(1, -60, 0, 26)
-	returnLbl.Position          = UDim2.new(0, 30, 0, 468)
+	returnLbl.Size              = UDim2.new(1, -60, 0, 18)
+	returnLbl.Position          = UDim2.new(0, 30, 0, 660)
 	returnLbl.BackgroundTransparency = 1
 	returnLbl.Font              = Enum.Font.Gotham
-	returnLbl.TextSize          = 15
-	returnLbl.Text              = "Returning to lobby..."
-	returnLbl.TextColor3        = Color3.fromRGB(90, 105, 130)
+	returnLbl.TextSize          = 14
+	returnLbl.Text              = ""
+	returnLbl.TextColor3        = Color3.fromRGB(150, 165, 195)
 	returnLbl.TextXAlignment    = Enum.TextXAlignment.Left
 	returnLbl.ZIndex            = 102
 	returnLbl.Parent            = card
 
-	-- PLAY AGAIN button — shown only on the mid-match defeat screen (hidden for the
-	-- real endgame, which auto-returns to lobby). Respawns the player's base.
+	-- PLAY AGAIN — shown only on the mid-match defeat screen (respawns the player's base
+	-- into the still-running match). Takes the left half when both buttons show.
 	local playAgainBtn          = Instance.new("TextButton")
 	playAgainBtn.Name           = "PlayAgainBtn"
-	playAgainBtn.Size           = UDim2.new(1, -60, 0, 44)
-	playAgainBtn.Position       = UDim2.new(0, 30, 0, 462)
+	playAgainBtn.Size           = UDim2.new(0.5, -36, 0, 46)
+	playAgainBtn.Position       = UDim2.new(0, 30, 0, 686)
 	playAgainBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 70)
 	playAgainBtn.BorderSizePixel  = 0
 	playAgainBtn.AutoButtonColor  = true
@@ -1882,6 +1999,30 @@ do
 		Network.playAgain()
 	end)
 
+	-- RETURN TO MENU — always shown; sends the player back to the ready-up menu. On the
+	-- endgame screen the match is already decided, so this resets straight away; from a
+	-- mid-match defeat (with PLAY AGAIN alongside) it routes through the surrender flow.
+	local returnBtn             = Instance.new("TextButton")
+	returnBtn.Name              = "ReturnBtn"
+	returnBtn.Size              = UDim2.new(1, -60, 0, 46)
+	returnBtn.Position          = UDim2.new(0, 30, 0, 686)
+	returnBtn.BackgroundColor3  = Color3.fromRGB(60, 74, 104)
+	returnBtn.BorderSizePixel   = 0
+	returnBtn.AutoButtonColor   = true
+	returnBtn.Font              = Enum.Font.GothamBold
+	returnBtn.TextSize          = 18
+	returnBtn.TextColor3        = Color3.fromRGB(226, 234, 248)
+	returnBtn.Text              = "RETURN TO MENU"
+	returnBtn.ZIndex            = 103
+	returnBtn.Visible           = false
+	returnBtn.Parent            = card
+	local _rbc = Instance.new("UICorner"); _rbc.CornerRadius = UDim.new(0, 8); _rbc.Parent = returnBtn
+	returnBtn.MouseButton1Click:Connect(function()
+		returnBtn.Active = false
+		returnLbl.Text = "Returning to the ready-up menu…"
+		Network.leaveToLobby()
+	end)
+
 	-- Tick sound played during stat counter animations
 	local tickSnd               = Instance.new("Sound")
 	tickSnd.Name                = "TickSound"
@@ -1889,6 +2030,101 @@ do
 	tickSnd.Volume              = 0.25
 	tickSnd.RollOffMaxDistance  = 0
 	tickSnd.Parent              = card
+end
+
+-- ── Surrender / restart vote popup (multiplayer) ────────────────────────────────
+-- Shown on the OTHER players' screens when someone asks to return to the ready-up menu
+-- mid-match: "<name> wants to surrender and restart the match." with YES / NO. In its
+-- own ScreenGui with a fit-to-viewport UIScale, so it reads the same on every device.
+do
+	local VOTE_W, VOTE_H = 420, 200
+	local sg               = Instance.new("ScreenGui")
+	sg.Name                = "RTSSurrenderVote"
+	sg.ResetOnSpawn        = false
+	sg.IgnoreGuiInset      = true
+	sg.DisplayOrder        = 260
+	sg.ZIndexBehavior      = Enum.ZIndexBehavior.Sibling
+	sg.Parent              = Players.LocalPlayer.PlayerGui
+
+	local overlay = Instance.new("Frame")
+	overlay.Size                   = UDim2.new(1, 0, 1, 0)
+	overlay.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
+	overlay.BackgroundTransparency = 0.5
+	overlay.Active                 = true    -- absorb clicks behind the popup
+	overlay.ZIndex                 = 100
+	overlay.Visible                = false
+	overlay.Parent                 = sg
+
+	local card = Instance.new("Frame")
+	card.Size                   = UDim2.fromOffset(VOTE_W, VOTE_H)
+	card.AnchorPoint            = Vector2.new(0.5, 0.5)
+	card.Position               = UDim2.fromScale(0.5, 0.5)
+	card.BackgroundColor3       = Color3.fromRGB(16, 18, 26)
+	card.BorderSizePixel        = 0
+	card.ZIndex                 = 101
+	card.Parent                 = overlay
+	local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0, 10); vc.Parent = card
+	local vst = Instance.new("UIStroke"); vst.Color = Color3.fromRGB(90, 108, 140); vst.Thickness = 1; vst.Parent = card
+
+	local vScale = Instance.new("UIScale"); vScale.Parent = card
+	local function fitVote()
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local vp = cam.ViewportSize
+		if vp.X == 0 or vp.Y == 0 then return end
+		vScale.Scale = math.min(1, vp.X * 0.9 / VOTE_W, vp.Y * 0.9 / VOTE_H)
+	end
+	fitVote()
+	if workspace.CurrentCamera then
+		workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitVote)
+	end
+
+	local topBar = Instance.new("Frame")
+	topBar.Size = UDim2.new(1, 0, 0, 6); topBar.BackgroundColor3 = Color3.fromRGB(230, 180, 90)
+	topBar.BorderSizePixel = 0; topBar.ZIndex = 102; topBar.Parent = card
+	local tbc = Instance.new("UICorner"); tbc.CornerRadius = UDim.new(0, 10); tbc.Parent = topBar
+
+	local heading = Instance.new("TextLabel")
+	heading.Size = UDim2.new(1, -32, 0, 30); heading.Position = UDim2.new(0, 16, 0, 22)
+	heading.BackgroundTransparency = 1; heading.Font = Enum.Font.GothamBold; heading.TextSize = 20
+	heading.Text = "SURRENDER & RESTART?"; heading.TextColor3 = Color3.fromRGB(240, 210, 150)
+	heading.ZIndex = 102; heading.Parent = card
+
+	local body = Instance.new("TextLabel")
+	body.Name = "Body"
+	body.Size = UDim2.new(1, -32, 0, 44); body.Position = UDim2.new(0, 16, 0, 58)
+	body.BackgroundTransparency = 1; body.Font = Enum.Font.Gotham; body.TextSize = 15
+	body.TextWrapped = true; body.Text = ""; body.TextColor3 = Color3.fromRGB(200, 210, 228)
+	body.ZIndex = 102; body.Parent = card
+
+	local function voteButton(text: string, x: number, col: Color3): TextButton
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0.5, -24, 0, 46); b.Position = UDim2.new(x, x == 0 and 16 or 8, 1, -62)
+		b.BackgroundColor3 = col; b.BorderSizePixel = 0; b.AutoButtonColor = true
+		b.Font = Enum.Font.GothamBold; b.TextSize = 18; b.TextColor3 = Color3.fromRGB(240, 246, 255)
+		b.Text = text; b.ZIndex = 103; b.Parent = card
+		local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 8); c.Parent = b
+		return b
+	end
+	local yesBtn = voteButton("YES", 0,   Color3.fromRGB(60, 150, 80))
+	local noBtn  = voteButton("NO",  0.5, Color3.fromRGB(170, 70, 70))
+
+	yesBtn.MouseButton1Click:Connect(function()
+		overlay.Visible = false
+		Network.surrenderVoteResult(true)
+	end)
+	noBtn.MouseButton1Click:Connect(function()
+		overlay.Visible = false
+		Network.surrenderVoteResult(false)
+	end)
+
+	showSurrenderVote = function(requesterName: string)
+		body.Text = (requesterName or "A player") .. " wants to surrender and restart the match. Do you agree?"
+		overlay.Visible = true
+	end
+	hideSurrenderVote = function()
+		overlay.Visible = false
+	end
 end
 
 Network.onCCAttacked(function()
@@ -1963,6 +2199,7 @@ local function renderEndCard(winnerUserId: number, reason: string, statsTable: a
 	local durLbl  = card:FindFirstChild("DurationLabel") :: TextLabel?
 	local retLbl  = card:FindFirstChild("ReturnLabel")   :: TextLabel?
 	local playAgainBtn = card:FindFirstChild("PlayAgainBtn") :: TextButton?
+	local returnBtn    = card:FindFirstChild("ReturnBtn")    :: TextButton?
 
 	if heading then
 		heading.Text       = isWinner and "VICTORY!" or "DEFEAT"
@@ -2147,29 +2384,241 @@ local function renderEndCard(winnerUserId: number, reason: string, statsTable: a
 		end)
 	end
 
-	animateStat("Kills",     myStats and myStats.kills           or 0, 0.3)
-	animateStat("Trained",   myStats and myStats.unitsTrained    or 0, 0.6)
-	animateStat("Builds",    myStats and myStats.buildingsBuilt  or 0, 0.9)
-	animateStat("Resources", myStats and myStats.resourcesEarned or 0, 1.2)
+	-- ── Sequential reveal ──────────────────────────────────────────────────────
+	-- Everything on the card starts hidden and fades in section by section, so the
+	-- outcome, roster, stats and graph land one after another instead of all at once.
+	local Tween = game:GetService("TweenService")
+	local function scheduleReveal(obj: Instance?, delay: number, deep: boolean?)
+		if not obj then return end
+		local targets: { { any } } = {}
+		local function rec(o: Instance)
+			if o:IsA("TextLabel") or o:IsA("TextButton") then
+				targets[#targets + 1] = { o, "TextTransparency", (o :: any).TextTransparency }
+				;(o :: any).TextTransparency = 1
+			end
+			if o:IsA("ImageLabel") then
+				targets[#targets + 1] = { o, "ImageTransparency", o.ImageTransparency }
+				o.ImageTransparency = 1
+			end
+			if o:IsA("GuiObject") and o.BackgroundTransparency < 1 then
+				targets[#targets + 1] = { o, "BackgroundTransparency", o.BackgroundTransparency }
+				o.BackgroundTransparency = 1
+			end
+			if deep then for _, c in o:GetChildren() do rec(c) end end
+		end
+		rec(obj)
+		task.delay(delay, function()
+			local ti = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			for _, t in targets do
+				Tween:Create(t[1], ti, { [t[2]] = t[3] }):Play()
+			end
+		end)
+	end
+
+	-- Header / roster / divider.
+	scheduleReveal(card:FindFirstChild("Heading"), 0.05)
+	scheduleReveal(card:FindFirstChild("Sub"),     0.18)
+	scheduleReveal(playersSection, 0.34, true)
+	scheduleReveal(card:FindFirstChild("Div1"), 0.58)
+
+	-- Stat rows reveal + count in sequence.
+	local statOrder = { "Kills", "Trained", "Builds", "Resources" }
+	local statVals  = {
+		Kills     = myStats and myStats.kills           or 0,
+		Trained   = myStats and myStats.unitsTrained    or 0,
+		Builds    = myStats and myStats.buildingsBuilt  or 0,
+		Resources = myStats and myStats.resourcesEarned or 0,
+	}
+	for i, id in statOrder do
+		local d = 0.72 + (i - 1) * 0.2
+		scheduleReveal(card:FindFirstChild(id .. "Row"), d, true)
+		animateStat(id, statVals[id], d)
+	end
+
+	-- ── Performance graph: cumulative kills per player over match time ──────────
+	local graphFrame = card:FindFirstChild("GraphSection") :: Frame?
+	do
+		scheduleReveal(card:FindFirstChild("GraphTitle"), 1.62)
+		if graphFrame then
+			for _, ch in graphFrame:GetChildren() do
+				if not ch:IsA("UICorner") then ch:Destroy() end
+			end
+
+			local PADL, PADR, PADT, PADB = 40, 12, 20, 22
+			local gw    = END_CARD_W - 60
+			local gh    = 150
+			local plotW = gw - PADL - PADR
+			local plotH = gh - PADT - PADB
+			local maxT  = math.max(duration, 1)
+
+			-- Universal series from the server: one line per combatant (players AND AI).
+			-- Winner gold, you cyan, everyone else cycles a palette.
+			local PALETTE = {
+				Color3.fromRGB(120, 230, 150), Color3.fromRGB(255, 170, 70),
+				Color3.fromRGB(200, 130, 255), Color3.fromRGB(240, 90, 110),
+				Color3.fromRGB(150, 200, 255), Color3.fromRGB(255, 130, 185),
+			}
+			local graph   = statsTable and (statsTable :: any)["__graph"]
+			local gseries = (graph and graph.series) or {}
+			local dt      = (graph and graph.dt) or 5
+
+			local series: { { pts: { Vector2 }, color: Color3, name: string } } = {}
+			local maxV   = 1
+			local palIdx = 0
+			for _, sd in gseries do
+				local pts: { Vector2 } = { Vector2.new(0, 0) }
+				for k, v in (sd.samples or {}) do
+					pts[#pts + 1] = Vector2.new(math.min(k * dt, maxT), v)
+					if v > maxV then maxV = v end
+				end
+				local finalK = sd.final or 0
+				pts[#pts + 1] = Vector2.new(maxT, finalK)
+				if finalK > maxV then maxV = finalK end
+				local col: Color3
+				if sd.isWinner then
+					col = Color3.fromRGB(255, 215, 0)
+				elseif sd.id == tostring(localUserId) then
+					col = Color3.fromRGB(90, 200, 255)
+				else
+					palIdx += 1
+					col = PALETTE[((palIdx - 1) % #PALETTE) + 1]
+				end
+				series[#series + 1] = { pts = pts, color = col, name = sd.name or "Enemy" }
+			end
+
+			-- Horizontal gridlines.
+			for gi = 0, 3 do
+				local gl = Instance.new("Frame")
+				gl.Size = UDim2.fromOffset(plotW, 1)
+				gl.Position = UDim2.fromOffset(PADL, PADT + plotH * (gi / 3))
+				gl.BackgroundColor3 = Color3.fromRGB(40, 46, 62)
+				gl.BackgroundTransparency = 0.35
+				gl.BorderSizePixel = 0
+				gl.ZIndex = 103
+				gl.Parent = graphFrame
+			end
+
+			local function axisLbl(txt: string, x: number, y: number, w: number, align: Enum.TextXAlignment)
+				local l = Instance.new("TextLabel")
+				l.Size = UDim2.fromOffset(w, 14)
+				l.Position = UDim2.fromOffset(x, y)
+				l.BackgroundTransparency = 1
+				l.Font = Enum.Font.Gotham
+				l.TextSize = 11
+				l.Text = txt
+				l.TextColor3 = Color3.fromRGB(110, 125, 150)
+				l.TextXAlignment = align
+				l.ZIndex = 104
+				l.Parent = graphFrame
+			end
+			axisLbl(tostring(maxV), 0, PADT - 7, PADL - 6, Enum.TextXAlignment.Right)
+			axisLbl("0", 0, PADT + plotH - 7, PADL - 6, Enum.TextXAlignment.Right)
+			axisLbl("0:00", PADL, gh - PADB + 4, 40, Enum.TextXAlignment.Left)
+			axisLbl(string.format("%d:%02d", math.floor(maxT / 60), math.floor(maxT % 60)),
+				gw - PADR - 44, gh - PADB + 4, 44, Enum.TextXAlignment.Right)
+
+			-- Legend (only when more than one commander is charted).
+			if #series > 1 then
+				local legend = Instance.new("Frame")
+				legend.Size = UDim2.fromOffset(plotW, 14)
+				legend.Position = UDim2.fromOffset(PADL, 3)
+				legend.BackgroundTransparency = 1
+				legend.ZIndex = 106
+				legend.Parent = graphFrame
+				local ll = Instance.new("UIListLayout")
+				ll.FillDirection = Enum.FillDirection.Horizontal
+				ll.HorizontalAlignment = Enum.HorizontalAlignment.Right
+				ll.Padding = UDim.new(0, 10)
+				ll.Parent = legend
+				for _, ser in series do
+					local chip = Instance.new("TextLabel")
+					chip.AutomaticSize = Enum.AutomaticSize.X
+					chip.Size = UDim2.fromOffset(0, 14)
+					chip.BackgroundTransparency = 1
+					chip.Font = Enum.Font.GothamBold
+					chip.TextSize = 11
+					chip.Text = "■ " .. ser.name
+					chip.TextColor3 = ser.color
+					chip.ZIndex = 106
+					chip.Parent = legend
+				end
+			end
+
+			-- Left-to-right wipe clip holding the plotted lines.
+			local clip = Instance.new("Frame")
+			clip.Name = "PlotClip"
+			clip.Position = UDim2.fromOffset(PADL, PADT)
+			clip.Size = UDim2.fromOffset(0, plotH)
+			clip.BackgroundTransparency = 1
+			clip.ClipsDescendants = true
+			clip.ZIndex = 104
+			clip.Parent = graphFrame
+
+			local function toPx(p: Vector2): (number, number)
+				return (p.X / maxT) * plotW, plotH - (p.Y / maxV) * plotH
+			end
+			for _, ser in series do
+				for pi = 1, #ser.pts - 1 do
+					local x0, y0 = toPx(ser.pts[pi])
+					local x1, y1 = toPx(ser.pts[pi + 1])
+					local dx, dy = x1 - x0, y1 - y0
+					local len = math.max(math.sqrt(dx * dx + dy * dy), 0.01)
+					local seg = Instance.new("Frame")
+					seg.Size = UDim2.fromOffset(len, 2)
+					seg.AnchorPoint = Vector2.new(0.5, 0.5)
+					seg.Position = UDim2.fromOffset((x0 + x1) / 2, (y0 + y1) / 2)
+					seg.Rotation = math.deg(math.atan2(dy, dx))
+					seg.BackgroundColor3 = ser.color
+					seg.BorderSizePixel = 0
+					seg.ZIndex = 105
+					seg.Parent = clip
+				end
+				local ex, ey = toPx(ser.pts[#ser.pts])
+				local dot = Instance.new("Frame")
+				dot.Size = UDim2.fromOffset(7, 7)
+				dot.AnchorPoint = Vector2.new(0.5, 0.5)
+				dot.Position = UDim2.fromOffset(ex, ey)
+				dot.BackgroundColor3 = ser.color
+				dot.BorderSizePixel = 0
+				dot.ZIndex = 106
+				dot.Parent = clip
+				local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(1, 0); dc.Parent = dot
+			end
+
+			-- Reveal the frame + axis, then wipe the lines in left-to-right.
+			scheduleReveal(graphFrame, 1.7, true)
+			task.delay(1.85, function()
+				Tween:Create(clip, TweenInfo.new(1.0, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+					{ Size = UDim2.fromOffset(plotW, plotH) }):Play()
+			end)
+		end
+	end
+
+	-- Footer: divider, duration, buttons.
+	scheduleReveal(card:FindFirstChild("Div2"), 2.7)
+	scheduleReveal(durLbl, 2.8)
 
 	winOverlay.Visible = true
 
-	if isDefeatRespawn then
-		-- Mid-match defeat: offer PLAY AGAIN, no lobby countdown.
-		if playAgainBtn then playAgainBtn.Visible = true end
-		if retLbl       then retLbl.Visible       = false end
-	else
-		-- Real endgame: hide PLAY AGAIN, run the return-to-lobby countdown.
-		if playAgainBtn then playAgainBtn.Visible = false end
-		if retLbl       then retLbl.Visible       = true  end
-		task.spawn(function()
-			for i = 10, 1, -1 do
-				if not winOverlay or not winOverlay.Visible then return end
-				if retLbl then retLbl.Text = "Returning to lobby in " .. i .. "s..." end
-				task.wait(1)
-			end
-			if retLbl then retLbl.Text = "Returning to lobby..." end
-		end)
+	-- RETURN TO MENU is always available and never auto-fires — the screen waits for a
+	-- click. On a mid-match defeat it sits beside PLAY AGAIN (each takes half the row);
+	-- on the real endgame it spans the full width on its own.
+	if retLbl then retLbl.Text = "" end
+	if returnBtn then
+		returnBtn.Visible = true
+		returnBtn.Active  = true
+		if isDefeatRespawn then
+			returnBtn.Size     = UDim2.new(0.5, -36, 0, 46)
+			returnBtn.Position = UDim2.new(0.5, 6, 0, 686)
+		else
+			returnBtn.Size     = UDim2.new(1, -60, 0, 46)
+			returnBtn.Position = UDim2.new(0, 30, 0, 686)
+		end
+		scheduleReveal(returnBtn, 2.95)
+	end
+	if playAgainBtn then
+		playAgainBtn.Visible = isDefeatRespawn
+		if isDefeatRespawn then scheduleReveal(playAgainBtn, 2.95) end
 	end
 end
 
@@ -4697,8 +5146,12 @@ end -- startGame
 
 CometManager.init()
 
--- Main menu first: BATTLE opens the Map/AI lobby (which owns the game-start flow);
--- TUTORIAL isn't wired up yet. The lobby only builds once BATTLE is pressed.
-MainMenu.init(function()
-	LobbyUI.init(startGame)
-end)
+-- Main menu first: a tabbed shell. The READY UP tab reveals the Map/AI lobby (which
+-- owns the game-start flow) beneath the persistent tab bar; the lobby only builds the
+-- first time that tab is entered. When its countdown begins, the lobby fires the
+-- start-transition hook so MainMenu drops its chrome for the full-screen sequence.
+MainMenu.init({
+	buildLobby = function() LobbyUI.init(startGame) end,
+	setLobbyVisible = function(visible: boolean) LobbyUI.setVisible(visible) end,
+})
+LobbyUI.setOnStartTransition(function() MainMenu.close() end)

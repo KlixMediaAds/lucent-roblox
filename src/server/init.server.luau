@@ -100,6 +100,62 @@ MineralManager.setTerrainManager(TerrainManager)
 -- ── Game end / reset ──────────────────────────────────────────────────────────
 local gameResetInProgress = false
 local gameStartTime       = os.clock()
+-- Performance-graph timeline: every TIMELINE_DT seconds we snapshot every combatant's
+-- (human players AND AI bots) cumulative kills, so the end screen can chart a universal
+-- kills-over-time line per commander. Keyed by owner id string.
+-- `matchGen` is bumped each match start/end so a stale sampler task self-exits.
+local TIMELINE_DT         = 5
+local killTimeline: { [string]: { number } } = {}
+local matchGen            = 0
+
+-- One timeline sample: append every combatant's current cumulative kills.
+local function sampleTimeline()
+	local tally = UnitManager.getKillTally()
+	local function record(idStr: string)
+		local arr = killTimeline[idStr]
+		if not arr then arr = {}; killTimeline[idStr] = arr end
+		arr[#arr + 1] = tally[idStr] or 0
+	end
+	for _, p in Players:GetPlayers() do
+		if p.UserId > 0 then record(tostring(p.UserId)) end
+	end
+	for _, bot in AIManager.getBotsForGraph() do
+		record(tostring(bot.userId))
+	end
+end
+
+-- Universal graph payload: one series per combatant (players + AI), each with its
+-- sampled kill timeline and final total. Stashed under statsTable["__graph"].
+local function buildGraphData(winnerUserId: number): any
+	local tally  = UnitManager.getKillTally()
+	local series = {}
+	local function add(idStr: string, name: string, isAI: boolean, userId: number)
+		table.insert(series, {
+			id       = idStr,
+			name     = name,
+			isAI     = isAI,
+			isWinner = userId == winnerUserId,
+			samples  = killTimeline[idStr] or {},
+			final    = tally[idStr] or 0,
+		})
+	end
+	for _, p in Players:GetPlayers() do
+		if p.UserId > 0 then add(tostring(p.UserId), p.Name, false, p.UserId) end
+	end
+	for _, bot in AIManager.getBotsForGraph() do
+		add(tostring(bot.userId), bot.name, true, bot.userId)
+	end
+	return { dt = TIMELINE_DT, series = series }
+end
+-- The match has been decided (an end screen is up). While true, a RETURN TO MENU
+-- press resets straight to the ready-up lobby with no surrender vote.
+local matchOver           = false
+-- True from the moment a return-to-lobby reset begins until the lobby is re-opened, so
+-- late/duplicate leave requests during that window are ignored (no spurious vote).
+local returningToLobby    = false
+-- A pending multiplayer surrender-restart vote, or nil. `needed` is the set of other
+-- human userIds whose yes is required; `votes` records the yes answers received.
+local pendingSurrender: { requester: Player, needed: { [number]: boolean }, votes: { [number]: boolean } }? = nil
 
 -- Base-assignment + gamemode state. Hoisted here (above triggerEndGame /
 -- onCCDestroyed) so every handler shares one set of variables rather than
@@ -107,15 +163,57 @@ local gameStartTime       = os.clock()
 local nextBaseIndex   = 0
 local nextLaneAIIdx   = 0
 local currentGamemode = "Default"
+local laneModeActive  = false   -- current match's lane flag (read by the persistent late-joiner handler)
+local lateJoinerConnected = false
 
 -- Default-mode base delivery (defined later; forward-declared so the reset /
 -- elimination handlers above its definition can call it).
 local playerBasePos: { [number]: Vector3 } = {}
 local deliverBaseForPlayer: (Player) -> ()
 
-local function triggerEndGame(winnerUserId: number, reason: string)
+-- Reset the whole match and re-open the ready-up lobby. Everyone lands back on the
+-- ready-up menu; pressing READY starts a fresh match through the normal lobby handoff.
+local function returnToLobby()
 	if gameResetInProgress then return end
 	gameResetInProgress = true
+	returningToLobby = true
+	pendingSurrender = nil
+	matchOver        = false
+	matchGen        += 1   -- stop any running timeline sampler
+
+	UnitManager.resetAll()
+	BuildingManager.resetAll()
+	for _, player in Players:GetPlayers() do
+		ResourceManager.reset(player)
+		ResearchManager.resetPlayer(player)
+	end
+	MineralManager.resetAll()
+	AIManager.resetAllBots()
+
+	nextBaseIndex = 0
+	nextLaneAIIdx = 0
+	playerBasePos = {}
+	gameStartTime = os.clock()
+
+	-- Tell every client the match is over → show the ready-up menu again.
+	RemoteHandler.get(Config.REMOTES.ReturnToLobby):FireAllClients()
+	gameResetInProgress = false
+
+	-- Re-open the server lobby a beat later so its LobbySync lands AFTER clients have
+	-- rebuilt their ready-up UI (which they do on the ReturnToLobby event above).
+	task.delay(0.35, function()
+		LobbyManager.reopen()
+		returningToLobby = false
+	end)
+end
+
+-- Declare the match decided and show the end screen. Players return to the ready-up
+-- menu only when they press RETURN TO MENU (no auto-return) → routes through
+-- LeaveToLobby, which resets immediately because matchOver is set here.
+local function triggerEndGame(winnerUserId: number, reason: string)
+	if matchOver or gameResetInProgress then return end
+	matchOver = true
+	matchGen += 1   -- stop the timeline sampler
 
 	local statsTable = {}
 	local duration   = math.max(0, math.floor(os.clock() - gameStartTime))
@@ -130,50 +228,9 @@ local function triggerEndGame(winnerUserId: number, reason: string)
 			}
 		end
 	end
+	statsTable["__graph"] = buildGraphData(winnerUserId)
 
 	RemoteHandler.get(Config.REMOTES.ShowEndScreen):FireAllClients(winnerUserId, reason, statsTable, duration)
-
-	task.wait(10)
-
-	UnitManager.resetAll()
-	BuildingManager.resetAll()
-
-	for _, player in Players:GetPlayers() do
-		ResourceManager.reset(player)
-		ResearchManager.resetPlayer(player)
-	end
-
-	MineralManager.resetAll()
-	AIManager.resetAllBots()
-	gameStartTime = os.clock()
-
-	-- Notify clients to reset their CC state
-	for _, player in Players:GetPlayers() do
-		RemoteHandler.get(Config.REMOTES.NeedCommandCenter):FireClient(player)
-	end
-
-	-- Re-establish bases for the new round.
-	if currentGamemode == "Lane" then
-		nextBaseIndex = 0
-		nextLaneAIIdx = 0
-		task.wait(0.1)  -- let NeedCommandCenter process first
-		for _, player in Players:GetPlayers() do
-			setupLanePlayerBase(player)
-		end
-	else
-		-- Default mode: place a fresh Command Center for every player.
-		nextBaseIndex = 0
-		playerBasePos = {}
-		task.wait(0.1)  -- let NeedCommandCenter reset client state first
-		for _, player in Players:GetPlayers() do
-			deliverBaseForPlayer(player)
-		end
-	end
-
-	-- Regrow the forest for the new round (CCs carve their own clearing).
-	ForestManager.generate()
-
-	gameResetInProgress = false
 end
 
 -- ── Elimination callback ──────────────────────────────────────────────────────
@@ -203,6 +260,7 @@ BuildingManager.setOnCCDestroyed(function(player)
 				resourcesEarned = ResourceManager.getTotalEarned(player),
 			},
 		}
+		stats["__graph"] = buildGraphData(-1)
 		local duration = math.max(0, math.floor(os.clock() - gameStartTime))
 
 		ResourceManager.reset(player)
@@ -232,6 +290,94 @@ end)
 -- flow (DEFEAT screen vs others, or a base reset in solo/AI matches).
 RemoteHandler.get(Config.REMOTES.ForfeitMatch).OnServerEvent:Connect(function(player)
 	BuildingManager.forfeit(player)
+end)
+
+-- ── Leave / return to the ready-up lobby (+ multiplayer surrender vote) ────────
+-- Solo (one human) or an already-decided match → reset straight to the ready-up menu.
+-- Multiplayer mid-match → put a surrender-restart vote to the OTHER human players; the
+-- reset only happens if every one of them accepts.
+local function humanPlayers(): { Player }
+	local list = {}
+	for _, p in Players:GetPlayers() do
+		if p.UserId > 0 then table.insert(list, p) end
+	end
+	return list
+end
+
+local function cancelSurrender(message: string)
+	local ps = pendingSurrender
+	if not ps then return end
+	pendingSurrender = nil
+	if ps.requester.Parent then
+		RemoteHandler.get(Config.REMOTES.SurrenderCancel):FireClient(ps.requester, message)
+	end
+	for uid in ps.needed do
+		local p = Players:GetPlayerByUserId(uid)
+		if p then RemoteHandler.get(Config.REMOTES.SurrenderCancel):FireClient(p, "") end
+	end
+end
+
+RemoteHandler.get(Config.REMOTES.LeaveToLobby).OnServerEvent:Connect(function(player)
+	if player.UserId <= 0 then return end
+	if returningToLobby or LobbyManager.isActive() then return end   -- already heading to / in the lobby
+	local humans = humanPlayers()
+
+	-- Immediate reset when solo, or when the match is already decided (end screen up).
+	if matchOver or #humans <= 1 then
+		returnToLobby()
+		return
+	end
+
+	-- Multiplayer, mid-match: one vote at a time.
+	if pendingSurrender then return end
+	local needed: { [number]: boolean } = {}
+	for _, p in humans do
+		if p ~= player then needed[p.UserId] = true end
+	end
+	pendingSurrender = { requester = player, needed = needed, votes = {} }
+	for _, p in humans do
+		if p ~= player then
+			RemoteHandler.get(Config.REMOTES.SurrenderVote):FireClient(p, player.Name)
+		end
+	end
+end)
+
+RemoteHandler.get(Config.REMOTES.SurrenderVoteResult).OnServerEvent:Connect(function(player, accept)
+	local ps = pendingSurrender
+	if not ps or not ps.needed[player.UserId] then return end
+
+	if accept ~= true then
+		cancelSurrender(player.Name .. " declined the restart.")
+		return
+	end
+
+	ps.votes[player.UserId] = true
+	for uid in ps.needed do
+		if not ps.votes[uid] then return end   -- still waiting on someone
+	end
+	-- Everyone agreed → reset to the ready-up lobby.
+	pendingSurrender = nil
+	returnToLobby()
+end)
+
+-- Keep a pending vote sane if a participant leaves: requester leaving cancels it; a
+-- voter leaving drops their requirement (and can complete the vote if they were last).
+Players.PlayerRemoving:Connect(function(player)
+	local ps = pendingSurrender
+	if not ps then return end
+	if ps.requester == player then
+		cancelSurrender("")
+		return
+	end
+	if ps.needed[player.UserId] then
+		ps.needed[player.UserId] = nil
+		ps.votes[player.UserId]  = nil
+		for uid in ps.needed do
+			if not ps.votes[uid] then return end
+		end
+		pendingSurrender = nil
+		returnToLobby()
+	end
 end)
 
 -- ── Chat commands (always active, not gated by lobby) ────────────────────────
@@ -410,7 +556,20 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	nextLaneAIIdx     = 0
 	currentGamemode   = gamemode or "Default"
 
+	-- Start the performance-graph sampler: snapshot every combatant's (players + AI)
+	-- cumulative kills each TIMELINE_DT seconds until the match ends (matchGen changes).
+	killTimeline = {}
+	matchGen += 1
+	local myGen = matchGen
+	task.spawn(function()
+		while matchGen == myGen do
+			sampleTimeline()
+			task.wait(TIMELINE_DT)
+		end
+	end)
+
 	local isLane = currentGamemode == "Lane"
+	laneModeActive = isLane
 
 	BuildingManager.setLaneMode(isLane)
 	UnitManager.setLaneMode(isLane)
@@ -436,18 +595,23 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	-- Grow the forest now that bases/deposits exist (it avoids both).
 	ForestManager.generate()
 
-	-- Late joiners also get auto-placed bases
-	Players.PlayerAdded:Connect(function(player)
-		task.delay(1, function()
-			if player.Parent and not BuildingManager.hasCommandCenter(player) then
-				if isLane then
-					setupLanePlayerBase(player)
-				else
-					deliverBaseForPlayer(player)
+	-- Late joiners also get auto-placed bases. Connect once (onLobbyEnd runs again each
+	-- time the lobby is re-opened after a match, so guard against stacking handlers).
+	if not lateJoinerConnected then
+		lateJoinerConnected = true
+		Players.PlayerAdded:Connect(function(player)
+			task.delay(1, function()
+				if player.Parent and not BuildingManager.hasCommandCenter(player)
+					and not LobbyManager.isActive() then
+					if laneModeActive then
+						setupLanePlayerBase(player)
+					else
+						deliverBaseForPlayer(player)
+					end
 				end
-			end
+			end)
 		end)
-	end)
+	end
 
 	-- Swarm gamemode: every AI bot fields a nest/creepy army instead of the
 	-- standard Barracks composition.

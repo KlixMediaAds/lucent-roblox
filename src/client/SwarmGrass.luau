@@ -17,7 +17,8 @@
 	  • Purple glow nodes — small neon blobs at branch points / tips for the eye
 	    catch (kept sparse and lightless, so nearly free).
 	  • Grow-in — when a CC spawns the whole web scales up/outward from the spike
-	    over ~1.2s (one-time Model:ScaleTo tween), so the veins appear to crawl out.
+	    over ~5s (one-time Model:ScaleTo tween), so the veins slowly creep out. The
+	    veins render at half transparency so they read as ghostly corruption.
 
 	Optimization:
 	  • Fully client-side — nothing replicates; the server never simulates this.
@@ -56,7 +57,8 @@ local GLOW_AT_TIP   = 0.5            -- chance of a glow blob at a tendril tip
 
 local CULL_SQ       = 360 * 360      -- un-parent webs past this range
 local CULL_EVERY    = 0.4            -- seconds between cull checks
-local GROW_TIME     = 1.2            -- spawn grow-in duration
+local GROW_TIME     = 5.0            -- spawn grow-in duration (slow creep as the game starts)
+local VEIN_TRANSP   = 0.5            -- tendrils render half-transparent
 local HALF_H        = Config.COMMAND_CENTER_SIZE.Y / 2
 
 local rng = Random.new()
@@ -86,6 +88,7 @@ local function addSegment(field: Model, groundY: number, p0: Vector3, p1: Vector
 	local seg      = Instance.new("Part")
 	seg.Size       = Vector3.new(width, THICKNESS, len + 0.15)  -- overlap to hide seams
 	seg.Color      = COLOR
+	seg.Transparency = VEIN_TRANSP
 	seg.Material   = Enum.Material.Slate
 	seg.Anchored   = true
 	seg.CanCollide = false
