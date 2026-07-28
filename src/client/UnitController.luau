@@ -28,6 +28,10 @@ local onEngineeringSelectedCb: ((string?) -> ())?
 -- Fires for an owned building that has no dedicated panel (so init.client can show
 -- a generic "upgrades coming soon" command card). (buildingId, buildingType) or nil.
 local onOtherBuildingSelectedCb: ((string?, string?) -> ())?
+-- Fires with the selected Egg-Sac egg ids (the clicked egg + its tentacle-tree descendants),
+-- or nil to close the panel, so init.client can show the EggPanel where the player chooses
+-- what those eggs hatch.
+local onEggSelectedCb: (({ string }?) -> ())?
 -- Fires whenever the selected UNIT set changes (with the current owned-unit ids),
 -- so init.client can show a unit command card (e.g. the Survivor upgrade menu).
 local onUnitsSelectedCb:     (({string}) -> ())?
@@ -77,6 +81,12 @@ local hoverBox:            SelectionBox? = nil
 local selectedBuildingId:  string?      = nil
 local selectedBuildingBox: SelectionBox? = nil
 local multiBldBoxes:       { [string]: SelectionBox } = {}  -- extra boxes from double-click
+
+-- ── Egg-Sac egg selection (own lightweight highlight; eggs aren't units/buildings) ──
+-- Selecting an egg also selects its descendants in the tentacle tree, so a whole subtree
+-- can be assigned a unit at once. Tracked as a set of egg ids → their highlight boxes.
+local selectedEggIds:   { string }                 = {}
+local selectedEggBoxes: { [string]: SelectionBox } = {}
 
 -- ── Double-click tracking ─────────────────────────────────────────────────────
 local lastClickTime:   number  = 0
@@ -464,6 +474,28 @@ local function hitBuilding(): string?
 	return nil
 end
 
+-- Raycast for an owned Egg-Sac nest under the cursor. Each one is a clickable Model (the
+-- bowl, plus an egg while it incubates) tagged with an "EggId" attribute, parented under a
+-- Mother model, so this must run BEFORE hitBuilding (which would otherwise match it as part
+-- of the Command Center). Returns the egg id and the clump Model, or nil.
+local function hitEgg(): (string?, Instance?)
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
+	if not result then return nil end
+	local inst: Instance? = result.Instance
+	while inst and inst ~= workspace do
+		local eid = inst:GetAttribute("EggId")
+		if eid ~= nil then
+			if inst:GetAttribute("EggOwnerId") == localPlayer.UserId then
+				return eid :: string, inst
+			end
+			return nil
+		end
+		inst = inst.Parent
+	end
+	return nil
+end
+
 local function hitEnemyUnit(): string?
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
@@ -600,6 +632,102 @@ local function isOnScreen(worldPos: Vector3): boolean
 	if sv.Z <= 0 then return false end
 	local vp = workspace.CurrentCamera.ViewportSize
 	return sv.X >= 0 and sv.X <= vp.X and sv.Y >= 0 and sv.Y <= vp.Y
+end
+
+-- Clear all egg highlights + tell init.client to close the EggPanel.
+local function clearEggSelection()
+	for id, box in selectedEggBoxes do box:Destroy(); selectedEggBoxes[id] = nil end
+	if #selectedEggIds > 0 then
+		selectedEggIds = {}
+		if onEggSelectedCb then onEggSelectedCb(nil) end
+	end
+end
+
+-- Scan the local player's egg clump Models, returning eggId → clump Model plus a
+-- parentEggId → { childEggId } adjacency map (from each clump's "ParentEgg" attribute).
+local function scanOwnedEggs(): ({ [string]: Instance }, { [string]: { string } })
+	local models:   { [string]: Instance }   = {}
+	local children: { [string]: { string } } = {}
+	local folder = workspace:FindFirstChild("Buildings")
+	if not folder then return models, children end
+	for _, cc in folder:GetChildren() do
+		for _, m in cc:GetChildren() do
+			local eid = m:GetAttribute("EggId")
+			if eid ~= nil and m:GetAttribute("EggOwnerId") == localPlayer.UserId then
+				models[eid :: string] = m
+				local pid = m:GetAttribute("ParentEgg")
+				if pid ~= nil then
+					local list = children[pid :: string]
+					if not list then list = {}; children[pid :: string] = list end
+					table.insert(list, eid :: string)
+				end
+			end
+		end
+	end
+	return models, children
+end
+
+-- Highlight the given eggs and open the panel for the whole set (one unit choice applies to
+-- all of them). Caller supplies the id list plus the eggId → clump Model lookup.
+local function applyEggSelection(ids: { string }, models: { [string]: Instance })
+	selectedEggIds = ids
+	for _, id in ids do
+		local m = models[id]
+		if m then
+			-- Outline the nest bowl: the egg only exists while a creature is incubating.
+			local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
+			local box               = Instance.new("SelectionBox")
+			box.Adornee             = adornee
+			box.Color3              = Color3.fromRGB(255, 180, 90)
+			box.LineThickness       = 0.06
+			box.SurfaceTransparency = 0.8
+			box.SurfaceColor3       = Color3.fromRGB(255, 180, 90)
+			box.Parent              = workspace
+			selectedEggBoxes[id]    = box
+			m.Destroying:Connect(function()
+				local b = selectedEggBoxes[id]
+				if b then b:Destroy(); selectedEggBoxes[id] = nil end
+			end)
+		end
+	end
+	if onEggSelectedCb then onEggSelectedCb(ids) end
+end
+
+-- Highlight a clicked egg AND its descendants in the tentacle tree, then open the panel for
+-- the whole set (so one unit choice applies to the subtree). Caller has already cleared
+-- unit/building selection.
+local function selectEgg(rootEggId: string)
+	clearEggSelection()
+	local models, children = scanOwnedEggs()
+
+	-- BFS the subtree rooted at the clicked egg.
+	local ids:   { string }           = {}
+	local stack: { string }           = { rootEggId }
+	local seen:  { [string]: boolean } = {}
+	while #stack > 0 do
+		local e = table.remove(stack) :: string
+		if not seen[e] then
+			seen[e] = true
+			table.insert(ids, e)
+			for _, c in (children[e] or {}) do table.insert(stack, c) end
+		end
+	end
+
+	applyEggSelection(ids, models)
+end
+
+-- Double-click on an egg: select EVERY owned egg currently on screen (mirrors the
+-- unit/building double-click "select all visible of this kind" behaviour).
+local function selectAllEggsOnScreen()
+	clearEggSelection()
+	local models = scanOwnedEggs()
+	local ids: { string } = {}
+	for id, m in models do
+		local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
+		local pos = adornee:IsA("BasePart") and adornee.Position or (m :: any):GetPivot().Position
+		if isOnScreen(pos) then table.insert(ids, id) end
+	end
+	applyEggSelection(ids, models)
 end
 
 -- Select all owned visible units of the same UnitType as the given id.
@@ -900,6 +1028,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			setHover(nil)
 			return
 		end
+		-- Hovering an egg (a child of the Mother model) shouldn't light up the whole
+		-- Command Center — suppress the building hover in that case.
+		if hitEgg() then setHover(nil); return end
 		setHover(hitBuilding())
 	end)
 
@@ -917,6 +1048,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			end
 			notify()
 			selectBuilding(nil)
+			clearEggSelection()
 			clearBuildingPanels()
 			return
 		end
@@ -996,15 +1128,18 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			lastClickTarget = nil
 			clearSelection()
 			selectBuilding(nil)
+			clearEggSelection()
 			boxSelect(
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
 			clearBuildingPanels()
 		else
-			-- Single / double click — check unit first, then buildings
+			-- Single / double click — check unit first, then eggs, then buildings
 			local now = os.clock()
 			local uid = hitUnit()
+			local eggId: string? = nil
+			if not uid then eggId = hitEgg() end
 			if uid then
 				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == uid
 				lastClickTime   = now
@@ -1016,10 +1151,26 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					addToSelection(uid)
 				end
 				selectBuilding(nil)
+				clearEggSelection()
 				clearBuildingPanels()
+			elseif eggId then
+				-- Own Egg-Sac egg: highlight it (+ its subtree) and open the "what to hatch" panel.
+				-- Double-clicking one selects every owned egg on screen instead.
+				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == eggId
+				lastClickTime   = now
+				lastClickTarget = eggId
+				clearSelection()
+				selectBuilding(nil)
+				clearBuildingPanels()
+				if isDouble then
+					selectAllEggsOnScreen()
+				else
+					selectEgg(eggId)
+				end
 			else
 				local bid = hitBuilding()
 				if bid then
+					clearEggSelection()
 					local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == bid
 					lastClickTime   = now
 					lastClickTarget = bid
@@ -1058,6 +1209,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					lastClickTarget = nil
 					clearSelection()
 					selectBuilding(nil)
+					clearEggSelection()
 					clearBuildingPanels()
 				end
 			end
@@ -1132,6 +1284,11 @@ end
 -- or (nil, nil) on deselect.
 function UnitController.onOtherBuildingSelected(fn: (string?, string?) -> ())
 	onOtherBuildingSelectedCb = fn
+end
+
+-- Fires with the selected Egg-Sac egg ids (clicked egg + subtree), or nil to close its panel.
+function UnitController.onEggSelected(fn: ({ string }?) -> ())
+	onEggSelectedCb = fn
 end
 
 -- Returns the primary selected building ID plus all secondary double-click selected IDs.

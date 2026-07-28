@@ -63,9 +63,19 @@ local nestLauncherBusy: { [string]: boolean } = {}  -- LampreyNest id → a laun
 
 -- Hollowed Mother "Egg Sacs" upgrade state, per Command Center (Mother) id.
 local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs purchases (0–MAX)
-local eggSacNests:      { [string]: { Vector3 } } = {}  -- Mother id → world positions of its planted nests
-local eggSacTimer:      { [string]: number } = {}   -- Mother id → autospawn interval accumulator
-local eggSacInFlight:   { [string]: number } = {}   -- Mother id → Embryo eggs currently incubating
+-- Persistent nests planted by the Egg Sacs upgrade, one per purchase. A nest sits empty
+-- until its creature is incubating, when an egg forms in it (see incubateSacEgg).
+-- Each egg is a clickable spawner the player assigns a unit type to; it keeps exactly one
+-- such unit alive, respawning it whenever it dies. eggId doubles as the "deployer" id used
+-- to alive-track its unit.
+-- `parentId`/`dir`/`numChildren` describe this egg's place in the tentacle tree: its parent
+-- node (nil = grown from the Mother), its outward growth direction (XZ unit), and how many
+-- children have branched off it (used to fan the next sibling into its own direction).
+-- `baseY` is the top of the egg's nest slab: the egg swells while it incubates, so it is
+-- re-seated on that Y every frame instead of growing symmetrically about its center.
+type SacEgg = { egg: BasePart, unitType: string?, spawnAt: number?, parentId: string?, dir: Vector3, numChildren: number, baseY: number }
+local eggSacEggs:       { [string]: { [string]: SacEgg } } = {}  -- Mother id → eggId → egg state
+local eggSacEggCounter  = 0
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
@@ -1807,9 +1817,7 @@ function BuildingManager.resetAll()
 	testSupplyLevel          = {}
 	testRateLevel            = {}
 	eggSacLevel              = {}
-	eggSacNests              = {}
-	eggSacTimer              = {}
-	eggSacInFlight           = {}
+	eggSacEggs               = {}
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -2616,109 +2624,763 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 end
 
 -- ── Hollowed Mother "Egg Sacs" upgrade ──────────────────────────────────────────
--- Slot order for the planted nests: the first pair sits on the Mother's two flanks
--- (±X), each later pair fills in around the ring so purchases visibly add nests.
-local EGGSAC_NEST_ANGLES_DEG = { 0, 180, 90, 270, 45, 225, 135, 315 }
+-- Eggs are scattered around the Mother like an electron cloud / slime-mold colony:
+-- densest near the center, thinning outward, and only spilling further out once the
+-- inner ground is crowded. When an egg is bought a wobbly "creepygrass" tentacle (dark
+-- veins + purple glow, inspired by the SwarmGrass beneath the Mother) grows out from the
+-- Mother / nearest egg at a FIXED speed — so a farther egg simply takes longer — and once
+-- it reaches the spot the egg forms at the tip. The tentacles double as the edges of a
+-- growing node network.
+local EGG_GRASS_COLOR    = Color3.fromRGB(10, 9, 13)
+local EGG_GLOW_COLOR     = Color3.fromRGB(150, 55, 225)  -- swarm purple (matches SwarmGrass)
+local EGG_MIN_SPACING    = 11                            -- min distance between egg centers
+local EGG_TENTACLE_SPEED = 22                            -- studs/sec the tentacle grows (fixed; distance → time)
+local EGG_BRANCH_MIN     = 11.5                          -- min distance a child sits from its parent node
+local EGG_BRANCH_MAX     = 22                            -- max (each egg picks a random length in between → uneven, organic spacing)
+local EGG_GOLDEN         = math.rad(137.5)               -- root children fan around the Mother by the golden angle
+local EGG_ROOT_MAX_KIDS  = 6                             -- eggs that attach directly to the Mother
+local EGG_NODE_MAX_KIDS  = 3                             -- children each egg branches into
+local EGG_NODE_FAN       = { 0, math.rad(58), math.rad(-58) }  -- sibling fan slots around a node's outward dir
 
--- World position (on the ground) of nest slot `slotIndex` around Mother `base`.
-local function eggSacNestSlotPos(base: BasePart, slotIndex: number): Vector3
-	local center = base.Position
-	local half   = Config.COMMAND_CENTER_SIZE.X / 2
-	local r      = half + 8
-	local ang    = math.rad(EGGSAC_NEST_ANGLES_DEG[slotIndex] or (slotIndex * 47))
-	local x, z   = center.X + math.cos(ang) * r, center.Z + math.sin(ang) * r
-	local surf   = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)
-		or (center.Y - Config.COMMAND_CENTER_SIZE.Y / 2)
-	return Vector3.new(x, surf, z)
+-- A thin dark vein hugging the ground from `a` to `b` (both already at ground Y). Used for
+-- both the creepygrass strands and the node-network edges between eggs.
+local function addGroundVein(parent: Instance, a: Vector3, b: Vector3, width: number)
+	local dir = b - a
+	local len = dir.Magnitude
+	if len < 1e-3 then return end
+	local mid = (a + b) * 0.5
+	local seg        = Instance.new("Part")
+	seg.Size         = Vector3.new(width, 0.16, len + 0.15)   -- slight overlap hides seams
+	seg.Color        = EGG_GRASS_COLOR
+	seg.Transparency = 0.45
+	seg.Material     = Enum.Material.Slate
+	seg.Anchored     = true
+	seg.CanCollide   = false
+	seg.CanQuery     = false
+	seg.CanTouch     = false
+	seg.CastShadow   = false
+	seg.Massless     = true
+	seg.CFrame       = CFrame.lookAt(mid, b)
+	seg.Parent       = parent
 end
 
--- Plant (build + record) the nests for slot indices (fromSlot+1 .. toSlot) around a Mother.
-local function plantEggSacNests(model: Model, base: BasePart, ccId: string, fromSlot: number, toSlot: number)
-	local nests = eggSacNests[ccId]
-	if not nests then nests = {}; eggSacNests[ccId] = nests end
-	for slot = fromSlot + 1, toSlot do
-		local pos = eggSacNestSlotPos(base, slot)
-		nests[slot] = pos
-		UnitVisuals.buildMotherNestDecor(model, CFrame.new(pos), base.BrickColor, true)
+local function addGlowBlob(parent: Instance, pos: Vector3, size: number)
+	local g        = Instance.new("Part")
+	g.Shape        = Enum.PartType.Ball
+	g.Size         = Vector3.new(size, size, size)
+	g.Color        = EGG_GLOW_COLOR
+	g.Material     = Enum.Material.Neon
+	g.Anchored     = true
+	g.CanCollide   = false
+	g.CanQuery     = false
+	g.CanTouch     = false
+	g.CastShadow   = false
+	g.Massless     = true
+	g.CFrame       = CFrame.new(pos.X, pos.Y + size * 0.4, pos.Z)
+	g.Parent       = parent
+	return g
+end
+
+-- Sprout a handful of short, wandering creepygrass roots + purple glow nubs from an egg's
+-- base, parented into its clump so they clean up with it.
+local function buildEggGrass(clump: Model, center: Vector3, groundY: number)
+	local y       = groundY + 0.09
+	local strands = math.random(5, 8)
+	local baseAng = math.random() * math.pi * 2
+	for i = 1, strands do
+		local ang   = baseAng + (i / strands) * math.pi * 2 + (math.random() - 0.5) * 0.6
+		local pos   = Vector3.new(center.X, y, center.Z)
+		local width = 0.5
+		local segs  = math.random(2, 3)
+		local step  = (2 + math.random() * 2.5) / segs
+		for _ = 1, segs do
+			ang += (math.random() - 0.5) * 0.7
+			local nextPos = pos + Vector3.new(math.cos(ang), 0, math.sin(ang)) * step
+			addGroundVein(clump, pos, nextPos, width)
+			pos    = nextPos
+			width *= 0.68
+		end
+		if math.random() < 0.4 then addGlowBlob(clump, pos, 0.25 + math.random() * 0.25) end
+	end
+	-- A brighter node glow right at the egg's foot so it reads as a network node.
+	addGlowBlob(clump, Vector3.new(center.X, y, center.Z), 0.55)
+end
+
+-- Ground height at an XZ (falls back to 0 if terrain isn't ready).
+local function eggGroundY(x: number, z: number): number
+	return (terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)) or 0
+end
+
+-- Rotate an XZ vector about the Y axis.
+local function eggRotY(v: Vector3, a: number): Vector3
+	local c, s = math.cos(a), math.sin(a)
+	return Vector3.new(v.X * c - v.Z * s, 0, v.X * s + v.Z * c)
+end
+
+-- True if (x,z) is within EGG_MIN_SPACING of any of this Mother's eggs.
+local function eggTooClose(ccId: string, x: number, z: number): boolean
+	local eggs = eggSacEggs[ccId]
+	if not eggs then return false end
+	for _, e in eggs do
+		if e.egg.Parent then
+			local p = e.egg.Position
+			local dx, dz = p.X - x, p.Z - z
+			if dx * dx + dz * dz < EGG_MIN_SPACING * EGG_MIN_SPACING then return true end
+		end
+	end
+	return false
+end
+
+-- Try to seat a child out from `(fromX,fromZ)` along `dir`. Each egg picks its OWN random
+-- branch length (so nest spacing is uneven / organic), then the length grows and the angle
+-- nudges until it clears every other egg. Returns nil if it can't.
+local function eggTryBranch(ccId: string, fromX: number, fromZ: number, dir: Vector3): Vector3?
+	local baseLen = EGG_BRANCH_MIN + math.random() * (EGG_BRANCH_MAX - EGG_BRANCH_MIN)
+	for _, extra in { 0, 3, 6, 10, 15 } do
+		local len = baseLen + extra
+		for _, aj in { 0, 0.22, -0.22, 0.45, -0.45 } do
+			local d = eggRotY(dir, aj)
+			local x = fromX + d.X * len
+			local z = fromZ + d.Z * len
+			if not eggTooClose(ccId, x, z) then
+				return Vector3.new(x, eggGroundY(x, z), z)
+			end
+		end
+	end
+	return nil
+end
+
+-- Plan the next egg as a node in the tentacle tree. Picks a not-yet-full parent (biased to
+-- inner nodes so the colony packs dense near the Mother and fans outward — the electron-cloud
+-- spread), and aims the new child into its OWN direction so siblings never overlap: root
+-- children fan around the Mother by the golden angle; deeper children fan ±58° around their
+-- parent's outward direction. Returns (eggPos, originPos, parentId, outwardDir).
+local function planEgg(ccId: string, base: BasePart): (Vector3, Vector3, string?, Vector3)
+	local eggs     = eggSacEggs[ccId]
+	local center   = base.Position
+	local motherPos = Vector3.new(center.X, eggGroundY(center.X, center.Z), center.Z)
+
+	-- Candidate parents (each with a proposed outward direction for its next child).
+	type Cand = { pos: Vector3, dir: Vector3, parentId: string?, score: number }
+	local cands: { Cand } = {}
+
+	local rootCount = 0
+	if eggs then for _, e in eggs do if e.egg.Parent and not e.parentId then rootCount += 1 end end end
+	if rootCount < EGG_ROOT_MAX_KIDS then
+		local ang = rootCount * EGG_GOLDEN + (math.random() - 0.5) * 0.35   -- golden spread + organic jitter
+		table.insert(cands, {
+			pos = motherPos, parentId = nil,
+			dir = Vector3.new(math.cos(ang), 0, math.sin(ang)),
+			score = math.random() * EGG_MIN_SPACING,  -- inner (dist 0) + jitter
+		})
+	end
+	if eggs then
+		for id, e in eggs do
+			if e.egg.Parent and e.numChildren < EGG_NODE_MAX_KIDS then
+				local p    = e.egg.Position
+				local dist = math.sqrt((p.X - center.X) ^ 2 + (p.Z - center.Z) ^ 2)
+				local fan  = (EGG_NODE_FAN[e.numChildren + 1] or 0) + (math.random() - 0.5) * 0.35
+				table.insert(cands, {
+					pos = Vector3.new(p.X, eggGroundY(p.X, p.Z), p.Z), parentId = id,
+					dir = eggRotY(e.dir, fan),                          -- fan around parent's outward dir + jitter
+					score = dist + math.random() * (EGG_MIN_SPACING * 1.5),  -- inner-biased, jittered
+				})
+			end
+		end
+	end
+
+	-- Inner-first with jitter, then take the first candidate that finds a clear spot.
+	table.sort(cands, function(a, b) return a.score < b.score end)
+	for _, c in cands do
+		local pos = eggTryBranch(ccId, c.pos.X, c.pos.Z, c.dir)
+		if pos then
+			local out = Vector3.new(pos.X - c.pos.X, 0, pos.Z - c.pos.Z)
+			out = out.Magnitude > 1e-3 and out.Unit or c.dir
+			return pos, c.pos, c.parentId, out
+		end
+	end
+
+	-- Fallback (everything crowded): drop on a random outer ring off the Mother.
+	local eggCount = 0
+	if eggs then for _ in eggs do eggCount += 1 end end
+	local ang  = math.random() * math.pi * 2
+	local r    = Config.COMMAND_CENTER_SIZE.X / 2 + 6 + eggCount * 1.5
+	local x, z = center.X + math.cos(ang) * r, center.Z + math.sin(ang) * r
+	local pos  = Vector3.new(x, eggGroundY(x, z), z)
+	return pos, motherPos, nil, Vector3.new(math.cos(ang), 0, math.sin(ang))
+end
+
+-- Grow a wobbly creepygrass tentacle from `from` to `to`, revealing it segment-by-segment
+-- at a FIXED speed (more distance → more segments → longer growth). Yields until it reaches
+-- the far end. The finished tentacle stays as the node-network edge. Aborts if the Mother
+-- dies mid-grow. `parent` is the CC model.
+local function growTentacle(parent: Instance, ccId: string, from: Vector3, to: Vector3)
+	local container   = Instance.new("Folder")
+	container.Name    = "EggTentacle"
+	container.Parent  = parent
+
+	local a    = Vector3.new(from.X, 0, from.Z)
+	local b    = Vector3.new(to.X, 0, to.Z)
+	local flat = b - a
+	local dist = flat.Magnitude
+	if dist < 0.5 then return end
+	local perp = Vector3.new(-flat.Z, 0, flat.X)
+	perp = perp.Magnitude > 1e-3 and perp.Unit or Vector3.new(1, 0, 0)
+
+	local segLen  = 1.8
+	local nSeg    = math.max(2, math.ceil(dist / segLen))
+	local wiggles = 1.5 + math.random() * 1.5          -- lateral wobble waves along the length
+	local ampMax  = 2.6
+	local phase   = math.random() * math.pi * 2
+
+	-- Precompute the wobbly ground path (offset tapers to 0 at both ends).
+	local pts = table.create(nSeg + 1)
+	for i = 0, nSeg do
+		local t    = i / nSeg
+		local mid  = a:Lerp(b, t)
+		local off  = math.sin(phase + t * math.pi * 2 * wiggles) * (math.sin(t * math.pi) * ampMax)
+		local px   = mid.X + perp.X * off
+		local pz   = mid.Z + perp.Z * off
+		pts[i + 1] = Vector3.new(px, eggGroundY(px, pz) + 0.12, pz)
+	end
+
+	for i = 1, nSeg do
+		if not parent.Parent or not buildingData[ccId] then container:Destroy(); return end
+		local t     = i / nSeg
+		local width = 1.5 * (1 - t) + 0.3              -- taper thick base → thin tip
+		addGroundVein(container, pts[i], pts[i + 1], width)
+		if math.random() < 0.12 then addGlowBlob(container, pts[i + 1], 0.28 + math.random() * 0.2) end
+		task.wait(segLen / EGG_TENTACLE_SPEED)
 	end
 end
 
--- Autospawn: settle an Embryo egg in `nestPos`, incubate it, then hatch an Embryo tracked
--- against the Mother (reusing the Deployer alive-count bookkeeping keyed by the Mother
--- id). `eggSacInFlight[ccId]` is always decremented when this finishes, aborted or not.
-local function produceEggSacEmbryo(ccId: string, player: any, nestPos: Vector3)
-	local function release()
-		eggSacInFlight[ccId] = math.max(0, (eggSacInFlight[ccId] or 1) - 1)
+-- Emoji shown on top of an egg for the unit it is set to hatch.
+local EGG_UNIT_ICON: { [string]: string } = {
+	Lamprey = "🐍", Hagfish = "🪱", Roller = "⚙", Needler = "🦂",
+}
+
+-- Show/refresh (or hide, when unitType is nil) the little icon floating over an egg
+-- that tells the player which unit that egg keeps alive.
+local function eggSacUpdateIcon(egg: BasePart, unitType: string?)
+	local bb = egg:FindFirstChild("SpawnIcon") :: BillboardGui?
+	if not unitType then
+		if bb then bb.Enabled = false end
+		return
+	end
+	if not bb then
+		bb = Instance.new("BillboardGui")
+		bb.Name           = "SpawnIcon"
+		bb.Size           = UDim2.fromOffset(34, 34)
+		bb.StudsOffset    = Vector3.new(0, 2.7, 0)
+		bb.AlwaysOnTop    = true
+		bb.LightInfluence = 0
+		bb.MaxDistance    = 240
+		bb.Parent         = egg
+		local lbl         = Instance.new("TextLabel")
+		lbl.Name          = "Icon"
+		lbl.Size          = UDim2.fromScale(1, 1)
+		lbl.BackgroundTransparency = 1
+		lbl.Font          = Enum.Font.GothamBold
+		lbl.TextScaled    = true
+		lbl.TextColor3    = Color3.fromRGB(255, 255, 255)
+		lbl.Parent        = bb
+	end
+	bb.Enabled = true
+	local lbl = bb:FindFirstChild("Icon") :: TextLabel?
+	if lbl then lbl.Text = EGG_UNIT_ICON[unitType] or "?" end
+end
+
+local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
+
+-- ── The nest an Egg Sac egg is laid in ──────────────────────────────────────────
+-- A shallow bramble bowl rather than a slab: a ring of dark flesh ribs that lean out of
+-- the ground and curl back inward over the socket, a few pale bone slivers woven across
+-- the rim, and a purple goo pool in the middle that keeps glowing while the nest is empty.
+local NEST_FLESH    = Color3.fromRGB(24, 15, 26)
+local NEST_FLESH_HI = Color3.fromRGB(38, 22, 40)
+local NEST_BONE     = Color3.fromRGB(96, 84, 84)
+local NEST_RIM_R    = 2.95   -- radius the rim curls over at
+local NEST_RIBS     = 15
+local NEST_FLOOR_Y  = 0.3    -- top of the goo pool: where an egg sits
+
+-- One tapered strand from `a` to `b`. Unlike addGroundVein this one is free in 3D, so the
+-- ribs can climb and curl.
+local function addNestStrand(parent: Instance, a: Vector3, b: Vector3, width: number, color: Color3)
+	local dir = b - a
+	local len = dir.Magnitude
+	if len < 1e-3 then return end
+	local up = math.abs(dir.Unit.Y) > 0.98 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
+	local p        = Instance.new("Part")
+	p.Name         = "NestRib"
+	p.Size         = Vector3.new(width, width * 0.85, len + 0.14)   -- slight overlap hides seams
+	p.CFrame       = CFrame.lookAt((a + b) * 0.5, b, up)
+	p.Color        = color
+	p.Material     = Enum.Material.Slate
+	p.Anchored     = true
+	p.CanCollide   = false
+	p.CanQuery     = false
+	p.CanTouch     = false
+	p.CastShadow   = false
+	p.Massless     = true
+	p.Transparency = 1          -- faded in by revealEggClump
+	p.Parent       = parent
+end
+
+-- A flat disc lying on the ground (Cylinder parts are circular about their X axis, so it
+-- gets stood on end). Used for the nest floor and its glowing goo pool.
+local function addNestDisc(parent: Instance, center: Vector3, diameter: number, thickness: number,
+	color: Color3, material: Enum.Material, name: string): BasePart
+	local d        = Instance.new("Part")
+	d.Name         = name
+	d.Shape        = Enum.PartType.Cylinder
+	d.Size         = Vector3.new(thickness, diameter, diameter)
+	d.CFrame       = CFrame.new(center) * CFrame.Angles(0, 0, math.pi / 2)
+	d.Color        = color
+	d.Material     = material
+	d.Anchored     = true
+	d.CanCollide   = false
+	d.CanQuery     = false
+	d.CanTouch     = false
+	d.CastShadow   = false
+	d.Massless     = true
+	d.Transparency = 1
+	d.Parent       = parent
+	return d
+end
+
+-- Build the bowl at `nestPos` (ground level) under `clump`. Every part starts invisible;
+-- revealEggClump fades them in to the transparency stamped on each one's "ShownAt" attribute.
+local function buildEggNest(clump: Model, nestPos: Vector3)
+	local ground = nestPos.Y
+
+	-- Wet floor, then the goo pool that sits in it (the socket the egg forms in).
+	addNestDisc(clump, nestPos + Vector3.new(0, 0.12, 0), NEST_RIM_R * 1.75, 0.24,
+		Color3.fromRGB(18, 11, 20), Enum.Material.Slate, "NestFloor")
+	local goo = addNestDisc(clump, nestPos + Vector3.new(0, NEST_FLOOR_Y, 0), NEST_RIM_R * 1.25, 0.22,
+		EGG_GLOW_COLOR, Enum.Material.Neon, "NestGoo")
+	goo:SetAttribute("ShownAt", 0.55)
+
+	-- Rim ribs: each roots just outside the pool, leans out and up to the rim, then curls
+	-- back in over the socket. Lengths and angles jitter so no two nests read the same.
+	for i = 1, NEST_RIBS do
+		local ang  = (i / NEST_RIBS) * math.pi * 2 + (math.random() - 0.5) * 0.2
+		local out  = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		local r0   = NEST_RIM_R * (0.6 + math.random() * 0.12)
+		local h    = 1.1 + math.random() * 0.6
+		local root = nestPos + out * r0 + Vector3.new(0, 0.05, 0)
+		local rim  = nestPos + out * NEST_RIM_R + Vector3.new(0, h * 0.66, 0)
+		local tip  = rim - out * (0.5 + math.random() * 0.55) + Vector3.new(0, h * 0.38, 0)
+		local col  = if math.random() < 0.3 then NEST_FLESH_HI else NEST_FLESH
+		addNestStrand(clump, root, rim, 0.66, col)
+		addNestStrand(clump, rim,  tip, 0.4,  col)
 	end
 
-	local model = buildingsFolder:FindFirstChild(ccId)
-	if not model then release(); return end
+	-- Pale bone slivers laid across the rim, tangential so they read as woven in.
+	for _ = 1, 5 do
+		local ang  = math.random() * math.pi * 2
+		local span = 0.5 + math.random() * 0.35
+		local y    = ground + 0.75 + math.random() * 0.45
+		local a    = Vector3.new(nestPos.X + math.cos(ang) * NEST_RIM_R, y, nestPos.Z + math.sin(ang) * NEST_RIM_R)
+		local b    = Vector3.new(nestPos.X + math.cos(ang + span) * NEST_RIM_R, y + (math.random() - 0.5) * 0.3,
+			nestPos.Z + math.sin(ang + span) * NEST_RIM_R)
+		addNestStrand(clump, a, b, 0.3, NEST_BONE)
+	end
 
-	local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
-	motherEggCounter += 1
-	local egg           = Instance.new("Part")
-	egg.Name            = "EggSacEgg_" .. motherEggCounter
-	egg.Shape           = Enum.PartType.Ball
-	egg.Size            = EGG_FULL * 0.3
-	egg.Position        = nestPos + Vector3.new(0, EGG_FULL.Y * 0.7, 0)
-	egg.Color           = Color3.fromRGB(255, 120, 60)
-	egg.Material        = Enum.Material.Neon
-	egg.Anchored        = true
-	egg.CanCollide      = false
-	egg.CanQuery        = false
-	egg.CastShadow      = false
-	egg.Transparency    = 0.1
-	egg.Parent          = model
+	-- Glow nubs tucked between the ribs so an empty nest still looks alive at night.
+	for _ = 1, 4 do
+		local ang  = math.random() * math.pi * 2
+		local blob = addGlowBlob(clump, Vector3.new(
+			nestPos.X + math.cos(ang) * NEST_RIM_R * 0.85,
+			ground + 0.1,
+			nestPos.Z + math.sin(ang) * NEST_RIM_R * 0.85
+		), 0.3 + math.random() * 0.25)
+		blob.Transparency = 1
+	end
+
+	local light      = Instance.new("PointLight")
+	light.Name       = "NestLight"
+	light.Color      = EGG_GLOW_COLOR
+	light.Brightness = 0            -- lit on reveal
+	light.Range      = 12
+	light.Parent     = goo
+
+	-- Invisible box hugging the bowl. The client adorns the selection outline to this: the egg
+	-- is gone most of the time and the click box is deliberately oversized, so neither is a
+	-- good fit for an outline.
+	local bowl        = Instance.new("Part")
+	bowl.Name         = "Bowl"
+	bowl.Size         = Vector3.new(NEST_RIM_R * 2 + 0.5, 2, NEST_RIM_R * 2 + 0.5)
+	bowl.Position     = nestPos + Vector3.new(0, 1, 0)
+	bowl.Anchored     = true
+	bowl.CanCollide   = false
+	bowl.CanQuery     = false
+	bowl.CanTouch     = false
+	bowl.CastShadow   = false
+	bowl.Transparency = 1
+	bowl:SetAttribute("ShownAt", 1)   -- stays invisible when the nest fades in
+	bowl.Parent       = clump
+end
+
+-- Build one egg clump at `nestPos`: the bramble nest, the (hidden) egg that forms in it while
+-- a creature incubates, and a generous invisible click box, grouped in a Model tagged with
+-- EggId/EggOwnerId (+ ParentEgg for the selection tree). Created HIDDEN (invisible,
+-- unclickable): revealEggClump pops it in once its tentacle finishes growing. Returns the
+-- eggId plus the egg part.
+local function buildEggClump(ccModel: Model, ownerId: number, nestPos: Vector3, parentId: string?): (string, BasePart)
+	eggSacEggCounter += 1
+	local eggId = "SacEgg_" .. eggSacEggCounter
+
+	local clump = Instance.new("Model")
+	clump.Name  = eggId
+	clump:SetAttribute("EggId", eggId)
+	clump:SetAttribute("EggOwnerId", ownerId)
+	if parentId then clump:SetAttribute("ParentEgg", parentId) end
+
+	buildEggNest(clump, nestPos)
+
+	-- The egg itself. It only EXISTS while a creature is incubating: the rest of the time it
+	-- is invisible and unlit, leaving an empty nest, and incubateSacEgg forms it in the
+	-- socket and swells it. Sized/positioned here for its resting state so the icon and
+	-- progress bar have something to hang off.
+	local egg         = Instance.new("Part")
+	egg.Name          = "Egg"
+	egg.Shape         = Enum.PartType.Ball
+	egg.Size          = EGG_FULL
+	egg.Position      = nestPos + Vector3.new(0, NEST_FLOOR_Y + EGG_FULL.Y * 0.5, 0)
+	egg.Color         = Color3.fromRGB(255, 120, 60)
+	egg.Material      = Enum.Material.Neon
+	egg.Anchored      = true
+	egg.CanCollide    = false
+	egg.CanQuery      = false     -- the Hitbox takes every click; the egg is often not there
+	egg.CastShadow    = false
+	egg.Transparency  = 1
+	egg.Parent        = clump
 	local eggLight      = Instance.new("PointLight")
 	eggLight.Color      = Color3.fromRGB(255, 140, 70)
-	eggLight.Brightness = 2.5
+	eggLight.Brightness = 0            -- lit while incubating
 	eggLight.Range      = 10
 	eggLight.Parent     = egg
 
-	-- Progress bar floating over the egg.
-	local bb          = Instance.new("BillboardGui")
-	bb.Name           = "EggProgress"
-	bb.Size           = UDim2.fromOffset(42, 6)
-	bb.StudsOffset    = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
-	bb.AlwaysOnTop    = true
-	bb.LightInfluence = 0
-	bb.MaxDistance    = 220
-	bb.Parent         = egg
-	local barBg       = Instance.new("Frame")
-	barBg.Size        = UDim2.fromScale(1, 1)
+	-- Incubation progress bar, same look as the Mother's spat eggs. Hidden until the egg
+	-- starts growing its unit (see incubateSacEgg).
+	local bb            = Instance.new("BillboardGui")
+	bb.Name             = "EggProgress"
+	bb.Size             = UDim2.fromOffset(48, 7)
+	bb.StudsOffset      = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
+	bb.AlwaysOnTop      = true
+	bb.LightInfluence   = 0
+	bb.MaxDistance      = 240
+	bb.Enabled          = false
+	bb.Parent           = egg
+	local barBg         = Instance.new("Frame")
+	barBg.Name          = "Bg"
+	barBg.Size          = UDim2.fromScale(1, 1)
 	barBg.BackgroundColor3 = Color3.fromRGB(12, 8, 16)
 	barBg.BackgroundTransparency = 0.25
 	barBg.BorderSizePixel = 0
-	barBg.Parent      = bb
-	local bgCorner    = Instance.new("UICorner"); bgCorner.CornerRadius = UDim.new(1, 0); bgCorner.Parent = barBg
-	local fill        = Instance.new("Frame")
-	fill.Size         = UDim2.fromScale(0, 1)
+	barBg.Parent        = bb
+	local bgCorner      = Instance.new("UICorner"); bgCorner.CornerRadius = UDim.new(1, 0); bgCorner.Parent = barBg
+	local barStroke     = Instance.new("UIStroke"); barStroke.Color = Color3.fromRGB(0, 0, 0); barStroke.Thickness = 1; barStroke.Transparency = 0.35; barStroke.Parent = barBg
+	local fill          = Instance.new("Frame")
+	fill.Name           = "Fill"
+	fill.Size           = UDim2.fromScale(0, 1)
 	fill.BackgroundColor3 = Color3.fromRGB(255, 150, 70)
 	fill.BorderSizePixel = 0
-	fill.Parent       = barBg
-	local fillCorner  = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
+	fill.Parent         = barBg
+	local fillCorner    = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
 
-	-- Pop the egg up out of the sac + breathe while it fills.
-	TweenService:Create(egg, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Size = EGG_FULL }):Play()
-	TweenService:Create(egg,
-		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-		{ Size = EGG_FULL * 1.12 }):Play()
-	TweenService:Create(fill,
-		TweenInfo.new(Config.MOTHER_EGGSAC_INCUBATION, Enum.EasingStyle.Linear),
-		{ Size = UDim2.fromScale(1, 1) }):Play()
+	-- Generous invisible click box: the low bowl and its thin ribs are awkward targets at RTS
+	-- camera pitch, so a tall box around the whole clump makes the nest easy to grab from any
+	-- angle. Enabled on reveal. Width < egg spacing (11) so it never grabs a neighbour.
+	local hit        = Instance.new("Part")
+	hit.Name         = "Hitbox"
+	hit.Size         = Vector3.new(7, 8, 7)
+	hit.Position     = nestPos + Vector3.new(0, 4, 0)
+	hit.Anchored     = true
+	hit.CanCollide   = false
+	hit.CanQuery     = false          -- enabled on reveal
+	hit.CanTouch     = false
+	hit.CastShadow   = false
+	hit.Transparency = 1
+	hit.Parent       = clump
 
-	task.wait(Config.MOTHER_EGGSAC_INCUBATION)
+	clump.PrimaryPart = egg
+	clump.Parent      = ccModel
+	return eggId, egg
+end
 
-	if egg.Parent == nil then release(); return end
-	local hatchPos = egg.Position
-	egg:Destroy()
-	spawnEggHatchVFX(hatchPos)
-	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
-	if buildingData[ccId] and unitManagerRef then
-		unitManagerRef.spawnForDeployer(ccId, player, Vector3.new(hatchPos.X, 0, hatchPos.Z), "Embryo")
+-- ── Egg-nest birth burst ────────────────────────────────────────────────────
+-- Plays when a fresh egg nest pops into view: a wet "pop" sound plus a splash of
+-- translucent water-blue globs flung outward like a burst water balloon.
+local function spawnEggNestBurstVFX(pos: Vector3)
+	-- Positional pop sound on a throwaway part.
+	local soundPart          = Instance.new("Part")
+	soundPart.Anchored       = true
+	soundPart.CanCollide     = false
+	soundPart.CanQuery       = false
+	soundPart.Transparency   = 1
+	soundPart.Size           = Vector3.new(1, 1, 1)
+	soundPart.CastShadow     = false
+	soundPart.Position       = pos
+	soundPart.Parent         = workspace
+	local snd                = Instance.new("Sound")
+	snd.SoundId              = "rbxassetid://9120495961"
+	snd.Volume               = 1.0
+	snd.RollOffMaxDistance   = 180
+	snd.RollOffMinDistance   = 10
+	snd.Parent               = soundPart
+	snd:Play()
+	Debris:AddItem(soundPart, 5)
+
+	-- Expanding translucent splash ring that fades out (the balloon's water skin).
+	local splash           = Instance.new("Part")
+	splash.Shape           = Enum.PartType.Ball
+	splash.Size            = Vector3.new(1.5, 1.5, 1.5)
+	splash.Position        = pos
+	splash.Color           = Color3.fromRGB(120, 205, 255)
+	splash.Material        = Enum.Material.Glass
+	splash.Anchored        = true
+	splash.CanCollide      = false
+	splash.CanQuery        = false
+	splash.CastShadow      = false
+	splash.Transparency    = 0.35
+	splash.Parent          = workspace
+	TweenService:Create(splash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size         = Vector3.new(10, 6, 10),
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(splash, 0.6)
+
+	-- Water globs flung outward + up, dragged down by gravity so they splatter.
+	local waterColors = {
+		Color3.fromRGB(120, 205, 255),
+		Color3.fromRGB( 90, 175, 240),
+		Color3.fromRGB(160, 225, 255),
+	}
+	for _ = 1, 18 do
+		local g            = Instance.new("Part")
+		g.Shape            = Enum.PartType.Ball
+		g.Anchored         = false
+		g.CanCollide       = false
+		g.CanTouch         = false
+		g.CastShadow       = false
+		local r            = rng:NextNumber(0.35, 0.85)
+		g.Size             = Vector3.new(r, r, r)
+		g.Color            = waterColors[rng:NextInteger(1, #waterColors)]
+		g.Material         = Enum.Material.Glass
+		g.Transparency     = 0.3
+		g.Position         = pos + Vector3.new(
+			rng:NextNumber(-1.2, 1.2),
+			rng:NextNumber(0.4, 1.8),
+			rng:NextNumber(-1.2, 1.2)
+		)
+		g.Parent           = workspace
+		g.AssemblyLinearVelocity = Vector3.new(
+			rng:NextNumber(-20, 20),
+			rng:NextNumber(12, 26),
+			rng:NextNumber(-20, 20)
+		)
+		Debris:AddItem(g, rng:NextNumber(0.9, 1.8))
 	end
-	release()
+
+	-- Fine spray mist for the wet burst feel.
+	local sprayPart        = Instance.new("Part")
+	sprayPart.Anchored     = true
+	sprayPart.CanCollide   = false
+	sprayPart.CanQuery     = false
+	sprayPart.Transparency = 1
+	sprayPart.Size         = Vector3.new(1, 1, 1)
+	sprayPart.CastShadow   = false
+	sprayPart.Position     = pos + Vector3.new(0, 0.6, 0)
+	sprayPart.Parent       = workspace
+	local spray            = Instance.new("ParticleEmitter")
+	spray.Color            = ColorSequence.new(Color3.fromRGB(150, 220, 255))
+	spray.Size             = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.8),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	spray.Transparency     = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.2),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	spray.Lifetime         = NumberRange.new(0.35, 0.7)
+	spray.Speed            = NumberRange.new(14, 26)
+	spray.SpreadAngle      = Vector2.new(180, 180)
+	spray.Acceleration     = Vector3.new(0, -40, 0)
+	spray.Rotation         = NumberRange.new(0, 360)
+	spray.LightEmission    = 0.3
+	spray.Enabled          = false
+	spray.Parent           = sprayPart
+	spray:Emit(28)
+	Debris:AddItem(sprayPart, 1.2)
+end
+
+-- Eggs currently mid-incubation, so a second incubation cannot start on top of one that is
+-- still running. Weak-keyed, so destroyed eggs (Mother razed) drop out on their own.
+local eggIncubating: { [BasePart]: boolean } = setmetatable({}, { __mode = "k" }) :: any
+
+-- Pop a finished nest into view at the tip of its tentacle: fade in every nest part to its
+-- own resting transparency, light the goo, sprout the creepygrass roots, make it clickable.
+-- The egg part stays hidden: it only forms once something is incubating in there.
+local function revealEggClump(egg: BasePart, nestPos: Vector3)
+	local clump = egg.Parent :: Model
+	local hit = clump:FindFirstChild("Hitbox") :: BasePart?
+	if hit then hit.CanQuery = true end
+
+	-- Wet water-balloon burst + pop sound the instant the nest appears.
+	spawnEggNestBurstVFX(nestPos + Vector3.new(0, 0.6, 0))
+
+	for _, part in clump:GetChildren() do
+		if part:IsA("BasePart") and part ~= egg and part ~= hit then
+			local shownAt = (part:GetAttribute("ShownAt") :: number?) or 0
+			TweenService:Create(part, TweenInfo.new(0.35), { Transparency = shownAt }):Play()
+		end
+	end
+	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
+	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.35), { Brightness = 1.4 }):Play() end
+
+	buildEggGrass(clump, nestPos, nestPos.Y)
+end
+
+-- Size an incubating egg swells to: half the size of the creature growing inside it, never
+-- smaller than a plain egg (so a Needler's egg still reads as an egg).
+local function sacEggTargetSize(unitType: string?): Vector3
+	local def = unitType and (Config.UNIT_TYPES :: any)[unitType]
+	if not def then return EGG_FULL end
+	local s = def.size * 0.5
+	return Vector3.new(
+		math.max(s.X, EGG_FULL.X),
+		math.max(s.Y, EGG_FULL.Y),
+		math.max(s.Z, EGG_FULL.Z)
+	)
+end
+
+-- Where an egg starts: a bud in the goo, before the creature packs it out.
+local EGG_SEED = EGG_FULL * 0.34
+
+-- Run the Mother-egg incubation on a planted Egg Sac egg. The egg forms in the nest's goo as
+-- a small bud, the client sprouts the same enveloping tentacles a spat Mother egg gets, a
+-- progress bar fills over the spawn delay, and the egg breathes while swelling toward half
+-- the size of the creature inside it. Ends the moment `entry.spawnAt` clears (the hatch, or
+-- its unit turning up alive): the tentacles let go and the spent egg sinks away, leaving an
+-- empty nest until the next brood.
+local function incubateSacEgg(entry: SacEgg)
+	local egg = entry.egg
+	-- The previous brood's shell may still be collapsing; wait it out rather than skip this one.
+	for _ = 1, 40 do
+		if not eggIncubating[egg] then break end
+		task.wait(0.05)
+	end
+	if not egg.Parent or eggIncubating[egg] or not entry.spawnAt then return end
+	eggIncubating[egg] = true
+	local clump = egg.Parent :: Model
+	local light = egg:FindFirstChildWhichIsA("PointLight")
+	local bar   = egg:FindFirstChild("EggProgress") :: BillboardGui?
+	local barBg = bar and bar:FindFirstChild("Bg")
+	local fill  = barBg and barBg:FindFirstChild("Fill") :: Frame?
+	local icon  = egg:FindFirstChild("SpawnIcon") :: BillboardGui?
+	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
+	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
+
+	if bar then bar.Enabled = true end
+	if fill then fill.Size = UDim2.fromScale(0, 1) end
+
+	-- Form the bud in the socket: the goo flares as the egg wells up out of it.
+	egg.Size     = EGG_SEED
+	egg.Position = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z)
+	TweenService:Create(egg, TweenInfo.new(0.4), { Transparency = 0.1 }):Play()
+	if goo then TweenService:Create(goo, TweenInfo.new(0.4), { Transparency = 0.25 }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.4), { Brightness = 3 }):Play() end
+
+	-- Tentacles erupt from the egg's base and climb it, hugging its live size (MotherEggBody).
+	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg)
+
+	-- Progress is read off the hatch deadline, so the bar and the swell stay in step even if
+	-- this animation started a beat late, or the player re-picks the unit mid-incubation
+	-- (which resets the deadline to the new creature's gestation).
+	while entry.spawnAt and egg.Parent do
+		local now     = os.clock()
+		local dur     = Config.eggSpawnTime(entry.unitType)
+		local k       = math.clamp(1 - ((entry.spawnAt or now) - now) / dur, 0, 1)
+		local breathe = 1 + 0.06 * math.sin(now * 4.5)          -- same beat as a spat Mother egg
+		local size    = EGG_SEED:Lerp(sacEggTargetSize(entry.unitType), k) * breathe
+		egg.Size      = size
+		egg.Position  = Vector3.new(egg.Position.X, entry.baseY + size.Y * 0.5, egg.Position.Z)
+		if light then light.Brightness = 2.5 + 2.5 * (0.5 + 0.5 * math.sin(now * 4.5)) end
+		if fill then fill.Size = UDim2.fromScale(k, 1) end
+		if bar  then bar.StudsOffset  = Vector3.new(0, size.Y * 0.62, 0) end
+		if icon then icon.StudsOffset = Vector3.new(0, size.Y * 0.62 + 1.3, 0) end
+		task.wait(1 / 20)   -- gestations run up to 30s, so keep the replicated churn modest
+	end
+
+	-- Spent: the creature is out (or never came), so the shell collapses back into the goo
+	-- and the tentacles let go, leaving the nest empty.
+	if not egg.Parent then eggIncubating[egg] = nil; return end
+	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg, true)   -- retract tentacles
+	if bar  then bar.Enabled = false end
+	if icon then icon.StudsOffset = Vector3.new(0, 2.7, 0) end
+	if light then TweenService:Create(light, TweenInfo.new(0.3), { Brightness = 0 }):Play() end
+	if goo then TweenService:Create(goo, TweenInfo.new(0.5), { Transparency = 0.55 }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = 1.4 }):Play() end
+	local COLLAPSE = 0.3
+	TweenService:Create(egg, TweenInfo.new(COLLAPSE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size         = EGG_SEED,
+		Position     = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z),
+		Transparency = 1,
+	}):Play()
+	task.wait(COLLAPSE)
+	eggIncubating[egg] = nil   -- held through the collapse so a fresh brood cannot fight it
+end
+
+-- Plant `toSlot - fromSlot` new eggs (one per purchase) as nodes of the tentacle tree —
+-- inner-biased for the electron-cloud spread, with siblings fanned into their own directions
+-- so they never overlap. Each grows its tentacle first, then pops the egg in at the tip.
+local function plantEggSacNests(ccModel: Model, base: BasePart, ccId: string, ownerId: number, fromSlot: number, toSlot: number)
+	local eggs = eggSacEggs[ccId]
+	if not eggs then eggs = {}; eggSacEggs[ccId] = eggs end
+	for _ = fromSlot + 1, toSlot do
+		local pos, origin, parentId, dir = planEgg(ccId, base)
+		local eggId, egg = buildEggClump(ccModel, ownerId, pos, parentId)
+		eggs[eggId] = { egg = egg, unitType = nil, spawnAt = nil, parentId = parentId, dir = dir,
+			numChildren = 0, baseY = pos.Y + NEST_FLOOR_Y }   -- eggs sit in the goo pool
+		if parentId and eggs[parentId] then eggs[parentId].numChildren += 1 end
+
+		task.spawn(function()
+			growTentacle(ccModel, ccId, origin, pos)              -- fixed speed → distance sets duration
+			if buildingData[ccId] and egg.Parent then
+				revealEggClump(egg, pos)
+			end
+		end)
+	end
+end
+
+-- Assign (or change) the unit an egg keeps alive. Only affects the NEXT spawn — a unit
+-- from a previous choice already alive is left alone until it dies. Returns whether set.
+function BuildingManager.assignEggUnit(player: any, eggId: string, unitType: string): boolean
+	if type(eggId) ~= "string" or type(unitType) ~= "string" then return false end
+	if unitType ~= "Lamprey" and unitType ~= "Hagfish"
+		and unitType ~= "Roller" and unitType ~= "Needler" then return false end
+	for ccId, eggs in eggSacEggs do
+		local entry = eggs[eggId]
+		if entry then
+			local data = buildingData[ccId]
+			if not data or data.owner ~= player then return false end
+			local prev = entry.unitType
+			entry.unitType = unitType
+			-- Re-picking while the nest is already incubating switches what is growing in
+			-- there, so restart the clock on the new creature's gestation.
+			if entry.spawnAt and prev ~= unitType then
+				entry.spawnAt = os.clock() + Config.eggSpawnTime(unitType)
+			end
+			if entry.egg.Parent then
+				entry.egg:SetAttribute("SpawnType", unitType)
+				eggSacUpdateIcon(entry.egg, unitType)
+			end
+			return true
+		end
+	end
+	return false
 end
 
 -- Purchase one Egg Sacs upgrade for `player`'s Mother `ccId`: charges the cost, bumps
@@ -2740,7 +3402,7 @@ function BuildingManager.upgradeEggSacsForPlayer(player: any, ccId: string): boo
 
 	local model = buildingsFolder:FindFirstChild(ccId) :: Model?
 	if model then
-		plantEggSacNests(model, data.base, ccId,
+		plantEggSacNests(model, data.base, ccId, (data.owner and data.owner.UserId) or 0,
 			level * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL,
 			newLevel * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL)
 		model:SetAttribute("EggSacLevel", newLevel)
@@ -2840,9 +3502,7 @@ function BuildingManager.damage(id: string, amount: number)
 	testRateLevel[id]     = nil
 	nestEggs[id]          = nil
 	eggSacLevel[id]       = nil
-	eggSacNests[id]       = nil
-	eggSacTimer[id]       = nil
-	eggSacInFlight[id]    = nil
+	eggSacEggs[id]        = nil
 	engState[id]          = nil
 	engResearchEnd[id]    = nil
 	engUpdateAcc[id]      = nil
@@ -2944,9 +3604,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		monumentWinTimer[id]  = nil
 		blobCooldowns[id]     = nil
 		eggSacLevel[id]       = nil
-		eggSacNests[id]       = nil
-		eggSacTimer[id]       = nil
-		eggSacInFlight[id]    = nil
+		eggSacEggs[id]        = nil
 		engState[id]          = nil
 		engResearchEnd[id]    = nil
 		engUpdateAcc[id]      = nil
@@ -3296,29 +3954,35 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
-		-- ── Mother Egg Sacs autospawn ──────────────────────────────────────────
-		-- Each Mother that has bought Egg Sacs keeps a clutch of Embryos alive up to its
-		-- capacity (level × 4), hatching a fresh egg from one of its planted nests on an
-		-- interval whenever alive + incubating Embryos fall short. Free (the upgrade paid).
-		for id, data in buildingData do
-			if data.buildingType ~= "CommandCenter" or data.isConstructing then continue end
-			local level = eggSacLevel[id] or 0
-			if level <= 0 then continue end
-			local nests = eggSacNests[id]
-			if not nests or #nests == 0 then continue end
-
-			eggSacTimer[id] = (eggSacTimer[id] or 0) + dt
-			if eggSacTimer[id] < Config.MOTHER_EGGSAC_INTERVAL then continue end
-			eggSacTimer[id] -= Config.MOTHER_EGGSAC_INTERVAL
-
-			local capacity = Config.eggSacCapacity(level)
-			local alive    = unitManagerRef and unitManagerRef.getDeployerAliveCount(id) or 0
-			local pending  = eggSacInFlight[id] or 0
-			if alive + pending >= capacity then continue end
-
-			local nestPos = nests[math.random(1, #nests)]
-			eggSacInFlight[id] = pending + 1
-			task.spawn(produceEggSacEmbryo, id, data.owner, nestPos)
+		-- ── Mother Egg Sacs: keep each egg's chosen unit alive ──────────────────
+		-- Every egg the Mother has planted is a clickable spawner. Once the player assigns
+		-- it a unit, it keeps exactly one of that unit alive, respawning it a short beat
+		-- after it dies. Free (the Egg Sacs upgrade paid).
+		local eggNow = os.clock()
+		for id, eggs in eggSacEggs do
+			local data = buildingData[id]
+			if not data or data.isConstructing then continue end
+			for eggId, entry in eggs do
+				if not entry.egg.Parent then eggs[eggId] = nil; continue end
+				if not entry.unitType then continue end
+				local alive = unitManagerRef and unitManagerRef.getDeployerAliveCount(eggId) > 0
+				if alive then
+					entry.spawnAt = nil
+				elseif unitManagerRef then
+					if not entry.spawnAt then
+						-- Fresh incubation: the creature's own gestation, animated end to end.
+						entry.spawnAt = eggNow + Config.eggSpawnTime(entry.unitType)
+						task.spawn(incubateSacEgg, entry)
+					end
+					if eggNow >= entry.spawnAt then
+						local p = entry.egg.Position
+						spawnEggHatchVFX(p)
+						RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(p, p, "LampreyEggHatch")
+						unitManagerRef.spawnForDeployer(eggId, data.owner, Vector3.new(p.X, 0, p.Z), entry.unitType)
+						entry.spawnAt = nil
+					end
+				end
+			end
 		end
 
 		-- ── Command Center passive income ──────────────────────────────────────
@@ -3805,6 +4469,14 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	RemoteHandler.get(Config.REMOTES.UpgradeEggSacs).OnServerEvent:Connect(function(player, ccId)
 		if type(ccId) ~= "string" then return end
 		BuildingManager.upgradeEggSacsForPlayer(player, ccId)
+	end)
+
+	-- ── AssignEgg remote: pick which unit one of a Mother's eggs keeps alive ─────
+	-- The egg starts hatching that unit and respawns it whenever it dies. Changing the
+	-- choice only takes effect once the currently-hatched unit dies.
+	RemoteHandler.get(Config.REMOTES.AssignEgg).OnServerEvent:Connect(function(player, eggId, unitType)
+		if type(eggId) ~= "string" or type(unitType) ~= "string" then return end
+		BuildingManager.assignEggUnit(player, eggId, unitType)
 	end)
 
 	-- ── TEST building remotes (separate Supply + Spawn Rate upgrades) ───────────

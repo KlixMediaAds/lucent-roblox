@@ -251,17 +251,22 @@ Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10
 -- that incubates under a progress bar, then hatches into the trained unit.
 Config.MOTHER_EGG_INCUBATION   = 8.0  -- seconds from the egg settling to hatch
 
--- Hollowed Mother "Egg Sacs" upgrade — a repeatable per-Mother purchase (replacing the
--- old manual Embryo option). Each purchase plants a pair of fleshy nests on the Mother's
--- flanks and raises the auto-spawn Embryo cap by MOTHER_EGGSAC_PER_LEVEL. Embryos then
--- hatch from those nests for free, refilling toward the cap on an interval.
-Config.MOTHER_EGGSAC_COST        = 150  -- resources per Egg Sacs purchase
-Config.MOTHER_EGGSAC_MAX_LEVEL   = 4    -- purchases allowed per Mother
-Config.MOTHER_EGGSAC_PER_LEVEL   = 4    -- +max Embryos in the autospawn per purchase
-Config.MOTHER_EGGSAC_NESTS_PER_LEVEL = 2  -- nests planted around the Mother per purchase
-Config.MOTHER_EGGSAC_INCUBATION  = 6.0  -- seconds an autospawned Embryo egg incubates in its nest
-Config.MOTHER_EGGSAC_INTERVAL    = 3.5  -- seconds between autospawn attempts per Mother
--- Max Embryos auto-spawned once `level` Egg Sacs purchases have been made.
+-- Hollowed Mother "Egg Sacs" upgrade — a repeatable per-Mother purchase. Each purchase
+-- plants ONE flat nest beside the Mother with ONE egg resting on it. Every egg is a
+-- clickable spawner: the player picks the unit it keeps alive (see BuildingManager).
+Config.MOTHER_EGGSAC_COST        = 40   -- resources per Egg Sacs purchase (one egg each)
+Config.MOTHER_EGGSAC_MAX_LEVEL   = 50   -- purchases allowed per Mother (one egg each)
+Config.MOTHER_EGGSAC_PER_LEVEL   = 1    -- eggs added per purchase (one nest + one egg)
+Config.MOTHER_EGGSAC_NESTS_PER_LEVEL = 1  -- nests planted around the Mother per purchase
+Config.MOTHER_EGG_SPAWN_DELAY    = 4.0  -- fallback incubation for a unit with no EGG_SPAWN_TIME entry
+-- Per-creature incubation: seconds a planted nest takes to (re)hatch its chosen unit after
+-- it is assigned, or after the last one died. Bigger creatures take longer to grow, so this
+-- is the real cost of a nest's unit choice. Surfaced on the egg command card (EggPanel).
+Config.EGG_SPAWN_TIME = { Lamprey = 15, Hagfish = 25, Roller = 30, Needler = 10 }
+function Config.eggSpawnTime(unitType: string?): number
+	return (unitType and (Config.EGG_SPAWN_TIME :: any)[unitType]) or Config.MOTHER_EGG_SPAWN_DELAY
+end
+-- Eggs available once `level` Egg Sacs purchases have been made (one egg per purchase).
 function Config.eggSacCapacity(level: number): number
 	return math.max(0, level) * Config.MOTHER_EGGSAC_PER_LEVEL
 end
@@ -588,6 +593,7 @@ Config.REMOTES = {
 	ForfeitMatch            = "ForfeitMatch",
 	TrainFromMother         = "TrainFromMother",
 	UpgradeEggSacs          = "UpgradeEggSacs",
+	AssignEgg               = "AssignEgg",
 	ToggleBurrow            = "ToggleBurrow",
 	UnlockEvolve            = "UnlockEvolve",
 	EvolveEmbryo            = "EvolveEmbryo",

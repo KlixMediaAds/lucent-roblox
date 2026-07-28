@@ -253,6 +253,11 @@ function Network.evolveEmbryo(embryoId: string, targetType: string)
 	RemoteHandler.get(Config.REMOTES.EvolveEmbryo):FireServer(embryoId, targetType)
 end
 
+-- eggId, unitType: choose which unit one of the Mother's Egg-Sac eggs keeps alive
+function Network.assignEgg(eggId: string, unitType: string)
+	RemoteHandler.get(Config.REMOTES.AssignEgg):FireServer(eggId, unitType)
+end
+
 -- leechId, targetType ("Watcher"/"Mother"): evolve a Leech in place — into a Watcher
 -- (slow ranged cluster of eyes) or a Mother (a new Command Center)
 function Network.evolveLeech(leechId: string, targetType: string)
@@ -284,8 +289,9 @@ function Network.onLeechHarvest(fn: (string) -> ())
 	RemoteHandler.get(Config.REMOTES.LeechHarvest).OnClientEvent:Connect(fn)
 end
 
--- egg: a Mother egg just settled → sprout its enveloping tentacles
-function Network.onMotherEggLand(fn: (BasePart) -> ())
+-- egg: a Mother egg just settled → sprout its enveloping tentacles.
+-- retract: the egg finished incubating and survives (an Egg Sac egg) → take them back off.
+function Network.onMotherEggLand(fn: (BasePart, boolean?) -> ())
 	RemoteHandler.get(Config.REMOTES.MotherEggLand).OnClientEvent:Connect(fn)
 end
 

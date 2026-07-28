@@ -20,6 +20,11 @@
 	                └───────────────┘ └──────────┘
 
 	Sizes are ~40% larger than the previous lobby for readability.
+
+	Race picking has two entry points, both calling setFaction: the TEAM cards in the
+	settings column, and clicking the race box on your own combatant banner (which swaps
+	to the other race). The server stores the pick and re-syncs the roster, so every
+	client's banners redraw with it.
 ]]
 
 local Players           = game:GetService("Players")
@@ -149,6 +154,9 @@ local isReady             = false
 local settingsExpanded    = false
 -- Chosen team/faction: "Humans" (Survivor-led) or "Hollowed" (Lamprey creatures).
 local selectedFaction     = "Humans"
+-- Flips the local player's race. Defined with the settings TEAM cards further down, but the
+-- player's own banner calls it too, so it is declared up here where the banners can see it.
+local swapLocalFaction: (string) -> ()
 local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel, vpf: ViewportFrame, badge: TextLabel } } = {}
 local lobbyTerrainMode    = "Off"   -- Layered | Walled | Off (server owns the authoritative value)
 local lobbyGamemode       = "Default"
@@ -273,6 +281,7 @@ end
 -- Up to MAX_BANNERS tall vertical cards, one per combatant. Each shows, top to
 -- bottom: the player name, their profile avatar, and a 3D preview of the race
 -- (faction) they picked. AI opponents and unfilled slots get their own variants.
+-- On your own banner the race preview is clickable and swaps your race.
 local BANNER_PAD  = 10
 local BANNER_IN_W = BANNER_W - BANNER_PAD * 2   -- 120
 
@@ -332,9 +341,12 @@ local function buildBanner(opts: {
 		g.TextYAlignment = Enum.TextYAlignment.Center
 	end
 
-	-- Race caption + preview
-	local raceY = 34 + BANNER_IN_W + 6   -- 160
-	label(card, opts.kind == "ai" and "DIFFICULTY" or "RACE", 10, C_GOLD, Enum.Font.GothamBold,
+	-- Race caption + preview. On your own banner the race doubles as a picker, so the
+	-- caption says so.
+	local raceY   = 34 + BANNER_IN_W + 6   -- 160
+	local canSwap = opts.isLocal and opts.kind == "player"
+	local caption = if opts.kind == "ai" then "DIFFICULTY" elseif canSwap then "RACE  ⇄ SWAP" else "RACE"
+	label(card, caption, 10, C_GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -12, 0, 12), UDim2.fromOffset(BANNER_PAD, raceY), Enum.TextXAlignment.Left)
 
 	local raceBox = Instance.new("Frame")
@@ -353,12 +365,43 @@ local function buildBanner(opts: {
 			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
 		dl.TextYAlignment = Enum.TextYAlignment.Center
 	else
-		local unit = FACTION_UNIT[opts.faction or "Humans"] or "Survivor"
+		local faction = opts.faction or "Humans"
+		local unit = FACTION_UNIT[faction] or "Survivor"
 		local vpf  = ViewportPreview.forUnit(unit, Vector2.new(BANNER_IN_W - 8, raceBox.Size.Y.Offset - 22))
 		vpf.Position = UDim2.fromOffset(4, 2)
 		vpf.Parent = raceBox
-		label(raceBox, FACTION_LABEL[opts.faction or "Humans"] or "HUMANS", 11, C_GOLD, Enum.Font.GothamBold,
+		local raceLbl = label(raceBox, FACTION_LABEL[faction] or "HUMANS", 11, C_GOLD, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 0, 16), UDim2.new(0, 0, 1, -18))
+
+		-- Your own race box is a second way into the team picker: click it to swap to the
+		-- other race, exactly as the TEAM cards in the settings do. A transparent button
+		-- sits over the box so the 3D preview keeps rendering underneath.
+		if canSwap then
+			local rst = stroke(raceBox, C_GOLD, 1); rst.Transparency = 0.55
+			local swap = Instance.new("TextButton")
+			swap.Name = "SwapRace"
+			swap.Size = UDim2.new(1, 0, 1, 0)
+			swap.BackgroundTransparency = 1
+			swap.AutoButtonColor = false
+			swap.Text = ""
+			swap.ZIndex = 6
+			swap.Parent = raceBox
+			swap.MouseEnter:Connect(function()
+				rst.Transparency = 0
+				rst.Thickness = 2
+				raceBox.BackgroundTransparency = 0
+				raceLbl.TextColor3 = C_TITLE
+			end)
+			swap.MouseLeave:Connect(function()
+				rst.Transparency = 0.55
+				rst.Thickness = 1
+				raceBox.BackgroundTransparency = 0.35
+				raceLbl.TextColor3 = C_GOLD
+			end)
+			swap.MouseButton1Click:Connect(function()
+				if swapLocalFaction then swapLocalFaction(faction) end
+			end)
+		end
 	end
 
 	-- Ready / waiting status pill (bottom)
@@ -814,6 +857,14 @@ local function setFaction(faction: string)
 	selectedFaction = faction
 	applyFactionVisual()
 	RemoteHandler.get(Config.REMOTES.LobbySetFaction):FireServer(faction)
+end
+
+-- Flip to the other race, driven from the local player's banner. `from` is the race that
+-- banner is showing (the server's copy), so the swap lands on the right one even if the
+-- settings cards were never touched. The server re-syncs the roster, which redraws the
+-- banner with the new race.
+swapLocalFaction = function(from: string)
+	setFaction(if from == "Hollowed" then "Humans" else "Hollowed")
 end
 
 -- Two picture buttons side by side: Humans (a Survivor) and Hollowed (a Lamprey),

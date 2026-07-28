@@ -121,9 +121,35 @@ local barrackTrainStart: { [string]: number }        = {}
 local MAX_QUEUE = 5
 local laneModeActive = false
 
--- Deployer unit tracking: forward (deployerId → set of unitIds) and reverse maps
+-- Deployer unit tracking: forward (deployerId → set of unitIds) and reverse maps.
+-- A unit may belong to MORE THAN ONE deployer: when Needlers from different eggs merge,
+-- the surviving body counts as alive for every source egg, so all those eggs keep pointing
+-- at it and none of them respawn until the merged body finally dies. Hence the reverse map
+-- is a set of deployers per unit, not a single id.
 local deployerUnits:   { [string]: { [string]: boolean } } = {}
-local unitToDeployer:  { [string]: string }                = {}
+local unitDeployers:   { [string]: { [string]: boolean } } = {}
+
+-- Link a unit to a deployer in both directions (a unit may accumulate several deployers).
+local function linkDeployer(deployerId: string, unitId: string)
+	local fwd = deployerUnits[deployerId]
+	if not fwd then fwd = {}; deployerUnits[deployerId] = fwd end
+	fwd[unitId] = true
+	local rev = unitDeployers[unitId]
+	if not rev then rev = {}; unitDeployers[unitId] = rev end
+	rev[deployerId] = true
+end
+
+-- Drop every deployer link for a unit. Called from all unit-removal paths so a dead unit
+-- stops counting toward any egg's "keep one alive" quota (letting it respawn).
+local function clearDeployerLinks(unitId: string)
+	local rev = unitDeployers[unitId]
+	if not rev then return end
+	unitDeployers[unitId] = nil
+	for dep in rev do
+		local fwd = deployerUnits[dep]
+		if fwd then fwd[unitId] = nil end
+	end
+end
 
 local aggroScanFrame = 0
 local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
@@ -1021,11 +1047,7 @@ local function despawnUnit(id: string): Vector3?
 	playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
 	if d.part then d.part:Destroy() end
 	units[id] = nil
-	local dep = unitToDeployer[id]
-	if dep then
-		unitToDeployer[id] = nil
-		if deployerUnits[dep] then deployerUnits[dep][id] = nil end
-	end
+	clearDeployerLinks(id)
 	return pos
 end
 
@@ -1185,9 +1207,7 @@ function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnP
 		if researchManagerRef and player.UserId > 0 then
 			researchManagerRef.recordUnitTrained(player, spawnType)
 		end
-		if not deployerUnits[deployerId] then deployerUnits[deployerId] = {} end
-		deployerUnits[deployerId][uid] = true
-		unitToDeployer[uid] = deployerId
+		linkDeployer(deployerId, uid)
 		-- Summoned units hold at the bonfire awaiting orders — they keep the spawnUnit
 		-- defaults (target=nil, home=spawnPos, atkMoveDest=nil), so they idle where they
 		-- appear, still defend against enemies that wander into range, and return to the
@@ -1311,11 +1331,7 @@ function UnitManager.removeAllUnitsFor(player: any)
 	for _, id in toRemove do
 		units[id].part:Destroy()
 		units[id] = nil
-		local dep = unitToDeployer[id]
-		if dep then
-			unitToDeployer[id] = nil
-			if deployerUnits[dep] then deployerUnits[dep][id] = nil end
-		end
+		clearDeployerLinks(id)
 	end
 end
 
@@ -1330,6 +1346,8 @@ function UnitManager.resetAll()
 	end
 	units            = {}
 	unitDecorators   = {}
+	deployerUnits    = {}
+	unitDeployers    = {}
 	playerUnitCount  = {}
 	playerStatMult   = {}
 	playerUpgradeLog = {}
@@ -1552,11 +1570,7 @@ local function beginBroodmotherDeath(id: string, data: UnitData)
 		playerUnitCount[owner.UserId] = math.max(0, (playerUnitCount[owner.UserId] or 1) - 1)
 		d.part:Destroy()
 		units[id] = nil
-		local dep = unitToDeployer[id]
-		if dep then
-			unitToDeployer[id] = nil
-			if deployerUnits[dep] then deployerUnits[dep][id] = nil end
-		end
+		clearDeployerLinks(id)
 
 		-- Birth the brood from the wreckage (only if the owner is still playing;
 		-- ground Y is resolved inside spawnUnit).
@@ -1624,11 +1638,7 @@ function UnitManager.damageNearestUnit(fromPos: Vector3, attackerOwnerIdStr: str
 		playerUnitCount[data.owner.UserId] = math.max(0, (playerUnitCount[data.owner.UserId] or 1) - 1)
 		data.part:Destroy()
 		units[bestId] = nil
-		local dep = unitToDeployer[bestId]
-		if dep then
-			unitToDeployer[bestId] = nil
-			if deployerUnits[dep] then deployerUnits[dep][bestId] = nil end
-		end
+		clearDeployerLinks(bestId)
 	end
 	return true, hitPos
 end
@@ -3146,11 +3156,7 @@ function UnitManager.init(resourceManager)
 				playerUnitCount[d.owner.UserId] = math.max(0, (playerUnitCount[d.owner.UserId] or 1) - 1)
 				d.part:Destroy()
 				units[id] = nil
-				local dep = unitToDeployer[id]
-				if dep then
-					unitToDeployer[id] = nil
-					if deployerUnits[dep] then deployerUnits[dep][id] = nil end
-				end
+				clearDeployerLinks(id)
 			end
 		end
 		for attackerStr, n in killCredit do
@@ -3420,6 +3426,16 @@ function UnitManager.init(resourceManager)
 		local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
 		if bb then bb.Size = UDim2.new(0, hpBarWidth(data.maxHp), 0, 4) end
 
+		-- Fold the absorbed Needler's egg deployers into the survivor. The merged body now
+		-- counts as the live unit for EVERY source egg, so no egg respawns a replacement
+		-- while it lives, and when it finally dies all of them (e.g. the 5 eggs behind a
+		-- 5-legged Needler) respawn at once. Do this BEFORE despawning `bestId`, whose
+		-- cleanup drops its own links.
+		local absorbed = unitDeployers[bestId]
+		if absorbed then
+			for dep in absorbed do linkDeployer(dep, needlerId) end
+		end
+
 		-- Consume the absorbed Needler (its client body detaches when the part dies).
 		despawnUnit(bestId)
 	end)
@@ -3501,11 +3517,7 @@ function UnitManager.init(resourceManager)
 		for _, id in toRemove do
 			units[id].part:Destroy()
 			units[id] = nil
-			local dep = unitToDeployer[id]
-			if dep then
-				unitToDeployer[id] = nil
-				if deployerUnits[dep] then deployerUnits[dep][id] = nil end
-			end
+			clearDeployerLinks(id)
 		end
 		local qToClean = {}
 		for barrackId, q in barrackQueues do

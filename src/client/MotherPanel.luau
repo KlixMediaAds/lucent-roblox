@@ -110,7 +110,8 @@ local function buildPage(): CommandCard.Page
 	end
 
 	-- Egg Sacs upgrade (grid slot 2) — repeatable purchase that plants nests + raises
-	-- the auto-spawn Embryo cap. Level is read live off the Mother model's attribute.
+	-- the egg cap. Each laid egg is clickable: pick the unit it keeps alive. Level is
+	-- read live off the Mother model's attribute.
 	local level    = eggSacLevel()
 	local maxLevel  = Config.MOTHER_EGGSAC_MAX_LEVEL
 	local maxed     = level >= maxLevel
@@ -127,9 +128,9 @@ local function buildPage(): CommandCard.Page
 		enabled = (not maxed) and res >= sacCost,
 		locked  = maxed,
 		desc    = maxed
-			and ("Egg Sacs maxed — the Mother auto-hatches up to " .. Config.eggSacCapacity(level) .. " Embryos from her nests.")
-			or ("Grow an Egg Sac cluster: plants nests beside the Mother that auto-hatch Embryos for free. +"
-				.. Config.MOTHER_EGGSAC_PER_LEVEL .. " max Embryos per tier (" .. maxLevel .. " tiers)."),
+			and ("Egg Sacs maxed — the Mother lays up to " .. Config.eggSacCapacity(level) .. " eggs. Click an egg to choose the unit it hatches.")
+			or ("Grow an Egg Sac cluster: plants nests beside the Mother that lay clickable eggs for free. Click an egg to pick the unit it keeps alive. +"
+				.. Config.MOTHER_EGGSAC_PER_LEVEL .. " max eggs per tier (" .. maxLevel .. " tiers)."),
 		onClick = function()
 			if not activeCCId then return end
 			if eggSacLevel() >= maxLevel then return end

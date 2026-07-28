@@ -41,6 +41,7 @@ local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
 local MotherPanel    = require(script:WaitForChild("MotherPanel"))
 local LeechPanel     = require(script:WaitForChild("LeechPanel"))
 local EmbryoPanel    = require(script:WaitForChild("EmbryoPanel"))
+local EggPanel       = require(script:WaitForChild("EggPanel"))
 local RollerPanel    = require(script:WaitForChild("RollerPanel"))
 local NeedlerPanel   = require(script:WaitForChild("NeedlerPanel"))
 local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
@@ -59,10 +60,26 @@ local ViewportPreview = require(script:WaitForChild("ViewportPreview"))
 local AmbientAudio    = require(script:WaitForChild("AmbientAudio"))
 
 -- Disable default character controls so WASD only moves the RTS camera.
+-- The ControlModule re-enables itself every time the character (re)spawns and, in the
+-- frame before the new character exists, calls the deprecated Player:Move(), which logs
+-- "Player:Move called, but player currently has no character." So we re-disable on each
+-- CharacterAdded (once the character is present) rather than only at startup.
 task.spawn(function()
+	local player           = Players.LocalPlayer
 	local ok, PlayerModule = pcall(require,
-		Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule"))
-	if ok then PlayerModule:GetControls():Disable() end
+		player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule"))
+	if not ok then return end
+
+	local function disableControls()
+		pcall(function() PlayerModule:GetControls():Disable() end)
+	end
+
+	-- Disable now (character may already exist) and again whenever one spawns, waiting
+	-- until the character is actually parented so the ControlModule has something to act on.
+	if player.Character then disableControls() end
+	player.CharacterAdded:Connect(function()
+		task.defer(disableControls)
+	end)
 end)
 
 -- Hide the default Roblox leaderboard / player list (it sits top-right, where the
@@ -460,6 +477,7 @@ CCMobilePanel.init(Network,
 MotherPanel.init(Network, function() return currentResources end)
 LeechPanel.init(Network)
 EmbryoPanel.init(Network)
+EggPanel.init(Network)
 RollerPanel.init(Network)
 NeedlerPanel.init(Network)
 DeployerPanel.init(Network,
@@ -759,6 +777,7 @@ local function enterCCMode()
 	MotherPanel.hide()
 	LeechPanel.hide()
 	EmbryoPanel.hide()
+	EggPanel.hide()
 	RollerPanel.hide()
 	NeedlerPanel.hide()
 	WorkshopPanel.resetMonument()
@@ -1060,6 +1079,24 @@ UnitController.onOtherBuildingSelected(function(bid: string?, btype: string?)
 		CommandCard.showMessage("other", name, "Upgrades coming soon!")
 	else
 		CommandCard.hide("other")
+	end
+end)
+
+-- ── Egg-Sac egg panel ───────────────────────────────────────────────────────────
+-- Clicking one of the Mother's eggs opens a 2×2 grid to choose which unit it hatches.
+UnitController.onEggSelected(function(eggIds: { string }?)
+	if eggIds and #eggIds > 0 then
+		MinePanel.hide()
+		WorkshopPanel.hide()
+		TurretPanel.hide()
+		BlobPanel.hide()
+		DeployerPanel.hide()
+		CCMobilePanel.hide()
+		LampreyNestPanel.hide()
+		EngineeringPanel.hide()
+		EggPanel.show(eggIds)
+	else
+		EggPanel.hide()
 	end
 end)
 
@@ -3989,8 +4026,13 @@ Network.onHagfishStrike(function(hagPos: Vector3, strikes: { Vector3 })
 end)
 
 -- A Mother egg just settled → sprout its enveloping, pulsing tentacles (client-side).
-Network.onMotherEggLand(function(egg: BasePart)
-	MotherEggBody.sprout(egg)
+-- A planted Egg Sac egg survives its hatch, so it asks for them back off afterwards.
+Network.onMotherEggLand(function(egg: BasePart, retract: boolean?)
+	if retract then
+		MotherEggBody.wither(egg)
+	else
+		MotherEggBody.sprout(egg)
+	end
 end)
 
 -- A burrowed Leech just paid out income → play its feeding/harvest animation, and

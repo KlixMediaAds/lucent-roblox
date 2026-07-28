@@ -29,7 +29,7 @@ local CULL_SQ   = 320 * 320
 
 -- ── State ────────────────────────────────────────────────────────────────────────
 type Tent = { segs: { BasePart }, glow: BasePart, phi: number, seed: number }
-type Entry = { egg: BasePart, t0: number, tents: { Tent } }
+type Entry = { egg: BasePart, t0: number, tents: { Tent }, conn: RBXScriptConnection }
 local active: { [BasePart]: Entry } = {}
 local camera: Camera?
 
@@ -74,20 +74,23 @@ function MotherEggBody.init(cam: Camera)
 			local dd     = center - camPos
 			if dd:Dot(dd) > CULL_SQ then continue end
 
-			local R = egg.Size.X * 0.5                      -- live → pulses with the egg
+			-- Live half-extents → the tentacles ride the true (possibly stretched) surface and
+			-- pulse with the egg. `R` is the narrow radius, used for their thickness.
+			local half = egg.Size * (0.5 * HUG)
+			local R    = math.min(egg.Size.X, egg.Size.Z) * 0.5
 			local g = math.clamp((now - e.t0) / GROW_TIME, 0, 1)
 			local gg = 1 - (1 - g) * (1 - g)                -- ease-out climb
 
 			for _, tent in e.tents do
 				local top   = THETA_MIN + gg * (THETA_MAX - THETA_MIN)
 				local segs  = tent.segs
-				local prev  = center + dirAt(THETA_MIN, tent.phi) * (R * HUG)
+				local prev  = center + dirAt(THETA_MIN, tent.phi) * half
 				for j = 1, #segs do
 					local frac  = j / #segs
 					local theta = THETA_MIN + (top - THETA_MIN) * frac
 					-- Gentle living sway that grows toward the tip.
 					local sway  = math.sin(now * 1.6 + tent.seed + j * 0.6) * 0.05 * frac
-					local pt    = center + dirAt(theta, tent.phi + sway) * (R * HUG)
+					local pt    = center + dirAt(theta, tent.phi + sway) * half
 					local mid   = (prev + pt) * 0.5
 					local len   = (pt - prev).Magnitude
 					local width = R * (0.4 - 0.24 * (frac - 1 / #segs))   -- taper base → tip
@@ -99,7 +102,7 @@ function MotherEggBody.init(cam: Camera)
 				-- Glowing bud at the growing tip.
 				local tipDir = dirAt(top, tent.phi)
 				tent.glow.Size   = Vector3.new(1, 1, 1) * (R * 0.3 * (0.35 + 0.65 * gg))
-				tent.glow.CFrame = CFrame.new(center + tipDir * (R * HUG))
+				tent.glow.CFrame = CFrame.new(center + tipDir * half)
 			end
 		end
 	end)
@@ -123,8 +126,26 @@ function MotherEggBody.sprout(egg: BasePart)
 		}
 	end
 
-	active[egg] = { egg = egg, t0 = os.clock(), tents = tents }
-	egg.Destroying:Once(function() active[egg] = nil end)
+	active[egg] = {
+		egg   = egg,
+		t0    = os.clock(),
+		tents = tents,
+		conn  = egg.Destroying:Once(function() active[egg] = nil end),
+	}
+end
+
+-- Strip the tentacles off an egg that survives its incubation (the Mother's planted Egg Sac
+-- eggs hatch over and over, so theirs have to come off between broods, and each brood
+-- sprouts a fresh set).
+function MotherEggBody.wither(egg: BasePart)
+	local e = active[egg]
+	if not e then return end
+	active[egg] = nil
+	e.conn:Disconnect()
+	for _, tent in e.tents do
+		for _, seg in tent.segs do seg:Destroy() end
+		tent.glow:Destroy()
+	end
 end
 
 return MotherEggBody
