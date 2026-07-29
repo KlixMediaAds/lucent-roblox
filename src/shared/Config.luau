@@ -4,7 +4,7 @@ local Config = {}
 Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 
 -- Economy
-Config.STARTING_RESOURCES   = 400
+Config.STARTING_RESOURCES   = 200
 Config.BUILDING_COST         = 50   -- Barracks cost
 Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure; scales — see below)
 
@@ -122,7 +122,7 @@ Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-
 
 -- Leech (Hollowed): when burrowed it enters a structure state and pays out passive
 -- income to its owner each interval (mirrors the Command Center passive income).
-Config.LEECH_BURROW_INCOME    = 8     -- resources per tick from each burrowed Leech
+Config.LEECH_BURROW_INCOME    = 2     -- resources per tick from each burrowed Leech
 Config.LEECH_BURROW_INTERVAL  = 6     -- seconds between burrowed-Leech income ticks
 Config.LEECH_BURROW_SINK      = 0     -- Leech no longer sinks: it arches up (rainbow) to feed — see LeechBody
 -- Each Leech rears up and quests for a random moment before planting its head to feed.

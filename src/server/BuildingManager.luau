@@ -63,11 +63,12 @@ local nestLauncherBusy: { [string]: boolean } = {}  -- LampreyNest id → a laun
 
 -- Hollowed Mother "Egg Sacs" upgrade state, per Command Center (Mother) id.
 local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs purchases (0–MAX)
--- Persistent nests planted by the Egg Sacs upgrade, one per purchase. A nest sits empty
--- until its creature is incubating, when an egg forms in it (see incubateSacEgg).
--- Each egg is a clickable spawner the player assigns a unit type to; it keeps exactly one
--- such unit alive, respawning it whenever it dies. eggId doubles as the "deployer" id used
--- to alive-track its unit.
+-- Persistent nests planted by the Egg Sacs upgrade, one per purchase. A nest arrives with a
+-- dormant egg already in it; the egg only starts growing and breathing once the player picks
+-- the unit it should keep alive (see incubateSacEgg), and it is spent the moment that unit
+-- hatches. From then on the nest sits empty and grows a fresh egg only when its unit dies.
+-- Each nest is a clickable spawner that keeps exactly one such unit alive; eggId doubles as
+-- the "deployer" id used to alive-track that unit.
 -- `parentId`/`dir`/`numChildren` describe this egg's place in the tentacle tree: its parent
 -- node (nil = grown from the Mother), its outward growth direction (XZ unit), and how many
 -- children have branched off it (used to fan the next sibling into its own direction).
@@ -342,9 +343,9 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		local isSwarmCC = isHollowed(player)
 		if isSwarmCC then
 			-- Hollowed Mother: a living brood-queen creature (Diplocaulus head, queen-ant
-			-- egg-laying gaster, anemone tentacle crown). The team-coloured base stays as
-			-- the invisible collision/HP part; all geometry comes from the shared builder
-			-- so ghosts/previews stay in sync.
+			-- egg-laying gaster). The team-coloured base stays as the invisible
+			-- collision/HP part; all geometry comes from the shared builder so
+			-- ghosts/previews stay in sync.
 			base.Transparency = 1
 
 			-- Tag for the client-side SwarmGrass renderer (black grass field). Grass
@@ -353,10 +354,10 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 			-- Flip the creature 180° so its head faces +Z — i.e. toward the default
 			-- camera (which sits at +Z looking toward -Z) — instead of away from it.
-			-- The MotherCrown client animator applies the same flip so the crown tracks.
+			-- Preview/ghost builders apply the same flip so every view stays aligned.
 			UnitVisuals.buildMotherDecor(model, CFrame.new(position) * CFrame.Angles(0, math.pi, 0), player.TeamColor, true)
 
-			-- The Mother's head / body / tentacles are all CanQuery=false decor and
+			-- The Mother's head / body / gaster are all CanQuery=false decor and
 			-- sprawl well beyond and above the invisible 14×14 Base, so clicks on the
 			-- creature itself miss. Drop in a roomy invisible, query-able hitbox over the
 			-- whole creature — hitBuilding matches any descendant of the model, so this
@@ -2892,16 +2893,30 @@ end
 
 local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
 
+-- A freshly-planted nest is not empty: a dormant egg sits in its socket from the moment
+-- the nest pops in, so the colony reads as eggs rather than bowls. It is inert — no
+-- breathing, no light, no progress bar — until the player picks the unit it should keep
+-- alive, at which point incubation takes over and swells it. Once that first creature
+-- hatches the egg is spent for good; the nest only grows another when its unit dies.
+local EGG_DORMANT = EGG_FULL * 0.78
+local EGG_DORMANT_TRANS = 0.18
+
 -- ── The nest an Egg Sac egg is laid in ──────────────────────────────────────────
 -- A shallow bramble bowl rather than a slab: a ring of dark flesh ribs that lean out of
 -- the ground and curl back inward over the socket, a few pale bone slivers woven across
--- the rim, and a purple goo pool in the middle that keeps glowing while the nest is empty.
+-- the rim, and a black goo pool in the middle that the egg sits in.
 local NEST_FLESH    = Color3.fromRGB(24, 15, 26)
 local NEST_FLESH_HI = Color3.fromRGB(38, 22, 40)
 local NEST_BONE     = Color3.fromRGB(96, 84, 84)
 local NEST_RIM_R    = 2.95   -- radius the rim curls over at
 local NEST_RIBS     = 15
 local NEST_FLOOR_Y  = 0.3    -- top of the goo pool: where an egg sits
+
+-- The socket pool. Black and unlit at rest; it only warms up while a creature is
+-- incubating, so the glow reads as the egg growing rather than as nest decoration.
+local NEST_GOO_COLOR = Color3.fromRGB(8, 7, 10)
+local NEST_GOO_LIGHT = Color3.fromRGB(255, 140, 70)   -- matches the egg's own light
+local NEST_GOO_REST  = 0                              -- goo light brightness with nothing growing
 
 -- One tapered strand from `a` to `b`. Unlike addGroundVein this one is free in 3D, so the
 -- ribs can climb and curl.
@@ -2957,7 +2972,7 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 	addNestDisc(clump, nestPos + Vector3.new(0, 0.12, 0), NEST_RIM_R * 1.75, 0.24,
 		Color3.fromRGB(18, 11, 20), Enum.Material.Slate, "NestFloor")
 	local goo = addNestDisc(clump, nestPos + Vector3.new(0, NEST_FLOOR_Y, 0), NEST_RIM_R * 1.25, 0.22,
-		EGG_GLOW_COLOR, Enum.Material.Neon, "NestGoo")
+		NEST_GOO_COLOR, Enum.Material.Slate, "NestGoo")
 	goo:SetAttribute("ShownAt", 0.55)
 
 	-- Rim ribs: each roots just outside the pool, leans out and up to the rim, then curls
@@ -2999,14 +3014,14 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 
 	local light      = Instance.new("PointLight")
 	light.Name       = "NestLight"
-	light.Color      = EGG_GLOW_COLOR
-	light.Brightness = 0            -- lit on reveal
+	light.Color      = NEST_GOO_LIGHT
+	light.Brightness = NEST_GOO_REST   -- dark until something incubates in the socket
 	light.Range      = 12
 	light.Parent     = goo
 
 	-- Invisible box hugging the bowl. The client adorns the selection outline to this: the egg
-	-- is gone most of the time and the click box is deliberately oversized, so neither is a
-	-- good fit for an outline.
+	-- changes size as it grows and is gone entirely between broods, and the click box is
+	-- deliberately oversized, so neither is a good fit for an outline.
 	local bowl        = Instance.new("Part")
 	bowl.Name         = "Bowl"
 	bowl.Size         = Vector3.new(NEST_RIM_R * 2 + 0.5, 2, NEST_RIM_R * 2 + 0.5)
@@ -3038,15 +3053,15 @@ local function buildEggClump(ccModel: Model, ownerId: number, nestPos: Vector3, 
 
 	buildEggNest(clump, nestPos)
 
-	-- The egg itself. It only EXISTS while a creature is incubating: the rest of the time it
-	-- is invisible and unlit, leaving an empty nest, and incubateSacEgg forms it in the
-	-- socket and swells it. Sized/positioned here for its resting state so the icon and
-	-- progress bar have something to hang off.
+	-- The egg itself. It sits dormant in the socket from the moment the nest is revealed,
+	-- incubateSacEgg swells it once a unit is picked, and after that creature hatches the
+	-- shell is spent — the nest stays empty until the unit dies and a new egg grows.
+	-- Built at dormant size; revealEggClump fades it in.
 	local egg         = Instance.new("Part")
 	egg.Name          = "Egg"
 	egg.Shape         = Enum.PartType.Ball
-	egg.Size          = EGG_FULL
-	egg.Position      = nestPos + Vector3.new(0, NEST_FLOOR_Y + EGG_FULL.Y * 0.5, 0)
+	egg.Size          = EGG_DORMANT
+	egg.Position      = nestPos + Vector3.new(0, NEST_FLOOR_Y + EGG_DORMANT.Y * 0.5, 0)
 	egg.Color         = Color3.fromRGB(255, 120, 60)
 	egg.Material      = Enum.Material.Neon
 	egg.Anchored      = true
@@ -3220,8 +3235,8 @@ end
 local eggIncubating: { [BasePart]: boolean } = setmetatable({}, { __mode = "k" }) :: any
 
 -- Pop a finished nest into view at the tip of its tentacle: fade in every nest part to its
--- own resting transparency, light the goo, sprout the creepygrass roots, make it clickable.
--- The egg part stays hidden: it only forms once something is incubating in there.
+-- own resting transparency, sprout the creepygrass roots, make it clickable. The dormant
+-- egg fades in with the rest, so a new nest arrives with an egg already sitting in it.
 local function revealEggClump(egg: BasePart, nestPos: Vector3)
 	local clump = egg.Parent :: Model
 	local hit = clump:FindFirstChild("Hitbox") :: BasePart?
@@ -3236,9 +3251,12 @@ local function revealEggClump(egg: BasePart, nestPos: Vector3)
 			TweenService:Create(part, TweenInfo.new(0.35), { Transparency = shownAt }):Play()
 		end
 	end
-	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
-	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
-	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.35), { Brightness = 1.4 }):Play() end
+
+	-- The dormant egg, unless incubation already claimed it (the player can pick a unit
+	-- the instant the nest lands, and that animation owns the egg's size/transparency).
+	if not eggIncubating[egg] then
+		TweenService:Create(egg, TweenInfo.new(0.35), { Transparency = EGG_DORMANT_TRANS }):Play()
+	end
 
 	buildEggGrass(clump, nestPos, nestPos.Y)
 end
@@ -3286,9 +3304,13 @@ local function incubateSacEgg(entry: SacEgg)
 	if bar then bar.Enabled = true end
 	if fill then fill.Size = UDim2.fromScale(0, 1) end
 
-	-- Form the bud in the socket: the goo flares as the egg wells up out of it.
-	egg.Size     = EGG_SEED
-	egg.Position = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z)
+	-- Where the swell starts. A nest that has never hatched still has its dormant egg in
+	-- the socket, so growth picks up from that size — the egg the player was looking at is
+	-- the one that starts moving. A respawn after the previous creature hatched has no egg
+	-- left, so it wells back up out of the goo as a fresh bud.
+	local startSize = if egg.Transparency < 1 then egg.Size else EGG_SEED
+	egg.Size     = startSize
+	egg.Position = Vector3.new(egg.Position.X, entry.baseY + startSize.Y * 0.5, egg.Position.Z)
 	TweenService:Create(egg, TweenInfo.new(0.4), { Transparency = 0.1 }):Play()
 	if goo then TweenService:Create(goo, TweenInfo.new(0.4), { Transparency = 0.25 }):Play() end
 	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.4), { Brightness = 3 }):Play() end
@@ -3304,7 +3326,7 @@ local function incubateSacEgg(entry: SacEgg)
 		local dur     = Config.eggSpawnTime(entry.unitType)
 		local k       = math.clamp(1 - ((entry.spawnAt or now) - now) / dur, 0, 1)
 		local breathe = 1 + 0.06 * math.sin(now * 4.5)          -- same beat as a spat Mother egg
-		local size    = EGG_SEED:Lerp(sacEggTargetSize(entry.unitType), k) * breathe
+		local size    = startSize:Lerp(sacEggTargetSize(entry.unitType), k) * breathe
 		egg.Size      = size
 		egg.Position  = Vector3.new(egg.Position.X, entry.baseY + size.Y * 0.5, egg.Position.Z)
 		if light then light.Brightness = 2.5 + 2.5 * (0.5 + 0.5 * math.sin(now * 4.5)) end
@@ -3322,7 +3344,7 @@ local function incubateSacEgg(entry: SacEgg)
 	if icon then icon.StudsOffset = Vector3.new(0, 2.7, 0) end
 	if light then TweenService:Create(light, TweenInfo.new(0.3), { Brightness = 0 }):Play() end
 	if goo then TweenService:Create(goo, TweenInfo.new(0.5), { Transparency = 0.55 }):Play() end
-	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = 1.4 }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = NEST_GOO_REST }):Play() end
 	local COLLAPSE = 0.3
 	TweenService:Create(egg, TweenInfo.new(COLLAPSE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 		Size         = EGG_SEED,

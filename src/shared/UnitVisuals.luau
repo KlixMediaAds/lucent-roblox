@@ -390,64 +390,15 @@ end
 ]]
 -- ── Hollowed Mother — living Command Center ──────────────────────────────────
 -- A brood-queen creature (replaces the old black spike): a Diplocaulus boomerang
--- head on a low, splayed salamander body; a swollen queen-ant gaster behind it,
--- banded and glowing with brood light; and a sea-anemone crown of tentacles rising
--- from its back — the faction's tall silhouette.
+-- head on a low, splayed salamander body, and a swollen queen-ant gaster behind
+-- it, banded and glowing with brood light.
 -- `castShadows` true for the live building, false for previews/ghosts.
-
--- Deterministic anemone-tentacle layout, shared by the static builder (resting
--- pose) and the client MotherCrown animator (slow hagfish-style wobble). Two rows
--- run along the spine — from behind the head, over the trunk, down the gaster —
--- each tentacle rooted in the back and leaning out over its own side, tallest over
--- the midsection. Segments are named "Crown_<i>_<j>" so the animator finds them.
-export type MotherTent = { base: Vector3, radial: Vector3, lens: { number }, thicks: { number }, seed: number }
-UnitVisuals.MOTHER_CROWN = (function(): { MotherTent }
-	local rng = Random.new(7331)
-	-- z along the spine and the back height there (embedded ~0.5 into the flesh).
-	local ROW: { { number } } = {  -- { z, baseY, lengthScale }
-		{ -2.6, 4.5, 0.85 },
-		{ -0.4, 5.3, 1.05 },
-		{  1.8, 5.1, 1.20 },
-		{  4.0, 6.1, 1.20 },
-		{  6.2, 7.1, 1.05 },
-		{  8.4, 7.0, 0.85 },
-	}
-	local list: { MotherTent } = {}
-	for _, s in { -1, 1 } do
-		for _, row in ROW do
-			local sc = row[3] * rng:NextNumber(0.9, 1.1)
-			list[#list + 1] = {
-				base   = Vector3.new(s * 1.4, row[2], row[1]),
-				-- Leans outward over its side with a slight backward drift.
-				radial = Vector3.new(s * 0.9, 0, 0.15 + rng:NextNumber(-0.1, 0.1)).Unit,
-				lens   = { 3.2 * sc, 2.7 * sc, 2.2 * sc },
-				thicks = { 0.85, 0.6, 0.38 },
-				seed   = rng:NextNumber(0, 100),
-			}
-		end
-	end
-	return list
-end)()
-
--- Resting local-space spine points (4) of one tentacle: rises from its root on the
--- back and splays outward like an anemone. The animator adds wobble on top.
-function UnitVisuals.motherCrownSpine(spec: MotherTent): { Vector3 }
-	local up   = Vector3.yAxis
-	local dirs = {
-		(spec.radial * 0.25 + up).Unit,
-		(spec.radial * 0.60 + up).Unit,
-		(spec.radial * 1.05 + up * 0.65).Unit,
-	}
-	local pts = { spec.base }
-	for k = 1, 3 do pts[k + 1] = pts[k] + dirs[k] * spec.lens[k] end
-	return pts
-end
 
 function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, castShadows: boolean?)
 	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh
 	local cBelly  = Color3.fromRGB(58, 34, 40)   -- lighter flesh bands
 	local cChitin = Color3.fromRGB(12, 10, 14)   -- near-black chitin (head shield, legs)
-	local cAccent = teamColor.Color              -- eyes / tentacle tips / brood glow
+	local cAccent = teamColor.Color              -- eyes / brood glow
 
 	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3,
 		material: Enum.Material, shape: Enum.PartType?, shadow: boolean?): Part
@@ -533,20 +484,6 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 	-- ── Egg vent at the gaster tip ───────────────────────────────────────────────
 	dp("EggVent", Vector3.new(1.0, 2.8, 2.8),
 		CFrame.new(0, 2.2, 12.4) * CFrame.Angles(0, math.rad(90), 0), cChitin, Enum.Material.Slate, Enum.PartType.Cylinder)
-
-	-- ── Sea-anemone tentacle crown on the back ──────────────────────────────────
-	-- Built in the shared resting pose from MOTHER_CROWN; segments are named
-	-- "Crown_<i>_<j>" so the client MotherCrown animator can find and sway them
-	-- (slow hagfish-tentacle wobble). Tips glow in the team colour.
-	for i, spec in UnitVisuals.MOTHER_CROWN do
-		local pts = UnitVisuals.motherCrownSpine(spec)
-		for j = 1, 3 do
-			local isTip = j == 3
-			seg("Crown_" .. i .. "_" .. j, pts[j], pts[j + 1], spec.thicks[j],
-				isTip and cAccent or cHide,
-				isTip and Enum.Material.Neon or Enum.Material.Slate)
-		end
-	end
 end
 
 function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)

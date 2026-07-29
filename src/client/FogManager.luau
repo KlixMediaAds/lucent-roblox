@@ -33,6 +33,11 @@ local UNIT_FADE    = 0.15  -- seconds for enemy-unit fade in/out
 
 local TICK = 0.3  -- fog update interval
 
+-- Match-start warm-up: poll fast until the first vision source replicates, so the
+-- base opens up immediately instead of the player staring at black ground.
+local WARMUP_TICK = 0.05
+local WARMUP_TIME = 8     -- give up warming after this long and settle to TICK
+
 -- Per-building-type vision radii (studs)
 local VIS_CC       = 75
 local VIS_BARRACKS = 50
@@ -689,25 +694,42 @@ function FogManager.init(userId: number)
 		end
 	end)
 
-	task.spawn(function()
-		-- Wire dirty flags to folder changes so source/deposit lists
-		-- are rebuilt only when membership actually changes.
-		local function watch(name: string, fn: () -> ())
-			local f = workspace:WaitForChild(name, 15)
+	-- Wire dirty flags to folder changes so source lists are rebuilt only when
+	-- membership actually changes. Each folder is watched on its own thread: a
+	-- folder that never appears (WaitForChild timing out) must not hold up the
+	-- others, and must never hold up the update loop below.
+	local function watch(name: string)
+		task.spawn(function()
+			local f = workspace:WaitForChild(name, 30)
 			if not f then return end
-			f.ChildAdded:Connect(fn)
-			f.ChildRemoved:Connect(fn)
-		end
+			local function dirtySource() sourcesDirty = true end
+			f.ChildAdded:Connect(dirtySource)
+			f.ChildRemoved:Connect(dirtySource)
+		end)
+	end
 
-		local function dirtySource() sourcesDirty = true end
+	watch("Units")
+	watch("Buildings")
 
-		watch("Units",     dirtySource)
-		watch("Buildings", dirtySource)
-		watch("Miners",    dirtySource)
+	task.spawn(function()
+		-- Tick fast until the first vision source shows up. At match start the fog
+		-- grid is built before our Command Center has replicated to the client, so
+		-- the opening tick finds nothing and the whole map reads as black ground.
+		-- The fast poll lifts the base bubble the instant the CC lands.
+		local warmupUntil = os.clock() + WARMUP_TIME
+		local warm        = true
 
 		while true do
 			updateFog()
-			task.wait(TICK)
+
+			if warm then
+				local haveSource = #ownUnitParts > 0 or #ownBuildingData > 0
+				if haveSource or xrayEnabled or os.clock() >= warmupUntil then
+					warm = false
+				end
+			end
+
+			task.wait(if warm then WARMUP_TICK else TICK)
 		end
 	end)
 end
@@ -717,6 +739,20 @@ end
 function FogManager.forceRefresh()
 	sourcesDirty = true
 	updateFog()
+
+	-- The caller often fires on the BuildingPlaced event, which can beat the
+	-- building model's replication to this client — the refresh above then finds
+	-- no sources and clears nothing. Retry briefly so the fog lifts the moment
+	-- the model actually lands rather than on the next regular tick.
+	if #ownBuildingData > 0 then return end
+	task.spawn(function()
+		for _ = 1, 30 do
+			task.wait(0.05)
+			sourcesDirty = true
+			updateFog()
+			if #ownBuildingData > 0 then return end
+		end
+	end)
 end
 
 -- Register a handler fired once per enemy building the moment it is first revealed

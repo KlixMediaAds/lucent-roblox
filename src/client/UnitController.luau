@@ -475,7 +475,7 @@ local function hitBuilding(): string?
 end
 
 -- Raycast for an owned Egg-Sac nest under the cursor. Each one is a clickable Model (the
--- bowl, plus an egg while it incubates) tagged with an "EggId" attribute, parented under a
+-- bowl, plus its egg when one is present) tagged with an "EggId" attribute, parented under a
 -- Mother model, so this must run BEFORE hitBuilding (which would otherwise match it as part
 -- of the Command Center). Returns the egg id and the clump Model, or nil.
 local function hitEgg(): (string?, Instance?)

@@ -9,7 +9,7 @@
 	with it. All parts are client-only children of the egg, so nothing replicates and they
 	vanish with the egg when it hatches.
 
-	Same pattern as MotherCrown / LeechBody: parts are shaped once, re-CFramed per frame.
+	Same pattern as LeechBody: parts are shaped once, re-CFramed per frame.
 ]]
 
 local RunService = game:GetService("RunService")
