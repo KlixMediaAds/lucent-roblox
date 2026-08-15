@@ -1,35 +1,38 @@
 --[[
-	AIManager v5 — Strategic Commander.
+	AIManager v6 — Honest Commander.
 
-	The old AI ran one linear build order, a near-fixed composition, and a single
-	gather→stage→attack→retreat loop for every difficulty. v5 replaces that brain
-	with a strategic layer while keeping the spawn/lifecycle scaffolding intact.
+	Ground-up rewrite with one rule: the AI plays by EXACTLY the player ruleset,
+	StarCraft-style. Difficulty changes only intelligence, never the rules.
 
-	Core ideas:
-	  • ARCHETYPES — each bot adopts a strategic identity (Aggressor / Mechanized /
-	    Economist / Defender / Waves). "balanced" rolls a RANDOM archetype per game,
-	    so two same-difficulty bots play differently. Each archetype defines economy
-	    targets, per-phase composition, a tech plan, a preferred turret upgrade, and
-	    aggression knobs.
-	  • PHASES — opening / expand / mid / late, derived from time + economy, gate the
-	    composition tier, tech depth, and aggression.
-	  • DESIRED-STATE ECONOMY — instead of a fixed ladder, each strategy tick computes
-	    desired building/harvester counts, builds a priority-scored shopping list, and
-	    buys top-down through the budget (honoring a reserve). Spending adapts to bank
-	    size and live threats.
-	  • COUNTER-COMPOSITION — scouts enemy unit types + defenses and answers them:
-	    Howitzers vs turret lines (only unit out-ranging a turret), Tank+Foamer vs
-	    cheap masses, Elite+Foamer vs heavy mech. Demanded tech is self-granted.
-	  • TECH + TURRET UPGRADES — the AI grants itself research (which its units use
-	    automatically) and upgrades turrets via BuildingManager.upgradeTurretForPlayer.
-	  • VALUE-BASED COMBAT — commits/retreats on relative force VALUE, not a clock.
-	    Adds harassment squads that hunt enemy Harvesters and composition-aware
-	    positioning (Howitzers hold at range, Medics trail, line units lead).
+	Same rules as a player:
+	  • ECONOMY — starts with STARTING_RESOURCES, earns only CC passive income and
+	    Foundry income (its base is seeded with the same 5 deposits a player gets).
+	    Every purchase goes through the same cost/validation paths players use.
+	    No resource grants — not even on Nightmare.
+	  • BUILDINGS — placed via BuildingManager.placeForPlayer: same costs, build
+	    times, build-zone limits, and prerequisites (Foundry → Bonfire → Turret /
+	    Engineering Post; Relay & CreepyBlob research-gated).
+	  • RESEARCH — earns condition unlocks (build/kill/summon counts) and runs the
+	    same 30-second timed researches through ResearchManager.requestUpgrade,
+	    honoring the per-category concurrency cap. No instant grants.
+	  • ENGINEERING POST — builds one and pays for Light researches like a player,
+	    collecting random stat upgrades on the same 30 s timer.
+	  • ARMY — free capacity-limited Bonfire auto-summon (same as the player),
+	    scaled only by paid Empowers; paid Survivor → Sniper field upgrades; paid
+	    turret upgrade paths. Armies attack-move like a player's would.
+	  • VISION — sees through the same fog radii the player's FogManager uses
+	    (units 65, per-building VISION_RADIUS). Anything else is remembered intel
+	    that goes stale. No wallhacks.
 
-	Difficulty levels 1-5 scale economy caps, army cap, tech depth, cadence, micro
-	competence and aggression — tuned stronger than v4 overall.
+	What difficulty (1-5) actually scales: decision cadence, intel memory, micro
+	quality (flanks, siege standoff, value-read accuracy), spending discipline,
+	scouting diligence, macro ambition, aggression timing, and whether the bot
+	will push a Monument win when dominant. Nightmare is a level-5 brain with
+	relentless pacing — still on a player's economy.
 
-	The AI never races the Monument (a pressure opponent, not a clock).
+	Per-game STYLES (Assault / Siege / Fortress / Waves) keep same-difficulty bots
+	from playing identically. The horror pacing is preserved: an opening peace
+	window (firstStrike) where the bot only economizes, and fog-edge lurker scouts.
 
 	Chat command: /ai balanced|territorial|waves|nightmare|trainer [1-5]
 --]]
@@ -38,172 +41,152 @@ local Teams             = game:GetService("Teams")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
+local SpawnPoints       = require(script.Parent:WaitForChild("SpawnPoints"))
 
 local AIManager = {}
 
--- ── BT return values ──────────────────────────────────────────────────────────
-
-local SUCCESS = 1
-local FAILURE = 2
-local RUNNING = 3
-
--- ── Difficulty levels (1 = weakest, 5 = brutal) ────────────────────────────────
--- caps:  h=harvesters  b=barracks  t=turrets  r=relays
--- techTier: how deep into an archetype's tech plan this level reaches (0 = none)
--- competence: 0..1, gates scouting / flanking / micro polish
--- firstStrike: seconds of opening "peace" before the bot launches its FIRST
---   committed assault. During this window it only ECONOMIES, SCOUTS and lurks at
---   the edge of the player's vision — it does not march the main army in. Lower
---   difficulties stalk longer; higher ones strike sooner (but never instantly).
+-- ── Difficulty levels: intelligence knobs ONLY (no rule changes) ──────────────
+-- strat/react: seconds between macro / micro thinking ticks
+-- mem:         seconds intel about unseen enemies is trusted before it goes stale
+-- micro:       0..1 decision quality — value-read accuracy, flanks, standoffs
+-- spend:       0..1 chance per opportunity the bot remembers to spend surplus
+-- ambition:    multiplier on the style's structure targets (a cautious beginner
+--              simply builds less; a strong player builds the full base)
+-- empower:     how deep it will Empower bonfires (bank pays every level)
+-- techDepth:   how far down its research priority list it bothers to go
+-- firstStrike: opening peace window before the first committed assault
 type Level = {
-	maxUnits: number,
-	hcap: number, bcap: number, tcap: number, rcap: number,
-	reserve: number,
-	strat: number, react: number,
-	vision: number, mem: number,
-	minAtk: number,
-	techTier: number,
-	competence: number,
-	firstStrike: number,
+	strat: number, react: number, mem: number,
+	micro: number, spend: number, scouts: number, harass: boolean,
+	minAtk: number, ambition: number, empower: number, techDepth: number,
+	firstStrike: number, monument: boolean,
 }
 
--- Caps tuned so even mid difficulties build a real, defended, spread-out base
--- (more turrets + relays so a cleared army doesn't leave the base wide open).
 local LEVELS: { Level } = {
-	{ maxUnits = 8,   hcap = 2, bcap = 1, tcap = 2, rcap = 1, reserve = 30, strat = 9.5, react = 2.2, vision = 46, mem = 12,  minAtk = 4, techTier = 0, competence = 0.40, firstStrike = 210 },
-	{ maxUnits = 15,  hcap = 3, bcap = 2, tcap = 3, rcap = 1, reserve = 40, strat = 8.0, react = 1.8, vision = 55, mem = 25,  minAtk = 4, techTier = 1, competence = 0.55, firstStrike = 175 },
-	{ maxUnits = 24,  hcap = 4, bcap = 3, tcap = 5, rcap = 2, reserve = 50, strat = 6.5, react = 1.4, vision = 63, mem = 45,  minAtk = 5, techTier = 2, competence = 0.70, firstStrike = 145 },
-	{ maxUnits = 36,  hcap = 6, bcap = 3, tcap = 6, rcap = 3, reserve = 65, strat = 5.0, react = 1.1, vision = 70, mem = 75,  minAtk = 5, techTier = 3, competence = 0.85, firstStrike = 115 },
-	{ maxUnits = 999, hcap = 7, bcap = 4, tcap = 8, rcap = 3, reserve = 75, strat = 4.0, react = 0.8, vision = 78, mem = 999, minAtk = 6, techTier = 4, competence = 1.00, firstStrike = 90 },
+	{ strat = 10.0, react = 2.4, mem = 20,  micro = 0.35, spend = 0.35, scouts = 1, harass = false, minAtk = 4, ambition = 0.70, empower = 1,  techDepth = 2, firstStrike = 210, monument = false },
+	{ strat = 8.0,  react = 2.0, mem = 40,  micro = 0.50, spend = 0.55, scouts = 1, harass = false, minAtk = 5, ambition = 0.85, empower = 3,  techDepth = 3, firstStrike = 175, monument = false },
+	{ strat = 6.5,  react = 1.5, mem = 75,  micro = 0.70, spend = 0.75, scouts = 1, harass = true,  minAtk = 5, ambition = 1.00, empower = 6,  techDepth = 5, firstStrike = 145, monument = false },
+	{ strat = 5.0,  react = 1.1, mem = 130, micro = 0.85, spend = 0.90, scouts = 2, harass = true,  minAtk = 6, ambition = 1.15, empower = 10, techDepth = 7, firstStrike = 115, monument = true  },
+	{ strat = 4.0,  react = 0.8, mem = 240, micro = 1.00, spend = 1.00, scouts = 2, harass = true,  minAtk = 6, ambition = 1.30, empower = 20, techDepth = 9, firstStrike = 90,  monument = true  },
 }
 
--- ── Strategic archetypes ───────────────────────────────────────────────────────
--- desired: target counts the archetype wants (clamped by level caps each tick)
--- comp:    per-phase base unit weights (counters layer on top)
--- techPlan: ordered tech grants (level techTier limits depth)
--- turret:  preferred turret upgrade
--- engageRatio: commit when myValue >= enemyLocalValue * engageRatio
--- garrison: fraction of army held at home
-type Archetype = {
+local RETREAT_RATIO = 0.45  -- pull back when myValue < enemyLocalValue * this
+
+-- ── Play styles (rolled per game; all honest, just different plans) ───────────
+-- targets:  structure counts the style works toward (scaled by phase + ambition)
+-- comp:     per-phase bonfire summon weights (counters layer on top)
+-- techOrder: research priority (requestUpgrade no-ops until conditions are met)
+type Style = {
 	label: string,
-	desired: { harvesters: number, barracks: number, turrets: number, relays: number, deployers: number },
+	targets: { foundries: number, bonfires: number, turrets: number, relays: number, posts: number },
 	comp: { [string]: { [string]: number } },
-	techPlan: { string },
+	techOrder: { string },
 	turret: string,
 	engageRatio: number,
+	garrison: number,
+	stageMin: number, stageMax: number,
 	harass: boolean,
 	waveMode: boolean,
 	turtle: boolean,
-	noCounter: boolean,
-	garrison: number,
 	reserveMult: number,
-	stageMin: number, stageMax: number,
+	commitRatio: number,
+	atkCooldownMin: number, atkCooldownMax: number,
 }
 
-local ARCHETYPES: { [string]: Archetype } = {
-	Aggressor = {
-		label = "Aggressor",
-		desired = { harvesters = 3, barracks = 2, turrets = 3, relays = 1, deployers = 0 },
+local STYLES: { [string]: Style } = {
+	Assault = {
+		label = "Assault",
+		targets = { foundries = 2, bonfires = 3, turrets = 2, relays = 1, posts = 1 },
 		comp = {
 			opening = { Survivor = 4 },
-			expand  = { Survivor = 4, Elite = 2 },
-			mid     = { Survivor = 3, Elite = 3, Foamer = 1 },
-			late    = { Survivor = 2, Elite = 4, Foamer = 1, Tank = 1 },
+			expand  = { Survivor = 4, Tank = 1 },
+			mid     = { Survivor = 3, Elite = 2, Tank = 1, Foamer = 1 },
+			late    = { Survivor = 2, Elite = 3, Tank = 2, Foamer = 1, Medic = 1 },
 		},
-		techPlan = { "EliteUnits", "CombatStims", "HardenedArmor", "Rollers" },
+		techOrder = { "EliteUnits", "ConcussionShells", "MedicUnit", "TurretUpgrades", "Relay", "RocketBarrage", "BetterMines" },
 		turret = "Flamethrower",
-		engageRatio = 0.85, harass = true, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.22, reserveMult = 0.6, stageMin = 3, stageMax = 8,
+		engageRatio = 0.95, garrison = 0.20, stageMin = 3, stageMax = 8,
+		harass = true, waveMode = false, turtle = false,
+		reserveMult = 0.7, commitRatio = 1.0, atkCooldownMin = 0, atkCooldownMax = 0,
 	},
-	Mechanized = {
-		label = "Mechanized",
-		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 1 },
+	Siege = {
+		label = "Siege",
+		targets = { foundries = 3, bonfires = 3, turrets = 3, relays = 2, posts = 1 },
 		comp = {
 			opening = { Survivor = 3 },
-			expand  = { Survivor = 2, Tank = 3 },
-			mid     = { Tank = 4, Howitzer = 1, Elite = 1 },
-			late    = { Tank = 4, Howitzer = 2, Elite = 2, Medic = 1 },
+			expand  = { Survivor = 2, Tank = 2 },
+			mid     = { Tank = 3, Howitzer = 2, Survivor = 1, Medic = 1 },
+			late    = { Tank = 3, Howitzer = 3, Elite = 1, Medic = 1 },
 		},
-		techPlan = { "ConcussionShells", "EliteUnits", "RocketBarrage", "MedicUnit" },
+		techOrder = { "ConcussionShells", "EliteUnits", "TurretUpgrades", "MedicUnit", "Relay", "RocketBarrage", "BetterMines" },
 		turret = "Artillery",
-		engageRatio = 1.20, harass = false, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.30, reserveMult = 1.2, stageMin = 8, stageMax = 18,
+		engageRatio = 1.15, garrison = 0.30, stageMin = 8, stageMax = 16,
+		harass = false, waveMode = false, turtle = false,
+		reserveMult = 1.1, commitRatio = 1.0, atkCooldownMin = 0, atkCooldownMax = 0,
 	},
-	Economist = {
-		label = "Economist",
-		desired = { harvesters = 6, barracks = 3, turrets = 4, relays = 3, deployers = 1 },
-		comp = {
-			opening = { Survivor = 3 },
-			expand  = { Survivor = 3, Tank = 1 },
-			mid     = { Survivor = 2, Tank = 2, Elite = 2, Medic = 1 },
-			late    = { Tank = 3, Elite = 3, Howitzer = 1, Medic = 2, Sniper = 1 },
-		},
-		techPlan = { "EliteUnits", "MedicUnit", "ConcussionShells", "TurretUpgrades" },
-		turret = "RocketLauncher",
-		engageRatio = 1.05, harass = true, waveMode = false, turtle = false, noCounter = false,
-		garrison = 0.30, reserveMult = 1.0, stageMin = 6, stageMax = 14,
-	},
-	Defender = {
-		label = "Defender",
-		desired = { harvesters = 5, barracks = 3, turrets = 8, relays = 3, deployers = 1 },
+	Fortress = {
+		label = "Fortress",
+		targets = { foundries = 3, bonfires = 3, turrets = 6, relays = 2, posts = 1 },
 		comp = {
 			opening = { Survivor = 3 },
 			expand  = { Survivor = 3, Foamer = 1 },
-			mid     = { Survivor = 2, Foamer = 2, Howitzer = 1, Tank = 1, Sniper = 1 },
-			late    = { Howitzer = 3, Foamer = 2, Tank = 2, Elite = 2, Medic = 1, Sniper = 2 },
+			mid     = { Survivor = 2, Foamer = 2, Howitzer = 1, Tank = 1 },
+			late    = { Howitzer = 2, Foamer = 2, Tank = 2, Elite = 2, Medic = 1 },
 		},
-		techPlan = { "TurretUpgrades", "EliteUnits", "ConcussionShells", "MedicUnit" },
+		techOrder = { "TurretUpgrades", "ConcussionShells", "EliteUnits", "MedicUnit", "Relay", "Trapper", "BetterMines" },
 		turret = "Artillery",
-		engageRatio = 1.40, harass = false, waveMode = false, turtle = true, noCounter = false,
-		garrison = 0.45, reserveMult = 1.3, stageMin = 10, stageMax = 20,
+		engageRatio = 1.35, garrison = 0.45, stageMin = 10, stageMax = 18,
+		harass = false, waveMode = false, turtle = true,
+		reserveMult = 1.3, commitRatio = 1.0, atkCooldownMin = 0, atkCooldownMax = 0,
 	},
 	Waves = {
 		label = "Waves",
-		desired = { harvesters = 4, barracks = 3, turrets = 4, relays = 2, deployers = 0 },
+		targets = { foundries = 3, bonfires = 3, turrets = 3, relays = 1, posts = 1 },
 		comp = {
 			opening = { Survivor = 4 },
 			expand  = { Survivor = 3, Tank = 1 },
 			mid     = { Survivor = 2, Tank = 3, Elite = 1 },
 			late    = { Tank = 3, Howitzer = 2, Elite = 2, Foamer = 1 },
 		},
-		techPlan = { "EliteUnits", "ConcussionShells", "TurretUpgrades", "RocketBarrage" },
+		techOrder = { "EliteUnits", "ConcussionShells", "TurretUpgrades", "Relay", "RocketBarrage", "MedicUnit", "BetterMines" },
 		turret = "RocketLauncher",
-		engageRatio = 0.90, harass = false, waveMode = true, turtle = false, noCounter = false,
-		garrison = 0.32, reserveMult = 1.0, stageMin = 4, stageMax = 10,
+		engageRatio = 0.95, garrison = 0.30, stageMin = 4, stageMax = 10,
+		harass = false, waveMode = true, turtle = false,
+		reserveMult = 1.0, commitRatio = 1.0, atkCooldownMin = 0, atkCooldownMax = 0,
 	},
-	-- Teaching opponent: simple comp, no counters, no deep tech.
+	-- Teaching opponent: tiny base, partial-commitment pokes with long cool-offs.
 	Trainer = {
 		label = "Trainer",
-		desired = { harvesters = 2, barracks = 2, turrets = 1, relays = 0, deployers = 0 },
+		targets = { foundries = 2, bonfires = 1, turrets = 1, relays = 0, posts = 0 },
 		comp = {
 			opening = { Survivor = 3 },
 			expand  = { Survivor = 3, Tank = 1 },
-			mid     = { Survivor = 3, Tank = 1, Foamer = 1 },
+			mid     = { Survivor = 3, Tank = 1 },
 			late    = { Survivor = 3, Tank = 1, Foamer = 1 },
 		},
-		techPlan = {},
+		techOrder = {},
 		turret = "Flamethrower",
-		engageRatio = 1.5, harass = false, waveMode = false, turtle = true, noCounter = true,
-		garrison = 0.35, reserveMult = 1.0, stageMin = 6, stageMax = 10,
+		engageRatio = 1.6, garrison = 0.35, stageMin = 6, stageMax = 10,
+		harass = false, waveMode = false, turtle = true,
+		reserveMult = 1.0, commitRatio = 0.55, atkCooldownMin = 45, atkCooldownMax = 90,
 	},
-	-- Swarm gamemode: combat knobs only (production handled by btProduceSwarm).
+	-- Swarm gamemode: combat knobs only (production runs through the swarm brain).
 	Swarm = {
 		label = "Swarm",
-		desired = { harvesters = 4, barracks = 0, turrets = 0, relays = 0, deployers = 0 },
+		targets = { foundries = 4, bonfires = 0, turrets = 0, relays = 0, posts = 0 },
 		comp = { opening = { Survivor = 1 }, expand = { Survivor = 1 }, mid = { Survivor = 1 }, late = { Survivor = 1 } },
-		techPlan = {},
+		techOrder = {},
 		turret = "Flamethrower",
-		engageRatio = 0.8, harass = true, waveMode = false, turtle = false, noCounter = true,
-		garrison = 0.12, reserveMult = 1.0, stageMin = 3, stageMax = 7,
+		engageRatio = 0.8, garrison = 0.12, stageMin = 3, stageMax = 7,
+		harass = true, waveMode = false, turtle = false,
+		reserveMult = 1.0, commitRatio = 1.0, atkCooldownMin = 0, atkCooldownMax = 0,
 	},
 }
 
-local BALANCED_ROLL = { "Aggressor", "Mechanized", "Economist" }
-local NIGHTMARE_ROLL = { "Aggressor", "Mechanized", "Economist", "Defender", "Waves" }
+local BALANCED_ROLL  = { "Assault", "Siege", "Fortress" }
+local NIGHTMARE_ROLL = { "Assault", "Siege", "Fortress", "Waves" }
 
 local VALID_PERSONALITIES = { balanced = true, territorial = true, waves = true, nightmare = true, trainer = true }
-
-local RETREAT_RATIO = 0.45  -- retreat when myValue < enemyLocalValue * this
 
 -- ── Bot spawn configuration ───────────────────────────────────────────────────
 
@@ -214,17 +197,6 @@ local AI_COLORS = {
 	BrickColor.new("Bright orange"),
 }
 
--- Diagonal mirrors (M(x,z) = (z,x)) of the human PLAYER_BASES in init.server, placed in
--- the NW half. assignBase() below picks the AI spot farthest from existing CCs, which for
--- a lone human at the SE corner is index 1 (the NW corner) — its exact diagonal twin — so
--- the main matchup lands on a mirror pair and both sides get an identical map.
-local AI_BASES = {
-	Vector3.new(-250, 0,  250),
-	Vector3.new( -70, 0,  290),
-	Vector3.new(-290, 0,   70),
-	Vector3.new(-170, 0,  170),
-}
-
 -- ── Module state ──────────────────────────────────────────────────────────────
 
 local aiCounter    = 0
@@ -232,13 +204,14 @@ local unitManager:     any
 local buildingManager: any
 local resourceManager: any
 local researchManager: any
+local mineralManager:  any
 
-local botByUserId:  { [number]: any }     = {}
-local takenBaseIdx: { [number]: boolean } = {}
+local botByUserId: { [number]: any } = {}
 
 local swarmMode = false
+local laneMode  = false
 
--- ── Generic helpers ─────────────────────────────────────────────────────────
+-- ── Generic helpers ───────────────────────────────────────────────────────────
 
 local function snapGrid(v: Vector3): Vector3
 	local g = Config.BUILDING_GRID
@@ -265,18 +238,32 @@ end
 local function unitValue(unitType: string): number
 	local d = Config.UNIT_TYPES[unitType]
 	if d and d.cost and d.cost > 0 then return d.cost end
-	return 20  -- free units (CreepySoldier) still count for something
+	return 20
 end
 
-local function canAfford(player: any, cost: number, reserve: number): boolean
-	return resourceManager.get(player) >= cost + reserve
+local function bank(ai: any): number
+	return resourceManager.get(ai.player)
 end
 
 local function hasTech(ai: any, techName: string): boolean
 	return researchManager ~= nil and researchManager.hasResearch(ai.player, techName)
 end
 
--- ── Building scans (live; never stale) ─────────────────────────────────────────
+-- A weak player misjudges army strength; a strong one reads it accurately.
+-- Noise on VALUE ESTIMATES is how low difficulties make bad calls without
+-- ever breaking the rules.
+local function estimate(ai: any, value: number): number
+	local wobble = (1 - ai.micro) * 0.5
+	return value * (1 + (math.random() - 0.5) * 2 * wobble)
+end
+
+-- Chance-gated spending discipline: low levels simply forget to spend surplus
+-- some of the time, the way a distracted human floats resources.
+local function remembers(ai: any): boolean
+	return math.random() < ai.spend
+end
+
+-- ── Live building scans (own buildings are always known — they're ours) ───────
 
 local function getOwnedBuildingIds(ownerStr: string, buildType: string): { string }
 	local ids: { string } = {}
@@ -296,274 +283,651 @@ local function countOwnedBuildings(ownerStr: string, buildType: string): number
 	return #getOwnedBuildingIds(ownerStr, buildType)
 end
 
-local function countAllOwnedBuildings(ownerStr: string): number
-	local n = 0
+local function getOwnedPositions(ownerStr: string, buildType: string): { Vector3 }
+	local out: { Vector3 } = {}
 	local folder = workspace:FindFirstChild("Buildings")
-	if not folder then return n end
-	for _, model in folder:GetChildren() do
-		local ov = model:FindFirstChild("OwnerId")
-		if ov and ov.Value == ownerStr then n += 1 end
-	end
-	return n
-end
-
--- ── Placement helpers ─────────────────────────────────────────────────────────
-
-local function tryPlaceRandom(player: any, anchor: Vector3, buildType: string, minR: number, maxR: number): boolean
-	for _ = 1, 20 do
-		local angle = math.random() * math.pi * 2
-		local r     = minR + math.random() * (maxR - minR)
-		local pos   = snapGrid(anchor + Vector3.new(math.cos(angle) * r, 0, math.sin(angle) * r))
-		if buildingManager.placeForPlayer(player, pos, buildType) then return true end
-	end
-	return false
-end
-
-local function getRelayAnchors(ownerStr: string): { Vector3 }
-	local anchors: { Vector3 } = {}
-	local folder = workspace:FindFirstChild("Buildings")
-	if not folder then return anchors end
+	if not folder then return out end
 	for _, model in folder:GetChildren() do
 		local ov = model:FindFirstChild("OwnerId")
 		local tv = model:FindFirstChild("BuildingType")
-		if ov and ov.Value == ownerStr and tv and tv.Value == "Relay" then
+		if ov and ov.Value == ownerStr and tv and tv.Value == buildType then
 			local base = model:FindFirstChild("Base") :: BasePart?
-			if base then table.insert(anchors, Vector3.new(base.Position.X, 0, base.Position.Z)) end
+			if base then table.insert(out, Vector3.new(base.Position.X, 0, base.Position.Z)) end
 		end
 	end
-	return anchors
+	return out
 end
 
-local function tryPlaceAnywhere(player: any, ownerStr: string, base: Vector3, buildType: string, minR: number, maxR: number): boolean
-	if tryPlaceRandom(player, base, buildType, minR, maxR) then return true end
-	for _, anchor in getRelayAnchors(ownerStr) do
-		if tryPlaceRandom(player, anchor, buildType, 5, maxR) then return true end
-	end
-	return false
-end
+-- ── Perception: the same fog-of-war rules the player lives under ──────────────
+-- Eyes = own units (VISION_UNIT) + own buildings (per-type VISION_RADIUS), the
+-- exact radii FogManager reveals for players. Everything sensed is written into
+-- an intel memory with timestamps; entries older than the bot's memory horizon
+-- (or confirmed dead on revisit) are dropped. All decisions read intel only.
 
--- ── Trainer measurement helpers ────────────────────────────────────────────────
+type Eye = { x: number, z: number, r2: number }
 
-local function countHumanBuildings(btype: string): number
-	local n = 0
-	local folder = workspace:FindFirstChild("Buildings")
-	if not folder then return n end
-	for _, model in folder:GetChildren() do
-		local ov = model:FindFirstChild("OwnerId")
-		if not ov then continue end
-		local uid = tonumber(ov.Value) or 0
-		if uid <= 0 then continue end
-		if btype == "any" then
-			n += 1
-		else
-			local tv = model:FindFirstChild("BuildingType")
-			if tv and tv.Value == btype then n += 1 end
-		end
-	end
-	return n
-end
-
-local function countHumanArmy(): number
-	local n = 0
-	local folder = workspace:FindFirstChild("Units")
-	if not folder then return n end
-	for _, p in folder:GetChildren() do
-		if not p:IsA("BasePart") then continue end
-		local ov = p:FindFirstChild("OwnerId")
-		if not ov then continue end
-		local uid = tonumber(ov.Value) or 0
-		if uid > 0 then n += 1 end
-	end
-	return n
-end
-
--- ── Research grants ─────────────────────────────────────────────────────────
-
-local function grantTech(player: any, techName: string)
-	if not researchManager then return end
-	researchManager.startForPlayer(player, "", techName)
-end
-
--- Grant a tech, first granting any prerequisite it lists (e.g. RocketBarrage
--- needs ConcussionShells before its units actually fire rockets).
-local function grantTechDeep(ai: any, techName: string)
-	local u = (Config.UNLOCKS :: any)[techName]
-	if not u then return end
-	if u.requires and not hasTech(ai, u.requires) then
-		grantTech(ai.player, u.requires)
-	end
-	grantTech(ai.player, techName)
-end
-
--- ── Vision / threat scanning ────────────────────────────────────────────────
-
-local function gatherEyes(myStr: string): { Vector3 }
-	local eyes: { Vector3 } = {}
-	local unitsF     = workspace:FindFirstChild("Units")
-	local buildingsF = workspace:FindFirstChild("Buildings")
+local function gatherEyes(ai: any): { Eye }
+	local eyes: { Eye } = {}
+	local myStr = ai.ownerStr
+	local unitsF = workspace:FindFirstChild("Units")
 	if unitsF then
+		local r2 = Config.VISION_UNIT * Config.VISION_UNIT
 		for _, p in unitsF:GetChildren() do
+			if not p:IsA("BasePart") then continue end
 			local ov = p:FindFirstChild("OwnerId")
-			if ov and ov.Value == myStr and p:IsA("BasePart") then
-				table.insert(eyes, (p :: BasePart).Position)
+			if ov and ov.Value == myStr then
+				eyes[#eyes + 1] = { x = p.Position.X, z = p.Position.Z, r2 = r2 }
 			end
 		end
 	end
+	local buildingsF = workspace:FindFirstChild("Buildings")
 	if buildingsF then
 		for _, model in buildingsF:GetChildren() do
 			local ov = model:FindFirstChild("OwnerId")
-			if ov and ov.Value == myStr then
-				local base = model:FindFirstChild("Base") :: BasePart?
-				if base then table.insert(eyes, base.Position) end
-			end
+			if not ov or ov.Value ~= myStr then continue end
+			local base = model:FindFirstChild("Base") :: BasePart?
+			if not base then continue end
+			local tv = model:FindFirstChild("BuildingType")
+			local vr = (Config.VISION_RADIUS :: any)[tv and tv.Value or ""] or Config.VISION_DEFAULT
+			eyes[#eyes + 1] = { x = base.Position.X, z = base.Position.Z, r2 = vr * vr }
 		end
 	end
 	return eyes
 end
 
--- Sum of enemy combat value (units + defensive turrets) within radius of a point.
-local function enemyValueNear(ownerStr: string, pos: Vector3, radius: number): number
-	local r2    = radius * radius
-	local total = 0
-	local unitsF = workspace:FindFirstChild("Units")
+local function inSight(eyes: { Eye }, pos: Vector3): boolean
+	for _, e in eyes do
+		local dx = pos.X - e.x
+		local dz = pos.Z - e.z
+		if dx * dx + dz * dz <= e.r2 then return true end
+	end
+	return false
+end
+
+-- Threat weights for priority-target scoring.
+local THREAT_BUILDING = {
+	Monument = 500, CommandCenter = 100, LampreyNest = 70, Foundry = 60,
+	Deployer = 55, EngineeringPost = 40, CreepyBlob = 35, Turret = 30, Relay = 25,
+}
+local THREAT_UNIT = {
+	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30,
+	Needler = 26, Roller = 24, Survivor = 20, Foamer = 18, CreepySoldier = 15,
+	Hagfish = 14, Watcher = 20, Medic = 10, Leech = 8, Embryo = 12,
+}
+
+local function senseWorld(ai: any)
+	local now   = tick()
+	local myStr = ai.ownerStr
+	local eyes  = gatherEyes(ai)
+	ai.eyes = eyes
+
+	local unitsF     = workspace:FindFirstChild("Units")
+	local buildingsF = workspace:FindFirstChild("Buildings")
+
+	-- Record everything currently visible.
 	if unitsF then
 		for _, p in unitsF:GetChildren() do
 			if not p:IsA("BasePart") then continue end
 			local ov = p:FindFirstChild("OwnerId")
-			if not ov or ov.Value == ownerStr then continue end
-			local dx = (p :: BasePart).Position.X - pos.X
-			local dz = (p :: BasePart).Position.Z - pos.Z
-			if dx * dx + dz * dz <= r2 then
-				local ut = p:FindFirstChild("UnitType")
-				total += unitValue(ut and ut.Value or "Survivor")
-			end
+			if not ov or ov.Value == myStr then continue end
+			local pos = p.Position
+			if not inSight(eyes, pos) then continue end
+			local ut = p:FindFirstChild("UnitType")
+			ai.intelUnits[p.Name] = {
+				pos   = Vector3.new(pos.X, 0, pos.Z),
+				utype = ut and ut.Value or "Survivor",
+				seen  = now,
+			}
 		end
 	end
-	local bF = workspace:FindFirstChild("Buildings")
-	if bF then
-		for _, m in bF:GetChildren() do
-			local ov = m:FindFirstChild("OwnerId")
-			local tv = m:FindFirstChild("BuildingType")
-			if ov and ov.Value ~= ownerStr and tv and tv.Value == "Turret" then
-				local base = m:FindFirstChild("Base") :: BasePart?
-				if base then
-					local dx = base.Position.X - pos.X
-					local dz = base.Position.Z - pos.Z
-					if dx * dx + dz * dz <= r2 then total += 55 end
-				end
-			end
-		end
-	end
-	return total
-end
-
-type ThreatResult = {
-	priorityTarget:   Vector3?,
-	enemyTurretCount: number,
-	enemyUnitCount:   number,
-	enemyArmyValue:   number,
-	baseUnderAttack:  boolean,
-	enemyComp:        { [string]: number },
-	enemyHarvesters:  { Vector3 },
-}
-
-local THREAT_BUILDING = {
-	Monument = 200, CommandCenter = 100, LampreyNest = 70,
-	Turret = 30, CreepyBlob = 35, Deployer = 50, Relay = 15,
-}
-local THREAT_UNIT = {
-	Broodmother = 46, Howitzer = 38, Sniper = 36, Elite = 35, Lamprey = 32, Tank = 30, Needler = 26, Roller = 24, Survivor = 20,
-	Foamer = 18, CreepySoldier = 15, Hagfish = 14, Medic = 10, Harvester = 8,
-}
-
-local function scanThreats(ai: any): ThreatResult
-	local myStr = ai.ownerStr
-	local vR    = ai.visionRadius
-	local eyes  = gatherEyes(myStr)
-
-	local result: ThreatResult = {
-		priorityTarget   = nil,
-		enemyTurretCount = 0,
-		enemyUnitCount   = 0,
-		enemyArmyValue   = 0,
-		baseUnderAttack  = false,
-		enemyComp        = {},
-		enemyHarvesters  = {},
-	}
-	if #eyes == 0 then return result end
-
-	local function minDistToEyes(epos: Vector3): number
-		local minD2 = math.huge
-		for _, eye in eyes do
-			local dx = epos.X - eye.X
-			local dz = epos.Z - eye.Z
-			local d2 = dx * dx + dz * dz
-			if d2 < minD2 then minD2 = d2 end
-		end
-		return math.sqrt(minD2)
-	end
-
-	local bestScore  = -math.huge
-	local buildingsF = workspace:FindFirstChild("Buildings")
-	local unitsF     = workspace:FindFirstChild("Units")
-
 	if buildingsF then
 		for _, model in buildingsF:GetChildren() do
 			local ov = model:FindFirstChild("OwnerId")
 			if not ov or ov.Value == myStr then continue end
 			local base = model:FindFirstChild("Base") :: BasePart?
 			if not base then continue end
-			local dist = minDistToEyes(base.Position)
-			if dist > vR then continue end
+			if not inSight(eyes, base.Position) then continue end
+			local tv = model:FindFirstChild("BuildingType")
+			ai.intelBuildings[model.Name] = {
+				pos   = Vector3.new(base.Position.X, 0, base.Position.Z),
+				btype = tv and tv.Value or "Deployer",
+				seen  = now,
+			}
+		end
+	end
 
-			local tv    = model:FindFirstChild("BuildingType")
-			local btype = tv and tv.Value or "Barracks"
-			if btype == "Turret" then result.enemyTurretCount += 1 end
+	-- Forget: stale intel ages out; anything we can SEE is gone gets erased.
+	-- Units churn fast, so unit intel is trusted for a shorter slice of memory.
+	local unitMem = math.min(ai.mem, 25)
+	for name, rec in ai.intelUnits do
+		if now - rec.seen > unitMem then
+			ai.intelUnits[name] = nil
+		elseif now - rec.seen > 0.5 and inSight(eyes, rec.pos)
+			and not (unitsF and unitsF:FindFirstChild(name)) then
+			ai.intelUnits[name] = nil
+		end
+	end
+	for name, rec in ai.intelBuildings do
+		if now - rec.seen > ai.mem then
+			ai.intelBuildings[name] = nil
+		elseif inSight(eyes, rec.pos)
+			and not (buildingsF and buildingsF:FindFirstChild(name)) then
+			ai.intelBuildings[name] = nil
+		end
+	end
 
-			local baseScore  = (THREAT_BUILDING :: any)[btype] or 25
-			local distFactor = 1 - math.clamp(dist / vR, 0, 0.8)
-			local score      = baseScore * (1 + distFactor)
-			if score > bestScore then
-				bestScore = score
-				result.priorityTarget = Vector3.new(base.Position.X, 0, base.Position.Z)
+	-- Aggregates the planners read.
+	local comp: { [string]: number } = {}
+	local armyValue    = 0
+	local turretCount  = 0
+	local unitCount    = 0
+	local underAttack  = false
+	local bestScore    = -math.huge
+	local bestTarget: Vector3? = nil
+
+	for _, rec in ai.intelUnits do
+		unitCount += 1
+		comp[rec.utype] = (comp[rec.utype] or 0) + 1
+		armyValue += unitValue(rec.utype)
+		local dToBase = (rec.pos - Vector3.new(ai.base.X, 0, ai.base.Z)).Magnitude
+		if dToBase < 60 and now - rec.seen < 5 then underAttack = true end
+		local fresh = math.clamp(1 - (now - rec.seen) / math.max(ai.mem, 1), 0, 1)
+		local score = ((THREAT_UNIT :: any)[rec.utype] or 20) * (0.5 + fresh)
+		if score > bestScore then bestScore = score; bestTarget = rec.pos end
+	end
+	for _, rec in ai.intelBuildings do
+		if rec.btype == "Turret" then turretCount += 1 end
+		local fresh = math.clamp(1 - (now - rec.seen) / math.max(ai.mem, 1), 0, 1)
+		local score = ((THREAT_BUILDING :: any)[rec.btype] or 25) * (0.5 + fresh)
+		if score > bestScore then bestScore = score; bestTarget = rec.pos end
+	end
+
+	ai.enemyComp        = comp
+	ai.enemyArmyValue   = armyValue
+	ai.enemyUnitCount   = unitCount
+	ai.enemyTurretCount = turretCount
+	ai.baseUnderAttack  = underAttack
+
+	if bestTarget then
+		ai.priorityTarget    = bestTarget
+		ai.lastKnownEnemyPos = bestTarget
+	else
+		ai.priorityTarget = ai.lastKnownEnemyPos
+	end
+end
+
+-- Known enemy value (units + turrets) within a radius of a point, from intel.
+local function intelValueNear(ai: any, pos: Vector3, radius: number): number
+	local r2, total = radius * radius, 0
+	for _, rec in ai.intelUnits do
+		local dx, dz = rec.pos.X - pos.X, rec.pos.Z - pos.Z
+		if dx * dx + dz * dz <= r2 then total += unitValue(rec.utype) end
+	end
+	for _, rec in ai.intelBuildings do
+		if rec.btype ~= "Turret" then continue end
+		local dx, dz = rec.pos.X - pos.X, rec.pos.Z - pos.Z
+		if dx * dx + dz * dz <= r2 then total += 55 end
+	end
+	return total
+end
+
+-- Random known enemy building of a type (from intel — never a map peek).
+local function knownEnemyBuilding(ai: any, btype: string): Vector3?
+	local found: { Vector3 } = {}
+	for _, rec in ai.intelBuildings do
+		if rec.btype == btype then table.insert(found, rec.pos) end
+	end
+	if #found == 0 then return nil end
+	return found[math.random(1, #found)]
+end
+
+-- Weighted attack-target pick over everything the bot knows about. An enemy
+-- Monument is an emergency (it wins the game if left standing) and dominates.
+local function pickAttackTarget(ai: any): Vector3?
+	local monument = knownEnemyBuilding(ai, "Monument")
+	if monument then return monument end
+	if ai.priorityTarget and math.random() < 0.4 then return ai.priorityTarget end
+	local candidates: { { pos: Vector3, w: number } } = {}
+	for _, rec in ai.intelBuildings do
+		local w = (THREAT_BUILDING :: any)[rec.btype] or 25
+		table.insert(candidates, { pos = rec.pos, w = w })
+	end
+	if #candidates == 0 then return ai.priorityTarget end
+	local total = 0
+	for _, c in candidates do total += c.w end
+	local r, cum = math.random() * total, 0
+	for _, c in candidates do
+		cum += c.w
+		if r <= cum then return c.pos end
+	end
+	return candidates[#candidates].pos
+end
+
+-- ── Placement: aim, then let placeForPlayer be the judge ──────────────────────
+-- Candidates ring an anchor; an optional bias direction sorts them so turrets
+-- face the threat and relays reach toward expansion targets. Every candidate is
+-- validated (zone / cost / occupancy / prereqs) by BuildingManager itself.
+
+local function tryPlaceRing(ai: any, anchor: Vector3, buildType: string, minR: number, maxR: number, biasDir: Vector3?): boolean
+	local candidates: { { pos: Vector3, score: number } } = {}
+	for _ = 1, 24 do
+		local angle = math.random() * math.pi * 2
+		local r     = minR + math.random() * (maxR - minR)
+		local pos   = snapGrid(anchor + Vector3.new(math.cos(angle) * r, 0, math.sin(angle) * r))
+		local score = math.random()
+		if biasDir then
+			local d = Vector3.new(math.cos(angle), 0, math.sin(angle))
+			score = d:Dot(biasDir) + math.random() * 0.35
+		end
+		table.insert(candidates, { pos = pos, score = score })
+	end
+	table.sort(candidates, function(a, b) return a.score > b.score end)
+	for _, c in candidates do
+		if buildingManager.placeForPlayer(ai.player, c.pos, buildType) then return true end
+	end
+	return false
+end
+
+-- Anchors the bot can legally build around: its CC and its relays.
+local function zoneAnchors(ai: any): { Vector3 }
+	local anchors = { Vector3.new(ai.base.X, 0, ai.base.Z) }
+	for _, p in getOwnedPositions(ai.ownerStr, "Relay") do table.insert(anchors, p) end
+	return anchors
+end
+
+local function tryPlaceAnywhere(ai: any, buildType: string, minR: number, maxR: number, biasDir: Vector3?): boolean
+	for i, anchor in zoneAnchors(ai) do
+		local lo = i == 1 and minR or 5
+		if tryPlaceRing(ai, anchor, buildType, lo, maxR, biasDir) then return true end
+	end
+	return false
+end
+
+-- Direction the enemy is expected from: latest intel, else the map centre.
+local function threatDir(ai: any): Vector3
+	local from = ai.lastKnownEnemyPos
+	local dir  = from and (from - ai.base) or -ai.base
+	dir = Vector3.new(dir.X, 0, dir.Z)
+	return dir.Magnitude > 1 and dir.Unit or Vector3.new(0, 0, 1)
+end
+
+-- Foundries chase deposits: find the unclaimed deposit reachable from our build
+-- zone with the most neighbours (deposits are world-visible to every commander,
+-- same as the player's minimap), and place the Foundry beside it.
+local function tryPlaceFoundry(ai: any): boolean
+	if mineralManager and mineralManager.getUnclaimedPositions then
+		local deposits = mineralManager.getUnclaimedPositions()
+		local anchors  = zoneAnchors(ai)
+		local best: Vector3? = nil
+		local bestScore = -1
+		for _, dep in deposits do
+			local reachable = false
+			for i, anchor in anchors do
+				local reach = (i == 1) and Config.BUILD_RADIUS or Config.RELAY_RADIUS
+				if (dep - anchor).Magnitude <= reach then reachable = true; break end
+			end
+			if not reachable then continue end
+			local neighbours = 0
+			for _, other in deposits do
+				if (other - dep).Magnitude <= 45 then neighbours += 1 end
+			end
+			if neighbours > bestScore then bestScore = neighbours; best = dep end
+		end
+		if best then
+			if tryPlaceRing(ai, best, "Foundry", 12, 30) then return true end
+		end
+	end
+	return tryPlaceAnywhere(ai, "Foundry", 22, 48)
+end
+
+-- Relays reach outward: toward the richest deposit cluster we can't touch yet,
+-- else toward the enemy. Placed at the edge of the current zone in that direction.
+local function tryPlaceRelay(ai: any): boolean
+	local dir = threatDir(ai)
+	if mineralManager and mineralManager.getUnclaimedPositions then
+		local anchors = zoneAnchors(ai)
+		local bestDep: Vector3? = nil
+		local bestDist = math.huge
+		for _, dep in mineralManager.getUnclaimedPositions() do
+			local reachable = false
+			local nearest   = math.huge
+			for i, anchor in anchors do
+				local reach = (i == 1) and Config.BUILD_RADIUS or Config.RELAY_RADIUS
+				local d = (dep - anchor).Magnitude
+				if d <= reach then reachable = true; break end
+				nearest = math.min(nearest, d)
+			end
+			if not reachable and nearest < bestDist then bestDist = nearest; bestDep = dep end
+		end
+		if bestDep then
+			local d = bestDep - ai.base
+			d = Vector3.new(d.X, 0, d.Z)
+			if d.Magnitude > 1 then dir = d.Unit end
+		end
+	end
+	local edge = Vector3.new(ai.base.X, 0, ai.base.Z) + dir * (Config.BUILD_RADIUS - 12)
+	if tryPlaceRing(ai, edge, "Relay", 0, 18, dir) then return true end
+	return tryPlaceAnywhere(ai, "Relay", 45, Config.BUILD_RADIUS - 10, dir)
+end
+
+-- ── Phase model ───────────────────────────────────────────────────────────────
+
+local function getPhase(ai: any): string
+	local t    = tick() - ai.startTime
+	local army = unitManager.getUnitCount(ai.player)
+	local p
+	if t < 35 then p = "opening"
+	elseif t < 110 then p = "expand"
+	elseif t < 260 then p = "mid"
+	else p = "late" end
+	if army >= 18 and p ~= "late" then p = "late"
+	elseif army >= 10 and (p == "opening" or p == "expand") then p = "mid" end
+	return p
+end
+
+-- ── Macro: structures ─────────────────────────────────────────────────────────
+-- Desired counts come from style targets × phase ramp × the level's ambition.
+-- The bot then buys ONE thing per macro tick with at most one structure under
+-- construction — the human pacing this game's design asks for (Nightmare, a
+-- flawless macro player, is exempt from the one-at-a-time throttle but still
+-- pays for and constructs everything normally).
+
+local function planStructures(ai: any)
+	local style = ai.style
+	local phase = ai.phase
+
+	local phaseMult = (phase == "opening" and 0.5)
+		or (phase == "expand" and 0.75)
+		or (phase == "mid" and 1.0)
+		or 1.25
+	local amb = ai.ambition
+
+	local function want(target: number): number
+		return math.max(0, math.ceil(target * phaseMult * amb))
+	end
+
+	local liveFoundry = countOwnedBuildings(ai.ownerStr, "Foundry")
+	local liveBonfire = countOwnedBuildings(ai.ownerStr, "Deployer")
+	local liveTurret  = countOwnedBuildings(ai.ownerStr, "Turret")
+	local liveRelay   = countOwnedBuildings(ai.ownerStr, "Relay")
+	local livePost    = countOwnedBuildings(ai.ownerStr, "EngineeringPost")
+
+	local wantFoundry = math.max(1, want(style.targets.foundries))
+	local wantBonfire = (phase == "opening") and math.min(1, style.targets.bonfires)
+		or want(style.targets.bonfires)
+	local wantTurret  = want(style.targets.turrets)
+	local wantRelay   = (phase ~= "opening") and want(style.targets.relays) or 0
+	local wantPost    = (phase ~= "opening") and math.min(1, style.targets.posts) or 0
+
+	-- Defensive floor: the base keeps a turret line that grows through the game.
+	local turretFloor = (phase == "opening" and 1) or (phase == "expand" and 2)
+		or (phase == "mid" and 3) or 4
+	wantTurret = math.max(wantTurret, math.ceil(turretFloor * math.min(amb, 1)))
+	if style.turtle and phase ~= "opening" then wantTurret = math.max(wantTurret, style.targets.turrets) end
+	if ai.baseUnderAttack then wantTurret += 1 end
+
+	-- Priority shopping list, most urgent first. Costs are what placeForPlayer
+	-- will charge; the reserve keeps a reaction cushion in the bank.
+	local reserve = ai.reserve
+	local defDir  = threatDir(ai)
+	local items: { { prio: number, cost: number, fn: () -> boolean } } = {}
+	local function add(prio: number, cost: number, fn: () -> boolean)
+		table.insert(items, { prio = prio, cost = cost, fn = fn })
+	end
+
+	if liveFoundry < 1 then
+		add(100, Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveFoundry), function()
+			return tryPlaceFoundry(ai)
+		end)
+	end
+	if liveFoundry >= 1 and liveBonfire < 1 then
+		add(95, Config.DEPLOYER_COST, function()
+			return tryPlaceAnywhere(ai, "Deployer", 15, 35)
+		end)
+	end
+	if ai.baseUnderAttack and liveBonfire >= 1 then
+		add(92, Config.TURRET_COST, function()
+			return tryPlaceAnywhere(ai, "Turret", 18, 42, defDir)
+		end)
+	end
+	if liveFoundry >= 1 and liveFoundry < wantFoundry then
+		add(85, Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveFoundry), function()
+			return tryPlaceFoundry(ai)
+		end)
+	end
+	if liveBonfire >= 1 and liveBonfire < wantBonfire then
+		add(80, Config.DEPLOYER_COST, function()
+			return tryPlaceAnywhere(ai, "Deployer", 15, 35)
+		end)
+	end
+	if liveBonfire >= 1 and liveTurret < wantTurret then
+		add(style.turtle and 84 or 72, Config.TURRET_COST, function()
+			return tryPlaceAnywhere(ai, "Turret", 20, 45, defDir)
+		end)
+	end
+	if liveBonfire >= 1 and livePost < wantPost then
+		add(68, Config.ENGINEERING_POST_COST, function()
+			return tryPlaceAnywhere(ai, "EngineeringPost", 18, 45)
+		end)
+	end
+	if liveRelay < wantRelay and hasTech(ai, "Relay") then
+		add(60, Config.RELAY_COST, function()
+			return tryPlaceRelay(ai)
+		end)
+	end
+
+	table.sort(items, function(a, b) return a.prio > b.prio end)
+
+	if not ai.pacingExempt then
+		if buildingManager.countConstructing and buildingManager.countConstructing(ai.player) > 0 then
+			return
+		end
+		for _, it in items do
+			if bank(ai) >= it.cost + reserve then
+				if it.fn() then break end
+			end
+		end
+	else
+		for _, it in items do
+			if bank(ai) >= it.cost + reserve then it.fn() end
+		end
+	end
+end
+
+-- ── Macro: research (the player path — conditions, timers, concurrency) ───────
+
+local function planResearch(ai: any)
+	if not researchManager then return end
+	local depth = ai.techDepth
+	if depth <= 0 then return end
+
+	-- Composition demands (counters wanting a gated unit) jump the queue.
+	if ai.compDemand then
+		for tech in ai.compDemand do
+			if not hasTech(ai, tech) then
+				researchManager.requestUpgrade(ai.player, tech)
+			end
+		end
+	end
+	local asked = 0
+	for i, tech in ipairs(ai.style.techOrder) do
+		if i > depth then break end
+		if not hasTech(ai, tech) then
+			researchManager.requestUpgrade(ai.player, tech)
+			asked += 1
+			if asked >= 3 then break end
+		end
+	end
+end
+
+-- ── Macro: Engineering Post (paid Light researches, collected when done) ──────
+
+local function planEngineering(ai: any)
+	if not buildingManager.startEngineeringForPlayer then return end
+	for _, id in getOwnedBuildingIds(ai.ownerStr, "EngineeringPost") do
+		local state = buildingManager.getEngineeringState(ai.player, id)
+		if state == "ready" and remembers(ai) then
+			buildingManager.collectEngineeringForPlayer(ai.player, id)
+		elseif state == "idle"
+			and bank(ai) >= Config.ENGINEERING_RESEARCH_COST + math.floor(ai.reserve * 1.5)
+			and remembers(ai) then
+			buildingManager.startEngineeringForPlayer(ai.player, id)
+		end
+	end
+end
+
+-- ── Macro: composition & bonfires ─────────────────────────────────────────────
+
+local function computeComposition(ai: any)
+	local style = ai.style
+	local base  = style.comp[ai.phase] or style.comp.mid
+	local w: { [string]: number } = {}
+	for k, v in base do w[k] = v end
+
+	-- Waves style escalates its tier with each wave launched.
+	if style.waveMode then
+		local tier = math.min(ai.wavesSent, 4)
+		w["Tank"] = (w["Tank"] or 0) + tier
+		if tier >= 2 then w["Elite"]    = (w["Elite"] or 0) + 1 end
+		if tier >= 3 then w["Howitzer"] = (w["Howitzer"] or 0) + 1 end
+	end
+
+	-- Counters, from OBSERVED intel only.
+	local comp = ai.enemyComp or {}
+	local cheapMass = (comp.Survivor or 0) + (comp.CreepySoldier or 0) + (comp.Hagfish or 0) + (comp.Embryo or 0)
+	local heavy     = (comp.Tank or 0) + (comp.Howitzer or 0) + (comp.Elite or 0)
+		+ (comp.Lamprey or 0) + (comp.Roller or 0) + (comp.Broodmother or 0)
+
+	-- Turret lines: only the Howitzer (65) out-ranges a turret (50).
+	if ai.enemyTurretCount >= 2 then
+		w["Howitzer"] = (w["Howitzer"] or 0) + ai.enemyTurretCount
+		w["Elite"]    = (w["Elite"] or 0) + 1
+	end
+	if cheapMass >= 4 then
+		w["Tank"]   = (w["Tank"] or 0) + math.floor(cheapMass / 3)
+		w["Foamer"] = (w["Foamer"] or 0) + 1
+	end
+	if heavy >= 3 then
+		w["Elite"]    = (w["Elite"] or 0) + 2
+		w["Foamer"]   = (w["Foamer"] or 0) + 1
+		w["Survivor"] = (w["Survivor"] or 0) + 1
+	end
+
+	if hasTech(ai, "MedicUnit") and unitManager.getUnitCount(ai.player) >= 6 then
+		w["Medic"] = math.max(w["Medic"] or 0, 1)
+	end
+
+	-- Research-gated picks: zero them out and demand the tech instead — the
+	-- research planner will queue it through the normal timed path.
+	ai.compDemand = {}
+	local gated = { Elite = "EliteUnits", Medic = "MedicUnit" }
+	for unitName, tech in gated do
+		if (w[unitName] or 0) > 0 and not hasTech(ai, tech) then
+			ai.compDemand[tech] = true
+			w[unitName] = 0
+		end
+	end
+
+	local total = 0
+	for _, v in w do total += v end
+	if total <= 0 then w["Survivor"] = 1 end
+	ai.currentWeights = w
+end
+
+local function planBonfires(ai: any)
+	local ids = getOwnedBuildingIds(ai.ownerStr, "Deployer")
+	if #ids == 0 then return end
+
+	ai.totalTrained = math.max(ai.totalTrained, unitManager.getUnitCount(ai.player))
+
+	-- Assign each new bonfire a composition-driven summon type; each tick one
+	-- existing bonfire is also re-evaluated so the mix tracks the counters
+	-- (players re-pick their bonfire menus too — just not all at once).
+	ai.bonfireType = ai.bonfireType or {}
+	table.sort(ids)
+	local rotate = ids[(ai.bonfireRotate % #ids) + 1]
+	ai.bonfireRotate += 1
+	for _, id in ids do
+		if not ai.bonfireType[id] or id == rotate then
+			local utype = pickWeighted(ai.currentWeights)
+			local def   = Config.UNIT_TYPES[utype]
+			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Survivor" end
+			if buildingManager.setBonfireSummonType(ai.player, id, utype) then
+				ai.bonfireType[id] = utype
 			end
 		end
 	end
 
-	if unitsF then
-		local baseXZ = Vector3.new(ai.base.X, 0, ai.base.Z)
-		for _, p in unitsF:GetChildren() do
-			local ov = p:FindFirstChild("OwnerId")
-			if not ov or ov.Value == myStr then continue end
-			if not p:IsA("BasePart") then continue end
-			local epos = (p :: BasePart).Position
-			local dist = minDistToEyes(epos)
-			if dist > vR then continue end
-
-			local ut    = p:FindFirstChild("UnitType")
-			local utype = ut and ut.Value or "Survivor"
-
-			result.enemyUnitCount += 1
-			result.enemyComp[utype] = (result.enemyComp[utype] or 0) + 1
-			result.enemyArmyValue += unitValue(utype)
-			if utype == "Harvester" then
-				table.insert(result.enemyHarvesters, Vector3.new(epos.X, 0, epos.Z))
+	-- Empower with surplus: lowest-level bonfire first, capped by the level's
+	-- ambition. Every level is bought at full price; discipline gates how
+	-- reliably surplus actually gets spent.
+	if ai.empowerCap > 0 and buildingManager.upgradeBonfireForPlayer then
+		for _ = 1, ai.pacingExempt and 4 or 1 do
+			if bank(ai) <= ai.reserve * 2.5 or not remembers(ai) then break end
+			local upgraded = false
+			for _, id in ids do
+				if buildingManager.upgradeBonfireForPlayer(ai.player, id, ai.empowerCap) then
+					upgraded = true
+					break
+				end
 			end
-
-			local distToBase = (Vector3.new(epos.X, 0, epos.Z) - baseXZ).Magnitude
-			if distToBase < 60 then result.baseUnderAttack = true end
-
-			local baseScore  = (THREAT_UNIT :: any)[utype] or 20
-			local distFactor = 1 - math.clamp(dist / vR, 0, 0.8)
-			local score      = baseScore * (1 + distFactor)
-			if score > bestScore then
-				bestScore = score
-				result.priorityTarget = Vector3.new(epos.X, 0, epos.Z)
-			end
+			if not upgraded then break end
 		end
 	end
+end
 
-	return result
+-- Paid Survivor → Sniper field upgrades: the counter a player buys against
+-- turret lines and slow heavy comps. Skill-gated — beginners don't know it.
+local function planSnipers(ai: any)
+	if ai.micro < 0.65 then return end
+	local heavy = (ai.enemyComp.Tank or 0) + (ai.enemyComp.Howitzer or 0) + (ai.enemyComp.Broodmother or 0)
+	if ai.enemyTurretCount < 2 and heavy < 3 then return end
+	local snipers, survivors = 0, {}
+	for _, u in unitManager.getPlayerUnitData(ai.player) do
+		if u.unitType == "Sniper" then snipers += 1
+		elseif u.unitType == "Survivor" then table.insert(survivors, u.id) end
+	end
+	local maxSnipers = math.min(4, ai.enemyTurretCount + math.floor(heavy / 2))
+	for _ = snipers + 1, maxSnipers do
+		if #survivors == 0 then break end
+		if bank(ai) < Config.SNIPER_UPGRADE_COST + ai.reserve then break end
+		if not remembers(ai) then break end
+		local id = table.remove(survivors)
+		unitManager.upgradeUnit(ai.player, id :: string, "Sniper")
+	end
+end
+
+local function planTurretUpgrades(ai: any)
+	if not buildingManager.upgradeTurretForPlayer then return end
+	if not hasTech(ai, "TurretUpgrades") then return end
+	local pref = ai.style.turret
+	local cost = (Config.TURRET_UPGRADE_COST :: any)[pref] or 999
+	for _, tid in getOwnedBuildingIds(ai.ownerStr, "Turret") do
+		if bank(ai) < cost + ai.reserve then break end
+		if not remembers(ai) then break end
+		buildingManager.upgradeTurretForPlayer(ai.player, tid, pref)
+	end
+end
+
+-- ── Macro: Monument (the bot plays to WIN when it has earned the right) ───────
+-- High-difficulty bots that are far ahead bank up and start the Monument, then
+-- turtle around it — exactly the play a dominant human makes.
+
+local function planMonument(ai: any)
+	if not ai.monumentAmbition or ai.monumentBuilt then return end
+	if ai.phase ~= "late" or ai.baseUnderAttack then return end
+	if bank(ai) < Config.MONUMENT_COST + ai.reserve * 2 then return end
+
+	local myValue = 0
+	for _, u in unitManager.getPlayerUnitData(ai.player) do myValue += unitValue(u.unitType) end
+	local known = estimate(ai, ai.enemyArmyValue)
+	local quiet = (tick() - ai.startTime > 180) and ai.enemyUnitCount == 0
+	if myValue > known * 1.3 or quiet then
+		if buildingManager.buildMonument(ai.player) then
+			ai.monumentBuilt = true
+			print(string.format("[AIManager] %s bot %s is racing the Monument", ai.style.label, ai.player.Name))
+		end
+	end
 end
 
 -- ── Exploration waypoints ─────────────────────────────────────────────────────
@@ -571,7 +935,6 @@ end
 local function generateExplorePoints(base: Vector3): { Vector3 }
 	local pts: { Vector3 } = {}
 	local B = 380
-
 	local function ringPt(cx: number, cz: number, r: number, i: number, n: number): Vector3
 		local a = (i / n) * math.pi * 2 + (math.random() - 0.5) * (math.pi * 2 / n) * 0.6
 		return snapGrid(Vector3.new(
@@ -579,7 +942,6 @@ local function generateExplorePoints(base: Vector3): { Vector3 }
 			math.clamp(cz + math.sin(a) * r, -B, B)
 		))
 	end
-
 	for i = 0, 7 do table.insert(pts, ringPt(base.X, base.Z, 45 + math.random(-8, 8), i, 8)) end
 	local m1x, m1z = base.X * 0.55, base.Z * 0.55
 	for i = 0, 7 do table.insert(pts, ringPt(m1x, m1z, 70 + math.random(-12, 12), i, 8)) end
@@ -587,7 +949,6 @@ local function generateExplorePoints(base: Vector3): { Vector3 }
 	local m2x, m2z = -base.X * 0.55, -base.Z * 0.55
 	for i = 0, 7 do table.insert(pts, ringPt(m2x, m2z, 65 + math.random(-12, 12), i, 8)) end
 	for i = 0, 3 do table.insert(pts, ringPt(-base.X, -base.Z, 45 + math.random(-8, 8), i, 4)) end
-
 	return pts  -- 36 total
 end
 
@@ -599,43 +960,20 @@ local function approachPoint(target: Vector3, angle: number, dist: number): Vect
 	))
 end
 
-local function findEnemyBuilding(ownerStr: string, btype: string): Vector3?
-	local folder = workspace:FindFirstChild("Buildings")
-	if not folder then return nil end
-	local found: { Vector3 } = {}
-	for _, model in folder:GetChildren() do
-		local ov = model:FindFirstChild("OwnerId")
-		local tv = model:FindFirstChild("BuildingType")
-		if ov and ov.Value ~= ownerStr and tv and tv.Value == btype then
-			local base = model:FindFirstChild("Base") :: BasePart?
-			if base then table.insert(found, Vector3.new(base.Position.X, 0, base.Position.Z)) end
-		end
-	end
-	if #found == 0 then return nil end
-	return found[math.random(1, #found)]
-end
+-- ── Movement helpers ──────────────────────────────────────────────────────────
+-- Army movements are ATTACK-MOVES (the same order a player issues); plain moves
+-- are reserved for scouts and support that shouldn't pick fights.
 
--- Weighted target: visible threat (50%) > production > defense > CC.
-local function pickAttackTarget(ai: any): Vector3?
-	if ai.priorityTarget and math.random() < 0.5 then return ai.priorityTarget end
-	local own = ai.ownerStr
-	local r = math.random()
-	local t: Vector3?
-	if r < 0.38 then
-		t = findEnemyBuilding(own, "Deployer") or findEnemyBuilding(own, "LampreyNest")
-	elseif r < 0.58 then
-		t = findEnemyBuilding(own, "Turret")
-	elseif r < 0.74 then
-		t = findEnemyBuilding(own, "Relay")
+local function orderChunk(ai: any, ids: { string }, dest: Vector3, attackMove: boolean)
+	if #ids == 0 then return end
+	if attackMove and unitManager.attackMoveUnitsFor then
+		unitManager.attackMoveUnitsFor(ai.player, ids, dest)
 	else
-		t = findEnemyBuilding(own, "CommandCenter")
+		unitManager.sendUnitsTo(ai.player, ids, dest)
 	end
-	return t or ai.priorityTarget or findEnemyBuilding(own, "CommandCenter") or findEnemyBuilding(own, "LampreyNest")
 end
 
--- ── Movement helpers ────────────────────────────────────────────────────────
-
-local function sendSpread(player: any, units: { string }, target: Vector3)
+local function sendSpread(ai: any, units: { string }, target: Vector3, attackMove: boolean)
 	local SPREAD = 10
 	for i = 1, #units, 3 do
 		local chunk = {}
@@ -643,11 +981,11 @@ local function sendSpread(player: any, units: { string }, target: Vector3)
 		local angle = math.random() * math.pi * 2
 		local r     = math.random(0, SPREAD)
 		local dest  = snapGrid(target + Vector3.new(math.cos(angle) * r, 0, math.sin(angle) * r))
-		unitManager.sendUnitsTo(player, chunk, dest)
+		orderChunk(ai, chunk, dest, attackMove)
 	end
 end
 
-local function fanAcrossMap(ai: any, units: { string }, pts: { Vector3 }, groupSize: number)
+local function fanAcrossMap(ai: any, units: { string }, pts: { Vector3 }, groupSize: number, attackMove: boolean)
 	local n = #units
 	if n == 0 then return end
 	local numGroups = math.ceil(n / groupSize)
@@ -658,12 +996,12 @@ local function fanAcrossMap(ai: any, units: { string }, pts: { Vector3 }, groupS
 			table.insert(chunk, units[j])
 		end
 		local ptIdx = ((ai.exploreIdx - 1 + g * ptSpread) % #pts) + 1
-		sendSpread(ai.player, chunk, pts[ptIdx])
+		sendSpread(ai, chunk, pts[ptIdx], attackMove)
 	end
 end
 
--- Composition-aware commit: Howitzers hold at standoff, Medics trail, line leads.
--- Optional 65/35 flank split of the line force onto a feint target.
+-- Composition-aware commit: Howitzers hold at standoff range, Medics trail,
+-- the line attack-moves in (with an optional 65/35 flank for skilled bots).
 local function commitAttack(ai: any, data: any, target: Vector3)
 	local mainSet: { [string]: boolean } = {}
 	for _, id in ai.mainForce do mainSet[id] = true end
@@ -676,6 +1014,16 @@ local function commitAttack(ai: any, data: any, target: Vector3)
 		else table.insert(line, u.id) end
 	end
 
+	-- Trainer-style partial commitment: hold a chunk back at the rally.
+	if ai.style.commitRatio < 1 and #line >= 3 then
+		local keep = math.floor(#line * ai.style.commitRatio)
+		local held = {}
+		for i = #line, keep + 1, -1 do
+			table.insert(held, table.remove(line))
+		end
+		if ai.rallyPoint and #held > 0 then sendSpread(ai, held, ai.rallyPoint, false) end
+	end
+
 	local dirAngle = math.atan2(target.Z - ai.base.Z, target.X - ai.base.X)
 
 	if ai.isFlankingAttack and ai.feintTarget and #line >= 5 then
@@ -684,41 +1032,34 @@ local function commitAttack(ai: any, data: any, target: Vector3)
 		for i, id in line do
 			if i <= mainCount then table.insert(a, id) else table.insert(b, id) end
 		end
-		sendSpread(ai.player, a, target)
-		sendSpread(ai.player, b, ai.feintTarget)
+		sendSpread(ai, a, target, true)
+		sendSpread(ai, b, ai.feintTarget, true)
 	elseif #line > 0 then
-		sendSpread(ai.player, line, target)
+		sendSpread(ai, line, target, true)
 	end
 
 	if #siege > 0 then
 		-- Howitzer range is 65; hold ~52 studs back on the approach side.
-		sendSpread(ai.player, siege, approachPoint(target, dirAngle + math.pi, 52))
+		sendSpread(ai, siege, approachPoint(target, dirAngle + math.pi, 52), true)
 	end
 	if #support > 0 then
-		unitManager.sendUnitsTo(ai.player, support, approachPoint(target, dirAngle + math.pi, 20))
+		orderChunk(ai, support, approachPoint(target, dirAngle + math.pi, 20), false)
 	end
 end
 
 -- ── Scout / stalker behavior ──────────────────────────────────────────────────
--- The scout is not a map-reconner — it is a lurker. It creeps to the EDGE of the
--- player's vision near their base or last-seen position and then behaves
--- unpredictably: it WATCHES (stands dead still, just out of the fog, staring),
--- WANDERS (drifts along the perimeter), or VANISHES (slips back into the fog,
--- then reappears from a new angle). Random dwell times and transitions make it
--- impossible to read — that flicker of a unit at the fog line is the scare.
+-- The scout is a lurker, not a map-recon drone. It creeps to the EDGE of the
+-- player's vision and then WATCHES (dead still), WANDERS (drifts the rim), or
+-- VANISHES (melts into the fog, reappears at a new angle). That flicker of a
+-- unit at the fog line is the scare — and it's also how the bot gathers intel.
 
--- A "fog-edge" ring distance: far enough to stay mostly hidden, close enough that
--- a building/unit at the rim of its vision catches a glimpse. (Player units reveal
--- ~65 studs, the CC ~75.)
 local LURK_MIN, LURK_MAX = 72, 96
 
 local function lurkAnchor(ai: any): Vector3?
-	-- Prefer the live threat, then last-known enemy position, then a discovered
-	-- enemy CC; fall back to the far edge of our explore ring (toward the enemy).
 	return ai.priorityTarget
 		or ai.lastKnownEnemyPos
-		or findEnemyBuilding(ai.ownerStr, "CommandCenter")
-		or findEnemyBuilding(ai.ownerStr, "Deployer")
+		or knownEnemyBuilding(ai, "CommandCenter")
+		or knownEnemyBuilding(ai, "Deployer")
 end
 
 local function updateScouts(ai: any, pts: { Vector3 })
@@ -727,8 +1068,7 @@ local function updateScouts(ai: any, pts: { Vector3 })
 	ai.scoutTimer = (ai.scoutTimer or 0) + ai.reactionInterval
 	local anchor  = lurkAnchor(ai)
 
-	-- No idea where the enemy is yet → patrol the far explore points to FIND them,
-	-- biasing toward fresh angles so the search itself looks restless.
+	-- Nothing found yet → patrol the far explore points to FIND the enemy.
 	if not anchor then
 		ai.scoutState = "search"
 		if ai.scoutTimer >= 9 then
@@ -739,32 +1079,27 @@ local function updateScouts(ai: any, pts: { Vector3 })
 		return
 	end
 
-	-- Found something to haunt. Run a little state machine with random dwell times.
 	if not ai.scoutState or ai.scoutState == "search" then
-		ai.scoutState   = "approach"
-		ai.scoutTimer   = 0
-		ai.scoutDwell   = 0
-		ai.scoutAngle   = math.random() * math.pi * 2
+		ai.scoutState = "approach"
+		ai.scoutTimer = 0
+		ai.scoutDwell = 0
+		ai.scoutAngle = math.random() * math.pi * 2
 	end
 
 	if ai.scoutTimer < (ai.scoutDwell or 0) then
-		-- Still holding the current behavior; only "wander" keeps nudging the target.
 		if ai.scoutState == "wander" and ai.scoutPoint then
 			unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
 		end
 		return
 	end
 
-	-- Dwell elapsed → pick the next state. Weighted for unpredictability.
 	ai.scoutTimer = 0
 	local prev = ai.scoutState
 	local r    = math.random()
 
 	if prev == "approach" then
-		-- Arrived at the fog edge → mostly stop and watch, sometimes immediately drift.
 		ai.scoutState = (r < 0.7) and "watch" or "wander"
 	elseif prev == "watch" then
-		-- After staring a while: drift along the rim, or melt back into the fog.
 		ai.scoutState = (r < 0.45) and "wander" or (r < 0.8) and "vanish" or "watch"
 	elseif prev == "wander" then
 		ai.scoutState = (r < 0.4) and "watch" or (r < 0.7) and "vanish" or "approach"
@@ -779,36 +1114,27 @@ local function updateScouts(ai: any, pts: { Vector3 })
 		ai.scoutDwell = math.random(3, 5)
 		ai.scoutPoint = approachPoint(anchor, ai.scoutAngle, dist)
 		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
-
 	elseif ai.scoutState == "watch" then
-		-- Stand dead still and stare. Long, varied hold = the unsettling part.
 		ai.scoutDwell = math.random(4, 9)
 		ai.scoutPoint = ai.scoutPoint or approachPoint(anchor, ai.scoutAngle, dist)
 		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
-
 	elseif ai.scoutState == "wander" then
-		-- Creep sideways around the perimeter to a neighbouring angle.
 		ai.scoutDwell = math.random(2, 4)
 		ai.scoutAngle = (ai.scoutAngle or 0) + (math.random() < 0.5 and -1 or 1) * (0.5 + math.random() * 0.7)
 		ai.scoutPoint = approachPoint(anchor, ai.scoutAngle, dist)
 		unitManager.sendUnitsTo(ai.player, ai.scouts, ai.scoutPoint)
-
-	else -- "vanish": retreat deep into the fog, then it'll re-approach from elsewhere.
+	else -- "vanish"
 		ai.scoutDwell = math.random(4, 8)
-		local hideAngle = ai.scoutAngle or 0
-		unitManager.sendUnitsTo(ai.player, ai.scouts, approachPoint(anchor, hideAngle, dist + 70))
+		unitManager.sendUnitsTo(ai.player, ai.scouts, approachPoint(anchor, ai.scoutAngle or 0, dist + 70))
 	end
 end
 
--- Harassment squad hunts enemy economy (Harvesters first), then soft buildings.
--- Held back during the opening peace window so the first thing the player ever
--- sees the bot do is lurk, not kill harvesters.
+-- Harassment squad hunts the enemy ECONOMY it knows about (Foundries, Relays).
+-- Held back during the opening peace window: it shadows from a distance so the
+-- first thing the player ever sees the bot do is lurk, not raid.
 local function updateHarass(ai: any)
 	if #ai.harass == 0 then return end
 	if ai.harassUnlockTime and tick() < ai.harassUnlockTime then
-		-- Not yet allowed to harass: shadow the enemy economy from a distance
-		-- instead, so the squad reads as a second creeping scout, not an attacker.
-		-- Re-pick a standoff point only every few seconds so it drifts, not twitches.
 		ai.harassTimer += ai.reactionInterval
 		if ai.harassTimer >= 6 or not ai.harassTarget then
 			ai.harassTimer = 0
@@ -819,28 +1145,22 @@ local function updateHarass(ai: any)
 				ai.harassTarget = ai.base
 			end
 		end
-		if ai.harassTarget then sendSpread(ai.player, ai.harass, ai.harassTarget) end
+		if ai.harassTarget then sendSpread(ai, ai.harass, ai.harassTarget, false) end
 		return
 	end
 	ai.harassTimer += ai.reactionInterval
 	if ai.harassTimer >= 4 or not ai.harassTarget then
 		ai.harassTimer = 0
-		local tgt: Vector3?
-		if ai.enemyHarvesters and #ai.enemyHarvesters > 0 then
-			tgt = ai.enemyHarvesters[math.random(1, #ai.enemyHarvesters)]
-		end
-		tgt = tgt or findEnemyBuilding(ai.ownerStr, "Relay")
-			or findEnemyBuilding(ai.ownerStr, "Deployer")
-			or findEnemyBuilding(ai.ownerStr, "CommandCenter")
+		ai.harassTarget = knownEnemyBuilding(ai, "Foundry")
+			or knownEnemyBuilding(ai, "Relay")
+			or knownEnemyBuilding(ai, "EngineeringPost")
+			or knownEnemyBuilding(ai, "Deployer")
 			or ai.explorePoints[#ai.explorePoints]
-		ai.harassTarget = tgt
 	end
-	if ai.harassTarget then sendSpread(ai.player, ai.harass, ai.harassTarget) end
+	if ai.harassTarget then sendSpread(ai, ai.harass, ai.harassTarget, true) end
 end
 
 -- ── Squad partitioning ────────────────────────────────────────────────────────
--- Carves out scouts + a harass squad (preferring the fastest units), then splits
--- the remainder into a garrison and a main force.
 
 local function rebuildSquads(ai: any)
 	local allUnits = unitManager.getPlayerUnitData(ai.player)
@@ -848,17 +1168,15 @@ local function rebuildSquads(ai: any)
 	ai.scouts, ai.harass, ai.mainForce, ai.garrison = {}, {}, {}, {}
 	if total == 0 then return end
 
-	-- Always peel off a lurker once there's an army to spare — the stalker at the
-	-- fog edge is core atmosphere, not a competence perk. Skilled bots field two.
-	-- (Trainer keeps its own careful loop and never lurks.)
-	local scoutN  = (total >= 4 and ai.personality ~= "trainer") and 1 or 0
-	if ai.competence >= 0.85 and total >= 10 and ai.personality ~= "trainer" then scoutN = 2 end
+	-- The lurker at the fog edge is core atmosphere — peel one off as soon as
+	-- there's an army to spare. Diligent (high-level) bots field two.
+	local scoutN = (total >= 4 and ai.personality ~= "trainer") and math.min(ai.scoutCount, 1) or 0
+	if ai.scoutCount >= 2 and total >= 10 and ai.personality ~= "trainer" then scoutN = 2 end
 	local harassN = 0
-	if ai.archetype.harass and total >= 8 then
+	if ai.harassEnabled and ai.style.harass and total >= 8 then
 		harassN = math.min(3, math.floor(total * 0.2))
 	end
 
-	-- Fastest units first → good scouts / harassers.
 	local fast = table.clone(allUnits)
 	table.sort(fast, function(a, b)
 		local sa = (Config.UNIT_MOVE_SPEED :: any)[a.unitType] or 20
@@ -879,7 +1197,9 @@ local function rebuildSquads(ai: any)
 		if not picked[u.id] then table.insert(rest, u.id) end
 	end
 
-	local garrisonN = math.max(rest[1] and 1 or 0, math.floor(#rest * ai.garrisonRatio))
+	local garrisonRatio = ai.style.garrison
+	if ai.monumentBuilt then garrisonRatio = math.max(garrisonRatio, 0.5) end
+	local garrisonN = math.max(rest[1] and 1 or 0, math.floor(#rest * garrisonRatio))
 	local mainN     = #rest - garrisonN
 	for i, id in rest do
 		if i <= mainN then table.insert(ai.mainForce, id)
@@ -887,374 +1207,24 @@ local function rebuildSquads(ai: any)
 	end
 end
 
--- ── Counter-composition ───────────────────────────────────────────────────────
+-- ── Combat controller ─────────────────────────────────────────────────────────
+-- Value-based: maneuver until a target offers a favorable trade (as the bot
+-- ESTIMATES it — misjudgment is the low-level handicap), commit, retreat when
+-- the trade turns. Cooldown-gated styles (Waves / Trainer) attack on a clock.
 
-local function computeComposition(ai: any)
-	local arche = ai.archetype
-	local base  = arche.comp[ai.phase] or arche.comp.mid
-	local w: { [string]: number } = {}
-	for k, v in base do w[k] = v end
-
-	-- Wave archetype: escalate the tier with each wave launched.
-	if arche.waveMode then
-		local tier = math.min(ai.wavesSent, 4)
-		w["Tank"] = (w["Tank"] or 0) + tier
-		if tier >= 2 then w["Elite"]    = (w["Elite"] or 0) + 1 end
-		if tier >= 3 then w["Howitzer"] = (w["Howitzer"] or 0) + 1 end
+local function currentAtkCooldown(ai: any): number
+	local style = ai.style
+	if style.waveMode then return math.max(20, 55 - ai.wavesSent * 5) end
+	if style.atkCooldownMax > 0 then
+		return ai.rolledCooldown or style.atkCooldownMin
 	end
-
-	if not arche.noCounter then
-		local comp = ai.enemyComp or {}
-		local cheapMass = (comp.Survivor or 0) + (comp.CreepySoldier or 0) + (comp.Hagfish or 0)
-		local heavy     = (comp.Tank or 0) + (comp.Howitzer or 0) + (comp.Elite or 0) + (comp.Lamprey or 0)
-
-		-- Turret lines: only the Howitzer (65) out-ranges a turret (50).
-		if ai.enemyTurretCount >= 2 then
-			w["Howitzer"] = (w["Howitzer"] or 0) + ai.enemyTurretCount
-			w["Elite"]    = (w["Elite"] or 0) + 1
-		end
-		-- Cheap masses: Tank splash + Foamer AoE slow.
-		if cheapMass >= 4 then
-			w["Tank"]   = (w["Tank"] or 0) + math.floor(cheapMass / 3)
-			w["Foamer"] = (w["Foamer"] or 0) + 1
-		end
-		-- Heavy mech: Elite + Foamer to peel, backed by Survivors.
-		if heavy >= 3 then
-			w["Elite"]   = (w["Elite"] or 0) + 2
-			w["Foamer"]  = (w["Foamer"] or 0) + 1
-			w["Survivor"] = (w["Survivor"] or 0) + 1
-		end
-	end
-
-	-- Medic support once researched and the army is large enough to be worth it.
-	if hasTech(ai, "MedicUnit") and unitManager.getUnitCount(ai.player) >= 6 then
-		w["Medic"] = math.max(w["Medic"] or 0, 1)
-	end
-
-	-- Gate research-locked units; record demand so planTech grants what we want.
-	ai.compDemand = {}
-	local gated = { Elite = "EliteUnits", Medic = "MedicUnit" }
-	for unitName, tech in gated do
-		if (w[unitName] or 0) > 0 and not hasTech(ai, tech) then
-			ai.compDemand[tech] = true
-			w[unitName] = 0
-		end
-	end
-
-	-- Nightmare: jitter for unpredictability.
-	if ai.isNightmare then
-		for k, v in w do w[k] = v + math.random(0, 2) end
-		if hasTech(ai, "EliteUnits") then w["Elite"] = (w["Elite"] or 0) + math.random(0, 3) end
-	end
-
-	local total = 0
-	for _, v in w do total += v end
-	if total <= 0 then w["Survivor"] = 1 end
-
-	ai.currentWeights = w
+	return 0
 end
 
--- ── Desired-state economy planner ──────────────────────────────────────────────
-
-local function planEconomy(ai: any)
-	local arche = ai.archetype
-	local phase = ai.phase
-	local reserve = ai.reserve
-
-	-- The Bonfire (internal type "Deployer") is the AI's primary military structure now
-	-- that the Barracks is gone — it free-summons the army and gates turrets/nests.
-	local liveFound     = countOwnedBuildings(ai.ownerStr, "Foundry")
-	local liveBarracks  = countOwnedBuildings(ai.ownerStr, "Deployer")
-	local liveTurrets   = countOwnedBuildings(ai.ownerStr, "Turret")
-	local liveRelays    = countOwnedBuildings(ai.ownerStr, "Relay")
-
-	local econMult = (phase == "opening" and 0.5)
-		or (phase == "expand" and 0.75)
-		or (phase == "mid" and 1.0)
-		or 1.25
-
-	local wantFound = math.min(ai.caps.h, math.max(1, math.ceil(arche.desired.harvesters * econMult)))
-	local wantBar  = (phase == "opening") and math.min(ai.caps.b, 1)
-		or math.min(ai.caps.b, arche.desired.barracks)
-	local wantTur  = math.min(ai.caps.t, math.max(0, math.ceil(arche.desired.turrets * econMult)))
-	if arche.turtle and phase ~= "opening" then wantTur = math.min(ai.caps.t, arche.desired.turrets) end
-	local wantRel  = (phase ~= "opening") and math.min(ai.caps.r, arche.desired.relays) or 0
-
-	if ai.baseUnderAttack         then wantTur = math.min(ai.caps.t, wantTur + 1) end
-	if ai.enemyUnitCount >= 5      then wantTur = math.min(ai.caps.t, wantTur + 1) end
-
-	-- Defensive floor: every base keeps a turret line that grows through the game,
-	-- so losing the field army never leaves the base wide open — even for aggressive
-	-- archetypes whose `desired.turrets` is low.
-	local turretFloor = (phase == "opening" and 1)
-		or (phase == "expand" and 2)
-		or (phase == "mid" and 3)
-		or 4
-	wantTur = math.min(ai.caps.t, math.max(wantTur, turretFloor))
-
-	-- Priority-scored shopping list.
-	local items: { { prio: number, cost: number, fn: () -> any } } = {}
-	local function add(prio: number, cost: number, fn: () -> any)
-		table.insert(items, { prio = prio, cost = cost, fn = fn })
-	end
-
-	if liveBarracks < 1 then
-		add(100, Config.DEPLOYER_COST, function()
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
-				ai.builtBarracks = math.max(ai.builtBarracks, 1); return true
-			end
-			return false
-		end)
-	end
-	if ai.baseUnderAttack and liveTurrets < ai.caps.t then
-		add(95, Config.TURRET_COST, function()
-			return tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 18, 42)
-		end)
-	end
-	if liveFound < wantFound then
-		-- Foundry cost scales with how many we already own (matches BuildingManager).
-		local foundryCost = Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveFound)
-		add(90, foundryCost, function()
-			-- Place the Foundry near base so its boost radius covers the seeded deposits.
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then
-				ai.builtMines += 1; return true
-			end
-			return false
-		end)
-	end
-	-- Build-up bonfires (the from-zero case is the prio-100 item above).
-	if liveBarracks >= 1 and liveBarracks < wantBar then
-		add(80, Config.DEPLOYER_COST, function()
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
-				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1); return true
-			end
-			return false
-		end)
-	end
-	if liveRelays < wantRel and hasTech(ai, "Relay") then
-		add(60, Config.RELAY_COST, function()
-			if tryPlaceRandom(ai.player, ai.base, "Relay", 45, 75) then ai.builtRelays += 1; return true end
-			return false
-		end)
-	end
-	if liveTurrets < wantTur then
-		add(arche.turtle and 84 or 70, Config.TURRET_COST, function()
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 20, 45) then
-				ai.builtTurrets = math.max(ai.builtTurrets, liveTurrets + 1); return true
-			end
-			return false
-		end)
-	end
-	table.sort(items, function(a, b) return a.prio > b.prio end)
-
-	-- Nightmare is deliberately unbound — buy everything affordable, top-down.
-	if ai.isNightmare then
-		for _, it in items do
-			if resourceManager.get(ai.player) >= it.cost + reserve then it.fn() end
-		end
-		return
-	end
-
-	-- Everyone else builds like a human: only ONE structure under construction at a
-	-- time, and at most one purchase per planning tick. Combined with the strategy
-	-- cadence + each building's assembly time, this paces AI expansion to roughly
-	-- the player's own build speed instead of a whole base appearing at once.
-	if buildingManager.countConstructing and buildingManager.countConstructing(ai.player) > 0 then
-		return
-	end
-	for _, it in items do
-		if resourceManager.get(ai.player) >= it.cost + reserve then
-			if it.fn() then break end
-		end
-	end
-end
-
--- ── Tech & turret-upgrade planning ─────────────────────────────────────────────
-
-local function planTech(ai: any)
-	if not researchManager then return end
-
-	-- Nightmare: grab the whole toolbox fast.
-	if ai.isNightmare then
-		for _, t in { "EliteUnits", "MedicUnit", "ConcussionShells", "RocketBarrage",
-			"TurretUpgrades", "Relay", "CombatStims", "HardenedArmor", "Rollers" } do
-			grantTechDeep(ai, t)
-		end
-		return
-	end
-
-	local tier = ai.techTier
-	if tier <= 0 then return end
-
-	-- Satisfy composition counters first (so the units we want unlock).
-	if ai.compDemand then
-		for tech in ai.compDemand do grantTechDeep(ai, tech) end
-	end
-
-	-- Walk the archetype tech plan, paced by how many units we've trained and
-	-- limited in depth by the difficulty level.
-	for i, tech in ipairs(ai.archetype.techPlan) do
-		if i > tier then break end
-		if ai.totalTrained >= (i - 1) * 2 then
-			grantTechDeep(ai, tech)
-		end
-	end
-
-	-- Enable turret upgrades once we actually have turrets to upgrade.
-	if tier >= 2 and countOwnedBuildings(ai.ownerStr, "Turret") >= 1 then
-		grantTech(ai.player, "TurretUpgrades")
-	end
-	-- Relay for build-zone expansion once we are scaling up.
-	if tier >= 1 and ai.builtBarracks >= 2 then
-		grantTech(ai.player, "Relay")
-	end
-end
-
-local function planTurretUpgrades(ai: any)
-	if not buildingManager.upgradeTurretForPlayer then return end
-	if not hasTech(ai, "TurretUpgrades") then return end
-	local pref = ai.archetype.turret or "RocketLauncher"
-	local cost = (Config.TURRET_UPGRADE_COST :: any)[pref] or 999
-	for _, tid in getOwnedBuildingIds(ai.ownerStr, "Turret") do
-		if resourceManager.get(ai.player) < cost + ai.reserve then break end
-		buildingManager.upgradeTurretForPlayer(ai.player, tid, pref)
-	end
-end
-
--- ── BT leaves ─────────────────────────────────────────────────────────────────
-
-local function btBuildCC(ai: any)
-	if ai.hasCC then return SUCCESS end
-	local ok = buildingManager.placeForPlayer(ai.player, ai.base, "CommandCenter")
-	if ok then ai.hasCC = true; return SUCCESS end
-	return RUNNING
-end
-
--- Trainer-only build-order starters (the strategic AI uses planEconomy instead).
-local function btBuildFirstMine(ai: any)
-	if countOwnedBuildings(ai.ownerStr, "Foundry") >= 1 then ai.builtMines = math.max(ai.builtMines, 1); return SUCCESS end
-	if not canAfford(ai.player, Config.FOUNDRY_COST, 0) then return RUNNING end
-	if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then ai.builtMines += 1; return SUCCESS end
-	return RUNNING
-end
-
-local function btBuildFirstBarracks(ai: any)
-	-- "Barracks" is gone; the Bonfire (type "Deployer") is the AI's first military build.
-	local live = countOwnedBuildings(ai.ownerStr, "Deployer")
-	if live >= 1 then ai.builtBarracks = math.max(ai.builtBarracks, 1); return SUCCESS end
-	if not canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then return RUNNING end
-	if tryPlaceRandom(ai.player, ai.base, "Deployer", 15, 35) then ai.builtBarracks += 1; return SUCCESS end
-	return RUNNING
-end
-
-local function btUpdateVision(ai: any)
-	local threats = scanThreats(ai)
-	ai.enemyTurretCount = threats.enemyTurretCount
-	ai.enemyUnitCount   = threats.enemyUnitCount
-	ai.enemyArmyValue   = threats.enemyArmyValue
-	ai.baseUnderAttack  = threats.baseUnderAttack
-	ai.enemyComp        = threats.enemyComp
-	ai.enemyHarvesters  = threats.enemyHarvesters
-
-	if threats.priorityTarget then
-		ai.lastKnownEnemyPos = threats.priorityTarget
-		ai.lastEnemySeenTick = tick()
-	elseif ai.lastKnownEnemyPos then
-		if tick() - ai.lastEnemySeenTick > ai.enemyMemory then
-			ai.lastKnownEnemyPos = nil
-		end
-	end
-	ai.priorityTarget = threats.priorityTarget or ai.lastKnownEnemyPos
-	return SUCCESS
-end
-
--- The AI's army comes from FREE, capacity-limited bonfire auto-summon — the same rules
--- the player plays by. This just MANAGES the bonfires (it does NOT mass paid units like
--- the old training did, which defied the capacity cap): give each bonfire a varied summon
--- type, and empower them with surplus to scale capacity by difficulty.
-local function btManageBonfires(ai: any)
-	local ids = getOwnedBuildingIds(ai.ownerStr, "Deployer")
-	if #ids == 0 then return FAILURE end
-
-	-- Pace tech by peak army size now that nothing increments totalTrained directly.
-	ai.totalTrained = math.max(ai.totalTrained, unitManager.getUnitCount(ai.player))
-
-	-- Assign each bonfire a (composition-driven) summon type once → varied armies, not
-	-- all-Survivor. Research-gated picks fall back to Survivor.
-	ai.bonfireType = ai.bonfireType or {}
-	for _, id in ids do
-		if not ai.bonfireType[id] then
-			local utype = (next(ai.currentWeights) ~= nil) and pickWeighted(ai.currentWeights) or "Survivor"
-			local def   = Config.UNIT_TYPES[utype]
-			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Survivor" end
-			if buildingManager.setBonfireSummonType and buildingManager.setBonfireSummonType(ai.player, id, utype) then
-				ai.bonfireType[id] = utype
-			end
-		end
-	end
-
-	-- Empower with clear surplus, capped by difficulty. Gradual by design — the army
-	-- still fills slowly through free auto-summon, so this never floods units.
-	local cap = ai.bonfireEmpowerCap or 0
-	if cap > 0 and buildingManager.upgradeBonfireForPlayer
-		and resourceManager.get(ai.player) > ai.reserve * 2.5 then
-		for _, id in ids do
-			if buildingManager.upgradeBonfireForPlayer(ai.player, id, cap) then break end
-		end
-	end
-
-	return SUCCESS
-end
-
--- Wave archetype: turtle, then launch escalating timed all-ins on a clock.
-local function waveCombat(ai: any, data: any, pts: { Vector3 })
-	ai.waveTimer = (ai.waveTimer or 0) + ai.reactionInterval
-	local interval = math.max(20, 55 - ai.wavesSent * 5)
-
-	if ai.combatPhase == "gather" then
-		local near = {}
-		for i = 1, math.min(10, #pts) do near[i] = pts[i] end
-		if #ai.mainForce > 0 then fanAcrossMap(ai, ai.mainForce, near, 4) end
-		local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
-		if pastPeace and ai.waveTimer >= interval and #data >= ai.minAtk and ai.priorityTarget then
-			local target = pickAttackTarget(ai)
-			if target then
-				ai.attackTarget   = target
-				ai.rallyPoint     = approachPoint(target, math.random() * math.pi * 2, 55 + math.random(0, 20))
-				ai.combatPhase    = "staging"; ai.phaseTimer = 0
-				ai.stageDuration  = math.random(ai.archetype.stageMin, ai.archetype.stageMax)
-				ai.attackDuration = math.random(18, 35)
-			end
-		end
-	elseif ai.combatPhase == "staging" then
-		if ai.rallyPoint and #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.rallyPoint) end
-		if not ai.attackTarget then
-			ai.combatPhase = "gather"; ai.phaseTimer = 0; ai.waveTimer = 0
-		elseif ai.phaseTimer >= ai.stageDuration then
-			ai.combatPhase = "attack"; ai.phaseTimer = 0; ai.wavesSent += 1
-		end
-	elseif ai.combatPhase == "attack" then
-		local target = ai.attackTarget or ai.priorityTarget
-		if not target then ai.combatPhase = "gather"; ai.phaseTimer = 0; ai.waveTimer = 0; return SUCCESS end
-		commitAttack(ai, data, target)
-		if ai.phaseTimer >= ai.attackDuration then
-			ai.combatPhase = "retreat"; ai.phaseTimer = 0; ai.retreatDuration = math.random(6, 12)
-		end
-	elseif ai.combatPhase == "retreat" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
-		if ai.phaseTimer >= ai.retreatDuration then
-			ai.combatPhase = "gather"; ai.phaseTimer = 0; ai.waveTimer = 0; ai.attackTarget = nil
-		end
-	end
-	return SUCCESS
-end
-
--- Value-based combat: maneuver until a target offers a favorable force trade,
--- commit, then retreat when the trade turns against us.
-local function btCommandArmy(ai: any)
+local function commandArmy(ai: any)
 	local data     = unitManager.getPlayerUnitData(ai.player)
 	local armySize = #data
-	if armySize == 0 then return FAILURE end
+	if armySize == 0 then return end
 
 	local myValue = 0
 	for _, u in data do myValue += unitValue(u.unitType) end
@@ -1268,65 +1238,65 @@ local function btCommandArmy(ai: any)
 
 	-- Snap home to defend.
 	if ai.baseUnderAttack and ai.combatPhase ~= "defend" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
-		if #ai.harass    > 0 then sendSpread(ai.player, ai.harass,    ai.base) end
+		if #ai.mainForce > 0 then sendSpread(ai, ai.mainForce, ai.base, true) end
+		if #ai.harass    > 0 then sendSpread(ai, ai.harass,    ai.base, true) end
 		ai.combatPhase = "defend"; ai.phaseTimer = 0; ai.attackTarget = nil; ai.feintTarget = nil
-		return SUCCESS
+		return
 	end
 
 	ai.phaseTimer += ai.reactionInterval
+	ai.atkCooldownTimer = (ai.atkCooldownTimer or 0) + ai.reactionInterval
 
 	if ai.combatPhase == "defend" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, garrisonTarget) end
+		if #ai.mainForce > 0 then sendSpread(ai, ai.mainForce, garrisonTarget, true) end
 		if not ai.baseUnderAttack then ai.combatPhase = "gather"; ai.phaseTimer = 0 end
-		return SUCCESS
+		return
 	end
-
-	if ai.archetype.waveMode then return waveCombat(ai, data, pts) end
 
 	local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
 
 	if ai.combatPhase == "gather" then
 		if #ai.mainForce > 0 then
 			if pastPeace then
-				-- Roam the full map, probing toward the enemy while looking for an opening.
-				fanAcrossMap(ai, ai.mainForce, pts, 3)
+				-- Roam the map probing for an opening (this is also how a bot
+				-- without intel finds the enemy — it has no map hack to lean on).
+				fanAcrossMap(ai, ai.mainForce, pts, 3, true)
 				ai.exploreTimer += ai.reactionInterval
 				if ai.exploreTimer >= 8 then ai.exploreTimer = 0; ai.exploreIdx = (ai.exploreIdx % #pts) + 1 end
 			else
-				-- Opening peace: the army stays home and patrols its OWN perimeter.
-				-- Only the lone scout (and the shadowing harass squad) ranges out, so
-				-- all the player sees is something lurking — never a column marching in.
+				-- Opening peace: the army patrols its OWN perimeter. Only the
+				-- lurker scout ranges out, so all the player sees is something
+				-- flickering at the fog line — never a column marching in.
 				local home: { Vector3 } = {}
 				for i = 1, math.min(8, #pts) do table.insert(home, pts[i]) end
-				if #home > 0 then fanAcrossMap(ai, ai.mainForce, home, 4) end
+				if #home > 0 then fanAcrossMap(ai, ai.mainForce, home, 4, false) end
 			end
 		end
-		if pastPeace and ai.priorityTarget and armySize >= ai.minAtk then
+		local cooldownOk = ai.atkCooldownTimer >= currentAtkCooldown(ai)
+		if pastPeace and cooldownOk and ai.priorityTarget and armySize >= ai.minAtk then
 			local target = pickAttackTarget(ai)
 			if target then
-				local enemyVal = enemyValueNear(ai.ownerStr, target, 70)
-				if myValue >= enemyVal * ai.engageRatio then
-					local approach   = math.random() * math.pi * 2
-					ai.combatPhase   = "staging"; ai.phaseTimer = 0
-					ai.attackTarget  = target
-					ai.rallyPoint    = approachPoint(target, approach, 50 + math.random(0, 25))
-					ai.stageDuration = math.random(ai.archetype.stageMin, ai.archetype.stageMax)
+				local enemyVal = estimate(ai, intelValueNear(ai, target, 70))
+				if myValue >= enemyVal * ai.style.engageRatio then
+					ai.combatPhase    = "staging"; ai.phaseTimer = 0
+					ai.attackTarget   = target
+					ai.rallyPoint     = approachPoint(target, math.random() * math.pi * 2, 50 + math.random(0, 25))
+					ai.stageDuration  = math.random(ai.style.stageMin, ai.style.stageMax)
 					ai.attackDuration = math.random(20, 45)
 				end
 			end
 		end
 
 	elseif ai.combatPhase == "staging" then
-		if #ai.mainForce > 0 and ai.rallyPoint then sendSpread(ai.player, ai.mainForce, ai.rallyPoint) end
+		if #ai.mainForce > 0 and ai.rallyPoint then sendSpread(ai, ai.mainForce, ai.rallyPoint, true) end
 		if not ai.attackTarget then
 			ai.combatPhase = "gather"; ai.phaseTimer = 0
 		elseif ai.phaseTimer >= ai.stageDuration then
 			ai.combatPhase = "attack"; ai.phaseTimer = 0; ai.wavesSent += 1
-			-- Competent bots sometimes flank a second target.
-			ai.isFlankingAttack = ai.competence >= 0.7 and math.random() < 0.35 and #ai.mainForce >= 5
+			-- Skilled bots sometimes split onto a second target.
+			ai.isFlankingAttack = ai.micro >= 0.7 and math.random() < 0.35 and #ai.mainForce >= 5
 			if ai.isFlankingAttack then
-				local c = findEnemyBuilding(ai.ownerStr, pickFrom({ "Deployer", "Turret", "Relay" }))
+				local c = knownEnemyBuilding(ai, pickFrom({ "Deployer", "Turret", "Relay", "Foundry" }))
 				ai.feintTarget = (c and c ~= ai.attackTarget) and c or nil
 				if not ai.feintTarget then ai.isFlankingAttack = false end
 			end
@@ -1334,9 +1304,9 @@ local function btCommandArmy(ai: any)
 
 	elseif ai.combatPhase == "attack" then
 		local target = ai.attackTarget or ai.priorityTarget
-		if not target then ai.combatPhase = "gather"; ai.phaseTimer = 0; return SUCCESS end
+		if not target then ai.combatPhase = "gather"; ai.phaseTimer = 0; return end
 		commitAttack(ai, data, target)
-		local enemyVal = enemyValueNear(ai.ownerStr, target, 70)
+		local enemyVal = estimate(ai, intelValueNear(ai, target, 70))
 		if myValue < enemyVal * RETREAT_RATIO or ai.phaseTimer >= ai.attackDuration then
 			ai.combatPhase = "retreat"; ai.phaseTimer = 0
 			ai.feintTarget = nil; ai.isFlankingAttack = false
@@ -1344,60 +1314,21 @@ local function btCommandArmy(ai: any)
 		end
 
 	elseif ai.combatPhase == "retreat" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
+		if #ai.mainForce > 0 then sendSpread(ai, ai.mainForce, ai.base, false) end
 		if ai.phaseTimer >= ai.retreatDuration then
 			ai.combatPhase = "gather"; ai.phaseTimer = 0; ai.attackTarget = nil; ai.rallyPoint = nil
+			ai.atkCooldownTimer = 0
+			if ai.style.atkCooldownMax > 0 then
+				ai.rolledCooldown = math.random(ai.style.atkCooldownMin, ai.style.atkCooldownMax)
+			end
 		end
 	end
-
-	return SUCCESS
 end
 
--- ── Phase model ───────────────────────────────────────────────────────────────
-
-local function getPhase(ai: any): string
-	local t    = tick() - ai.startTime
-	local army = unitManager.getUnitCount(ai.player)
-	local p
-	if t < 35 then p = "opening"
-	elseif t < 110 then p = "expand"
-	elseif t < 260 then p = "mid"
-	else p = "late" end
-
-	if army >= 18 and p ~= "late" then p = "late"
-	elseif army >= 10 and (p == "opening" or p == "expand") then p = "mid" end
-
-	if ai.isNightmare and p ~= "late" then
-		p = (p == "opening" and "expand") or (p == "expand" and "mid") or "late"
-	end
-	return p
-end
-
--- ── Nightmare scaling ───────────────────────────────────────────────────────
--- Starts ~level-3 strength and grows unbound. Overwrites the mutable knobs each
--- tick using exponential time scaling, and keeps the coffers full.
-
-local function applyNightmareScaling(ai: any)
-	local elapsed = tick() - ai.startTime
-	local scale   = math.exp(elapsed / 90)
-
-	ai.maxUnits  = 999
-	ai.caps      = {
-		h = math.ceil(3 * scale), b = math.ceil(2 * scale),
-		t = math.ceil(2 * scale), r = math.max(1, math.ceil(scale - 0.5)),
-	}
-	ai.strategyInterval = math.max(0.5, 6.0 / math.sqrt(scale))
-	ai.reactionInterval = math.max(0.2, 1.2 / math.sqrt(scale))
-	ai.minAtk       = math.max(1, math.floor(4 / scale))
-	ai.garrisonRatio = math.max(0.02, 0.12 / scale)
-	ai.reserveBase  = 0
-	ai.techTier     = 4
-
-	local current = resourceManager.get(ai.player)
-	if current < 9999 then resourceManager.add(ai.player, 9999 - current) end
-end
-
--- ── Swarm gamemode ──────────────────────────────────────────────────────────
+-- ── Swarm gamemode brain ──────────────────────────────────────────────────────
+-- Special PvE mode: the bot fields a nest/creepy army instead of the standard
+-- human tech tree. Still pays full price for every structure, egg and soldier
+-- out of the same honest economy (Foundries + CC income).
 
 local function swarmCaps(level: number): (number, number, number)
 	if level <= 1 then return 1, 0, 1
@@ -1407,38 +1338,47 @@ local function swarmCaps(level: number): (number, number, number)
 	else return 4, 3, 4 end
 end
 
-local function swarmStrategyTree(ai: any)
-	if ai.isNightmare then
-		local current = resourceManager.get(ai.player)
-		if current < 9999 then resourceManager.add(ai.player, 9999 - current) end
+local function ensureCC(ai: any): boolean
+	if ai.hasCC then return true end
+	local ok = buildingManager.placeForPlayer(ai.player, ai.base, "CommandCenter")
+	if not ok then return false end
+	ai.hasCC = true
+	-- Base parity with humans: default-mode players get 5 deposits seeded at
+	-- their base (deliverBaseForPlayer); lane-mode players get +600 resources
+	-- instead. The bot gets exactly the same start.
+	if ai.laneMode then
+		resourceManager.add(ai.player, 600)
+	elseif mineralManager and mineralManager.spawnDepositsForBase then
+		mineralManager.spawnDepositsForBase(Vector3.new(ai.base.X, 0, ai.base.Z), 5)
 	end
+	return true
+end
 
-	if btBuildCC(ai) ~= SUCCESS then return end
+local function swarmStrategyTree(ai: any)
+	if not ensureCC(ai) then return end
 
-	if not ai.swarmTechGranted then
+	if not ai.swarmTechGranted and researchManager then
 		ai.swarmTechGranted = true
-		grantTech(ai.player, "CreepyBlob")
+		researchManager.startForPlayer(ai.player, "", "CreepyBlob")
 	end
 
 	local maxNests, maxBlobs, maxMines = swarmCaps(ai.level)
 	if ai.isNightmare then maxNests += 2; maxBlobs += 2 end
 
-	local liveMines = countOwnedBuildings(ai.ownerStr, "Foundry")
+	local liveMines   = countOwnedBuildings(ai.ownerStr, "Foundry")
 	local foundryCost = Config.scaledBuildingCost(Config.FOUNDRY_COST, "Foundry", liveMines)
-	if liveMines < maxMines and canAfford(ai.player, foundryCost, ai.reserve) then
-		if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then
-			ai.builtMines += 1
-		end
+	if liveMines < maxMines and bank(ai) >= foundryCost + ai.reserve then
+		tryPlaceFoundry(ai)
 	end
 
 	local liveNests = countOwnedBuildings(ai.ownerStr, "LampreyNest")
-	if liveNests < maxNests and canAfford(ai.player, Config.LAMPREY_NEST_COST, ai.reserve) then
-		tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "LampreyNest", 15, 45)
+	if liveNests < maxNests and bank(ai) >= Config.LAMPREY_NEST_COST + ai.reserve then
+		tryPlaceAnywhere(ai, "LampreyNest", 15, 45)
 	end
 
 	local liveBlobs = countOwnedBuildings(ai.ownerStr, "CreepyBlob")
-	if liveBlobs < maxBlobs and canAfford(ai.player, Config.CREEPY_BLOB_COST, ai.reserve) then
-		tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "CreepyBlob", 15, 45)
+	if liveBlobs < maxBlobs and bank(ai) >= Config.CREEPY_BLOB_COST + ai.reserve then
+		tryPlaceAnywhere(ai, "CreepyBlob", 15, 45)
 	end
 
 	local currentCount = unitManager.getUnitCount(ai.player)
@@ -1448,14 +1388,10 @@ local function swarmStrategyTree(ai: any)
 	end
 end
 
-local function btProduceSwarm(ai: any)
-	if unitManager.getUnitCount(ai.player) >= ai.maxUnits then return end
-
+local function produceSwarm(ai: any)
 	for _, nestId in getOwnedBuildingIds(ai.ownerStr, "LampreyNest") do
-		-- Once the swarm can afford one, occasionally commit to a heavy Broodmother;
-		-- otherwise keep alternating the cheap Lamprey/Hagfish swarm.
 		local kind: string
-		if canAfford(ai.player, Config.BROODMOTHER_EGG_COST, ai.reserve) and math.random() < 0.18 then
+		if bank(ai) >= Config.BROODMOTHER_EGG_COST + ai.reserve and math.random() < 0.18 then
 			kind = "Broodmother"
 		else
 			ai.swarmEggToggle = not ai.swarmEggToggle
@@ -1464,287 +1400,102 @@ local function btProduceSwarm(ai: any)
 		local cost = if kind == "Hagfish" then Config.HAGFISH_EGG_COST
 			elseif kind == "Broodmother" then Config.BROODMOTHER_EGG_COST
 			else Config.LAMPREY_EGG_COST
-		if canAfford(ai.player, cost, ai.reserve) then
+		if bank(ai) >= cost + ai.reserve then
 			buildingManager.requestNestEgg(ai.player, nestId, kind)
 		end
 	end
-
 	for _, blobId in getOwnedBuildingIds(ai.ownerStr, "CreepyBlob") do
-		if canAfford(ai.player, Config.BLOB_SOLDIER_COST, ai.reserve) then
+		if bank(ai) >= Config.BLOB_SOLDIER_COST + ai.reserve then
 			buildingManager.requestBlobSoldier(ai.player, blobId)
 		end
 	end
 end
 
--- ── Trainer personality ──────────────────────────────────────────────────────
---[[
-	Teaching opponent. Mirrors the human's economy/army (with lag), probes in
-	partial-commitment waves with long cool-offs, gives ground when the player is
-	expanding, never wins, and concedes after the player kills ≥8 trainer units OR
-	destroys ≥2 trainer buildings (or after 7 minutes).
---]]
-
-local function trainerStrategyTree(ai: any)
-	ai.phase   = getPhase(ai)
-	ai.reserve = math.floor(ai.reserveBase * ai.archetype.reserveMult)
-
-	local playerMines    = buildingManager.getHumanBuildingCount("Foundry")
-	local playerBarracks = countHumanBuildings("Deployer")
-	local playerAllBld   = countHumanBuildings("any")
-	local playerArmy     = countHumanArmy()
-
-	ai.caps.h   = math.clamp(playerMines,    1, 2)
-	ai.caps.b   = math.clamp(playerBarracks, 1, 2)
-	ai.caps.t   = 1
-	ai.caps.r   = 0
-	ai.maxUnits = math.clamp(playerArmy + math.random(1, 2), 4, 14)
-
-	local playerBldGrew = playerAllBld > (ai.trainerLastBldCount or 0)
-	ai.trainerLastBldCount = playerAllBld
-	if playerBldGrew then
-		ai.trainerWaveInterval = math.max(ai.trainerWaveInterval, 70)
-	end
-
-	local ownBldNow = countAllOwnedBuildings(ai.ownerStr)
-	if ownBldNow < (ai.trainerLastOwnBldCount or 0) then
-		ai.trainerBldLost += (ai.trainerLastOwnBldCount - ownBldNow)
-	end
-	ai.trainerLastOwnBldCount = ownBldNow
-
-	if not ai.trainerConceded then
-		local elapsed = tick() - ai.startTime
-		if ai.trainerUnitsLost >= 8 or ai.trainerBldLost >= 2 or elapsed >= 420 then
-			ai.trainerConceded = true
-			ai.trainerMode     = "concede"
-			print("[Trainer] Conceding — unitsLost:", ai.trainerUnitsLost,
-				"bldLost:", ai.trainerBldLost, "elapsed:", math.floor(elapsed) .. "s")
-		end
-	end
-
-	if ai.trainerMode == "shadow" and ai.wavesSent >= 1 then ai.trainerMode = "press" end
-
-	if btBuildCC(ai) ~= SUCCESS then return end
-	btBuildFirstMine(ai)
-	btBuildFirstBarracks(ai)
-
-	if ai.trainerConceded then
-		local currentCount = unitManager.getUnitCount(ai.player)
-		if currentCount ~= ai.lastSquadCount then
-			rebuildSquads(ai); ai.lastSquadCount = currentCount
-		end
-		return
-	end
-
-	local liveMines    = countOwnedBuildings(ai.ownerStr, "Foundry")
-	local liveBarracks = countOwnedBuildings(ai.ownerStr, "Deployer")
-	local liveTurrets  = countOwnedBuildings(ai.ownerStr, "Turret")
-
-	if liveBarracks < math.min(ai.caps.b, ai.builtBarracks) then
-		if canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then ai.builtBarracks += 1 end
-		end
-	end
-	if liveMines < ai.caps.h then
-		if canAfford(ai.player, Config.FOUNDRY_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Foundry", 22, 48) then ai.builtMines += 1 end
-		end
-	end
-	if liveBarracks < ai.caps.b then
-		if canAfford(ai.player, Config.DEPLOYER_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Deployer", 15, 35) then
-				ai.builtBarracks = math.max(ai.builtBarracks, liveBarracks + 1)
-			end
-		end
-	end
-	if liveTurrets < 1 then
-		if canAfford(ai.player, Config.TURRET_COST, ai.reserve) then
-			if tryPlaceAnywhere(ai.player, ai.ownerStr, ai.base, "Turret", 20, 40) then
-				ai.builtTurrets = math.max(ai.builtTurrets, 1)
-			end
-		end
-	end
-
-	local currentCount = unitManager.getUnitCount(ai.player)
-	if currentCount ~= ai.lastSquadCount then
-		rebuildSquads(ai); ai.lastSquadCount = currentCount
-	end
-	computeComposition(ai)
-end
-
-local function btCommandArmyTrainer(ai: any)
-	local armySize = unitManager.getUnitCount(ai.player)
-	if armySize == 0 then return FAILURE end
-
-	local garrisonTarget = ai.baseUnderAttack and ai.base or snapGrid(ai.base + Vector3.new(0, 0, 18))
-	if #ai.garrison > 0 then unitManager.sendUnitsTo(ai.player, ai.garrison, garrisonTarget) end
-
-	if ai.trainerConceded then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
-		if #ai.garrison  > 0 then unitManager.sendUnitsTo(ai.player, ai.garrison, ai.base) end
-		ai.combatPhase = "gather"
-		return SUCCESS
-	end
-
-	if ai.baseUnderAttack and ai.combatPhase ~= "retreat" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
-		ai.combatPhase = "retreat"; ai.phaseTimer = 0
-		ai.retreatDuration  = math.random(20, 35)
-		ai.trainerWaveTimer = 0
-		return SUCCESS
-	end
-
-	ai.phaseTimer += ai.reactionInterval
-
-	if ai.combatPhase == "gather" then
-		ai.trainerWaveTimer += ai.reactionInterval
-		local pts = ai.explorePoints
-		local nearPts: { Vector3 } = {}
-		for i = 1, math.min(8, #pts) do table.insert(nearPts, pts[i]) end
-		if #ai.mainForce > 0 and #nearPts > 0 then
-			ai.exploreTimer += ai.reactionInterval
-			if ai.exploreTimer >= 10 then ai.exploreTimer = 0; ai.exploreIdx = (ai.exploreIdx % #nearPts) + 1 end
-			fanAcrossMap(ai, ai.mainForce, nearPts, 3)
-		end
-
-		local pastPeace = (not ai.aggressionUnlockTime) or tick() >= ai.aggressionUnlockTime
-		if pastPeace and ai.trainerWaveTimer >= ai.trainerWaveInterval and armySize >= ai.minAtk and ai.priorityTarget then
-			local target = pickAttackTarget(ai)
-			if target then
-				ai.attackTarget   = target
-				ai.rallyPoint     = approachPoint(target, math.random() * math.pi * 2, 60 + math.random(0, 20))
-				ai.combatPhase    = "staging"; ai.phaseTimer = 0
-				ai.stageDuration  = math.random(5, 10)
-				ai.attackDuration = math.random(10, 16)
-				ai.retreatDuration = math.random(20, 40)
-				ai.trainerAttackStartArmy = armySize
-			end
-		end
-
-	elseif ai.combatPhase == "staging" then
-		if #ai.mainForce > 0 and ai.rallyPoint then sendSpread(ai.player, ai.mainForce, ai.rallyPoint) end
-		if not ai.attackTarget then
-			ai.combatPhase = "gather"; ai.phaseTimer = 0
-		elseif ai.phaseTimer >= ai.stageDuration then
-			ai.combatPhase = "attack"; ai.phaseTimer = 0; ai.wavesSent += 1
-		end
-
-	elseif ai.combatPhase == "attack" then
-		local target = ai.attackTarget or ai.priorityTarget
-		if not target then ai.combatPhase = "retreat"; ai.phaseTimer = 0; return SUCCESS end
-
-		local n           = #ai.mainForce
-		local commitRatio = 0.50 + math.random() * 0.10
-		local commitCount = math.max(1, math.floor(n * commitRatio))
-		local commitChunk, holdChunk = {}, {}
-		for i, id in ai.mainForce do
-			if i <= commitCount then table.insert(commitChunk, id) else table.insert(holdChunk, id) end
-		end
-		sendSpread(ai.player, commitChunk, target)
-		if ai.rallyPoint and #holdChunk > 0 then sendSpread(ai.player, holdChunk, ai.rallyPoint) end
-
-		if ai.phaseTimer >= ai.attackDuration then
-			ai.trainerUnitsLost += math.max(0, ai.trainerAttackStartArmy - armySize)
-			ai.combatPhase = "retreat"; ai.phaseTimer = 0
-		end
-
-	elseif ai.combatPhase == "retreat" then
-		if #ai.mainForce > 0 then sendSpread(ai.player, ai.mainForce, ai.base) end
-		if ai.phaseTimer >= ai.retreatDuration then
-			ai.combatPhase = "gather"; ai.phaseTimer = 0; ai.attackTarget = nil; ai.rallyPoint = nil
-			local playerArmy    = countHumanArmy()
-			local playerGrowing = playerArmy > (ai.trainerLastPlayerArmy or 0)
-			ai.trainerWaveInterval   = playerGrowing and math.random(60, 90) or math.random(40, 65)
-			ai.trainerLastPlayerArmy = playerArmy
-			ai.trainerWaveTimer      = 0
-		end
-	end
-
-	return SUCCESS
-end
-
-local function trainerReactionTree(ai: any)
-	btUpdateVision(ai)
-	if not ai.trainerConceded then btManageBonfires(ai) end
-	btCommandArmyTrainer(ai)
-end
-
 -- ── Top-level trees ───────────────────────────────────────────────────────────
 
 local function strategyTree(ai: any)
+	ai.reserve = math.floor(ai.reserveBase * ai.style.reserveMult)
 	if ai.swarm then swarmStrategyTree(ai); return end
-	if ai.personality == "trainer" then trainerStrategyTree(ai); return end
-	if ai.isNightmare then applyNightmareScaling(ai) end
 
-	if btBuildCC(ai) ~= SUCCESS then return end
+	if not ensureCC(ai) then return end
 
-	ai.phase   = getPhase(ai)
-	ai.reserve = math.floor(ai.reserveBase * ai.archetype.reserveMult)
+	ai.phase = getPhase(ai)
 
-	planEconomy(ai)
+	planStructures(ai)
 
 	local count = unitManager.getUnitCount(ai.player)
 	if count ~= ai.lastSquadCount then rebuildSquads(ai); ai.lastSquadCount = count end
 
 	computeComposition(ai)
-	planTech(ai)
+	planResearch(ai)
+	planEngineering(ai)
+	planBonfires(ai)
+	planSnipers(ai)
 	planTurretUpgrades(ai)
+	planMonument(ai)
 end
 
 local function reactionTree(ai: any)
+	senseWorld(ai)
 	if ai.swarm then
-		btUpdateVision(ai); btProduceSwarm(ai); btCommandArmy(ai); return
+		produceSwarm(ai)
 	end
-	if ai.personality == "trainer" then trainerReactionTree(ai); return end
-	if ai.isNightmare then applyNightmareScaling(ai) end
-	btUpdateVision(ai)
-	btManageBonfires(ai)
-	btCommandArmy(ai)
+	commandArmy(ai)
 end
 
 -- ── Identity assignment ───────────────────────────────────────────────────────
 
 local function applyLevel(ai: any, level: number)
 	local L = LEVELS[math.clamp(level, 1, 5)]
-	ai.maxUnits        = L.maxUnits
-	ai.caps            = { h = L.hcap, b = L.bcap, t = L.tcap, r = L.rcap }
-	ai.reserveBase     = L.reserve
-	ai.reserve         = L.reserve
 	ai.strategyInterval = L.strat
 	ai.reactionInterval = L.react
-	ai.visionRadius    = L.vision
-	ai.enemyMemory     = L.mem
-	ai.minAtk          = L.minAtk
-	ai.techTier        = L.techTier
-	ai.competence      = L.competence
-	ai.firstStrike     = L.firstStrike
-	-- How far the bot will Empower its bonfires (capacity scaling). Gentle: Easy never
-	-- upgrades, Medium tops out at +2, up to +4 at the highest tier.
-	ai.bonfireEmpowerCap = math.max(0, level - 1)
+	ai.mem              = L.mem
+	ai.micro            = L.micro
+	ai.spend            = L.spend
+	ai.scoutCount       = L.scouts
+	ai.harassEnabled    = L.harass
+	ai.minAtk           = L.minAtk
+	ai.ambition         = L.ambition
+	ai.empowerCap       = L.empower
+	ai.techDepth        = L.techDepth
+	ai.firstStrike      = L.firstStrike
+	ai.monumentAmbition = L.monument
+	ai.reserveBase      = 30 + level * 10
+	ai.pacingExempt     = false
+
+	-- Nightmare: a flawless level-5 brain on a relentless clock. It thinks and
+	-- spends faster and never hesitates — but its bank, prices, timers, and
+	-- vision are exactly a player's.
+	if ai.isNightmare then
+		ai.strategyInterval = 3.0
+		ai.reactionInterval = 0.6
+		ai.micro            = 1.0
+		ai.spend            = 1.0
+		ai.ambition         = 1.5
+		ai.empowerCap       = Config.DEPLOYER_UPGRADE_MAX_LEVEL
+		ai.techDepth        = 9
+		ai.firstStrike      = 60
+		ai.monumentAmbition = true
+		ai.reserveBase      = 20
+		ai.pacingExempt     = true
+	end
 end
 
--- When the bot is first allowed to commit its main army, and when the harassment
--- squad may begin hunting. Re-anchored to `startTime` so resets pace fresh. The
--- opening before this is deliberately quiet: scouts lurk, the army holds home.
+-- When the bot first commits its main army, and when harassment may begin.
+-- The opening before this is deliberately quiet: scouts lurk, the army holds.
 local function applyAggressionWindow(ai: any)
-	local fs = ai.firstStrike or 140
-	-- ±15% jitter so the first push never lands on a predictable clock.
-	fs = fs * (0.85 + math.random() * 0.30)
+	local fs = (ai.firstStrike or 140) * (0.85 + math.random() * 0.30)
 	ai.aggressionUnlockTime = ai.startTime + fs
 	ai.harassUnlockTime     = ai.startTime + fs * 0.55
 end
 
-local function assignArchetype(ai: any)
-	local arche
-	if ai.swarm then arche = ARCHETYPES.Swarm
-	elseif ai.personality == "trainer" then arche = ARCHETYPES.Trainer
-	elseif ai.personality == "territorial" then arche = ARCHETYPES.Defender
-	elseif ai.personality == "waves" then arche = ARCHETYPES.Waves
-	elseif ai.personality == "nightmare" then arche = ARCHETYPES[pickFrom(NIGHTMARE_ROLL)]
-	else arche = ARCHETYPES[pickFrom(BALANCED_ROLL)] end
-
-	ai.archetype     = arche
-	ai.engageRatio   = arche.engageRatio
-	ai.garrisonRatio = arche.garrison
+local function assignStyle(ai: any)
+	if ai.swarm then ai.style = STYLES.Swarm
+	elseif ai.personality == "trainer" then ai.style = STYLES.Trainer
+	elseif ai.personality == "territorial" then ai.style = STYLES.Fortress
+	elseif ai.personality == "waves" then ai.style = STYLES.Waves
+	elseif ai.personality == "nightmare" then ai.style = STYLES[pickFrom(NIGHTMARE_ROLL)]
+	else ai.style = STYLES[pickFrom(BALANCED_ROLL)] end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -1759,14 +1510,23 @@ function AIManager.setResearchManager(rm: any)
 	researchManager = rm
 end
 
+function AIManager.setMineralManager(mm: any)
+	mineralManager = mm
+end
+
 function AIManager.setSwarmMode(on: boolean)
 	swarmMode = on and true or false
 end
 
+-- Lane mode gives bots an explicit corridor base and extra starting resources (no
+-- deposits are seeded down the lane); every other mode has them claim a perimeter
+-- spot and mine like a player.
+function AIManager.setLaneMode(on: boolean)
+	laneMode = on and true or false
+end
+
 -- Permanently knock a bot out of the current match (its CC was destroyed). It stops
--- thinking/rebuilding and idles until the next round's resetAllBots respawns it. Used
--- so a player can actually wipe out every enemy and be declared the winner, instead of
--- defeated AIs instantly rebuilding a new Command Center.
+-- thinking/rebuilding and idles until the next round's resetAllBots respawns it.
 function AIManager.eliminateBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end
@@ -1774,12 +1534,12 @@ function AIManager.eliminateBot(userId: number)
 	ai.hasCC      = false
 end
 
--- Every AI bot that took part in this match (id + a readable name), for the end-screen
--- performance graph. Includes eliminated bots so their kill curve still shows.
+-- Every AI bot that took part in this match (id + a readable name), for the
+-- end-screen performance graph.
 function AIManager.getBotsForGraph(): { { userId: number, name: string } }
 	local out = {}
 	for userId, ai in botByUserId do
-		local label = (ai.archetype and ai.archetype.label) or ai.personality or "Bot"
+		local label = (ai.style and ai.style.label) or ai.personality or "Bot"
 		out[#out + 1] = { userId = userId, name = "AI " .. tostring(label) }
 	end
 	return out
@@ -1789,31 +1549,32 @@ function AIManager.resetBot(userId: number)
 	local ai = botByUserId[userId]
 	if not ai then return end
 
-	-- Re-roll level + archetype so a rebuilt bot plays fresh.
+	-- Re-roll level knobs + style so a rebuilt bot plays fresh.
 	applyLevel(ai, ai.level)
-	assignArchetype(ai)
+	assignStyle(ai)
+
+	-- Hold this bot's ground on the spawn ring. The reservation list was just
+	-- cleared for the new match, so re-register it or the next commander to claim a
+	-- spot could be handed the ground this bot is about to rebuild on.
+	SpawnPoints.reserve(ai.base)
 
 	ai.hasCC             = false
-	ai.eliminated        = false   -- fresh round → the bot is back in play
+	ai.eliminated        = false
 	ai.swarmTechGranted  = false
 	ai.swarmEggToggle    = false
-	ai.builtMines        = 0
-	ai.builtBarracks     = 0
-	ai.builtTurrets      = 0
-	ai.builtRelays       = 0
-	ai.trainedSoldiers   = 0
-	ai.trainedTanks      = 0
+	ai.monumentBuilt     = false
 	ai.totalTrained      = 0
 	ai.bonfireType       = {}
+	ai.bonfireRotate     = 0
+	ai.intelUnits        = {}
+	ai.intelBuildings    = {}
 	ai.lastKnownEnemyPos = nil
-	ai.lastEnemySeenTick = 0
 	ai.priorityTarget    = nil
 	ai.enemyTurretCount  = 0
 	ai.enemyUnitCount    = 0
 	ai.enemyArmyValue    = 0
 	ai.baseUnderAttack   = false
 	ai.enemyComp         = {}
-	ai.enemyHarvesters   = {}
 	ai.compDemand        = {}
 	ai.mainForce         = {}
 	ai.garrison          = {}
@@ -1841,77 +1602,36 @@ function AIManager.resetBot(userId: number)
 	ai.stageDuration     = 12
 	ai.attackDuration    = 25
 	ai.retreatDuration   = 15
-	ai.waveTimer         = 0
+	ai.atkCooldownTimer  = 0
+	ai.rolledCooldown    = nil
 	ai.wavesSent         = 0
 	ai.strategyTimer     = ai.strategyInterval
 	ai.reactionTimer     = ai.reactionInterval
 	ai.startTime         = tick()
 	applyAggressionWindow(ai)
-	ai.trainerMode            = "shadow"
-	ai.trainerWaveTimer       = 0
-	ai.trainerWaveInterval    = 60
-	ai.trainerUnitsLost       = 0
-	ai.trainerBldLost         = 0
-	ai.trainerAttackStartArmy = 0
-	ai.trainerLastBldCount    = 0
-	ai.trainerLastOwnBldCount = 0
-	ai.trainerLastPlayerArmy  = 0
-	ai.trainerConceded        = false
-	resourceManager.add(ai.player, Config.STARTING_RESOURCES)
-	print(string.format("[AIManager] Bot %d reset → %s", userId, ai.archetype.label))
+
+	-- Fresh match, fresh slate — exactly what a rejoining player gets.
+	resourceManager.reset(ai.player)
+	if researchManager and researchManager.resetPlayer then
+		researchManager.resetPlayer(ai.player)
+	end
+	print(string.format("[AIManager] Bot %d reset → %s lv%d", userId, ai.style.label, ai.level))
 end
 
 function AIManager.resetAllBots()
-	takenBaseIdx = {}
 	for userId in botByUserId do
 		AIManager.resetBot(userId)
 	end
 end
 
-local function pickBestBase(): (Vector3, number)
-	local existingCCPositions: { Vector3 } = {}
-	local buildingsF = workspace:FindFirstChild("Buildings")
-	if buildingsF then
-		for _, model in buildingsF:GetChildren() do
-			local tv = model:FindFirstChild("BuildingType")
-			if tv and tv.Value == "CommandCenter" then
-				local base = model:FindFirstChild("Base") :: BasePart?
-				if base then table.insert(existingCCPositions, Vector3.new(base.Position.X, 0, base.Position.Z)) end
-			end
-		end
-	end
-	for idx, taken in takenBaseIdx do
-		if taken then
-			local c = AI_BASES[idx]
-			table.insert(existingCCPositions, Vector3.new(c.X, 0, c.Z))
-		end
-	end
-
-	local bestIdx: number = -1
-	local bestScore = -1
-	for i, corner in AI_BASES do
-		if takenBaseIdx[i] then continue end
-		local cornerXZ = Vector3.new(corner.X, 0, corner.Z)
-		local minDist = math.huge
-		for _, ccPos in existingCCPositions do
-			local d = (cornerXZ - ccPos).Magnitude
-			if d < minDist then minDist = d end
-		end
-		if #existingCCPositions == 0 then minDist = math.huge end
-		if minDist > bestScore then bestScore = minDist; bestIdx = i end
-	end
-	if bestIdx == -1 then
-		for i in AI_BASES do if not takenBaseIdx[i] then bestIdx = i; break end end
-	end
-	if bestIdx == -1 then bestIdx = ((aiCounter - 1) % #AI_BASES) + 1 end
-
-	takenBaseIdx[bestIdx] = true
-	return AI_BASES[bestIdx], bestIdx
-end
-
-function AIManager.spawnAI(personality: string, level: number, baseOverride: Vector3?): boolean
+-- `race` ("Humans" | "Hollowed") comes from the lobby's per-AI card. Hollowed
+-- bots field the nest/creature army (the swarm brain) behind the black spike
+-- command center; Humans (default) play the bonfire tech tree. The Swarm
+-- GAMEMODE still forces every bot Hollowed regardless of the card.
+function AIManager.spawnAI(personality: string, level: number, baseOverride: Vector3?, race: string?): boolean
 	personality = tostring(personality):lower()
 	level       = math.clamp(math.floor(tonumber(level) or 3), 1, 5)
+	local hollowed = swarmMode or race == "Hollowed"
 
 	if not VALID_PERSONALITIES[personality] then
 		warn("[AIManager] Unknown personality:", personality, "— use balanced / territorial / waves / nightmare / trainer")
@@ -1919,14 +1639,10 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 	end
 
 	aiCounter += 1
-	local base: Vector3
-	local colorIdx: number
-	if baseOverride then
-		colorIdx = ((aiCounter - 1) % #AI_COLORS) + 1
-		base     = baseOverride
-	else
-		base, colorIdx = pickBestBase()
-	end
+	-- Lane mode passes an explicit corridor base; otherwise the bot claims a random
+	-- perimeter spot, spaced away from every other commander (SpawnPoints).
+	local base     = baseOverride or SpawnPoints.claim()
+	local colorIdx = ((aiCounter - 1) % #AI_COLORS) + 1
 
 	local team          = Instance.new("Team")
 	team.TeamColor      = AI_COLORS[colorIdx]
@@ -1939,10 +1655,14 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		Team      = team,
 		Name      = "AI_" .. aiCounter,
 		Parent    = workspace,
-		isSwarm   = swarmMode,   -- swarm-mode AIs get a distinct black spike command center
+		isSwarm   = hollowed,   -- Hollowed AIs get the black spike command center + nest gates
 	}
 
-	resourceManager.add(aiPlayer, Config.STARTING_RESOURCES)
+	-- Same wallet + research ledger a joining player gets.
+	resourceManager.reset(aiPlayer)
+	if researchManager and researchManager.registerBotPlayer then
+		researchManager.registerBotPlayer(aiPlayer)
+	end
 
 	local ai: any = {
 		player      = aiPlayer,
@@ -1951,34 +1671,30 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		personality = personality,
 		level       = personality == "nightmare" and 5 or personality == "trainer" and 1 or level,
 		isNightmare = personality == "nightmare",
+		laneMode    = laneMode,
 
-		swarm            = swarmMode,
+		swarm            = hollowed,
 		swarmTechGranted = false,
 		swarmEggToggle   = false,
 
-		hasCC      = false,
-		eliminated = false,   -- true once this bot's CC is destroyed mid-match; stays down until the next round
+		hasCC         = false,
+		eliminated    = false,
+		monumentBuilt = false,
+		totalTrained  = 0,
 
-		builtMines    = 0,
-		builtBarracks = 0,
-		builtTurrets  = 0,
-		builtRelays   = 0,
+		bonfireType   = {},
+		bonfireRotate = 0,
 
-		trainedSoldiers = 0,
-		trainedTanks    = 0,
-		totalTrained    = 0,
-
+		intelUnits        = {},
+		intelBuildings    = {},
 		lastKnownEnemyPos = nil,
-		lastEnemySeenTick = 0,
 		priorityTarget    = nil,
-
-		enemyTurretCount = 0,
-		enemyUnitCount   = 0,
-		enemyArmyValue   = 0,
-		baseUnderAttack  = false,
-		enemyComp        = {},
-		enemyHarvesters  = {},
-		compDemand       = {},
+		enemyTurretCount  = 0,
+		enemyUnitCount    = 0,
+		enemyArmyValue    = 0,
+		baseUnderAttack   = false,
+		enemyComp         = {},
+		compDemand        = {},
 
 		mainForce = {},
 		garrison  = {},
@@ -2013,40 +1729,31 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 		stageDuration    = 12,
 		attackDuration   = 25,
 		retreatDuration  = 15,
-		waveTimer        = 0,
+		atkCooldownTimer = 0,
+		rolledCooldown   = nil,
 		wavesSent        = 0,
 
+		reserve   = 0,
 		startTime = tick(),
-
-		trainerMode            = "shadow",
-		trainerWaveTimer       = 0,
-		trainerWaveInterval    = 60,
-		trainerUnitsLost       = 0,
-		trainerBldLost         = 0,
-		trainerAttackStartArmy = 0,
-		trainerLastBldCount    = 0,
-		trainerLastOwnBldCount = 0,
-		trainerLastPlayerArmy  = 0,
-		trainerConceded        = false,
 	}
 
 	applyLevel(ai, ai.level)
-	assignArchetype(ai)
+	assignStyle(ai)
 	applyAggressionWindow(ai)
 
 	ai.strategyTimer = ai.strategyInterval
 	ai.reactionTimer = ai.reactionInterval
 	ai.scoutIdx      = math.floor(#ai.explorePoints * 0.6) + 1
 
-	team.Name = string.format("AI [%s/%s lv%d] %d", personality, ai.archetype.label, ai.level, aiCounter)
+	team.Name = string.format("AI [%s/%s lv%d] %d", personality, ai.style.label, ai.level, aiCounter)
 
 	botByUserId[aiPlayer.UserId] = ai
 
 	task.spawn(function()
 		while true do
 			local dt = task.wait(0.5)
-			-- Eliminated bots idle (they don't rebuild a CC) until the next round's
-			-- resetAllBots clears the flag and respawns them fresh.
+			-- Eliminated bots idle (they don't rebuild a CC) until the next
+			-- round's resetAllBots clears the flag and respawns them fresh.
 			if ai.eliminated then continue end
 			ai.strategyTimer += dt
 			ai.reactionTimer += dt
@@ -2065,7 +1772,7 @@ function AIManager.spawnAI(personality: string, level: number, baseOverride: Vec
 	end)
 
 	print(string.format("[AIManager] Spawned %s AI (%s) lv%d #%d at %s",
-		personality, ai.archetype.label, ai.level, aiCounter, tostring(base)))
+		personality, ai.style.label, ai.level, aiCounter, tostring(base)))
 	return true
 end
 

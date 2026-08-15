@@ -1520,7 +1520,7 @@ function HUD.setHasResearch(fn: (string) -> boolean)
 end
 
 function HUD.setUpgradesVisible(_visible: boolean)
-	-- Upgrades button is hidden for now (its spot is used by the camera [R] button).
+	-- Upgrades button is hidden for now (its spot is used by the camera [1] button).
 	if upgradeMapBtn then upgradeMapBtn.Visible = false end
 end
 

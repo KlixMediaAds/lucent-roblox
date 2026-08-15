@@ -28,7 +28,6 @@ local WatcherBody    = require(script:WaitForChild("WatcherBody"))
 local NeedlerBody    = require(script:WaitForChild("NeedlerBody"))
 local MotherEggBody  = require(script:WaitForChild("MotherEggBody"))
 local FabricatorArms = require(script:WaitForChild("FabricatorArms"))
-local SwarmGrass = require(script:WaitForChild("SwarmGrass"))
 local FoundryRotor   = require(script:WaitForChild("FoundryRotor"))
 local TurretPanel    = require(script:WaitForChild("TurretPanel"))
 local BlobPanel      = require(script:WaitForChild("BlobPanel"))
@@ -38,6 +37,7 @@ local DeployerPanel  = require(script:WaitForChild("DeployerPanel"))
 local TestPanel      = require(script:WaitForChild("TestPanel"))
 local SurvivorPanel  = require(script:WaitForChild("SurvivorPanel"))
 local MotherPanel    = require(script:WaitForChild("MotherPanel"))
+local MotherInject   = require(script:WaitForChild("MotherInject"))
 local LeechPanel     = require(script:WaitForChild("LeechPanel"))
 local EmbryoPanel    = require(script:WaitForChild("EmbryoPanel"))
 local EggPanel       = require(script:WaitForChild("EggPanel"))
@@ -47,6 +47,7 @@ local CCMobilePanel  = require(script:WaitForChild("CCMobilePanel"))
 local CommandCard    = require(script:WaitForChild("CommandCard"))
 local Jumpscare      = require(script:WaitForChild("Jumpscare"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
+local MotherLegs     = require(script:WaitForChild("MotherLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
 local ScoutManager   = require(script:WaitForChild("ScoutManager"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
@@ -233,6 +234,10 @@ end
 
 local function buildCCMoveGhost()
 	destroyCCMoveGhost()
+	-- The Hollowed Mother walks as a creature under her own power, so she gets no
+	-- placement hologram trailing the cursor — you order her around, you don't
+	-- re-site a structure.
+	if isHollowedLocal() then return end
 	local color = Players.LocalPlayer.TeamColor
 	local ccSz  = Config.COMMAND_CENTER_SIZE
 	local halfH = ccSz.Y / 2
@@ -254,23 +259,6 @@ local function buildCCMoveGhost()
 	base.CastShadow     = false
 	base.Parent         = m
 	m.PrimaryPart       = base
-
-	-- Hollowed Mother: ghostly version of the brood-queen creature (shared builder
-	-- keeps it matching the placed Mother), not the Human Fabricator Core rig.
-	if isHollowedLocal() then
-		base.Transparency = 1
-		-- Match the placed Mother's 180° flip (head faces +Z / the camera).
-		UnitVisuals.buildMotherDecor(m, CFrame.new(0, 0, 0) * CFrame.Angles(0, math.pi, 0), color, false)
-		for _, d in m:GetDescendants() do
-			if d:IsA("BasePart") and d ~= base then
-				d.Transparency = math.max(d.Transparency, 0.5)
-				d.CanQuery     = false
-			end
-		end
-		m.Parent    = workspace
-		ccMoveGhost = m
-		return
-	end
 
 	-- Fabricator Core decor (shared with the live CC), made ghostly
 	UnitVisuals.buildCommandCenterDecor(m, CFrame.new(0, 0, 0), color, false)
@@ -310,8 +298,11 @@ local function buildCCMoveGhost()
 	ccMoveGhost = m
 end
 
+-- Selection/drag-select is off while a ghost is being placed, and while the Mother is
+-- waiting for the player to click the ground for an injection, since that click belongs to
+-- the injection, not to the selection box.
 local function isBlocked(): boolean
-	return BuildingPlacer.isActive()
+	return BuildingPlacer.isActive() or MotherInject.isAiming()
 end
 
 local function startGame(gamemode: string?)
@@ -332,7 +323,6 @@ WatcherBody.init(workspace.CurrentCamera)
 NeedlerBody.init(workspace.CurrentCamera)
 MotherEggBody.init(workspace.CurrentCamera)
 FabricatorArms.init(workspace.CurrentCamera)
-SwarmGrass.init(workspace.CurrentCamera)
 FoundryRotor.init(workspace.CurrentCamera)
 BuildingPlacer.init(Network, CameraModule)
 BuildingPlacer.setResourceGetter(function() return currentResources end)
@@ -496,6 +486,7 @@ TestPanel.init(Network,
 	function() HUD.hideBuildPage() end)
 SurvivorPanel.init(Network, function() return currentResources end)
 MechLegs.init(workspace.CurrentCamera)
+MotherLegs.init(workspace.CurrentCamera)
 FogManager.init(localUserId)
 MiniMap.init(CameraModule, localUserId)
 ScoutManager.init(Network, CameraModule, FogManager, MiniMap)
@@ -510,12 +501,23 @@ local function ownCCBase(): BasePart?
 	return model and model:FindFirstChild("Base") :: BasePart? or nil
 end
 
+-- INJECT: the card hands the press to MotherInject, which runs the ground-targeting
+-- mode and fires the request; the card flips to its "pick a spot" face while it's up.
+-- It reads the Mother's base off ownCCBase to strike each queued mark as she reaches it,
+-- which is why this wiring sits below that helper rather than up with the other panels.
+MotherInject.init(Network, CameraModule, function(aiming: boolean)
+	MotherPanel.setAiming(aiming)
+end, ownCCBase, function() return currentResources end)
+MotherPanel.onInject(function(ccId: string)
+	MotherInject.begin(ccId)
+end)
+
 MiniMap.onReturnClicked(function()
 	local base = ownCCBase()
 	if base then CameraModule.returnToBase(base.Position) end
 end)
 
--- The [R] camera button dims while the view is already "home" — near the CC and at
+-- The [1] camera button dims while the view is already "home" — near the CC and at
 -- default rotation (returning would do nothing) — and brightens once you pan/rotate.
 RunService.RenderStepped:Connect(function()
 	local base = ownCCBase()
@@ -692,16 +694,16 @@ end
 
 -- ── Command Center build page (command-card grid) ─────────────────────────────
 -- Build options live on the CC's command-card page, shown when the player selects
--- their CC or presses [Space]. (CC mobility action is disabled for now.)
+-- their CC. Humans also toggle it with [Space]; the Hollowed Mother's card is their
+-- default card instead (see the fallback below), so it needs no key.
 local ccPageId: string? = nil
 
 local function showCCBuildPage(ccId: string?)
 	if not ownCCId then return end
 	ccPageId = ccId or ownCCId
 	if isHollowedLocal() then
-		-- Hollowed: the CC is the Mother — show its 2×2 option grid instead of the
-		-- Human build page. Feed the current uproot state so it shows Uproot/Downroot.
-		MotherPanel.setMobileState(ccIsMobile)
+		-- Hollowed: the CC is the Mother, so show her single INJECT button instead of the
+		-- Human build page.
 		MotherPanel.show(ccPageId :: string)
 	else
 		HUD.showBuildPage()
@@ -717,12 +719,23 @@ local function hideCCBuildPage()
 	end
 end
 
--- [Space]: toggle the Command Center (Mother, for Hollowed) options on the command card.
+-- The Mother's card is the Hollowed player's resting state: whenever the command grid
+-- falls empty (nothing selected), it fills back in with her INJECT button instead of
+-- the "[Space] for menu" prompt. Humans keep the prompt and the [Space] toggle.
+local function showDefaultCommandCard()
+	if not ownCCId or not isHollowedLocal() then return end
+	if #UnitController.getSelected() > 0 then return end
+	if #UnitController.getSelectedBuildingIds() > 0 then return end
+	MotherPanel.show(ownCCId :: string)
+end
+CommandCard.setFallback(showDefaultCommandCard)
+
+-- [Space]: toggle the Human Command Center's build options on the command card.
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.KeyCode ~= Enum.KeyCode.Space then return end
-	local shown = isHollowedLocal() and MotherPanel.isVisible() or HUD.isBuildPageShown()
-	if shown then
+	if isHollowedLocal() then return end   -- the Mother's card is always up
+	if HUD.isBuildPageShown() then
 		hideCCBuildPage()
 	else
 		hideBuildingPanels()
@@ -736,12 +749,39 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 	if input.KeyCode == Enum.KeyCode.F then Jumpscare.trigger() end
 end)
 
--- [R] shortcut: recenter the camera on the Command Center (the map's [R] button).
+-- [1] recenter the camera on the Command Center (the map's [1] button).
+-- [1][1] in quick succession LOCKS the camera to it, so it trails the Mother as she
+-- walks instead of needing to be chased. The lock releases the moment the player
+-- steers for themselves — WASD, screen-edge scroll, rotate, middle-drag, or a
+-- minimap click (which jumps focus and drops any follow).
+-- While the build page is open the number row belongs to its build slots, so the
+-- recenter stands down and lets HUD's [1] place the first building instead.
+local HOME_DOUBLE_TAP = 0.4
+local lastHomeTap     = 0
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then return end
+	if input.KeyCode ~= Enum.KeyCode.One then return end
+	if CommandCard.isOwner("build") then return end
+	local base = ownCCBase()
+	if not base then return end
+	local now = os.clock()
+	if now - lastHomeTap <= HOME_DOUBLE_TAP then
+		lastHomeTap = 0   -- consumed, so a third tap starts a fresh pair
+		CameraModule.followPart(base, true)
+	else
+		lastHomeTap = now
+		CameraModule.returnToBase(base.Position)
+	end
+end)
+
+-- [R] INJECT: same action as the Mother card's tile, so the ground-targeting mode can
+-- be armed without reaching for the card. Only while her card is the one on screen.
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.KeyCode ~= Enum.KeyCode.R then return end
-	local base = ownCCBase()
-	if base then CameraModule.returnToBase(base.Position) end
+	if not MotherPanel.isVisible() then return end
+	if MotherInject.isAiming() then return end
+	MotherPanel.triggerInject()
 end)
 
 -- ── Command Center mode ───────────────────────────────────────────────────────
@@ -772,6 +812,7 @@ local function enterCCMode()
 	BlobPanel.hide()
 	LampreyNestPanel.hide()
 	CCMobilePanel.hide()
+	MotherInject.cancel()
 	MotherPanel.hide()
 	LeechPanel.hide()
 	EmbryoPanel.hide()
@@ -838,11 +879,43 @@ local function onOwnCCPlaced(id: string, pos: Vector3)
 	if ownCCId == id then return end
 	ownCCId = id
 	updateIncomeReadout()
+	-- The Hollowed Mother spawns uprooted, and that CCMobileSync can land before this
+	-- handler exists, so read the state off the model rather than trusting the event.
+	do
+		local bf    = workspace:FindFirstChild("Buildings")
+		local model = bf and bf:FindFirstChild(id)
+		local mv    = model and model:FindFirstChild("IsMobile") :: BoolValue?
+		if mv and mv.Value then
+			ccIsMobile = true
+			BuildingPlacer.setCCMobile(true)
+			buildCCMoveGhost()
+			if isHollowedLocal() and model and model:IsA("Model") then
+				MotherLegs.attach(id, model)
+			end
+		end
+	end
 	-- CC is up: reveal the build + research tray.
 	HUD.setCommandCenterMode(false)
 	Tutorial.notify("cc_placed")
 	CameraModule.setFocus(pos)
+	-- The game opens locked onto our Command Center, so a walking Hollowed Mother is
+	-- trailed by default instead of having to be chased. Same lock as [1][1]: it
+	-- releases the first time the player steers (WASD / QE / middle-drag / edge pan).
+	-- The base is resolved off the model because the placement event can beat the
+	-- model's replication, and setFocus's teleport hold keeps the camera from
+	-- snapping early once the follow is set.
+	task.spawn(function()
+		local bf    = workspace:FindFirstChild("Buildings") or workspace:WaitForChild("Buildings", 10)
+		local model = bf and bf:WaitForChild(id, 10)
+		local base  = model and model:WaitForChild("Base", 5) :: BasePart?
+		if base and ownCCId == id then
+			CameraModule.followPart(base, true)
+		end
+	end)
 	FogManager.forceRefresh()
+	-- Hollowed: the Mother's card is the resting state of the command grid, so put it up
+	-- the moment she exists rather than waiting for a selection to come and go.
+	showDefaultCommandCard()
 	-- Upgrades button stays hidden until the player places their first Barracks.
 end
 
@@ -1170,24 +1243,27 @@ Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boo
 	if ccId ~= ownCCId then return end
 	ccIsMobile = isMobile
 	CCMobilePanel.setMobileState(isUnlocked, isMobile)
-	MotherPanel.setMobileState(isMobile)   -- flips the Mother card between Uproot / Downroot
 	BuildingPlacer.setCCMobile(isMobile)
 	if isMobile then
 		buildCCMoveGhost()
-		-- The Hollowed Mother is a raw spike, not a mechanical rig — no MechLegs for it.
-		if not isHollowedLocal() then
-			task.spawn(function()
-				local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
-				if not bf then return end
-				local model = bf:WaitForChild(ccId, 10)
-				if not model then return end
+		task.spawn(function()
+			local bf = workspace:WaitForChild("Buildings", 10) :: Folder?
+			if not bf then return end
+			local model = bf:WaitForChild(ccId, 10) :: Model?
+			if not model then return end
+			-- The Mother walks on her own grown legs, so those get animated in place;
+			-- the Human core sprouts a mechanical rig it doesn't otherwise have.
+			if isHollowedLocal() then
+				MotherLegs.attach(ccId, model)
+			else
 				local base = model:FindFirstChild("Base") :: BasePart?
 				if base then MechLegs.attach(ccId, base) end
-			end)
-		end
+			end
+		end)
 	else
 		destroyCCMoveGhost()
 		MechLegs.detach(ccId)
+		MotherLegs.detach(ccId)
 	end
 end)
 
@@ -1213,8 +1289,10 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 	if processed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
 	if not ccIsMobile or not ownCCId then return end
+	if MotherInject.isAiming() then return end   -- that right-click called off the injection
 	local target = ccMoveTarget or CameraModule.getGroundPosition()
 	if target then
+		MotherInject.clearQueue()   -- a hand-issued move calls off the queued injections
 		Network.moveMobileCC(ownCCId, target)
 	end
 end)
@@ -1948,7 +2026,8 @@ do
 		val.Parent              = row
 	end
 
-	-- ── Performance graph (cumulative kills over match time, per player) ────────
+	-- ── Performance graph (per-commander metric over match time; renderEndCard
+	-- fills in the title and adds the metric tabs on this same line) ────────────
 	local graphTitle            = Instance.new("TextLabel")
 	graphTitle.Name             = "GraphTitle"
 	graphTitle.Size             = UDim2.new(1, -60, 0, 18)
@@ -1956,7 +2035,7 @@ do
 	graphTitle.BackgroundTransparency = 1
 	graphTitle.Font             = Enum.Font.GothamBold
 	graphTitle.TextSize         = 14
-	graphTitle.Text             = "UNITS DESTROYED OVER TIME (ALL COMMANDERS)"
+	graphTitle.Text             = "UNITS DESTROYED OVER TIME"
 	graphTitle.TextColor3       = Color3.fromRGB(150, 165, 195)
 	graphTitle.TextXAlignment   = Enum.TextXAlignment.Left
 	graphTitle.ZIndex           = 102
@@ -2470,14 +2549,31 @@ local function renderEndCard(winnerUserId: number, reason: string, statsTable: a
 		animateStat(id, statVals[id], d)
 	end
 
-	-- ── Performance graph: cumulative kills per player over match time ──────────
+	-- ── Performance graph: any tracked metric per commander over match time ─────
+	-- The server ships every metric's timeline for every combatant; a row of tabs on
+	-- the title line picks which one is plotted and redraws the plot in place.
 	local graphFrame = card:FindFirstChild("GraphSection") :: Frame?
+	local graphTitle = card:FindFirstChild("GraphTitle") :: TextLabel?
 	do
-		scheduleReveal(card:FindFirstChild("GraphTitle"), 1.62)
+		scheduleReveal(graphTitle, 1.62)
+		local oldTabs = card:FindFirstChild("GraphTabs")
+		if oldTabs then oldTabs:Destroy() end
+
 		if graphFrame then
-			for _, ch in graphFrame:GetChildren() do
-				if not ch:IsA("UICorner") then ch:Destroy() end
-			end
+			local gf = graphFrame :: Frame
+
+			-- Cumulative metrics only climb; the instantaneous ones (army/supply/base)
+			-- dip whenever a fight or a raid goes badly, which is the interesting read.
+			local METRICS = {
+				{ key = "kills",     tab = "KILLS",  title = "UNITS DESTROYED OVER TIME" },
+				{ key = "army",      tab = "ARMY",   title = "ARMY VALUE OVER TIME" },
+				{ key = "resources", tab = "INCOME", title = "RESOURCES EARNED OVER TIME" },
+				{ key = "units",     tab = "SUPPLY", title = "ARMY SIZE OVER TIME" },
+				{ key = "buildings", tab = "BASE",   title = "STRUCTURES STANDING OVER TIME" },
+			}
+
+			local TAB_ON_BG, TAB_OFF_BG = Color3.fromRGB(58, 48, 24), Color3.fromRGB(24, 28, 38)
+			local TAB_ON_TX, TAB_OFF_TX = Color3.fromRGB(255, 215, 120), Color3.fromRGB(120, 135, 160)
 
 			local PADL, PADR, PADT, PADB = 40, 12, 20, 22
 			local gw    = END_CARD_W - 60
@@ -2487,7 +2583,8 @@ local function renderEndCard(winnerUserId: number, reason: string, statsTable: a
 			local maxT  = math.max(duration, 1)
 
 			-- Universal series from the server: one line per combatant (players AND AI).
-			-- Winner gold, you cyan, everyone else cycles a palette.
+			-- Winner gold, you cyan, everyone else cycles a palette. Colours are resolved
+			-- once so a commander keeps the same line colour across metric switches.
 			local PALETTE = {
 				Color3.fromRGB(120, 230, 150), Color3.fromRGB(255, 170, 70),
 				Color3.fromRGB(200, 130, 255), Color3.fromRGB(240, 90, 110),
@@ -2497,135 +2594,220 @@ local function renderEndCard(winnerUserId: number, reason: string, statsTable: a
 			local gseries = (graph and graph.series) or {}
 			local dt      = (graph and graph.dt) or 5
 
-			local series: { { pts: { Vector2 }, color: Color3, name: string } } = {}
-			local maxV   = 1
-			local palIdx = 0
-			for _, sd in gseries do
-				local pts: { Vector2 } = { Vector2.new(0, 0) }
-				for k, v in (sd.samples or {}) do
-					pts[#pts + 1] = Vector2.new(math.min(k * dt, maxT), v)
-					if v > maxV then maxV = v end
+			local colors: { Color3 } = {}
+			local names:  { string } = {}
+			do
+				local palIdx = 0
+				for i, sd in gseries do
+					if sd.isWinner then
+						colors[i] = Color3.fromRGB(255, 215, 0)
+					elseif sd.id == tostring(localUserId) then
+						colors[i] = Color3.fromRGB(90, 200, 255)
+					else
+						palIdx += 1
+						colors[i] = PALETTE[((palIdx - 1) % #PALETTE) + 1]
+					end
+					names[i] = sd.name or "Enemy"
 				end
-				local finalK = sd.final or 0
-				pts[#pts + 1] = Vector2.new(maxT, finalK)
-				if finalK > maxV then maxV = finalK end
-				local col: Color3
-				if sd.isWinner then
-					col = Color3.fromRGB(255, 215, 0)
-				elseif sd.id == tostring(localUserId) then
-					col = Color3.fromRGB(90, 200, 255)
-				else
-					palIdx += 1
-					col = PALETTE[((palIdx - 1) % #PALETTE) + 1]
+			end
+
+			-- Resource totals run to five figures; keep the axis readable.
+			local function fmtNum(v: number): string
+				if v >= 1000 then return string.format("%.1fk", v / 1000) end
+				return tostring(math.floor(v + 0.5))
+			end
+
+			local tabBtns: { TextButton } = {}
+			local activeIdx = 1
+
+			-- Rebuild the whole plot for one metric. `wipeDelay`/`wipeTime` drive the
+			-- left-to-right reveal: the first draw waits for the card's reveal sequence,
+			-- a tab switch snaps in quickly.
+			local function drawMetric(mi: number, wipeDelay: number, wipeTime: number)
+				activeIdx = mi
+				local M = METRICS[mi]
+				if graphTitle then graphTitle.Text = M.title end
+				for i, b in tabBtns do
+					local on = i == mi
+					b.BackgroundColor3 = on and TAB_ON_BG or TAB_OFF_BG
+					b.TextColor3       = on and TAB_ON_TX or TAB_OFF_TX
 				end
-				series[#series + 1] = { pts = pts, color = col, name = sd.name or "Enemy" }
-			end
 
-			-- Horizontal gridlines.
-			for gi = 0, 3 do
-				local gl = Instance.new("Frame")
-				gl.Size = UDim2.fromOffset(plotW, 1)
-				gl.Position = UDim2.fromOffset(PADL, PADT + plotH * (gi / 3))
-				gl.BackgroundColor3 = Color3.fromRGB(40, 46, 62)
-				gl.BackgroundTransparency = 0.35
-				gl.BorderSizePixel = 0
-				gl.ZIndex = 103
-				gl.Parent = graphFrame
-			end
+				for _, ch in gf:GetChildren() do
+					if not ch:IsA("UICorner") then ch:Destroy() end
+				end
 
-			local function axisLbl(txt: string, x: number, y: number, w: number, align: Enum.TextXAlignment)
-				local l = Instance.new("TextLabel")
-				l.Size = UDim2.fromOffset(w, 14)
-				l.Position = UDim2.fromOffset(x, y)
-				l.BackgroundTransparency = 1
-				l.Font = Enum.Font.Gotham
-				l.TextSize = 11
-				l.Text = txt
-				l.TextColor3 = Color3.fromRGB(110, 125, 150)
-				l.TextXAlignment = align
-				l.ZIndex = 104
-				l.Parent = graphFrame
-			end
-			axisLbl(tostring(maxV), 0, PADT - 7, PADL - 6, Enum.TextXAlignment.Right)
-			axisLbl("0", 0, PADT + plotH - 7, PADL - 6, Enum.TextXAlignment.Right)
-			axisLbl("0:00", PADL, gh - PADB + 4, 40, Enum.TextXAlignment.Left)
-			axisLbl(string.format("%d:%02d", math.floor(maxT / 60), math.floor(maxT % 60)),
-				gw - PADR - 44, gh - PADB + 4, 44, Enum.TextXAlignment.Right)
+				local series: { { pts: { Vector2 }, color: Color3, name: string } } = {}
+				local maxV = 1
+				for i, sd in gseries do
+					local md      = sd.metrics and (sd.metrics :: any)[M.key]
+					local samples = (md and md.samples) or {}
+					local finalV  = (md and md.final) or 0
+					local pts: { Vector2 } = { Vector2.new(0, 0) }
+					for k, v in samples do
+						pts[#pts + 1] = Vector2.new(math.min(k * dt, maxT), v)
+						if v > maxV then maxV = v end
+					end
+					pts[#pts + 1] = Vector2.new(maxT, finalV)
+					if finalV > maxV then maxV = finalV end
+					series[#series + 1] = { pts = pts, color = colors[i], name = names[i] }
+				end
 
-			-- Legend (only when more than one commander is charted).
-			if #series > 1 then
-				local legend = Instance.new("Frame")
-				legend.Size = UDim2.fromOffset(plotW, 14)
-				legend.Position = UDim2.fromOffset(PADL, 3)
-				legend.BackgroundTransparency = 1
-				legend.ZIndex = 106
-				legend.Parent = graphFrame
-				local ll = Instance.new("UIListLayout")
-				ll.FillDirection = Enum.FillDirection.Horizontal
-				ll.HorizontalAlignment = Enum.HorizontalAlignment.Right
-				ll.Padding = UDim.new(0, 10)
-				ll.Parent = legend
+				local function axisLbl(txt: string, x: number, y: number, w: number, align: Enum.TextXAlignment)
+					local l = Instance.new("TextLabel")
+					l.Size = UDim2.fromOffset(w, 14)
+					l.Position = UDim2.fromOffset(x, y)
+					l.BackgroundTransparency = 1
+					l.Font = Enum.Font.Gotham
+					l.TextSize = 11
+					l.Text = txt
+					l.TextColor3 = Color3.fromRGB(110, 125, 150)
+					l.TextXAlignment = align
+					l.ZIndex = 104
+					l.Parent = gf
+				end
+
+				-- Horizontal gridlines, each labelled so the scale is readable whichever
+				-- metric is showing (kills count in tens, resources in thousands).
+				for gi = 0, 3 do
+					local y = PADT + plotH * (gi / 3)
+					local gl = Instance.new("Frame")
+					gl.Size = UDim2.fromOffset(plotW, 1)
+					gl.Position = UDim2.fromOffset(PADL, y)
+					gl.BackgroundColor3 = Color3.fromRGB(40, 46, 62)
+					gl.BackgroundTransparency = 0.35
+					gl.BorderSizePixel = 0
+					gl.ZIndex = 103
+					gl.Parent = gf
+					axisLbl(fmtNum(maxV * (1 - gi / 3)), 0, y - 7, PADL - 6, Enum.TextXAlignment.Right)
+				end
+
+				axisLbl("0:00", PADL, gh - PADB + 4, 40, Enum.TextXAlignment.Left)
+				axisLbl(string.format("%d:%02d", math.floor(maxT / 60), math.floor(maxT % 60)),
+					gw - PADR - 44, gh - PADB + 4, 44, Enum.TextXAlignment.Right)
+
+				-- Legend (only when more than one commander is charted).
+				if #series > 1 then
+					local legend = Instance.new("Frame")
+					legend.Size = UDim2.fromOffset(plotW, 14)
+					legend.Position = UDim2.fromOffset(PADL, 3)
+					legend.BackgroundTransparency = 1
+					legend.ZIndex = 106
+					legend.Parent = gf
+					local ll = Instance.new("UIListLayout")
+					ll.FillDirection = Enum.FillDirection.Horizontal
+					ll.HorizontalAlignment = Enum.HorizontalAlignment.Right
+					ll.Padding = UDim.new(0, 10)
+					ll.Parent = legend
+					for _, ser in series do
+						local chip = Instance.new("TextLabel")
+						chip.AutomaticSize = Enum.AutomaticSize.X
+						chip.Size = UDim2.fromOffset(0, 14)
+						chip.BackgroundTransparency = 1
+						chip.Font = Enum.Font.GothamBold
+						chip.TextSize = 11
+						chip.Text = "■ " .. ser.name
+						chip.TextColor3 = ser.color
+						chip.ZIndex = 106
+						chip.Parent = legend
+					end
+				end
+
+				-- Left-to-right wipe clip holding the plotted lines.
+				local clip = Instance.new("Frame")
+				clip.Name = "PlotClip"
+				clip.Position = UDim2.fromOffset(PADL, PADT)
+				clip.Size = UDim2.fromOffset(0, plotH)
+				clip.BackgroundTransparency = 1
+				clip.ClipsDescendants = true
+				clip.ZIndex = 104
+				clip.Parent = gf
+
+				local function toPx(p: Vector2): (number, number)
+					return (p.X / maxT) * plotW, plotH - (p.Y / maxV) * plotH
+				end
 				for _, ser in series do
-					local chip = Instance.new("TextLabel")
-					chip.AutomaticSize = Enum.AutomaticSize.X
-					chip.Size = UDim2.fromOffset(0, 14)
-					chip.BackgroundTransparency = 1
-					chip.Font = Enum.Font.GothamBold
-					chip.TextSize = 11
-					chip.Text = "■ " .. ser.name
-					chip.TextColor3 = ser.color
-					chip.ZIndex = 106
-					chip.Parent = legend
+					for pi = 1, #ser.pts - 1 do
+						local x0, y0 = toPx(ser.pts[pi])
+						local x1, y1 = toPx(ser.pts[pi + 1])
+						local dx, dy = x1 - x0, y1 - y0
+						local len = math.max(math.sqrt(dx * dx + dy * dy), 0.01)
+						local seg = Instance.new("Frame")
+						seg.Size = UDim2.fromOffset(len, 2)
+						seg.AnchorPoint = Vector2.new(0.5, 0.5)
+						seg.Position = UDim2.fromOffset((x0 + x1) / 2, (y0 + y1) / 2)
+						seg.Rotation = math.deg(math.atan2(dy, dx))
+						seg.BackgroundColor3 = ser.color
+						seg.BorderSizePixel = 0
+						seg.ZIndex = 105
+						seg.Parent = clip
+					end
+					local ex, ey = toPx(ser.pts[#ser.pts])
+					local dot = Instance.new("Frame")
+					dot.Size = UDim2.fromOffset(7, 7)
+					dot.AnchorPoint = Vector2.new(0.5, 0.5)
+					dot.Position = UDim2.fromOffset(ex, ey)
+					dot.BackgroundColor3 = ser.color
+					dot.BorderSizePixel = 0
+					dot.ZIndex = 106
+					dot.Parent = clip
+					local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(1, 0); dc.Parent = dot
 				end
-			end
 
-			-- Left-to-right wipe clip holding the plotted lines.
-			local clip = Instance.new("Frame")
-			clip.Name = "PlotClip"
-			clip.Position = UDim2.fromOffset(PADL, PADT)
-			clip.Size = UDim2.fromOffset(0, plotH)
-			clip.BackgroundTransparency = 1
-			clip.ClipsDescendants = true
-			clip.ZIndex = 104
-			clip.Parent = graphFrame
-
-			local function toPx(p: Vector2): (number, number)
-				return (p.X / maxT) * plotW, plotH - (p.Y / maxV) * plotH
-			end
-			for _, ser in series do
-				for pi = 1, #ser.pts - 1 do
-					local x0, y0 = toPx(ser.pts[pi])
-					local x1, y1 = toPx(ser.pts[pi + 1])
-					local dx, dy = x1 - x0, y1 - y0
-					local len = math.max(math.sqrt(dx * dx + dy * dy), 0.01)
-					local seg = Instance.new("Frame")
-					seg.Size = UDim2.fromOffset(len, 2)
-					seg.AnchorPoint = Vector2.new(0.5, 0.5)
-					seg.Position = UDim2.fromOffset((x0 + x1) / 2, (y0 + y1) / 2)
-					seg.Rotation = math.deg(math.atan2(dy, dx))
-					seg.BackgroundColor3 = ser.color
-					seg.BorderSizePixel = 0
-					seg.ZIndex = 105
-					seg.Parent = clip
+				local function playWipe()
+					if not clip.Parent then return end   -- switched away before the wipe fired
+					Tween:Create(clip, TweenInfo.new(wipeTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Size = UDim2.fromOffset(plotW, plotH) }):Play()
 				end
-				local ex, ey = toPx(ser.pts[#ser.pts])
-				local dot = Instance.new("Frame")
-				dot.Size = UDim2.fromOffset(7, 7)
-				dot.AnchorPoint = Vector2.new(0.5, 0.5)
-				dot.Position = UDim2.fromOffset(ex, ey)
-				dot.BackgroundColor3 = ser.color
-				dot.BorderSizePixel = 0
-				dot.ZIndex = 106
-				dot.Parent = clip
-				local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(1, 0); dc.Parent = dot
+				if wipeDelay > 0 then task.delay(wipeDelay, playWipe) else playWipe() end
 			end
 
-			-- Reveal the frame + axis, then wipe the lines in left-to-right.
-			scheduleReveal(graphFrame, 1.7, true)
-			task.delay(1.85, function()
-				Tween:Create(clip, TweenInfo.new(1.0, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-					{ Size = UDim2.fromOffset(plotW, plotH) }):Play()
-			end)
+			-- Metric tabs, right-aligned on the graph's title line.
+			if graphTitle then graphTitle.TextTruncate = Enum.TextTruncate.AtEnd end
+			local tabRow = Instance.new("Frame")
+			tabRow.Name = "GraphTabs"
+			tabRow.Size = UDim2.new(1, -60, 0, 18)
+			tabRow.Position = UDim2.new(0, 30, 0, 436)
+			tabRow.BackgroundTransparency = 1
+			tabRow.ZIndex = 103
+			tabRow.Parent = card
+			local tl = Instance.new("UIListLayout")
+			tl.FillDirection = Enum.FillDirection.Horizontal
+			tl.HorizontalAlignment = Enum.HorizontalAlignment.Right
+			tl.VerticalAlignment = Enum.VerticalAlignment.Center
+			tl.Padding = UDim.new(0, 4)
+			tl.Parent = tabRow
+
+			for i, M in METRICS do
+				local b = Instance.new("TextButton")
+				b.Name = "Tab_" .. M.key
+				b.AutomaticSize = Enum.AutomaticSize.X
+				b.Size = UDim2.fromOffset(0, 16)
+				b.BackgroundColor3 = TAB_OFF_BG
+				b.BorderSizePixel = 0
+				b.AutoButtonColor = false
+				b.Font = Enum.Font.GothamBold
+				b.TextSize = 10
+				b.Text = M.tab
+				b.TextColor3 = TAB_OFF_TX
+				b.LayoutOrder = i
+				b.ZIndex = 104
+				b.Parent = tabRow
+				local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 4); bc.Parent = b
+				local bp = Instance.new("UIPadding")
+				bp.PaddingLeft = UDim.new(0, 7); bp.PaddingRight = UDim.new(0, 7)
+				bp.Parent = b
+				tabBtns[i] = b
+				b.MouseButton1Click:Connect(function()
+					if activeIdx ~= i then drawMetric(i, 0, 0.45) end
+				end)
+			end
+
+			drawMetric(1, 1.85, 1.0)
+
+			-- Reveal the frame + tabs; the plot then wipes in left-to-right.
+			scheduleReveal(gf, 1.7, true)
+			scheduleReveal(tabRow, 1.66, true)
 		end
 	end
 
@@ -3802,8 +3984,13 @@ end
 -- of physics-driven globs, and leaves a bubbling corrosive pool that fizzles away.
 local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	local Debris = game:GetService("Debris")
-	local TRAVEL = 0.46
-	local ARC    = 10.0
+	-- Tighter and meaner than the original lob: a smaller bolt that lands sooner
+	-- on a flatter trajectory, so the spit reads as a spat dart, not a heaved blob.
+	local BOLT   = 0.7          -- size scale of the flying bolt
+	local TRAVEL = 0.32         -- seconds in flight
+	local ARC    = 7.0          -- lob height in studs
+	local CORE_D = 1.6 * BOLT   -- glowing core diameter
+	local AURA_D = 2.5 * BOLT   -- slime aura diameter
 
 	local flat = Vector3.new(toPos.X - fromPos.X, 0, toPos.Z - fromPos.Z)
 	local dir  = if flat.Magnitude > 0.01 then flat.Unit else Vector3.new(0, 0, -1)
@@ -3821,7 +4008,7 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	local glob          = Instance.new("Part")
 	glob.Name           = "_LampreyBile"
 	glob.Shape          = Enum.PartType.Ball
-	glob.Size           = Vector3.new(1.6, 1.6, 1.6)
+	glob.Size           = Vector3.new(CORE_D, CORE_D, CORE_D)
 	glob.Color          = C_HOT
 	glob.Material       = Enum.Material.Neon
 	glob.Transparency   = 0
@@ -3839,7 +4026,7 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	local shell         = Instance.new("Part")
 	shell.Name          = "_LampreyBileShell"
 	shell.Shape         = Enum.PartType.Ball
-	shell.Size          = Vector3.new(2.5, 2.5, 2.5)
+	shell.Size          = Vector3.new(AURA_D, AURA_D, AURA_D)
 	shell.Color         = C_BILE
 	shell.Material      = Enum.Material.Neon
 	shell.Transparency  = 0.55
@@ -3848,8 +4035,8 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	shell.Parent        = workspace
 
 	-- ── Ribbon trail streaking behind the bolt ─────────────────────────────────
-	local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(0,  0.6, 0); a0.Parent = glob
-	local a1 = Instance.new("Attachment"); a1.Position = Vector3.new(0, -0.6, 0); a1.Parent = glob
+	local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(0,  0.6 * BOLT, 0); a0.Parent = glob
+	local a1 = Instance.new("Attachment"); a1.Position = Vector3.new(0, -0.6 * BOLT, 0); a1.Parent = glob
 	local trail            = Instance.new("Trail")
 	trail.Attachment0      = a0
 	trail.Attachment1      = a1
@@ -3871,7 +4058,7 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 	drip.Texture              = "rbxasset://textures/particles/sparkles_main.dds"
 	drip.Color                = ColorSequence.new(C_HOT, C_DK)
 	drip.LightEmission        = 0.8
-	drip.Size                 = NumberSequence.new(0.7, 0.05)
+	drip.Size                 = NumberSequence.new(0.7 * BOLT, 0.05)
 	drip.Transparency         = NumberSequence.new({
 		NumberSequenceKeypoint.new(0, 0.2),
 		NumberSequenceKeypoint.new(1, 1),
@@ -3892,11 +4079,11 @@ local function spawnLampreyBile(fromPos: Vector3, toPos: Vector3)
 		local t    = math.min(origElapsed / TRAVEL, 1)
 		local arcH = math.sin(t * math.pi) * ARC
 		local pos  = origin:Lerp(dest, t) + Vector3.new(0, arcH, 0)
-		local wob  = 1.6 + math.sin(origElapsed * 30) * 0.16
+		local wob  = CORE_D + math.sin(origElapsed * 30) * 0.16 * BOLT
 		glob.Size   = Vector3.new(wob, wob, wob)
 		glob.CFrame = CFrame.new(pos) * CFrame.Angles(spin, spin * 0.7, 0)
 		-- Aura lags slightly behind and pulses out of phase for a gooey feel
-		local swob = 2.5 + math.sin(origElapsed * 22 + 1) * 0.24
+		local swob = AURA_D + math.sin(origElapsed * 22 + 1) * 0.24 * BOLT
 		shell.Size     = Vector3.new(swob, swob, swob)
 		shell.Position = shell.Position:Lerp(pos, 0.5)
 		if t >= 1 then

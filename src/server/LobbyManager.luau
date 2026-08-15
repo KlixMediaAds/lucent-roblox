@@ -6,9 +6,10 @@
 	  2. Any client can fire LobbyReady to toggle their own ready state.
 	  3. Any client can fire LobbyReroll to regenerate mineral deposits
 	     (3-second server-enforced cooldown; resets all ready states).
-	  4. AI is configured with two cycling settings instead of a personality queue:
-	       • LobbySetAICount      — cycles the number of AI opponents 0 → 1 → 2 → 3 → 0
-	       • LobbySetAIDifficulty — cycles Easy → Medium → Hard → Nightmare
+	  4. AI is configured per-slot, straight from the AI's roster card:
+	       • LobbySetAICount            — cycles the number of AI opponents 0 → 1 → 2 → 3 → 0
+	       • LobbySetAIDifficulty (idx) — cycles that AI's difficulty Easy → Medium → Hard → Nightmare
+	       • LobbySetAIRace (idx)       — cycles that AI's race Humans → Hollowed → Random
 	     Teams are FFA-only for now (the lobby Teams control is "coming soon").
 	  5. When every connected player is ready, LobbyStart fires to all clients,
 	     then onLobbyEnd(aiQueue) is called ~3.5 s later to kick off the game.
@@ -53,10 +54,10 @@ local function regenTerrain()
 	end
 end
 
--- AI configuration (replaces the old per-personality queue).
+-- AI configuration: per-slot difficulty + race, edited by clicking the AI's
+-- roster card (the same interaction players use to swap their own race).
 local MAX_AI           = 3
 local aiCount          = 1          -- number of AI opponents, 0..MAX_AI
-local aiDifficulty     = "Medium"   -- one of DIFFICULTY_ORDER
 
 local DIFFICULTY_ORDER = { "Easy", "Medium", "Hard", "Nightmare" }
 -- Each difficulty maps onto the existing personality + 1-5 level system.
@@ -67,7 +68,14 @@ local DIFFICULTY = {
 	Nightmare = { personality = "nightmare", level = 5 },
 }
 
-type AIEntry = { personality: string, level: number }
+-- Race per slot: Humans (bonfire army), Hollowed (nest/creature army), or
+-- Random (rolled when the match starts).
+local AI_RACE_ORDER = { "Humans", "Hollowed", "Random" }
+
+local aiDiffs: { string } = { "Medium", "Medium", "Medium" }
+local aiRaces: { string } = { "Humans", "Humans", "Humans" }
+
+type AIEntry = { personality: string, level: number, race: string }
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -84,8 +92,12 @@ local function buildReadyList(): { { name: string, userId: number, ready: boolea
 	return list
 end
 
-local function buildSettings(): { aiCount: number, aiDifficulty: string }
-	return { aiCount = aiCount, aiDifficulty = aiDifficulty }
+local function buildSettings(): { aiCount: number, ais: { { difficulty: string, race: string } } }
+	local ais = {}
+	for i = 1, MAX_AI do
+		ais[i] = { difficulty = aiDiffs[i], race = aiRaces[i] }
+	end
+	return { aiCount = aiCount, ais = ais }
 end
 
 local function syncAll(mineralManager)
@@ -103,11 +115,16 @@ local function resetAllReady()
 end
 
 -- Expand the AI settings into a concrete spawn list for the game handoff.
+-- "Random" race resolves here, so each match rolls fresh.
 local function buildAISnapshot(): { AIEntry }
-	local d = DIFFICULTY[aiDifficulty] or DIFFICULTY.Medium
 	local snapshot: { AIEntry } = {}
-	for _ = 1, aiCount do
-		table.insert(snapshot, { personality = d.personality, level = d.level })
+	for i = 1, aiCount do
+		local d    = DIFFICULTY[aiDiffs[i]] or DIFFICULTY.Medium
+		local race = aiRaces[i]
+		if race == "Random" then
+			race = math.random() < 0.5 and "Humans" or "Hollowed"
+		end
+		table.insert(snapshot, { personality = d.personality, level = d.level, race = race })
 	end
 	return snapshot
 end
@@ -223,11 +240,26 @@ function LobbyManager.init(mineralManager, terrainManager, onLobbyEnd: ({ AIEntr
 		syncAll(mineralManager)
 	end)
 
-	-- Cycle the AI difficulty: Easy → Medium → Hard → Nightmare → Easy.
-	RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty).OnServerEvent:Connect(function(_player)
+	-- Cycle ONE AI's difficulty (clicked on its roster card): Easy → Medium →
+	-- Hard → Nightmare → Easy.
+	RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty).OnServerEvent:Connect(function(_player, slot: any)
 		if not active then return end
-		local idx = table.find(DIFFICULTY_ORDER, aiDifficulty) or 2
-		aiDifficulty = DIFFICULTY_ORDER[(idx % #DIFFICULTY_ORDER) + 1]
+		slot = tonumber(slot)
+		if not slot or slot < 1 or slot > aiCount then return end
+		local idx = table.find(DIFFICULTY_ORDER, aiDiffs[slot]) or 2
+		aiDiffs[slot] = DIFFICULTY_ORDER[(idx % #DIFFICULTY_ORDER) + 1]
+		resetAllReady()
+		syncAll(mineralManager)
+	end)
+
+	-- Cycle ONE AI's race (clicked on its roster-card icon): Humans → Hollowed →
+	-- Random → Humans.
+	RemoteHandler.get(Config.REMOTES.LobbySetAIRace).OnServerEvent:Connect(function(_player, slot: any)
+		if not active then return end
+		slot = tonumber(slot)
+		if not slot or slot < 1 or slot > aiCount then return end
+		local idx = table.find(AI_RACE_ORDER, aiRaces[slot]) or 1
+		aiRaces[slot] = AI_RACE_ORDER[(idx % #AI_RACE_ORDER) + 1]
 		resetAllReady()
 		syncAll(mineralManager)
 	end)

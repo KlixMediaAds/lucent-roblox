@@ -812,7 +812,7 @@ end
 -- ── Eye "camera jumper" ──────────────────────────────────────────────────────────
 -- Hovering a pill for a full second (when that order has ≥1 unit) pops a 👁 above it.
 -- Clicking the eye snaps the camera to that order's forces:
---   • DEFEND — flies home to the base (same as the [R] recenter).
+--   • DEFEND — flies home to the base (same as the [1] recenter).
 --   • ATTACK / SCOUT — hop to that order's highest-priority troop and follow it (until it
 --              dies or the player pans). Priority = units hit in the last 10s first (most
 --              recent first), then outermost/most-forward; each further press steps to the

@@ -10,7 +10,8 @@
 	decorative brackets / diamonds / glow.
 
 	Layout:
-	  • A square 3×3 grid panel sized to match the minimap.
+	  • A square 3×3 grid panel sized to match the minimap. Pages may ask for fewer
+	    columns (cols = 2 / 1) to get bigger tiles out of the same frame.
 	  • A slim header bar above it with the selected structure's name.
 	  • A floating info panel above the stack with the hovered slot's name/cost/desc.
 
@@ -59,6 +60,9 @@ export type Slot = {
 	enabled:         boolean?,
 	locked:          boolean?,
 	icon:            string?,
+	-- Text printed across the face of the tile, under the icon. Only worth using on
+	-- big tiles (cols = 1 or 2); a 40px tile has no room for words.
+	label:           string?,
 	viewportKey:     string?,
 	viewportFactory: (() -> ViewportFrame)?,
 	badge:           string?,
@@ -119,6 +123,19 @@ local hint:       TextLabel?   -- camera/menu prompt shown when nothing selected
 local vpStash:    Frame?
 local currentOwner: string? = nil
 
+-- Page shown when the grid falls empty (see CommandCard.setFallback).
+local fallbackFn:     (() -> ())? = nil
+local fallbackQueued              = false
+
+local function queueFallback()
+	if not fallbackFn or fallbackQueued then return end
+	fallbackQueued = true
+	task.defer(function()
+		fallbackQueued = false
+		if currentOwner == nil and fallbackFn then fallbackFn() end
+	end)
+end
+
 -- The empty-grid prompt first teaches camera movement, then swaps to the menu hint once
 -- the player has actually panned with WASD (a one-time, cross-faded transition).
 local HINT_WASD  = "[WASD] to move camera"
@@ -138,6 +155,7 @@ type Tile = {
 	flash:    Frame,
 	hotkey:   TextLabel,
 	badge:    TextLabel,
+	label:    TextLabel,
 	track:    Frame,
 	fill:     Frame,
 	onClick:  (() -> ())?,
@@ -297,6 +315,22 @@ local function makeTile(parent: Instance, index: number): Tile
 	badge.ZIndex                   = 18
 	badge.Parent                   = btn
 
+	-- Face text for big tiles (e.g. the Mother's single full-grid INJECT button).
+	local label                    = Instance.new("TextLabel")
+	label.Name                     = "Label"
+	label.Size                     = UDim2.new(1, -8, 0.22, 0)
+	label.Position                 = UDim2.new(0, 4, 0.68, 0)
+	label.BackgroundTransparency   = 1
+	label.Font                     = Enum.Font.GothamBold
+	label.TextSize                 = 16
+	label.TextColor3               = TXT
+	label.TextStrokeTransparency   = 0.6
+	label.TextStrokeColor3         = Color3.new(0, 0, 0)
+	label.Text                     = ""
+	label.Visible                  = false
+	label.ZIndex                   = 18
+	label.Parent                   = btn
+
 	local track                    = Instance.new("Frame")
 	track.Name                     = "ProgTrack"
 	track.Size                     = UDim2.new(1, -6, 0, 2)
@@ -335,7 +369,7 @@ local function makeTile(parent: Instance, index: number): Tile
 	local tile: Tile = {
 		wrapper = wrapper, btn = btn, stroke = stroke, holder = holder,
 		iconScale = iconScale, flash = flash,
-		hotkey = hotkey, badge = badge, track = track, fill = fill,
+		hotkey = hotkey, badge = badge, label = label, track = track, fill = fill,
 		onClick = nil, tip = nil, restColor = BORDER, restBg = TILE_BG,
 		locked = false, enabled = true,
 	}
@@ -408,8 +442,14 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 	else
 		tile.btn.Text       = slot.icon or ""
 		tile.btn.TextColor3 = locked and MONO_TXT or TXT
-		tile.btn.TextSize   = math.floor(tilePx * 0.5)   -- bigger glyphs on bigger tiles
+		-- Bigger glyphs on bigger tiles; a labelled tile leaves room for its words.
+		tile.btn.TextSize   = math.floor(tilePx * (slot.label and 0.30 or 0.5))
 	end
+
+	tile.label.Visible    = slot.label ~= nil
+	tile.label.Text       = slot.label or ""
+	tile.label.TextSize   = math.clamp(math.floor(tilePx * 0.15), 11, 20)
+	tile.label.TextColor3 = locked and MONO_TXT or TXT
 
 	-- Border colour conveys state: locked = grey, unaffordable = red, else steel.
 	local restColor = locked and MONO_LINE or (enabled and BORDER or BORDER_RED)
@@ -759,10 +799,20 @@ function CommandCard.hide(ownerKey: string)
 	if hint then hint.Visible = true end
 	setHeader("")
 	if frame then frame.Visible = false end
+	queueFallback()
 end
 
 function CommandCard.isOwner(ownerKey: string): boolean
 	return currentOwner == ownerKey
+end
+
+-- Fallback page. Panels release the grid all the time (a selection is dropped, another
+-- panel takes over), and most of those releases are immediately followed by someone else
+-- claiming it. The fallback runs one frame later, only if the grid is still unowned:
+-- that's what keeps the Hollowed Mother's card up whenever nothing is selected.
+function CommandCard.setFallback(fn: (() -> ())?)
+	fallbackFn = fn
+	queueFallback()
 end
 
 return CommandCard

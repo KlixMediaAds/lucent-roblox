@@ -63,7 +63,11 @@ end
 local function applyBlueprint(parent: Instance, body: BasePart, bp: UnitBlueprints.Blueprint)
 	if bp.rootTransparent then body.Transparency = 1 end
 	local teamColor = body.Color
-	local skinColor = UnitBlueprints.randomSkinTone()  -- one tone per preview (head + arms match)
+	-- Previews are UI art, so they hold one fixed pale tone rather than rolling a
+	-- random one: these get rebuilt on every lobby redraw, and a logo that changes
+	-- complexion each time you click something reads as a glitch. Live units still
+	-- randomize (UnitManager) so a crowd on the field reads as individuals.
+	local skinColor = UnitBlueprints.previewSkinTone()
 	for _, spec in bp.parts do
 		local p  = UnitBlueprints.instantiate(spec, body.CFrame, teamColor, skinColor)
 		p.Parent = parent
@@ -394,6 +398,46 @@ end
 -- it, banded and glowing with brood light.
 -- `castShadows` true for the live building, false for previews/ghosts.
 
+-- Overall size of the Hollowed Mother, applied to every dimension and offset of her
+-- geometry. She is built at "authored" scale below and shrunk by this on the way out,
+-- so one number resizes the whole creature. Everything that positions itself against
+-- her body (the walk animator, her click hitbox) multiplies by it too.
+UnitVisuals.MOTHER_SCALE = 0.75
+local MOTHER_SCALE = UnitVisuals.MOTHER_SCALE
+
+--[[
+	Local-space layout of the Mother's four splayed salamander legs, shared by the
+	static decor builder below and the client walk animator (MotherLegs) so the two
+	can never drift apart on where a leg is anchored. `phase` puts diagonal pairs in
+	step: front-left swings with rear-right, front-right with rear-left.
+
+	These are AUTHORED coordinates — consumers apply MOTHER_SCALE themselves, exactly
+	as the decor builder's helpers do.
+
+	The builder names each leg's parts "LegUpper<i>" / "LegFore<i>" / "Foot<i>",
+	indexed into this list, so the animator can find and re-pose a specific leg
+	rather than spawning a second set of legs to keep in sync.
+]]
+export type MotherLeg = { hip: Vector3, knee: Vector3, foot: Vector3, pad: Vector3, phase: number }
+
+local MOTHER_LEGS: { MotherLeg } = {}
+do
+	for _, s in { -1, 1 } do
+		for li, zHip in { -4.2, 0.8 } do
+			local isFront = li == 1
+			local zFoot   = zHip + (isFront and -1.4 or 1.2)   -- front pair reaches forward, rear back
+			table.insert(MOTHER_LEGS, {
+				hip   = Vector3.new(s * 2.4, 2.5, zHip),        -- buried inside the trunk mass
+				knee  = Vector3.new(s * 4.9, 2.0, zHip + (isFront and -0.6 or 0.5)),
+				foot  = Vector3.new(s * 6.0, 0.4, zFoot),
+				pad   = Vector3.new(s * 6.1, 0.3, zFoot),
+				phase = (isFront == (s < 0)) and 0 or math.pi,
+			})
+		end
+	end
+end
+UnitVisuals.MOTHER_LEGS = MOTHER_LEGS
+
 function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, castShadows: boolean?)
 	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh
 	local cBelly  = Color3.fromRGB(58, 34, 40)   -- lighter flesh bands
@@ -405,8 +449,10 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 		local p = Instance.new("Part")
 		p.Name = name
 		if shape then (p :: any).Shape = shape end
-		p.Size       = size
-		p.CFrame     = groundCF * localCF
+		-- Shrink both the part and how far out it sits, so the whole creature scales
+		-- about the ground point she stands on — which keeps her feet planted.
+		p.Size       = size * MOTHER_SCALE
+		p.CFrame     = groundCF * (CFrame.new(localCF.Position * MOTHER_SCALE) * localCF.Rotation)
 		p.Color      = color
 		p.Material   = material
 		p.Anchored   = true
@@ -416,12 +462,12 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 		return p
 	end
 	local function worldPt(v: Vector3): Vector3
-		return (groundCF * CFrame.new(v)).Position
+		return (groundCF * CFrame.new(v * MOTHER_SCALE)).Position
 	end
 	-- Tapered organic segment between two local-space points.
 	local function seg(name: string, a: Vector3, b: Vector3, thick: number, color: Color3, material: Enum.Material): Part
 		local p = dp(name, Vector3.one, CFrame.new(), color, material)
-		UnitVisuals.orientYBetween(p, worldPt(a), worldPt(b), thick)
+		UnitVisuals.orientYBetween(p, worldPt(a), worldPt(b), thick * MOTHER_SCALE)
 		return p
 	end
 
@@ -454,16 +500,11 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 	dp("Thorax", Vector3.new(7.4, 4.6, 7.0), CFrame.new(0, 3.6,  0.6), cHide, Enum.Material.Slate, Enum.PartType.Ball, true)
 
 	-- ── Four stubby splayed legs (salamander stance), rooted deep in the trunk ──
-	for _, s in { -1, 1 } do
-		for li, zHip in { -4.2, 0.8 } do
-			local zFoot = zHip + (li == 1 and -1.4 or 1.2)   -- front pair reaches forward, rear back
-			local hip   = Vector3.new(s * 2.4, 2.5, zHip)    -- buried inside the trunk mass
-			local knee  = Vector3.new(s * 4.9, 2.0, zHip + (li == 1 and -0.6 or 0.5))
-			local foot  = Vector3.new(s * 6.0, 0.4, zFoot)
-			seg("LegUpper", hip,  knee, 1.35, cChitin, Enum.Material.Slate)
-			seg("LegFore",  knee, foot, 1.0,  cChitin, Enum.Material.Slate)
-			dp("Foot", Vector3.new(2.1, 0.7, 2.5), CFrame.new(s * 6.1, 0.3, zFoot), cChitin, Enum.Material.Slate, Enum.PartType.Ball)
-		end
+	-- Indexed names let the client walk animator re-pose these exact parts.
+	for i, L in MOTHER_LEGS do
+		seg("LegUpper" .. i, L.hip,  L.knee, 1.35, cChitin, Enum.Material.Slate)
+		seg("LegFore"  .. i, L.knee, L.foot, 1.0,  cChitin, Enum.Material.Slate)
+		dp("Foot" .. i, Vector3.new(2.1, 0.7, 2.5), CFrame.new(L.pad), cChitin, Enum.Material.Slate, Enum.PartType.Ball)
 	end
 
 	-- ── Queen-ant gaster: swollen, banded, tipped down to the egg vent ──────────

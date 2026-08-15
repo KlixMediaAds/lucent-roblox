@@ -217,16 +217,18 @@ local WALL_TOP    = GROUND_TOP + STEP   -- wall crest — one elevation level up
 local WALL_THICK  = 18                  -- wall width (studs); ≥ NavGrid CELL so it blocks cells
 local SPEC_CHANCE = 0.10                -- chance a wall vertex sprouts a spike above the crest
 
--- Keep walls clear of every starting base spot — the SE-half PLAYER_BASES in init.server
--- and their diagonal-mirror AI_BASES in AIManager — so an auto-placed Command Center
--- never lands boxed in by rock.
-local BASE_SPOTS = {
-	Vector2.new(250, -250), Vector2.new(-250, 250),   -- SE / NW corner pair
-	Vector2.new(290,  -70), Vector2.new( -70, 290),
-	Vector2.new( 70, -290), Vector2.new(-290,  70),
-	Vector2.new(170, -170), Vector2.new(-170, 170),
-}
+-- Keep walls clear of the spawn ring. Commanders start at a RANDOM point along the
+-- map's perimeter ring (see SpawnPoints), so instead of dodging a handful of fixed
+-- spots the generator keeps the entire ring band open — any point on it could be
+-- somebody's base, and none of them may land boxed in by rock. Walls therefore
+-- weave through the interior while the rim stays open ground.
+-- init.server feeds in the live ring half-extent; the default matches SpawnPoints.
 local BASE_CLEAR = 110
+local spawnRing  = 340
+
+function TerrainManager.setSpawnRing(halfExtent: number)
+	spawnRing = halfExtent
+end
 
 function TerrainManager.generateWalled(seed: number?)
 	terrainPlan = nil
@@ -243,11 +245,7 @@ function TerrainManager.generateWalled(seed: number?)
 	local LIM = HALF - 24
 
 	local function nearBase(x: number, z: number): boolean
-		for _, b in BASE_SPOTS do
-			local dx, dz = x - b.X, z - b.Y
-			if dx * dx + dz * dz < BASE_CLEAR * BASE_CLEAR then return true end
-		end
-		return false
+		return math.abs(math.max(math.abs(x), math.abs(z)) - spawnRing) < BASE_CLEAR
 	end
 
 	-- Mirror a point across the symmetry axis so both halves of the map match.

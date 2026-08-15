@@ -233,6 +233,15 @@ function Network.trainFromMother(ccId: string, unitType: string)
 	RemoteHandler.get(Config.REMOTES.TrainFromMother):FireServer(ccId, unitType)
 end
 
+-- ccId, pos: send the Mother to inject the ground at pos (she walks there, then three
+-- plants rise out of the wound). `queued` (the player held [Shift]) stacks the spot
+-- behind her current order instead of replacing it.
+-- `plant`, when given, aims the spike at one of her own grown plants at that spot, which
+-- bursts it for what it was growing instead of opening fresh ground.
+function Network.injectGround(ccId: string, pos: Vector3, queued: boolean?, plant: Model?)
+	RemoteHandler.get(Config.REMOTES.InjectGround):FireServer(ccId, pos, queued == true, plant)
+end
+
 -- ccId: buy one Egg Sacs upgrade on the Mother (plants nests + raises the Embryo cap)
 function Network.upgradeEggSacs(ccId: string)
 	RemoteHandler.get(Config.REMOTES.UpgradeEggSacs):FireServer(ccId)

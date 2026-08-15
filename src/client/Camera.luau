@@ -32,6 +32,12 @@ local edgePanSuppressed = false
 -- When set, the camera locks its focus onto this part each frame (used to follow
 -- the incoming Core drop pod). WASD panning is suspended while following.
 local followTarget: BasePart? = nil
+local followEdgeRelease = false   -- does edge-scrolling also break this follow?
+-- Edge-release only arms once the cursor has been seen away from the screen edge. A
+-- follow that starts while the cursor already sits in the edge band (game start, a
+-- double-tap of [1] with the mouse parked in a corner) would otherwise cancel itself
+-- on its very first frame.
+local followEdgeArmed   = false
 
 -- While a teleport is being audio-ducked, the camera is frozen at its current pose so
 -- the actual jump happens only at the silent low point of the fade (see setFocus). This
@@ -140,6 +146,19 @@ function Camera.init()
 				or UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.S)
 				or UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.D)
 				or UserInputService:IsKeyDown(Enum.KeyCode.Q) or UserInputService:IsKeyDown(Enum.KeyCode.E)
+			-- Follows that asked for it also break on edge-scroll (see followPart).
+			if not manualOverride and followEdgeRelease then
+				local vp  = cam.ViewportSize
+				local mp  = UserInputService:GetMouseLocation()
+				local thr = Config.CAMERA_EDGE_THRESHOLD
+				local atEdge = mp.X < thr or mp.X > vp.X - thr
+					or mp.Y < thr or mp.Y > vp.Y - thr
+				if not atEdge then
+					followEdgeArmed = true
+				elseif followEdgeArmed and not edgePanSuppressed then
+					manualOverride = true
+				end
+			end
 			if followTarget.Parent and not manualOverride then
 				focus = Vector3.new(followTarget.Position.X, 0, followTarget.Position.Z)
 				apply()
@@ -247,10 +266,22 @@ function Camera.setEdgePanSuppressed(v: boolean)
 	edgePanSuppressed = v
 end
 
--- Lock the camera onto a moving part (the camera keeps it centred each frame and
--- ignores WASD until stopFollow is called).
-function Camera.followPart(part: BasePart?)
-	followTarget = part
+--[[
+	Lock the camera onto a moving part: it stays centred every frame until the player
+	steers (WASD / QE / middle-drag), an explicit setFocus jumps elsewhere, or the
+	part dies.
+
+	`releaseOnEdgePan` also counts screen-edge scrolling as steering. It's opt-in
+	because a follow started from a corner UI button would otherwise cancel itself
+	the instant it began — the cursor is already in the edge zone. A follow started
+	from a keypress has no such problem and passes true, so nudging the screen edge
+	frees the camera like any other pan.
+]]
+function Camera.followPart(part: BasePart?, releaseOnEdgePan: boolean?)
+	followTarget      = part
+	followEdgeRelease = releaseOnEdgePan == true
+	followEdgeArmed   = false   -- see followEdgeArmed: the cursor must leave the edge first
+	returning         = false   -- don't let a return-to-base fly resume underneath the lock
 end
 
 function Camera.stopFollow()

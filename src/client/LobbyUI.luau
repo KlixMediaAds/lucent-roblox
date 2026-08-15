@@ -12,7 +12,7 @@
 	  │ MATCH    │  │                          │
 	  │ SETUP    │  │       TACTICAL MAP       │  ← map on the right of the settings
 	  │ • Gamemode  │       (large square)     │
-	  │ • AI Diff   │                          │
+	  │ • Terrain   │                          │
 	  │ • AI Count  │  └──────────────────────────┘
 	  │ • Teams  │  ┌───────────────┐ ┌──────────┐
 	  └──────────┘  │  COMBATANTS    │ │  READY   │  ← roster beneath the map,
@@ -25,6 +25,11 @@
 	settings column, and clicking the race box on your own combatant banner (which swaps
 	to the other race). The server stores the pick and re-syncs the roster, so every
 	client's banners redraw with it.
+
+	AI opponents are configured on their own roster cards the same way: clicking an
+	AI's icon cycles its race (Humans → Hollowed → Random) and clicking its
+	difficulty box cycles Easy → Medium → Hard → Nightmare, per AI. The settings
+	drop-menu keeps only the AI COUNT control.
 ]]
 
 local Players           = game:GetService("Players")
@@ -136,7 +141,6 @@ local sndCountdown:  Sound
 local sndStart:      Sound
 
 local aiCountBtn:    TextButton
-local aiDiffBtn:     TextButton
 local gamemodeBtn:   TextButton
 local terrainBtn:    TextButton
 
@@ -160,7 +164,7 @@ local swapLocalFaction: (string) -> ()
 local factionCards: { [string]: { card: TextButton, stroke: UIStroke, name: TextLabel, vpf: ViewportFrame, badge: TextLabel } } = {}
 local lobbyTerrainMode    = "Off"   -- Layered | Walled | Off (server owns the authoritative value)
 local lobbyGamemode       = "Default"
-local lastSettings        = { aiCount = 1, aiDifficulty = "Medium" }
+local lastSettings        = { aiCount = 1, ais = {} }
 
 -- Bright "ready up" palette, pronounced yellow→white gradient
 local C_READY_TOP   = Color3.fromRGB(255, 248, 196)  -- near-white top
@@ -285,10 +289,14 @@ end
 local BANNER_PAD  = 10
 local BANNER_IN_W = BANNER_W - BANNER_PAD * 2   -- 120
 
--- Build a single banner. `kind` is "player" | "ai" | "empty".
+-- Build a single banner. `kind` is "player" | "ai" | "empty". AI banners are
+-- editable in place: `index` is the AI's lobby slot — clicking its icon cycles
+-- the race (Humans → Hollowed → Random), clicking its difficulty cycles
+-- Easy → Medium → Hard → Nightmare.
 local function buildBanner(opts: {
 	kind: string, name: string?, userId: number?, faction: string?,
 	ready: boolean?, isLocal: boolean?, diff: string?, diffColor: Color3?,
+	index: number?, race: string?,
 }): Frame
 	local card = Instance.new("Frame")
 	card.Size = UDim2.fromOffset(BANNER_W, BANNER_H)
@@ -324,9 +332,47 @@ local function buildBanner(opts: {
 	local hst = stroke(holder, C_BORDER, 1); hst.Transparency = 0.5
 
 	if opts.kind == "ai" then
-		local g = label(holder, "🤖", 54, accent, Enum.Font.GothamBlack,
-			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
-		g.TextYAlignment = Enum.TextYAlignment.Center
+		-- The icon box shows the AI's race and doubles as its race picker.
+		local race = opts.race or "Humans"
+		if race == "Random" then
+			local g = label(holder, "🎲", 44, accent, Enum.Font.GothamBlack,
+				UDim2.new(1, 0, 1, -18), UDim2.fromOffset(0, 0))
+			g.TextYAlignment = Enum.TextYAlignment.Center
+		else
+			local vpf = ViewportPreview.forUnit(FACTION_UNIT[race] or "Survivor",
+				Vector2.new(BANNER_IN_W - 8, BANNER_IN_W - 26))
+			vpf.Position = UDim2.fromOffset(4, 2)
+			vpf.Parent = holder
+		end
+		local raceStrip = label(holder,
+			race == "Random" and "RANDOM" or (FACTION_LABEL[race] or race:upper()),
+			10, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, 0, 0, 14), UDim2.new(0, 0, 1, -16))
+
+		if opts.index then
+			local rst = stroke(holder, C_GOLD, 1); rst.Transparency = 0.55
+			local pick = Instance.new("TextButton")
+			pick.Name = "PickRace"
+			pick.Size = UDim2.new(1, 0, 1, 0)
+			pick.BackgroundTransparency = 1
+			pick.AutoButtonColor = false
+			pick.Text = ""
+			pick.ZIndex = 6
+			pick.Parent = holder
+			pick.MouseEnter:Connect(function()
+				rst.Transparency = 0; rst.Thickness = 2
+				raceStrip.TextColor3 = C_TITLE
+				raceStrip.Text = "RACE  ⇄"
+			end)
+			pick.MouseLeave:Connect(function()
+				rst.Transparency = 0.55; rst.Thickness = 1
+				raceStrip.TextColor3 = C_GOLD
+				raceStrip.Text = race == "Random" and "RANDOM" or (FACTION_LABEL[race] or race:upper())
+			end)
+			pick.MouseButton1Click:Connect(function()
+				RemoteHandler.get(Config.REMOTES.LobbySetAIRace):FireServer(opts.index)
+			end)
+		end
 	elseif opts.userId and opts.userId > 0 then
 		local img = Instance.new("ImageLabel")
 		img.Size = UDim2.new(1, 0, 1, 0)
@@ -345,7 +391,7 @@ local function buildBanner(opts: {
 	-- caption says so.
 	local raceY   = 34 + BANNER_IN_W + 6   -- 160
 	local canSwap = opts.isLocal and opts.kind == "player"
-	local caption = if opts.kind == "ai" then "DIFFICULTY" elseif canSwap then "RACE  ⇄ SWAP" else "RACE"
+	local caption = if opts.kind == "ai" then "DIFFICULTY  ⇄ CYCLE" elseif canSwap then "RACE  ⇄ SWAP" else "RACE"
 	label(card, caption, 10, C_GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -12, 0, 12), UDim2.fromOffset(BANNER_PAD, raceY), Enum.TextXAlignment.Left)
 
@@ -360,10 +406,33 @@ local function buildBanner(opts: {
 	corner(raceBox, 6)
 
 	if opts.kind == "ai" then
-		-- AI has no chosen race; show the difficulty prominently instead.
+		-- The difficulty box: shows this AI's difficulty and cycles it on click.
 		local dl = label(raceBox, (opts.diff or "MEDIUM"):upper(), 18, accent, Enum.Font.GothamBlack,
 			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
 		dl.TextYAlignment = Enum.TextYAlignment.Center
+
+		if opts.index then
+			local dst = stroke(raceBox, accent, 1); dst.Transparency = 0.55
+			local cyc = Instance.new("TextButton")
+			cyc.Name = "CycleDifficulty"
+			cyc.Size = UDim2.new(1, 0, 1, 0)
+			cyc.BackgroundTransparency = 1
+			cyc.AutoButtonColor = false
+			cyc.Text = ""
+			cyc.ZIndex = 6
+			cyc.Parent = raceBox
+			cyc.MouseEnter:Connect(function()
+				dst.Transparency = 0; dst.Thickness = 2
+				raceBox.BackgroundTransparency = 0
+			end)
+			cyc.MouseLeave:Connect(function()
+				dst.Transparency = 0.55; dst.Thickness = 1
+				raceBox.BackgroundTransparency = 0.35
+			end)
+			cyc.MouseButton1Click:Connect(function()
+				RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty):FireServer(opts.index)
+			end)
+		end
 	else
 		local faction = opts.faction or "Humans"
 		local unit = FACTION_UNIT[faction] or "Survivor"
@@ -423,12 +492,16 @@ local function buildBanner(opts: {
 end
 
 local function syncRoster(readyList: { { name: string, userId: number, ready: boolean, faction: string? } }, settings)
-	local n    = (settings and settings.aiCount) or 0
-	local diff = (settings and settings.aiDifficulty) or "Medium"
+	local n   = (settings and settings.aiCount) or 0
+	local ais = (settings and settings.ais) or {}
 
 	-- Rebuild only when something visible changed (avoids re-rendering 3D previews on
-	-- every sync). Signature captures names, factions, ready flags and the AI config.
-	local parts = { tostring(n), diff }
+	-- every sync). Signature captures names, factions, ready flags and each AI's config.
+	local parts = { tostring(n) }
+	for i = 1, n do
+		local a = ais[i] or {}
+		table.insert(parts, string.format("ai%d|%s|%s", i, a.difficulty or "Medium", a.race or "Humans"))
+	end
 	for _, e in readyList do
 		table.insert(parts, string.format("%s|%s|%s", e.name, e.faction or "Humans", tostring(e.ready)))
 	end
@@ -440,7 +513,6 @@ local function syncRoster(readyList: { { name: string, userId: number, ready: bo
 		if child:IsA("Frame") then child:Destroy() end
 	end
 
-	local diffColor = DIFF_COLORS[diff] or C_GOLD
 	local slots = 0
 
 	-- Human players first.
@@ -457,12 +529,16 @@ local function syncRoster(readyList: { { name: string, userId: number, ready: bo
 		}).Parent = bannersContent
 	end
 
-	-- Then AI opponents.
-	for _ = 1, n do
+	-- Then AI opponents — each card carries its own difficulty + race controls.
+	for i = 1, n do
 		if slots >= MAX_BANNERS then break end
 		slots += 1
+		local a    = ais[i] or {}
+		local diff = a.difficulty or "Medium"
 		buildBanner({
-			kind = "ai", name = "AI OPPONENT", diff = diff, diffColor = diffColor,
+			kind = "ai", name = "AI OPPONENT", index = i,
+			diff = diff, diffColor = DIFF_COLORS[diff] or C_GOLD,
+			race = a.race or "Humans",
 		}).Parent = bannersContent
 	end
 
@@ -476,19 +552,11 @@ end
 -- ── Settings value display ─────────────────────────────────────────────────────
 local function applySettings(settings)
 	lastSettings = settings or lastSettings
-	local n    = lastSettings.aiCount or 0
-	local diff = lastSettings.aiDifficulty or "Medium"
+	local n = lastSettings.aiCount or 0
 
 	if aiCountBtn then
 		aiCountBtn.Text = n == 0 and "NONE" or tostring(n)
 		aiCountBtn.TextColor3 = n == 0 and C_SUBTEXT or C_TITLE
-	end
-	if aiDiffBtn then
-		local c = DIFF_COLORS[diff] or C_GOLD
-		aiDiffBtn.Text = diff:upper()
-		aiDiffBtn.TextColor3 = c
-		local st = aiDiffBtn:FindFirstChildOfClass("UIStroke")
-		if st then st.Color = c; st.Transparency = 0.35 end
 	end
 end
 
@@ -978,11 +1046,9 @@ local function buildSettingsColumn()
 	terrainBtn = settingRow(settingsPanel, rowY, "TERRAIN", "LAYERED", TERRAIN_COLORS.Layered, true)
 	rowY += ROW_STEP
 
-	-- AI Difficulty (cycles Easy/Medium/Hard/Nightmare)
-	aiDiffBtn = settingRow(settingsPanel, rowY, "AI DIFFICULTY", "MEDIUM", C_GOLD, true)
-	rowY += ROW_STEP
+	-- AI Count (cycles 0..3). Per-AI difficulty and race moved onto each AI's
+	-- roster card — click the card's difficulty / icon to change them.
 
-	-- AI Count (cycles 0..3)
 	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C_TITLE, true)
 	rowY += ROW_STEP
 
@@ -1081,9 +1147,6 @@ local function wireControls()
 	readyBtn.MouseButton1Click:Connect(function()
 		RemoteHandler.get(Config.REMOTES.LobbyReady):FireServer()
 	end)
-	aiDiffBtn.MouseButton1Click:Connect(function()
-		RemoteHandler.get(Config.REMOTES.LobbySetAIDifficulty):FireServer()
-	end)
 	aiCountBtn.MouseButton1Click:Connect(function()
 		RemoteHandler.get(Config.REMOTES.LobbySetAICount):FireServer()
 	end)
@@ -1165,7 +1228,7 @@ local function wireRemotesOnce()
 			readyList: { { name: string, userId: number, ready: boolean, faction: string? } },
 			_positions:  { Vector3 },
 			terrainMode: string,
-			settings:    { aiCount: number, aiDifficulty: string }?,
+			settings:    { aiCount: number, ais: { { difficulty: string, race: string } } }?,
 			gamemode:    string?
 		)
 			-- Ignore syncs that arrive while no lobby is on screen (mid-match).

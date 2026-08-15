@@ -55,6 +55,13 @@ local SKIN_TONES = {
 }
 local DEFAULT_SKIN = SKIN_TONES[3]
 
+-- The fixed tone for UI previews: the palest of the range. A thumbnail is a logo,
+-- not a crowd — it is rebuilt every time the lobby redraws, so rolling a random
+-- tone would make the same card change complexion on every click.
+function UnitBlueprints.previewSkinTone(): Color3
+	return SKIN_TONES[1]
+end
+
 -- One randomized skin tone, used for every `skin` part on a single unit. Callers
 -- compute this once per unit/preview and pass it to `instantiate`.
 function UnitBlueprints.randomSkinTone(): Color3

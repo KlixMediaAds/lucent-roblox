@@ -650,13 +650,13 @@ local function buildUI()
 	rStroke.Parent            = rBtn
 	returnStroke              = rStroke
 
-	-- Small "R" key badge in the corner
+	-- Small "1" key badge in the corner
 	local rBadge              = Instance.new("TextLabel")
 	rBadge.Size               = UDim2.fromOffset(11, 9)
 	rBadge.AnchorPoint        = Vector2.new(1, 1)
 	rBadge.Position           = UDim2.new(1, -2, 1, -1)
 	rBadge.BackgroundTransparency = 1
-	rBadge.Text               = "R"
+	rBadge.Text               = "1"
 	rBadge.Font               = Enum.Font.GothamBold
 	rBadge.TextSize           = 9
 	rBadge.TextColor3         = Color3.fromRGB(150, 170, 200)
@@ -871,7 +871,7 @@ function MiniMap.setReturnVisible(v: boolean)
 	if returnBtn then returnBtn.Visible = v end
 end
 
--- Dim the [R] camera button when the view is already "home" (return is redundant),
+-- Dim the [1] camera button when the view is already "home" (return is redundant),
 -- brighten it once the player has panned / rotated away. Applies only on a state
 -- change so it doesn't fight the hover tweens each frame.
 function MiniMap.setReturnDimmed(dimmed: boolean)

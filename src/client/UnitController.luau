@@ -475,9 +475,8 @@ local function hitBuilding(): string?
 end
 
 -- Raycast for an owned Egg-Sac nest under the cursor. Each one is a clickable Model (the
--- bowl, plus its egg when one is present) tagged with an "EggId" attribute, parented under a
--- Mother model, so this must run BEFORE hitBuilding (which would otherwise match it as part
--- of the Command Center). Returns the egg id and the clump Model, or nil.
+-- bowl, plus its egg when one is present) tagged with an "EggId" attribute, living in
+-- workspace.EggNests. Returns the egg id and the clump Model, or nil.
 local function hitEgg(): (string?, Instance?)
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
@@ -523,6 +522,29 @@ local function hitEnemyBuilding(): string?
 				return id
 			end
 		end
+	end
+	return nil
+end
+
+-- An enemy egg or Egg-Sac nest under the cursor, as a focus-attack target id. Eggs
+-- aren't buildings — they live in workspace.EggNests, or under a Lamprey Nest — but the
+-- server accepts their id in the same focus order, so right-clicking one is identical to
+-- right-clicking a structure. The id is stamped on the egg itself and on a nest's clump
+-- (whose invisible Hitbox is what the ray actually lands on), so walk up a couple of
+-- levels from whatever was hit.
+local function hitEnemyEgg(): string?
+	local ray    = mouse.UnitRay
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
+	local inst: Instance? = result and result.Instance
+	for _ = 1, 3 do
+		if not inst then break end
+		local id = inst:GetAttribute("EggTargetId")
+		if type(id) == "string" then
+			-- Found the clutch: only an enemy's is a target.
+			if inst:GetAttribute("EggTargetOwner") ~= localPlayer.UserId then return id end
+			return nil
+		end
+		inst = inst.Parent
 	end
 	return nil
 end
@@ -645,10 +667,12 @@ end
 
 -- Scan the local player's egg clump Models, returning eggId → clump Model plus a
 -- parentEggId → { childEggId } adjacency map (from each clump's "ParentEgg" attribute).
+-- Nests sit in workspace.EggNests (grouped per owning Mother) rather than under the
+-- Mother's model, so they stay put when she uproots and walks off.
 local function scanOwnedEggs(): ({ [string]: Instance }, { [string]: { string } })
 	local models:   { [string]: Instance }   = {}
 	local children: { [string]: { string } } = {}
-	local folder = workspace:FindFirstChild("Buildings")
+	local folder = workspace:FindFirstChild("EggNests")
 	if not folder then return models, children end
 	for _, cc in folder:GetChildren() do
 		for _, m in cc:GetChildren() do
@@ -716,13 +740,29 @@ local function selectEgg(rootEggId: string)
 	applyEggSelection(ids, models)
 end
 
--- Double-click on an egg: select EVERY owned egg currently on screen (mirrors the
--- unit/building double-click "select all visible of this kind" behaviour).
-local function selectAllEggsOnScreen()
-	clearEggSelection()
+-- The creature an egg nest is set to hatch ("Lamprey", "Hagfish", …), or nil while
+-- it is still unassigned. The server stamps this on the egg part whenever a unit is
+-- picked (BuildingManager.assignEggUnit), so it replicates to every client.
+local function eggSpawnType(clump: Instance): string?
+	local egg = (clump :: any):FindFirstChild("Egg")
+	local st  = egg and egg:GetAttribute("SpawnType")
+	return type(st) == "string" and st or nil
+end
+
+-- Double-click on an egg: select every owned egg on screen that hatches the SAME
+-- creature — the unit/building double-click "select all visible of this kind"
+-- behaviour. Eggs that have not been assigned a unit yet group with each other,
+-- so double-clicking a fresh nest grabs all the other empty ones to set at once.
+local function selectAllSameEggTypeOnScreen(rootEggId: string)
 	local models = scanOwnedEggs()
+	local root   = models[rootEggId]
+	if not root then selectEgg(rootEggId); return end
+	local targetType = eggSpawnType(root)
+
+	clearEggSelection()
 	local ids: { string } = {}
 	for id, m in models do
+		if eggSpawnType(m) ~= targetType then continue end
 		local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
 		local pos = adornee:IsA("BasePart") and adornee.Position or (m :: any):GetPivot().Position
 		if isOnScreen(pos) then table.insert(ids, id) end
@@ -850,6 +890,14 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			if enemyBldId then
 				maybeUnitVoice()
 				network.focusAttack(selected, enemyBldId, "building")
+				if ground then spawnMovePing(ground, true) end
+				if onMoveIssuedCb then onMoveIssuedCb(selected) end
+				return
+			end
+			local enemyEggId = hitEnemyEgg()
+			if enemyEggId then
+				maybeUnitVoice()
+				network.focusAttack(selected, enemyEggId, "building")
 				if ground then spawnMovePing(ground, true) end
 				if onMoveIssuedCb then onMoveIssuedCb(selected) end
 				return
@@ -1155,7 +1203,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				clearBuildingPanels()
 			elseif eggId then
 				-- Own Egg-Sac egg: highlight it (+ its subtree) and open the "what to hatch" panel.
-				-- Double-clicking one selects every owned egg on screen instead.
+				-- Double-clicking one selects every on-screen egg hatching the same creature.
 				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == eggId
 				lastClickTime   = now
 				lastClickTarget = eggId
@@ -1163,7 +1211,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				selectBuilding(nil)
 				clearBuildingPanels()
 				if isDouble then
-					selectAllEggsOnScreen()
+					selectAllSameEggTypeOnScreen(eggId)
 				else
 					selectEgg(eggId)
 				end

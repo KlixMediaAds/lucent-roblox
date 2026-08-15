@@ -34,6 +34,12 @@ function ResourceManager.getTotalEarned(player: Player): number
 	return totalEarned[player.UserId] or 0
 end
 
+-- Same, addressed by raw user id so the end-screen timeline can sample AI bots
+-- (negative ids, no Player instance) alongside human players.
+function ResourceManager.getTotalEarnedById(userId: number): number
+	return totalEarned[userId] or 0
+end
+
 function ResourceManager.spend(player: Player, amount: number): boolean
 	local current = store[player.UserId] or 0
 	if current < amount then return false end

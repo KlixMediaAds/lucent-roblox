@@ -123,6 +123,12 @@ Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-
 -- Leech (Hollowed): when burrowed it enters a structure state and pays out passive
 -- income to its owner each interval (mirrors the Command Center passive income).
 Config.LEECH_BURROW_INCOME    = 2     -- resources per tick from each burrowed Leech
+-- A Leech anchored within LEECH_ORE_RADIUS of a live mineral deposit taps it and
+-- pays LEECH_ORE_BONUS on top (doubling its base yield). The same radius is how far
+-- a freshly-hatched Leech will look for ore to crawl toward before burrowing, so a
+-- Leech that can sense a deposit ends up feeding on it.
+Config.LEECH_ORE_RADIUS       = 60    -- studs; ore-sensing range, and the feeding range
+Config.LEECH_ORE_BONUS        = 2     -- extra resources per tick when anchored on ore
 Config.LEECH_BURROW_INTERVAL  = 6     -- seconds between burrowed-Leech income ticks
 Config.LEECH_BURROW_SINK      = 0     -- Leech no longer sinks: it arches up (rainbow) to feed — see LeechBody
 -- Each Leech rears up and quests for a random moment before planting its head to feed.
@@ -131,11 +137,12 @@ Config.LEECH_BURROW_SINK      = 0     -- Leech no longer sinks: it arches up (ra
 -- it on the part as an "AnchorDelay" attribute the client body-animator reads.
 Config.LEECH_ANCHOR_DELAY_MIN = 0.5   -- min seconds head-up before a Leech anchors
 Config.LEECH_ANCHOR_DELAY_MAX = 3.0   -- max seconds head-up before a Leech anchors
--- Freshly-spawned Leeches don't idle at the nest: they crawl a few tiles out to open
--- ground on a random heading and burrow themselves (no micro needed). Distances are in
--- studs (~12 studs ≈ one nav tile), so this scatters them 3–5 tiles from the spawn point.
-Config.LEECH_SCATTER_MIN      = 36    -- min studs a new Leech crawls out before auto-burrowing
-Config.LEECH_SCATTER_MAX      = 60    -- max studs a new Leech crawls out before auto-burrowing
+-- Freshly-spawned Leeches don't idle at the nest: they crawl clear of it and burrow
+-- themselves (no micro needed). They only shuffle a short way — the reach they used to
+-- cover now serves as LEECH_ORE_RADIUS, the range they sense ore across — so a clutch
+-- settles as a tight bed around the nest, leaning toward whatever ore is in range.
+Config.LEECH_SCATTER_MIN      = 7     -- min studs a new Leech crawls out before auto-burrowing
+Config.LEECH_SCATTER_MAX      = 12    -- max studs a new Leech crawls out before auto-burrowing
 
 -- A selected Leech can evolve in place into a Watcher (a slow, ranged cluster of eyes).
 -- The server charges this, despawns the Leech, and spawns a Watcher where it stood.
@@ -226,6 +233,9 @@ Config.FOREST_CC_CLEARING      = 60    -- studs; trees are felled within this ra
 Config.RELAY_COST            = 175
 Config.MOBILE_CC_COST        = 200   -- one-time cost to enable CC mobility
 Config.MOBILE_CC_SPEED       = 14    -- studs per second when walking
+-- The Hollowed Mother uproots onto her own legs rather than crawling on treads,
+-- so she travels 50% faster than the Human mobile Command Center.
+Config.MOTHER_MOVE_SPEED     = 21    -- studs per second for an uprooted Mother
 Config.CREEPY_BLOB_COST      = 225   -- cost to place the blob building
 Config.BLOB_SOLDIER_COST     = 40    -- per CreepySoldier spawn
 Config.BLOB_SOLDIER_COOLDOWN = 6     -- seconds between soldier spawns
@@ -251,6 +261,13 @@ Config.LAMPREY_EGG_INCUBATION  = 9.0  -- seconds from egg settling to hatch (~10
 -- that incubates under a progress bar, then hatches into the trained unit.
 Config.MOTHER_EGG_INCUBATION   = 8.0  -- seconds from the egg settling to hatch
 
+-- Eggs on the ground are soft targets, not scenery: a raider who reaches a clutch can
+-- pop the eggs before they hatch and level the Egg-Sac nests that keep respawning
+-- creatures. Deliberately fragile, so a clutch left undefended is a real liability —
+-- but attackers only turn on eggs when no actual structure is within their range.
+Config.EGG_HP      = 70   -- one loose egg (a nest's clutch, or a Mother's spat egg)
+Config.EGG_NEST_HP = 180  -- a planted Egg-Sac nest; killing it takes its spawner for good
+
 -- Hollowed Mother "Egg Sacs" upgrade — a repeatable per-Mother purchase. Each purchase
 -- plants ONE flat nest beside the Mother with ONE egg resting on it. Every egg is a
 -- clickable spawner: the player picks the unit it keeps alive (see BuildingManager).
@@ -270,6 +287,21 @@ end
 function Config.eggSacCapacity(level: number): number
 	return math.max(0, level) * Config.MOTHER_EGGSAC_PER_LEVEL
 end
+
+-- Hollowed Mother "Inject": the Mother's one command-card action. The player picks a
+-- ground point, the Mother walks over (uprooting herself if she was rooted), drives her
+-- spike into the soil, and three plants tear their way up out of the wound. She re-roots
+-- afterwards if that is how she started.
+Config.MOTHER_INJECT_COST     = 10    -- resources per injection, ground or plant
+Config.MOTHER_INJECT_ARRIVE   = 14    -- studs from the point that counts as "stood over it"
+Config.MOTHER_INJECT_DURATION = 1.8   -- seconds she stays hunched over the injection
+Config.MOTHER_INJECT_PLANTS   = 3     -- plants that rise per injection
+Config.MOTHER_INJECT_SPREAD   = 9     -- studs out from the point the plants ring around
+Config.MOTHER_INJECT_RANGE    = 400   -- max studs from the Mother a target point may sit
+-- Injecting one of her own grown plants instead of bare ground: the plant bursts and
+-- gives up what it was growing. Which plant gives what lives in InjectPlants.INJECT.
+Config.MOTHER_INJECT_PLANT_LEECHES = 3   -- Leeches out of a spire
+Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- Lamprey Nests out of a pod cluster
 
 -- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest
 -- births eggs: instead of settling them around its own footprint, the nest LAUNCHES
@@ -497,7 +529,7 @@ Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitz
 Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
 Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20, Needler = 42 }
 Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }
-Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 3.0, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
+Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 2.1, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
 
 -- Needler merge ability: a selected Needler folds the nearest owned Needler within
 -- range into itself, stacking their bodies into one (up to NEEDLER_MERGE_MAX). Stacks
@@ -563,6 +595,7 @@ Config.REMOTES = {
 	LobbyStart              = "LobbyStart",
 	LobbySetColor           = "LobbySetColor",
 	LobbySetFaction         = "LobbySetFaction",
+	LobbySetAIRace          = "LobbySetAIRace",
 	LobbyTerrainToggle      = "LobbyTerrainToggle",
 	LobbyAddAI              = "LobbyAddAI",
 	LobbyRemoveAI           = "LobbyRemoveAI",
@@ -592,6 +625,7 @@ Config.REMOTES = {
 	SetNestRally            = "SetNestRally",
 	ForfeitMatch            = "ForfeitMatch",
 	TrainFromMother         = "TrainFromMother",
+	InjectGround            = "InjectGround",
 	UpgradeEggSacs          = "UpgradeEggSacs",
 	AssignEgg               = "AssignEgg",
 	ToggleBurrow            = "ToggleBurrow",

@@ -68,6 +68,7 @@ local LobbyManager     = require(script:WaitForChild("LobbyManager"))
 local TerrainManager   = require(script:WaitForChild("TerrainManager"))
 local ForestManager    = require(script:WaitForChild("ForestManager"))
 local NavGrid          = require(script:WaitForChild("NavGrid"))
+local SpawnPoints      = require(script:WaitForChild("SpawnPoints"))
 
 TeamManager.init()
 ResourceManager.init()
@@ -84,6 +85,7 @@ BuildingManager.setResearchManager(ResearchManager)
 MineralManager.setBuildingManager(BuildingManager)
 AIManager.init(UnitManager, BuildingManager, ResourceManager)
 AIManager.setResearchManager(ResearchManager)
+AIManager.setMineralManager(MineralManager)
 
 ForestManager.init(MineralManager)
 ForestManager.setTerrainManager(TerrainManager)
@@ -91,6 +93,9 @@ BuildingManager.setForestManager(ForestManager)
 BuildingManager.setTerrainManager(TerrainManager)
 UnitManager.setForestManager(ForestManager)
 MineralManager.setForestManager(ForestManager)
+
+-- Keep the walled map's rock clear of wherever a base might spawn.
+TerrainManager.setSpawnRing(SpawnPoints.RING_HALF)
 
 NavGrid.setTerrainManager(TerrainManager)
 UnitManager.setTerrainManager(TerrainManager)
@@ -101,42 +106,90 @@ MineralManager.setTerrainManager(TerrainManager)
 local gameResetInProgress = false
 local gameStartTime       = os.clock()
 -- Performance-graph timeline: every TIMELINE_DT seconds we snapshot every combatant's
--- (human players AND AI bots) cumulative kills, so the end screen can chart a universal
--- kills-over-time line per commander. Keyed by owner id string.
+-- (human players AND AI bots) progress across several metrics, so the end screen can
+-- chart any of them per commander and let the viewer switch between them.
+--   kills / resources — cumulative, only ever climb
+--   army / units / buildings — instantaneous, so losing a fight visibly dents the line
+-- Keyed by owner id string, then by metric.
 -- `matchGen` is bumped each match start/end so a stale sampler task self-exits.
 local TIMELINE_DT         = 5
-local killTimeline: { [string]: { number } } = {}
+local METRIC_KEYS         = { "kills", "army", "units", "resources", "buildings" }
+-- Running totals, as opposed to the instantaneous metrics. Losing a match zeroes a
+-- commander's ledgers as bookkeeping (ResourceManager.reset on elimination), but a
+-- career total can never actually fall, so these are held at their high-water mark
+-- instead of collapsing the line to zero the moment someone is knocked out.
+local CUMULATIVE          = { kills = true, resources = true }
+local timeline: { [string]: { [string]: { number } } } = {}
 local matchGen            = 0
 
--- One timeline sample: append every combatant's current cumulative kills.
+-- Read every combatant's current standing across all charted metrics.
+local function readMetrics(): (any, any, any)
+	return UnitManager.getKillTally(), UnitManager.getArmyTally(), BuildingManager.getBuildingTally()
+end
+
+-- Append one value, holding cumulative metrics at their previous high.
+local function pushSample(arr: { number }, key: string, value: number)
+	if CUMULATIVE[key] then
+		local last = arr[#arr]
+		if last and value < last then value = last end
+	end
+	arr[#arr + 1] = value
+end
+
+-- One timeline sample: append each combatant's current value for every metric.
 local function sampleTimeline()
-	local tally = UnitManager.getKillTally()
-	local function record(idStr: string)
-		local arr = killTimeline[idStr]
-		if not arr then arr = {}; killTimeline[idStr] = arr end
-		arr[#arr + 1] = tally[idStr] or 0
+	local kills, army, buildings = readMetrics()
+	local function record(idStr: string, userId: number)
+		local m = timeline[idStr]
+		if not m then
+			m = {}
+			for _, key in METRIC_KEYS do m[key] = {} end
+			timeline[idStr] = m
+		end
+		local a = army[idStr]
+		pushSample(m.kills,     "kills",     kills[idStr] or 0)
+		pushSample(m.army,      "army",      a and a.value or 0)
+		pushSample(m.units,     "units",     a and a.count or 0)
+		pushSample(m.resources, "resources", ResourceManager.getTotalEarnedById(userId))
+		pushSample(m.buildings, "buildings", buildings[idStr] or 0)
 	end
 	for _, p in Players:GetPlayers() do
-		if p.UserId > 0 then record(tostring(p.UserId)) end
+		if p.UserId > 0 then record(tostring(p.UserId), p.UserId) end
 	end
 	for _, bot in AIManager.getBotsForGraph() do
-		record(tostring(bot.userId))
+		record(tostring(bot.userId), bot.userId)
 	end
 end
 
--- Universal graph payload: one series per combatant (players + AI), each with its
--- sampled kill timeline and final total. Stashed under statsTable["__graph"].
+-- Universal graph payload: one series per combatant (players + AI), each carrying
+-- every metric's sampled timeline plus its final value. Stashed under
+-- statsTable["__graph"]; the end screen picks which metric to plot.
 local function buildGraphData(winnerUserId: number): any
-	local tally  = UnitManager.getKillTally()
+	local kills, army, buildings = readMetrics()
 	local series = {}
 	local function add(idStr: string, name: string, isAI: boolean, userId: number)
+		local m = timeline[idStr] or {}
+		local a = army[idStr]
+		-- Same high-water rule the samples follow, so the closing point of a
+		-- cumulative line never dives below the curve leading up to it.
+		local function finalOf(key: string, value: number): number
+			local arr  = m[key]
+			local last = arr and arr[#arr]
+			if CUMULATIVE[key] and last and value < last then return last end
+			return value
+		end
 		table.insert(series, {
 			id       = idStr,
 			name     = name,
 			isAI     = isAI,
 			isWinner = userId == winnerUserId,
-			samples  = killTimeline[idStr] or {},
-			final    = tally[idStr] or 0,
+			metrics  = {
+				kills     = { samples = m.kills     or {}, final = finalOf("kills", kills[idStr] or 0) },
+				army      = { samples = m.army      or {}, final = a and a.value or 0 },
+				units     = { samples = m.units     or {}, final = a and a.count or 0 },
+				resources = { samples = m.resources or {}, final = finalOf("resources", ResourceManager.getTotalEarnedById(userId)) },
+				buildings = { samples = m.buildings or {}, final = buildings[idStr] or 0 },
+			},
 		})
 	end
 	for _, p in Players:GetPlayers() do
@@ -188,6 +241,9 @@ local function returnToLobby()
 		ResearchManager.resetPlayer(player)
 	end
 	MineralManager.resetAll()
+	-- Clear the spawn ring before the bots reset: each surviving bot re-reserves its
+	-- own base as it resets, so next match's claims route around them.
+	SpawnPoints.reset()
 	AIManager.resetAllBots()
 
 	nextBaseIndex = 0
@@ -402,18 +458,10 @@ for _, player in Players:GetPlayers() do
 	connectChatForPlayer(player)
 end
 
--- ── Symmetric player base positions ──────────────────────────────────────────
--- Bases sit in the SE half of the map (below the main diagonal z = x). Their AI
--- counterparts (AIManager.AI_BASES) are the exact diagonal mirrors M(x,z) = (z,x) in
--- the NW half, so — with the forest and ore deposits also mirrored across z = x — a
--- human and the opposing AI start in identical surroundings. Assigned in join order.
--- Y = COMMAND_CENTER_SIZE.Y / 2 so the base sits on the Y=0 floor.
-local PLAYER_BASES: { Vector3 } = {
-	Vector3.new(250, Config.COMMAND_CENTER_SIZE.Y / 2, -250),  -- SE corner (primary)
-	Vector3.new(290, Config.COMMAND_CENTER_SIZE.Y / 2,  -70),  -- east edge
-	Vector3.new( 70, Config.COMMAND_CENTER_SIZE.Y / 2, -290),  -- south edge
-	Vector3.new(170, Config.COMMAND_CENTER_SIZE.Y / 2, -170),  -- inner SE
-}
+-- ── Player base positions ────────────────────────────────────────────────────
+-- Default/Swarm mode hands every commander — human and AI alike — a random spot on
+-- the map's perimeter ring (see SpawnPoints), spaced as far from the others as the
+-- board allows. Lane mode keeps its fixed corridor ends below.
 
 -- Lane mode bases: players at the south end (Z≈−290), AI at the north end (Z≈+290)
 local LANE_PLAYER_BASES: { Vector3 } = {
@@ -522,8 +570,7 @@ function deliverBaseForPlayer(player: Player)
 	local uid  = player.UserId
 	local base = playerBasePos[uid]
 	if not base then
-		nextBaseIndex += 1
-		local desired = PLAYER_BASES[nextBaseIndex] or PLAYER_BASES[1]
+		local desired = SpawnPoints.claim()
 		local ccHalf  = Config.COMMAND_CENTER_SIZE.X / 2
 		base = findFlatSpot(desired, ccHalf, ccHalf)
 		playerBasePos[uid] = base
@@ -558,7 +605,7 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 
 	-- Start the performance-graph sampler: snapshot every combatant's (players + AI)
 	-- cumulative kills each TIMELINE_DT seconds until the match ends (matchGen changes).
-	killTimeline = {}
+	timeline = {}
 	matchGen += 1
 	local myGen = matchGen
 	task.spawn(function()
@@ -616,6 +663,9 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	-- Swarm gamemode: every AI bot fields a nest/creepy army instead of the
 	-- standard Barracks composition.
 	AIManager.setSwarmMode(currentGamemode == "Swarm")
+	-- Lane mode hands bots an explicit corridor base; everywhere else they claim a
+	-- perimeter spot themselves.
+	AIManager.setLaneMode(isLane)
 
 	-- Spawn AI bots
 	if #aiQueue > 0 then
@@ -624,9 +674,9 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 				if isLane then
 					local laneBase = LANE_AI_BASES[(nextLaneAIIdx % #LANE_AI_BASES) + 1]
 					nextLaneAIIdx += 1
-					AIManager.spawnAI(entry.personality, entry.level, laneBase)
+					AIManager.spawnAI(entry.personality, entry.level, laneBase, entry.race)
 				else
-					AIManager.spawnAI(entry.personality, entry.level)
+					AIManager.spawnAI(entry.personality, entry.level, nil, entry.race)
 				end
 				task.wait(0.8)
 			end

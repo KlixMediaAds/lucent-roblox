@@ -83,9 +83,90 @@ local LEAF_COLS = {
 	Color3.fromRGB(66, 104, 36),
 }
 
-local function buildTreeModel(pos: Vector3, seed: number): Model
+-- ── Pine model ──────────────────────────────────────────────────────────────
+-- The forest is stamped from the authored Pinetree in ReplicatedStorage.Assets
+-- (synced by Rojo from assets/Pinetree.rbxmx). It's loaded once and cloned per
+-- tree. If it's ever missing we fall back to the primitive tree below, so a
+-- missing asset degrades the scenery instead of taking the map down.
+local TREE_H_MIN, TREE_H_MAX = 12, 19   -- planted height range, in studs
+
+local template:   Model? = nil
+local templateH   = 0                   -- authored height, so clones can be normalised
+local templateTried = false
+
+local function getTemplate(): Model?
+	if templateTried then return template end
+	templateTried = true
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local m      = assets and assets:FindFirstChild("Pinetree")
+	if m and m:IsA("Model") then
+		local _, size = m:GetBoundingBox()
+		if size.Y > 0.1 then
+			template  = m
+			templateH = size.Y
+		end
+	end
+	if not template then
+		warn("[ForestManager] ReplicatedStorage.Assets.Pinetree missing — using primitive trees")
+	end
+	return template
+end
+
+-- One pine, stamped from the model: scaled into the forest's height range, spun to
+-- its own heading, and stood on the ground at `pos`.
+local function buildPineTree(pos: Vector3, seed: number, src: Model): Model
 	local r     = Random.new(seed * 7919 + 13)
-	local h     = r:NextNumber(12, 19)
+	local model = src:Clone()
+	model.Name  = "Tree"
+	model.Parent = forestFolder      -- parent before scaling so the transform sticks
+
+	-- Normalise the authored height into the range the forest was tuned for, then
+	-- vary it per tree so a grove isn't one silhouette repeated.
+	model:ScaleTo(r:NextNumber(TREE_H_MIN, TREE_H_MAX) / templateH)
+	-- Spin each stamp; 1,600 identical headings would read as wallpaper.
+	model:PivotTo(model:GetPivot() * CFrame.Angles(0, r:NextNumber(0, math.pi * 2), 0))
+
+	-- Stand it up: drop the bounding box's bottom-centre onto the planting spot.
+	local bbCF, bbSize = model:GetBoundingBox()
+	local bottom = Vector3.new(bbCF.Position.X, bbCF.Position.Y - bbSize.Y * 0.5, bbCF.Position.Z)
+	model:PivotTo(model:GetPivot() + (pos - bottom))
+
+	-- Scenery rules, forced regardless of how the model was authored: trees never
+	-- collide and never absorb a raycast, so they can't block unit pathing, building
+	-- placement or clicks — they only look solid, and get knocked down.
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") then
+			p.Anchored   = true
+			p.CanCollide = false
+			p.CanQuery   = false
+			p.CanTouch   = false
+			p.CastShadow = false
+		end
+	end
+
+	-- Invisible ground anchor — PrimaryPart so GetPivot() is an upright frame at the
+	-- trunk base, which makes the topple rotation a clean hinge. Added last so it
+	-- stays out of the bounding-box maths above.
+	local anchor        = Instance.new("Part")
+	anchor.Name         = "Root"
+	anchor.Size         = Vector3.one * 0.2
+	anchor.CFrame       = CFrame.new(pos)
+	anchor.Anchored     = true
+	anchor.CanCollide   = false
+	anchor.CanQuery     = false
+	anchor.Transparency = 1
+	anchor.CastShadow   = false
+	anchor.Parent       = model
+	model.PrimaryPart   = anchor
+
+	return model
+end
+
+-- Fallback scenery: the original primitive tree (trunk cylinder + leafy blobs),
+-- used only when the pine model can't be found.
+local function buildProceduralTree(pos: Vector3, seed: number): Model
+	local r     = Random.new(seed * 7919 + 13)
+	local h     = r:NextNumber(TREE_H_MIN, TREE_H_MAX)
 	local model = Instance.new("Model")
 	model.Name  = "Tree"
 
@@ -140,6 +221,13 @@ local function buildTreeModel(pos: Vector3, seed: number): Model
 	end
 
 	return model
+end
+
+-- Plant one tree: the authored pine when it's available, the primitive otherwise.
+local function buildTreeModel(pos: Vector3, seed: number): Model
+	local src = getTemplate()
+	if src then return buildPineTree(pos, seed, src) end
+	return buildProceduralTree(pos, seed)
 end
 
 -- ── Felling ─────────────────────────────────────────────────────────────────

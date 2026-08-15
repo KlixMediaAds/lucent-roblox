@@ -7,7 +7,9 @@ local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
+local InjectPlants      = require(Shared:WaitForChild("InjectPlants"))
 local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
+local GoreManager       = require(script.Parent:WaitForChild("GoreManager"))
 
 local rng = Random.new()
 
@@ -77,6 +79,21 @@ local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs pu
 type SacEgg = { egg: BasePart, unitType: string?, spawnAt: number?, parentId: string?, dir: Vector3, numChildren: number, baseY: number }
 local eggSacEggs:       { [string]: { [string]: SacEgg } } = {}  -- Mother id → eggId → egg state
 local eggSacEggCounter  = 0
+
+-- Eggs and Egg-Sac nests that enemies can shoot. Declared up here (rather than beside the
+-- egg code far below) so resetAll can clear the registry between matches; the functions
+-- that drive it live with the rest of the egg code. See "Attackable eggs & nests".
+type EggTarget = {
+	hp: number, maxHp: number, hpBarHideAt: number?,   -- the shape applyHP reads
+	base: BasePart,          -- what attackers aim at; carries the HP bar
+	root: Instance,          -- what is destroyed on death (the egg, or its whole nest clump)
+	owner: any,
+	gore: string,            -- unit type whose blood colours the burst
+	onDeath: (() -> ())?,
+}
+local eggTargets: { [string]: EggTarget } = {}
+local eggTargetCounter = 0
+local EGG_TARGET_TAG   = "egg:"
 local skipNextConstruction = false  -- set true to bypass build-time for the next placeForPlayer call
 local laneModeActive       = false  -- blocks non-CC placement from the PlaceBuilding remote
 
@@ -102,7 +119,202 @@ local ccMobile:         { [string]: boolean } = {}  -- ccId   → currently walk
 local ccMoveTargets:    { [string]: Vector3 } = {}  -- ccId   → current move target
 local playerCCId:       { [number]: string  } = {}  -- userId → their CC building id
 
+-- ── Mother "Inject" state ─────────────────────────────────────────────────────
+-- One order per Mother. She uproots (if rooted), walks to `target`, drives her spike
+-- into the soil, and three plants tear their way out. `wasRooted` remembers whether to
+-- root her back down once she is done.
+-- `plant` set means the spike goes into one of her own grown plants instead of bare
+-- ground: the plant bursts and gives up what it was growing (InjectPlants.INJECT).
+type InjectOrder = { target: Vector3, phase: string, wasRooted: boolean, plant: Model? }  -- phase: "walk" | "inject"
+local injectOrders: { [string]: InjectOrder } = {}
+
+-- Shift-clicked spots waiting behind the active order, oldest first. She works through
+-- them one after another without rooting back down in between; `wasRooted` rides along
+-- on the running order, so she only settles once the last wound is made.
+type InjectQueued = { target: Vector3, plant: Model? }
+local injectQueues: { [string]: { InjectQueued } } = {}
+local MAX_INJECT_QUEUE = 8
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
+
+-- Flip a Command Center between rooted (structure) and mobile (walking), keeping the
+-- model's IsMobile value and the owner's client in sync. Shared by the MobilizeCC
+-- remote and the Mother's Inject walk, which uproots her on its own.
+local function setCCMobileState(ccId: string, owner: any, mobile: boolean)
+	ccMobile[ccId] = mobile
+	if not mobile then ccMoveTargets[ccId] = nil end
+
+	local model = buildingsFolder and buildingsFolder:FindFirstChild(ccId)
+	if model then
+		local mv = model:FindFirstChild("IsMobile") :: BoolValue?
+		if not mv then
+			mv        = Instance.new("BoolValue")
+			mv.Name   = "IsMobile"
+			mv.Parent = model
+		end
+		(mv :: BoolValue).Value = mobile
+	end
+
+	-- AI bots are plain tables, not Players, so there is nothing to sync for them.
+	if type(owner) ~= "table" then
+		RemoteHandler.get(Config.REMOTES.CCMobileSync):FireClient(owner, ccId, true, mobile)
+	end
+end
+
+-- Everything the Mother's injections grow lives in one workspace folder. It is scenery, so
+-- it stays out of Buildings (nothing selects, targets or pathfinds around it).
+local function injectPlantFolder(): Folder
+	local existing = workspace:FindFirstChild("InjectPlants")
+	if existing and existing:IsA("Folder") then return existing end
+	local f  = Instance.new("Folder")
+	f.Name   = "InjectPlants"
+	f.Parent = workspace
+	return f
+end
+
+-- The wound itself: a purple bloom at the point where the spike goes in.
+local function injectBurst(pos: Vector3)
+	local flash        = Instance.new("Part")
+	flash.Shape        = Enum.PartType.Ball
+	flash.Size         = Vector3.new(3, 3, 3)
+	flash.Position     = pos + Vector3.new(0, 0.5, 0)
+	flash.Color        = Color3.fromRGB(196, 90, 255)
+	flash.Material     = Enum.Material.Neon
+	flash.Anchored     = true
+	flash.CanCollide   = false
+	flash.CanQuery     = false
+	flash.CastShadow   = false
+	flash.Transparency = 0.15
+	flash.Parent       = workspace
+	TweenService:Create(flash, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size         = Vector3.new(20, 6, 20),
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(flash, 0.8)
+end
+
+-- The spike goes into one of her own plants: it bursts and gives up whatever it was
+-- growing. A spire lets a knot of Leeches out; a pod cluster is planted over as Lamprey
+-- Nests. The plant is spent either way, so it comes down first.
+local function harvestInjectPlant(owner: any, plant: Model, origin: Vector3)
+	local info = InjectPlants.injectInfo(plant)
+	local kind = info and info.kind
+	plant:Destroy()
+	injectBurst(origin)
+	if not kind then return end
+
+	local function surfaceAt(x: number, z: number): number
+		return (terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)) or origin.Y
+	end
+
+	if kind == "leeches" then
+		local count = Config.MOTHER_INJECT_PLANT_LEECHES
+		for i = 1, count do
+			local a  = ((i - 1) / count) * math.pi * 2 + rng:NextNumber(-0.3, 0.3)
+			local d  = rng:NextNumber(4, 8)
+			local px = origin.X + math.cos(a) * d
+			local pz = origin.Z + math.sin(a) * d
+			if unitManagerRef then
+				unitManagerRef.spawnUnitNow(owner, Vector3.new(px, surfaceAt(px, pz), pz), "Leech")
+			end
+		end
+		return
+	end
+
+	if kind == "nests" then
+		-- Read straight off Config rather than buildingSize(), which is declared below.
+		local size  = Config.LAMPREY_NEST_SIZE
+		local clear = math.max(size.X, size.Z) * 0.5 + 2
+		local ring  = math.max(size.X, size.Z) + 3
+		for i = 1, Config.MOTHER_INJECT_PLANT_NESTS do
+			local baseA = ((i - 1) / Config.MOTHER_INJECT_PLANT_NESTS) * math.pi * 2
+			-- Walk the ring outwards until the footprint has room, so two nests out of one
+			-- plant never land inside each other or on top of anything already standing.
+			for attempt = 0, 7 do
+				local a  = baseA + attempt * 0.5
+				local r  = ring + attempt * 2
+				local px = origin.X + math.cos(a) * r
+				local pz = origin.Z + math.sin(a) * r
+				if not BuildingManager.blocksMovement(px, pz, clear) then
+					local id = BuildingManager.morphStructureForPlayer(owner,
+						Vector3.new(px, surfaceAt(px, pz), pz), "LampreyNest")
+					if id then break end
+				end
+			end
+		end
+	end
+end
+
+-- She has arrived: turn to face the spot, hold while the spike goes in, then push three
+-- plants up out of the ground (or burst the plant she was sent to, if that is what she
+-- was aimed at). Runs on its own thread (it waits out the injection).
+local function runInjection(ccId: string, order: InjectOrder)
+	local data = buildingData[ccId]
+	if not data then injectOrders[ccId] = nil; injectQueues[ccId] = nil; return end
+
+	local groundY = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(order.target.X, order.target.Z)) or 0
+	local origin  = Vector3.new(order.target.X, groundY, order.target.Z)
+
+	-- Face the wound while she works (same heading convention as the walk loop).
+	local model = buildingsFolder:FindFirstChild(ccId)
+	if model and model:IsA("Model") and data.base.Parent then
+		local pos  = data.base.Position
+		local flat = Vector3.new(origin.X - pos.X, 0, origin.Z - pos.Z)
+		if flat.Magnitude > 0.1 then
+			model:PivotTo(CFrame.new(pos) * CFrame.lookAt(pos, pos - flat.Unit).Rotation)
+		end
+	end
+
+	injectBurst(origin)
+	task.wait(Config.MOTHER_INJECT_DURATION)
+
+	-- She may have died mid-injection; the ground still keeps what she put in it.
+	local plant = order.plant
+	if plant then
+		-- Someone (or a queued order of her own) already burst it: this spike finds
+		-- nothing, and nothing grows in its place.
+		if plant.Parent then harvestInjectPlant(data.owner, plant, origin) end
+	else
+		local folder   = injectPlantFolder()
+		local variants = InjectPlants.VARIANTS
+		local seed     = rng:NextInteger(1, 1000000)
+		local count    = Config.MOTHER_INJECT_PLANTS
+		for i = 1, count do
+			local a  = ((i - 1) / count) * math.pi * 2 + rng:NextNumber(-0.4, 0.4)
+			local d  = Config.MOTHER_INJECT_SPREAD * rng:NextNumber(0.45, 1.0)
+			local px = origin.X + math.cos(a) * d
+			local pz = origin.Z + math.sin(a) * d
+			local py = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz)) or groundY
+			local grown = InjectPlants.grow(folder, Vector3.new(px, py, pz),
+				variants[((i - 1) % #variants) + 1], seed + i)
+			-- Only her own plants take her spike, so each one remembers whose it is.
+			grown:SetAttribute("OwnerUserId", data.owner.UserId)
+		end
+	end
+
+	injectOrders[ccId] = nil
+
+	-- Straight on to the next shift-queued spot, if there is one.
+	local queue    = injectQueues[ccId]
+	local nextUp   = queue and table.remove(queue, 1) or nil
+	if queue and #queue == 0 then injectQueues[ccId] = nil end
+	local live     = buildingData[ccId]
+	if nextUp and live and live.base.Parent then
+		injectOrders[ccId] = {
+			target    = nextUp.target,
+			phase     = "walk",
+			wasRooted = order.wasRooted,
+			plant     = nextUp.plant,
+		}
+		if not ccMobile[ccId] then setCCMobileState(ccId, live.owner, true) end
+		ccMoveTargets[ccId] = nextUp.target
+		return
+	end
+
+	if order.wasRooted and live then
+		setCCMobileState(ccId, live.owner, false)
+	end
+end
 
 local function buildingSize(buildingType: string): Vector3
 	if buildingType == "CommandCenter" then return Config.COMMAND_CENTER_SIZE end
@@ -207,6 +419,10 @@ local function isTerrainBlocked(pos: Vector3, buildType: string): boolean
 	return false
 end
 
+-- How briskly an uprooted Mother swings around to face where she is walking
+-- (higher = snappier). Tuned to read as a big creature turning, not a turret.
+local MOTHER_TURN_RATE = 4
+
 local function isOutOfMapBounds(pos: Vector3, buildType: string): boolean
 	local ns = buildingSize(buildType)
 	return math.abs(pos.X) + ns.X / 2 > 432 or math.abs(pos.Z) + ns.Z / 2 > 432
@@ -219,11 +435,14 @@ local function hpBarWidth(maxHp: number): number
 	return math.clamp(math.floor(50 + maxHp * 0.06 + 0.5), 56, 150)
 end
 
-local function addHealthBar(part: BasePart, maxHp: number)
+-- `studsY` overrides how high the bar floats above the part's centre. Eggs need it:
+-- their shell is tweened larger and smaller as the creature inside grows, so the
+-- height read off the part at build time would be wrong for most of its life.
+local function addHealthBar(part: BasePart, maxHp: number, studsY: number?)
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "HealthBar"
 	bb.Size             = UDim2.new(0, hpBarWidth(maxHp), 0, 5)
-	bb.StudsOffset      = Vector3.new(0, part.Size.Y / 2 + 2.5, 0)
+	bb.StudsOffset      = Vector3.new(0, studsY or (part.Size.Y / 2 + 2.5), 0)
 	bb.AlwaysOnTop      = false
 	bb.Enabled          = false
 	bb.Parent           = part
@@ -284,9 +503,9 @@ local function applyHP(data: BuildingData, tookDamage: boolean?)
 end
 
 -- ── Faction ───────────────────────────────────────────────────────────────────
--- A player is "Hollowed" (the nest/blob creature faction: spike CC, black grass,
--- can only place Blobs + Nests) if they chose that team in the lobby, or if they're
--- a Swarm-mode AI bot (plain Lua table carrying isSwarm). Everyone else is Humans.
+-- A player is "Hollowed" (the nest/blob creature faction: spike CC, can only place
+-- Blobs + Nests) if they chose that team in the lobby, or if they're a Hollowed /
+-- Swarm-mode AI bot (plain Lua table carrying isSwarm). Everyone else is Humans.
 local function isHollowed(player: any): boolean
 	if type(player) == "table" then return player.isSwarm == true end
 	return player:GetAttribute("Faction") == "Hollowed"
@@ -348,9 +567,20 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			-- ghosts/previews stay in sync.
 			base.Transparency = 1
 
-			-- Tag for the client-side SwarmGrass renderer (black grass field). Grass
-			-- is drawn locally on each client (zero replication) as one merged mesh.
+			-- Marks this CC as the Hollowed spike rather than the Fabricator Core.
+			-- Read by init.server to perch the avatar on the spike (no operator pulpit).
 			model:SetAttribute("SwarmCC", true)
+
+			-- The Mother is born UPROOTED: she stands up as a walking creature so the
+			-- player carries her to a site and plants her, instead of starting rooted
+			-- wherever the match happened to drop her. Clients pick this up from the
+			-- IsMobile value (see the reconcile in init.client) as well as the sync
+			-- event, since the event can fire before the client wires its handlers.
+			ccMobile[id] = true
+			local startMobile   = Instance.new("BoolValue")
+			startMobile.Name    = "IsMobile"
+			startMobile.Value   = true
+			startMobile.Parent  = model
 
 			-- Flip the creature 180° so its head faces +Z — i.e. toward the default
 			-- camera (which sits at +Z looking toward -Z) — instead of away from it.
@@ -365,8 +595,8 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			-- with uproot/downroot PivotTo moves and the construction sink animation.
 			local mhb        = Instance.new("Part")
 			mhb.Name         = "ClickHitbox"
-			mhb.Size         = Vector3.new(18, 16, 24)
-			mhb.CFrame       = CFrame.new(position + Vector3.new(0, 8, 0))
+			mhb.Size         = Vector3.new(18, 16, 24) * UnitVisuals.MOTHER_SCALE
+			mhb.CFrame       = CFrame.new(position + Vector3.new(0, 8 * UnitVisuals.MOTHER_SCALE, 0))
 			mhb.Transparency = 1
 			mhb.Anchored     = true
 			mhb.CanCollide   = false
@@ -1805,6 +2035,18 @@ function BuildingManager.getHumanBuildingCount(buildingType: string): number
 	return n
 end
 
+-- Per-owner count of finished structures, keyed by owner id string (players AND
+-- AI). Sampled periodically for the end-screen performance graph.
+function BuildingManager.getBuildingTally(): { [string]: number }
+	local out: { [string]: number } = {}
+	for _, data in buildingData do
+		if data.isConstructing or not data.owner then continue end
+		local key = tostring(data.owner.UserId)
+		out[key] = (out[key] or 0) + 1
+	end
+	return out
+end
+
 function BuildingManager.resetAll()
 	for _, model in buildingsFolder:GetChildren() do model:Destroy() end
 	buildingData             = {}
@@ -1819,6 +2061,10 @@ function BuildingManager.resetAll()
 	testRateLevel            = {}
 	eggSacLevel              = {}
 	eggSacEggs               = {}
+	eggTargets               = {}
+	local nestRoot = workspace:FindFirstChild("EggNests")
+	if nestRoot then nestRoot:Destroy() end
+	eggNestsRoot = nil
 	monumentByOwner          = {}
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
@@ -1831,7 +2077,11 @@ function BuildingManager.resetAll()
 	ccMobileUnlocked         = {}
 	ccMobile                 = {}
 	ccMoveTargets            = {}
+	injectOrders             = {}
+	injectQueues             = {}
 	playerCCId               = {}
+	local plants = workspace:FindFirstChild("InjectPlants")
+	if plants then plants:Destroy() end
 	-- Clear the per-player Embryo evolution unlock so it doesn't carry into the next match.
 	for _, plr in game:GetService("Players"):GetPlayers() do
 		plr:SetAttribute("EmbryoGenome", nil)
@@ -2279,6 +2529,81 @@ local function throwNestLauncher(model: Instance, basePos: Vector3, aimDir: Vect
 	layoutNestLauncher(model, basePos, aimDir, restLean)
 end
 
+-- ── Attackable eggs & nests ───────────────────────────────────────────────────
+-- A clutch on the ground is a target, not scenery. Eggs are not buildings though —
+-- they live outside workspace.Buildings and have no BuildingData — so they get their
+-- own registry keyed by an "egg:" id. getNearestEnemyBuilding hands those ids out and
+-- BuildingManager.damage routes them back here, which means every existing attacker
+-- (units, turrets, AI bots, a player's focus-fire order) can kill a clutch without
+-- knowing eggs exist.
+--
+-- `base` is what attackers aim at and what carries the HP bar; `root` is what gets
+-- destroyed when it dies — the egg part itself for a loose egg, the whole clump for an
+-- Egg-Sac nest. Entries are pruned lazily: anything whose parts have left the workspace
+-- (hatched, or razed along with its Mother) is dropped the next time it's looked at, so
+-- no caller has to unregister by hand. The registry itself is declared at the top of the
+-- file, next to the rest of the egg state.
+local function isEggTargetId(id: string): boolean
+	return id:sub(1, #EGG_TARGET_TAG) == EGG_TARGET_TAG
+end
+
+-- Make an egg shootable. The id is stamped on both instances as an EggTargetId
+-- attribute, which is how a client turns a right-click on a clutch into a focus order.
+local function registerEggTarget(base: BasePart, root: Instance, owner: any, maxHp: number,
+	gore: string, barY: number?, onDeath: (() -> ())?): string
+	eggTargetCounter += 1
+	local id = EGG_TARGET_TAG .. eggTargetCounter
+	eggTargets[id] = {
+		hp = maxHp, maxHp = maxHp, base = base, root = root,
+		owner = owner, gore = gore, onDeath = onDeath,
+	}
+	addHealthBar(base, maxHp, barY)
+	local ownerId = (owner and owner.UserId) or 0
+	base:SetAttribute("EggTargetId", id)
+	base:SetAttribute("EggTargetOwner", ownerId)
+	if root ~= base then
+		root:SetAttribute("EggTargetId", id)
+		root:SetAttribute("EggTargetOwner", ownerId)
+	end
+	return id
+end
+
+-- The live entry for `id`, or nil — pruning it if what it pointed at is already gone.
+local function eggTargetAt(id: string): EggTarget?
+	local e = eggTargets[id]
+	if not e then return nil end
+	if not e.base.Parent or not e.root.Parent then
+		eggTargets[id] = nil
+		return nil
+	end
+	return e
+end
+
+-- Burst an egg: shell shards, a splash of whatever was growing inside, then the whole
+-- thing comes down. onDeath lets the owner settle up (a nest reclaiming its egg slot).
+local function killEggTarget(id: string, e: EggTarget)
+	eggTargets[id] = nil
+	local pos = e.base.Position
+	-- Take the shell down first: the gore's ground raycast would otherwise land the
+	-- blood pool on top of the egg it just burst, leaving a stain floating in the air.
+	if e.root.Parent then e.root:Destroy() end
+	spawnEggHatchVFX(pos)
+	GoreManager.spawn(e.gore, pos, 2, e.maxHp)
+	if e.onDeath then task.spawn(e.onDeath) end
+end
+
+local function damageEggTarget(id: string, amount: number)
+	local e = eggTargetAt(id)
+	if not e then return end
+	e.hp = math.max(0, e.hp - amount)
+	applyHP(e :: any, true)   -- EggTarget carries the hp/maxHp/base/hpBarHideAt applyHP reads
+	if e.hp > 0 then
+		AlertManager.report(e.owner, e.base.Position, "base")   -- "under attack" map ping
+		return
+	end
+	killEggTarget(id, e)
+end
+
 -- ── Lamprey egg production (server-side, one task per egg) ───────────────────
 -- Pulses the nest's tubes, ejects an egg to a random spot nearby, lets it
 -- incubate on its own timer, then hatches it into `unitType` ("Lamprey" |
@@ -2450,6 +2775,14 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	end
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(target, target, "LampreyEggLand")
 
+	-- Down and vulnerable: an enemy that reaches the clutch can pop the egg before it
+	-- hatches, and doing so gives the nest its reserved slot back. Only now does it take
+	-- raycasts — while it was arcing through the air it was untouchable scenery.
+	egg.CanQuery = true
+	registerEggTarget(egg, egg, player, Config.EGG_HP, unitType, nil, function()
+		nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
+	end)
+
 	-- ── Incubate: the egg breathes green until it hatches ─────────────────────
 	TweenService:Create(egg,
 		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
@@ -2484,6 +2817,41 @@ end
 -- and then hatches into `unitType`. The cost is already spent by the TrainFromMother
 -- handler, so this never charges. Multiple eggs can be in flight at once.
 local motherEggCounter = 0
+-- ── Where a Mother's eggs live ──────────────────────────────────────────────
+-- Eggs are laid in the GROUND, not carried by the Mother, so they live in their own
+-- workspace folder instead of under her model. An uprooted Mother therefore walks out
+-- from under her clutch and leaves it exactly where she laid it, rather than dragging
+-- everything along with her PivotTo. Grouped per-CC so one Mother's whole clutch can
+-- be cleared when she dies. Used by both her spat eggs and her Egg-Sac nests.
+local eggNestsRoot: Folder? = nil
+
+local function eggNestFolder(ccId: string): Folder
+	if not eggNestsRoot or not eggNestsRoot.Parent then
+		local existing = workspace:FindFirstChild("EggNests") :: Folder?
+		if not existing then
+			existing        = Instance.new("Folder")
+			existing.Name   = "EggNests"
+			existing.Parent = workspace
+		end
+		eggNestsRoot = existing
+	end
+	local root = eggNestsRoot :: Folder
+	local sub  = root:FindFirstChild(ccId) :: Folder?
+	if not sub then
+		sub        = Instance.new("Folder")
+		sub.Name   = ccId
+		sub.Parent = root
+	end
+	return sub :: Folder
+end
+
+-- Drop one Mother's clutch (spat eggs, nests, and the tentacles linking them).
+local function clearEggNests(ccId: string)
+	local root = workspace:FindFirstChild("EggNests")
+	local sub  = root and root:FindFirstChild(ccId)
+	if sub then sub:Destroy() end
+end
+
 function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: string)
 	local data = buildingData[ccId]
 	if not data then return end
@@ -2504,8 +2872,9 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 		local surf = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z) or 0
 		return surf + EGG_FULL.Y / 2
 	end
+	local clutch = eggNestFolder(ccId)
 	local function overlapsEgg(x: number, z: number): boolean
-		for _, child in model:GetChildren() do
+		for _, child in clutch:GetChildren() do
 			if child:IsA("BasePart") and child.Name:match("^MotherEgg_") then
 				local dx, dz = child.Position.X - x, child.Position.Z - z
 				if dx * dx + dz * dz < 25 then return true end   -- ~5-stud gap
@@ -2528,7 +2897,8 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	local target   = Vector3.new(px, settleYAt(px, pz), pz)
 	local startPos = basePos + Vector3.new(0, base.Size.Y * 0.4, 0) + fwd * (halfX * 0.5)
 
-	-- Egg (parented to the CC model so it replicates + the overlap check can see it).
+	-- Egg lives in the Mother's clutch folder, NOT under her model — she walks off and
+	-- leaves it lying where she laid it instead of towing it around.
 	motherEggCounter += 1
 	local egg           = Instance.new("Part")
 	egg.Name            = "MotherEgg_" .. motherEggCounter
@@ -2542,7 +2912,7 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	egg.CanQuery        = false
 	egg.CastShadow      = false
 	egg.Transparency    = 0.1
-	egg.Parent          = model
+	egg.Parent          = clutch
 	local eggLight      = Instance.new("PointLight")
 	eggLight.Color      = Color3.fromRGB(255, 140, 70)
 	eggLight.Brightness = 3
@@ -2598,6 +2968,10 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	-- climb them up, hugging + pulsing with the egg (animated client-side in MotherEggBody).
 	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg)
 
+	-- Lying in the open in front of the Mother, so it can be shot before it hatches.
+	egg.CanQuery = true
+	registerEggTarget(egg, egg, player, Config.EGG_HP, unitType, nil)
+
 	-- Incubate: the egg breathes while the progress bar fills over the incubation.
 	bb.Enabled = true
 	TweenService:Create(egg,
@@ -2628,12 +3002,12 @@ end
 -- Eggs are scattered around the Mother like an electron cloud / slime-mold colony:
 -- densest near the center, thinning outward, and only spilling further out once the
 -- inner ground is crowded. When an egg is bought a wobbly "creepygrass" tentacle (dark
--- veins + purple glow, inspired by the SwarmGrass beneath the Mother) grows out from the
--- Mother / nearest egg at a FIXED speed — so a farther egg simply takes longer — and once
+-- veins + purple glow) grows out from the Mother / nearest egg at a FIXED speed —
+-- so a farther egg simply takes longer — and once
 -- it reaches the spot the egg forms at the tip. The tentacles double as the edges of a
 -- growing node network.
 local EGG_GRASS_COLOR    = Color3.fromRGB(10, 9, 13)
-local EGG_GLOW_COLOR     = Color3.fromRGB(150, 55, 225)  -- swarm purple (matches SwarmGrass)
+local EGG_GLOW_COLOR     = Color3.fromRGB(150, 55, 225)  -- swarm purple
 local EGG_MIN_SPACING    = 11                            -- min distance between egg centers
 local EGG_TENTACLE_SPEED = 22                            -- studs/sec the tentacle grows (fixed; distance → time)
 local EGG_BRANCH_MIN     = 11.5                          -- min distance a child sits from its parent node
@@ -3041,7 +3415,7 @@ end
 -- EggId/EggOwnerId (+ ParentEgg for the selection tree). Created HIDDEN (invisible,
 -- unclickable): revealEggClump pops it in once its tentacle finishes growing. Returns the
 -- eggId plus the egg part.
-local function buildEggClump(ccModel: Model, ownerId: number, nestPos: Vector3, parentId: string?): (string, BasePart)
+local function buildEggClump(container: Instance, ownerId: number, nestPos: Vector3, parentId: string?): (string, BasePart)
 	eggSacEggCounter += 1
 	local eggId = "SacEgg_" .. eggSacEggCounter
 
@@ -3120,7 +3494,7 @@ local function buildEggClump(ccModel: Model, ownerId: number, nestPos: Vector3, 
 	hit.Parent       = clump
 
 	clump.PrimaryPart = egg
-	clump.Parent      = ccModel
+	clump.Parent      = container
 	return eggId, egg
 end
 
@@ -3237,10 +3611,16 @@ local eggIncubating: { [BasePart]: boolean } = setmetatable({}, { __mode = "k" }
 -- Pop a finished nest into view at the tip of its tentacle: fade in every nest part to its
 -- own resting transparency, sprout the creepygrass roots, make it clickable. The dormant
 -- egg fades in with the rest, so a new nest arrives with an egg already sitting in it.
-local function revealEggClump(egg: BasePart, nestPos: Vector3)
+local function revealEggClump(egg: BasePart, nestPos: Vector3, owner: any)
 	local clump = egg.Parent :: Model
 	local hit = clump:FindFirstChild("Hitbox") :: BasePart?
 	if hit then hit.CanQuery = true end
+
+	-- A standing nest is a structure worth raiding: it respawns its creature forever
+	-- until someone breaks it. Aimed at (and health-barred on) the egg so the bar sits
+	-- low over the bowl; killing it takes the whole clump, spawner and all. The bar
+	-- height is pinned because incubation tweens the shell's size continuously.
+	registerEggTarget(egg, clump, owner, Config.EGG_NEST_HP, "Embryo", 3.4)
 
 	-- Wet water-balloon burst + pop sound the instant the nest appears.
 	spawnEggNestBurstVFX(nestPos + Vector3.new(0, 0.6, 0))
@@ -3358,20 +3738,22 @@ end
 -- Plant `toSlot - fromSlot` new eggs (one per purchase) as nodes of the tentacle tree —
 -- inner-biased for the electron-cloud spread, with siblings fanned into their own directions
 -- so they never overlap. Each grows its tentacle first, then pops the egg in at the tip.
-local function plantEggSacNests(ccModel: Model, base: BasePart, ccId: string, ownerId: number, fromSlot: number, toSlot: number)
+local function plantEggSacNests(base: BasePart, ccId: string, ownerId: number, fromSlot: number, toSlot: number)
 	local eggs = eggSacEggs[ccId]
 	if not eggs then eggs = {}; eggSacEggs[ccId] = eggs end
+	local container = eggNestFolder(ccId)
 	for _ = fromSlot + 1, toSlot do
 		local pos, origin, parentId, dir = planEgg(ccId, base)
-		local eggId, egg = buildEggClump(ccModel, ownerId, pos, parentId)
+		local eggId, egg = buildEggClump(container, ownerId, pos, parentId)
 		eggs[eggId] = { egg = egg, unitType = nil, spawnAt = nil, parentId = parentId, dir = dir,
 			numChildren = 0, baseY = pos.Y + NEST_FLOOR_Y }   -- eggs sit in the goo pool
 		if parentId and eggs[parentId] then eggs[parentId].numChildren += 1 end
 
 		task.spawn(function()
-			growTentacle(ccModel, ccId, origin, pos)              -- fixed speed → distance sets duration
-			if buildingData[ccId] and egg.Parent then
-				revealEggClump(egg, pos)
+			growTentacle(container, ccId, origin, pos)            -- fixed speed → distance sets duration
+			local cc = buildingData[ccId]
+			if cc and egg.Parent then
+				revealEggClump(egg, pos, cc.owner)
 			end
 		end)
 	end
@@ -3424,7 +3806,7 @@ function BuildingManager.upgradeEggSacsForPlayer(player: any, ccId: string): boo
 
 	local model = buildingsFolder:FindFirstChild(ccId) :: Model?
 	if model then
-		plantEggSacNests(model, data.base, ccId, (data.owner and data.owner.UserId) or 0,
+		plantEggSacNests(data.base, ccId, (data.owner and data.owner.UserId) or 0,
 			level * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL,
 			newLevel * Config.MOTHER_EGGSAC_NESTS_PER_LEVEL)
 		model:SetAttribute("EggSacLevel", newLevel)
@@ -3489,6 +3871,10 @@ function BuildingManager.requestBlobSoldier(player: any, blobId: string): boolea
 end
 
 function BuildingManager.damage(id: string, amount: number)
+	if isEggTargetId(id) then
+		damageEggTarget(id, amount)   -- eggs/nests keep their own HP; see the egg registry
+		return
+	end
 	local data = buildingData[id]
 	if not data then return end
 	data.hp = math.max(0, data.hp - amount)
@@ -3525,6 +3911,7 @@ function BuildingManager.damage(id: string, amount: number)
 	nestEggs[id]          = nil
 	eggSacLevel[id]       = nil
 	eggSacEggs[id]        = nil
+	clearEggNests(id)     -- nests live outside the model, so take them down by hand
 	engState[id]          = nil
 	engResearchEnd[id]    = nil
 	engUpdateAcc[id]      = nil
@@ -3604,7 +3991,33 @@ function BuildingManager.getNearestEnemyBuilding(fromPos: Vector3, attackerOwner
 			bestDist = d; bestId = id; bestPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
 		end
 	end
+	if bestId then return bestId, bestPos end
+
+	-- Nothing built is in reach, so fall through to the clutch. Eggs and Egg-Sac nests
+	-- are shootable, but they rank strictly below real structures: a raider standing
+	-- between a Mother's eggs and the Mother herself goes for the Mother, and eggs never
+	-- soak fire that a defended building should be taking.
+	for id in eggTargets do
+		local e = eggTargetAt(id)
+		if not e then continue end
+		if tostring(e.owner.UserId) == attackerOwnerIdStr then continue end
+		local d = (e.base.Position - fromPos).Magnitude
+		if d < range and d < bestDist and (not canTarget or canTarget(e.base.Position)) then
+			bestDist = d; bestId = id; bestPos = e.base.Position + Vector3.new(0, e.base.Size.Y * 0.5, 0)
+		end
+	end
 	return bestId, bestPos
+end
+
+-- What an attacker aims at for `id`: a building's Base, or an egg/nest's shell. Lets a
+-- focus-fire order name either kind of target without the caller telling them apart.
+function BuildingManager.getTargetPart(id: string): BasePart?
+	if isEggTargetId(id) then
+		local e = eggTargetAt(id)
+		return e and e.base or nil
+	end
+	local data = buildingData[id]
+	return data and data.base or nil
 end
 
 function BuildingManager.removeAllBuildingsFor(player: any)
@@ -3627,6 +4040,7 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		blobCooldowns[id]     = nil
 		eggSacLevel[id]       = nil
 		eggSacEggs[id]        = nil
+		clearEggNests(id)     -- nests live outside the model, so take them down by hand
 		engState[id]          = nil
 		engResearchEnd[id]    = nil
 		engUpdateAcc[id]      = nil
@@ -3683,16 +4097,15 @@ function BuildingManager.placeForPlayer(player: any, position: Vector3, building
 	end
 
 	-- Requirement check: Bonfire (Deployer) needs a Foundry; Turret/EngPost/Nest need a
-	-- Bonfire; Relay needs research.
-	-- AI bots (UserId < 0) bypass the Foundry prerequisite — they build on their own pacing.
-	if buildingType == "Deployer" and player.UserId > 0
-		and getPlayerBuildingCount(player, "Foundry") < 1 then return false end
+	-- Bonfire; Relay needs research. AI bots obey the same tree as players.
+	if buildingType == "Deployer" and getPlayerBuildingCount(player, "Foundry") < 1 then return false end
 	if buildingType == "Turret"   and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
-	if buildingType == "EngineeringPost" and player.UserId > 0
+	if buildingType == "EngineeringPost"
 		and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
-	-- LampreyNest normally needs a Bonfire first; AI swarm bots (UserId < 0) skip
-	-- this so their entire army can come from nests + creepy structures.
-	if buildingType == "LampreyNest" and player.UserId > 0
+	-- LampreyNest needs a Bonfire first. Sole exemption: SWARM-gamemode bots, whose
+	-- entire army comes from nests + creepy structures by design.
+	if buildingType == "LampreyNest"
+		and (player.UserId > 0 or not player.isSwarm)
 		and getPlayerBuildingCount(player, "Deployer") < 1 then return false end
 	-- TEST is limited to one per player (placed + in-flight).
 	if buildingType == "TEST"
@@ -4012,9 +4425,11 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if ccIncomeAccum >= Config.CC_PASSIVE_INTERVAL then
 			ccIncomeAccum -= Config.CC_PASSIVE_INTERVAL
 			if resourceManagerRef then
+				-- Every standing CC pays out — AI bots included, since they run the same
+				-- economy as players.
 				for _, data in buildingData do
 					if data.buildingType == "CommandCenter" and not data.isConstructing
-						and data.owner and data.owner.UserId > 0 then
+						and data.owner then
 						resourceManagerRef.add(data.owner, Config.CC_PASSIVE_INCOME)
 					end
 				end
@@ -4038,9 +4453,6 @@ function BuildingManager.init(resourceManager, mineralManager_)
 						pos, Config.FOUNDRY_BOOST_RADIUS, Config.FOUNDRY_DRAIN_PER_DEPOSIT)
 				end
 
-				-- Income goes to every owner, including AI bots (UserId < 0) — unlike CC
-				-- passive income, the Foundry is the AI's economic engine just as it is the
-				-- player's, so the guard that excludes bots from CC income is not applied here.
 				local boostMult = 1 + depositCount * Config.FOUNDRY_BOOST_PER_DEPOSIT
 				local income    = math.floor(Config.FOUNDRY_BASE_INCOME * boostMult)
 				if resourceManagerRef and data.owner then
@@ -4079,10 +4491,12 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- ── Engineering Post research timers ───────────────────────────────────
+		-- Runs for every owner — AI bots research at their posts too (engSync itself
+		-- skips the client push for fake players).
 		for id, data in buildingData do
 			if data.buildingType ~= "EngineeringPost" then continue end
 			if engState[id] ~= "researching" then continue end
-			if not (data.owner and data.owner.UserId > 0) then continue end
+			if not data.owner then continue end
 
 			if os.clock() >= (engResearchEnd[id] or 0) then
 				-- Research complete: light up the notifier, wait for the player to collect.
@@ -4141,15 +4555,52 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				continue
 			end
 
-			local step  = math.min(Config.MOBILE_CC_SPEED * dt, flat.Magnitude)
+			-- The Mother walks on her own legs and is markedly quicker than the
+			-- Human core, which drags itself along on treads.
+			local hollowed = isHollowed(data.owner)
+			local speed = hollowed and Config.MOTHER_MOVE_SPEED or Config.MOBILE_CC_SPEED
+			local step  = math.min(speed * dt, flat.Magnitude)
 			local move  = flat.Unit * step
 			local model = buildingsFolder:FindFirstChild(ccId) :: Model?
 			if model and model:IsA("Model") then
-				model:PivotTo(CFrame.new(
+				local dest = Vector3.new(
 					data.base.Position.X + move.X,
 					data.base.Position.Y,
 					data.base.Position.Z + move.Z
-				))
+				)
+				if hollowed then
+					-- Turn to walk head-first instead of sliding sideways. The creature is
+					-- built facing +Z relative to its base, so LookVector (−Z) has to point
+					-- AWAY from the heading. Eased, so she banks into a turn rather than
+					-- snapping around.
+					local want    = CFrame.lookAt(dest, dest - flat.Unit).Rotation
+					local current = model:GetPivot().Rotation
+					local turned  = current:Lerp(want, math.min(1, dt * MOTHER_TURN_RATE))
+					model:PivotTo(CFrame.new(dest) * turned)
+				else
+					model:PivotTo(CFrame.new(dest))
+				end
+			end
+		end
+
+		-- ── Mother injections ─────────────────────────────────────────────────
+		-- She is walking to the spot she was told to inject; once she is standing
+		-- over it (or has stopped short), the spike goes in.
+		for ccId, order in injectOrders do
+			if order.phase ~= "walk" then continue end
+			local data = buildingData[ccId]
+			if not data or not data.base.Parent then
+				injectOrders[ccId] = nil
+				injectQueues[ccId] = nil
+				continue
+			end
+
+			local pos  = data.base.Position
+			local flat = Vector3.new(order.target.X - pos.X, 0, order.target.Z - pos.Z)
+			if flat.Magnitude <= Config.MOTHER_INJECT_ARRIVE or ccMoveTargets[ccId] == nil then
+				order.phase         = "inject"
+				ccMoveTargets[ccId] = nil
+				task.spawn(runInjection, ccId, order)
 			end
 		end
 
@@ -4166,20 +4617,11 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		-- cost. It just toggles between rooted (structure, has build options) and mobile
 		-- (moveable unit). Humans keep the researched + paid Mobile-CC path below.
 		if isHollowed(player) then
-			local nowMobile = not ccMobile[ccId]
-			ccMobile[ccId]  = nowMobile
-			if not nowMobile then ccMoveTargets[ccId] = nil end
-			local model = buildingsFolder:FindFirstChild(ccId)
-			if model then
-				local mv = model:FindFirstChild("IsMobile") :: BoolValue?
-				if not mv then
-					mv        = Instance.new("BoolValue")
-					mv.Name   = "IsMobile"
-					mv.Parent = model
-				end
-				(mv :: BoolValue).Value = nowMobile
-			end
-			RemoteHandler.get(Config.REMOTES.CCMobileSync):FireClient(player, ccId, true, nowMobile)
+			-- Rooting mid-walk also drops any injection she was on her way to make,
+			-- along with anything queued behind it.
+			injectOrders[ccId] = nil
+			injectQueues[ccId] = nil
+			setCCMobileState(ccId, player, not ccMobile[ccId])
 			return
 		end
 
@@ -4225,7 +4667,87 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if not data or data.buildingType ~= "CommandCenter" then return end
 		if data.owner ~= player then return end
 		if not ccMobile[ccId] then return end
+		injectOrders[ccId] = nil   -- a hand-issued move cancels the walk to an injection
+		injectQueues[ccId] = nil   -- and everything queued behind it
 		ccMoveTargets[ccId] = Vector3.new(pos.X, 0, pos.Z)
+	end)
+
+	-- ── InjectGround remote (Hollowed Mother → "Inject") ──────────────────
+	-- The player picked a spot on the ground: the Mother uproots herself if she was
+	-- rooted, walks over, drives her spike in, and three plants come up out of it.
+	-- She roots back down afterwards if that is how she started.
+	-- `queued` (the player held [Shift]) stacks the spot behind whatever she is already
+	-- doing instead of replacing it, so a whole run of injections can be laid out at once.
+	-- `plantInst`, when given, aims the spike at one of her own grown plants rather than
+	-- at bare ground; the plant's own position is the spot she walks to.
+	RemoteHandler.get(Config.REMOTES.InjectGround).OnServerEvent:Connect(function(player, ccId, pos, queued, plantInst)
+		if type(ccId) ~= "string" then return end
+		if typeof(pos) ~= "Vector3" then return end
+		local data = buildingData[ccId]
+		if not data or data.buildingType ~= "CommandCenter" then return end
+		if data.owner ~= player then return end
+		if data.isConstructing then return end
+		if not isHollowed(player) then return end
+		if not data.base.Parent then return end
+
+		-- A plant target is only as good as the plant: it has to be one of hers, still
+		-- standing, and one of the kinds that actually gives something up. The client
+		-- sends the model itself, so the spot comes off the plant, not off the cursor.
+		local plant: Model? = nil
+		if plantInst ~= nil then
+			if typeof(plantInst) ~= "Instance" or not plantInst:IsA("Model") then return end
+			local folder = workspace:FindFirstChild("InjectPlants")
+			if not folder or plantInst.Parent ~= folder then return end
+			if plantInst:GetAttribute("OwnerUserId") ~= player.UserId then return end
+			local info = InjectPlants.injectInfo(plantInst)
+			if not (info and info.kind) then return end
+			plant = plantInst
+			pos   = plantInst:GetPivot().Position
+		end
+
+		local target = Vector3.new(pos.X, 0, pos.Z)
+		local here   = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+		if (target - here).Magnitude > Config.MOTHER_INJECT_RANGE then return end
+
+		local wantQueue = queued == true
+		local order     = injectOrders[ccId]
+
+		-- Re-targeting mid-walk just moves the spot; once the spike is in, she finishes.
+		-- A shift-order never re-targets, so it stacks up even while she is hunched over.
+		if order and order.phase == "inject" and not wantQueue then return end
+
+		local queue = injectQueues[ccId]
+		if wantQueue and order and queue and #queue >= MAX_INJECT_QUEUE then return end
+
+		-- Every wound costs, but nudging the spot of an order already under way is free.
+		local cost = Config.MOTHER_INJECT_COST
+		if cost > 0 and (wantQueue or not order) then
+			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
+		end
+
+		if wantQueue and order then
+			if not queue then queue = {}; injectQueues[ccId] = queue end
+			table.insert(queue, { target = target, plant = plant })
+			return
+		end
+
+		-- A plain order wipes the queue: this spot is the whole plan now.
+		if not wantQueue then injectQueues[ccId] = nil end
+
+		if order then
+			order.target = target
+			order.plant  = plant
+		else
+			injectOrders[ccId] = {
+				target    = target,
+				phase     = "walk",
+				wasRooted = not ccMobile[ccId],
+				plant     = plant,
+			}
+		end
+
+		if not ccMobile[ccId] then setCCMobileState(ccId, player, true) end
+		ccMoveTargets[ccId] = target
 	end)
 
 	-- ── UnlockEvolve remote (Hollowed Mother → "Evolve") ──────────────────
@@ -4734,10 +5256,54 @@ end
 
 -- ── Bonfire helpers for AI bots (server-side; no client UI involved) ──────────
 -- Set which unit a bonfire summons (lets AI armies be varied, not all-Survivor).
+-- Enforces the same unit whitelist + research gates as the SetDeployerType remote,
+-- so a bot can't summon anything a player couldn't pick.
 function BuildingManager.setBonfireSummonType(player: any, deployerId: string, unitType: string): boolean
+	local VALID = { Survivor = true, Sniper = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
+	if not VALID[unitType] then return false end
 	local data = buildingData[deployerId]
 	if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return false end
+	if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
+		local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
+		if not researchManagerRef.hasResearch(player, req) then return false end
+	end
 	deployerUnitType[deployerId] = unitType
+	return true
+end
+
+-- ── Engineering Post helpers for AI bots (mirror the player remotes exactly) ──
+
+function BuildingManager.getEngineeringState(player: any, id: string): string?
+	local data = buildingData[id]
+	if not data or data.buildingType ~= "EngineeringPost" or data.owner ~= player
+		or data.isConstructing then return nil end
+	return engState[id] or "idle"
+end
+
+-- Start a Light research (charges ENGINEERING_RESEARCH_COST, same as the remote).
+function BuildingManager.startEngineeringForPlayer(player: any, id: string): boolean
+	local data = buildingData[id]
+	if not data or data.buildingType ~= "EngineeringPost" or data.owner ~= player
+		or data.isConstructing then return false end
+	if (engState[id] or "idle") ~= "idle" then return false end
+	if not resourceManagerRef or resourceManagerRef.get(player) < Config.ENGINEERING_RESEARCH_COST then return false end
+	resourceManagerRef.spend(player, Config.ENGINEERING_RESEARCH_COST)
+	engState[id]       = "researching"
+	engResearchEnd[id] = os.clock() + Config.ENGINEERING_LIGHT_TIME
+	engUpdateAcc[id]   = 0
+	return true
+end
+
+-- Collect a finished research: roll + apply a random upgrade (same as the remote).
+function BuildingManager.collectEngineeringForPlayer(player: any, id: string): boolean
+	local data = buildingData[id]
+	if not data or data.buildingType ~= "EngineeringPost" or data.owner ~= player
+		or data.isConstructing then return false end
+	if engState[id] ~= "ready" then return false end
+	engState[id]       = "idle"
+	engResearchEnd[id] = nil
+	engNotifier(id, false)
+	if unitManagerRef then unitManagerRef.applyRandomUpgrade(player) end
 	return true
 end
 

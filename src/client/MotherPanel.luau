@@ -1,158 +1,64 @@
 --!strict
 --[[
-    MotherPanel — command-card menu for the Hollowed "Mother" (their spike Command
-    Center). Renders as a larger 2×2 tile grid (cols = 2).
+    MotherPanel: command-card page for the Hollowed "Mother" (their spike Command
+    Center). It is the Hollowed player's default card: init.client feeds it to the
+    command card as the fallback page, so it sits open whenever nothing is selected.
 
-    Rooted (structure) state → three options:
-        Leech · Egg Sacs             (Leech instant-trains beside the Mother; Egg Sacs is
-                                      a repeatable upgrade that plants nests which auto-hatch
-                                      Embryos)
-        Uproot                       (lift the Mother into a moveable unit)
+    The grid holds ONE action, a single button filling the whole frame (cols = 1):
 
-    Mobile (uprooted) state → a single option:
-        Downroot                     (root back down; restores the build options)
+        INJECT   → [R], or the tile: pick a point on the ground; the Mother walks over (uprooting
+                   herself if she was rooted), drives her spike in, and three plants
+                   rise out of the wound. She roots back down afterwards. Holding [Shift]
+                   on the pick queues it, so a whole run of wounds can be laid out at once.
 
-    All production/mobility is server-authoritative; this panel only sends intent
-    (Network.trainFromMother / Network.mobilizeCC) and reflects the mobile state fed
-    in via setMobileState() from init.client's CCMobileSync handler.
+    The panel only sends intent. The walk, the injection and the plants are all
+    server-authoritative (Network.injectGround). Aiming lives in MotherInject, which
+    init.client hooks up through MotherPanel.onInject.
 ]]
 
-local Workspace         = game:GetService("Workspace")
-local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
-local UILib             = require(script.Parent:WaitForChild("UILib"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
-local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
 
 local MotherPanel = {}
-local C           = UILib.C
 local OWNER       = "mother"
-local localPlayer = Players.LocalPlayer
 
 -- ── State ─────────────────────────────────────────────────────────────────────
-local activeCCId:   string? = nil
-local networkRef:   any
-local resourcesFn:  (() -> number)?
-local isMobile      = false
-local eggSacConn:   RBXScriptConnection? = nil
+local activeCCId:  string? = nil
+local resourcesFn: (() -> number)?
+local injectFn:    ((string) -> ())? = nil
+local isAiming     = false
 
 -- ── Colours ───────────────────────────────────────────────────────────────────
-local LEECH_COL    = Color3.fromRGB(120, 190,  90)
-local EGGSAC_COL   = Color3.fromRGB(255, 140,  70)
-local UPROOT_COL   = Color3.fromRGB( 20, 200, 160)
-local DOWNROOT_COL = Color3.fromRGB(225, 130,  20)
-
-type Opt = { key: string, name: string, icon: string, color: Color3, desc: string }
--- Leech is the only direct train (index 1); the Egg Sacs upgrade (index 2) and Uproot
--- (index 3) are built separately in buildPage().
-local OPTIONS: { Opt } = {
-	{ key = "Leech", name = "LEECH", icon = "🪱", color = LEECH_COL, desc = "Spawn a Leech. Select it to burrow for passive income." },
-}
-
--- The live EggSacLevel is replicated on the Mother's model as an attribute (stamped by
--- the server on each purchase), so the panel reads it straight off the workspace model.
-local function activeMotherModel(): Instance?
-	if not activeCCId then return nil end
-	local bf = Workspace:FindFirstChild("Buildings")
-	return bf and bf:FindFirstChild(activeCCId) or nil
-end
-local function eggSacLevel(): number
-	local m = activeMotherModel()
-	return m and (m:GetAttribute("EggSacLevel") :: number? or 0) or 0
-end
+local INJECT_COL = Color3.fromRGB(196,  90, 255)
 
 -- ── Page builder ────────────────────────────────────────────────────────────────
 local function buildPage(): CommandCard.Page
-	local slots: { CommandCard.Slot } = {}
+	local cost    = Config.MOTHER_INJECT_COST
+	local res     = resourcesFn and resourcesFn() or 0
+	local canPay  = cost <= 0 or res >= cost
 
-	if isMobile then
-		table.insert(slots, {
-			index   = 1,
-			name    = "DOWNROOT",
-			icon    = "⬇",
-			color   = DOWNROOT_COL,
-			desc    = "Root the Mother back down — restores the build options.",
-			onClick = function()
-				if activeCCId then networkRef.mobilizeCC(activeCCId) end
-			end,
-		})
-		return { header = "MOTHER", slots = slots, cols = 2 }
-	end
+	local slot: CommandCard.Slot = {
+		index   = 1,
+		name    = isAiming and "INJECT (PICK A SPOT)" or "INJECT",
+		label   = isAiming and "PICK A SPOT" or "INJECT",
+		icon    = "⬇",
+		hotkey  = "R",
+		color   = INJECT_COL,
+		cost    = cost > 0 and cost or nil,
+		enabled = canPay,
+		desc    = isAiming
+			and "Click the ground to send her. Hold [Shift] to queue several. Right-click or [Esc] to call it off."
+			or ("Pick a point on the ground. The Mother walks to it, sinks her spike in, and "
+				.. Config.MOTHER_INJECT_PLANTS .. " plants tear their way up out of the soil. "
+				.. "Aim at a plant she has already grown and it bursts instead, giving up "
+				.. "what it was growing."),
+		onClick = function() MotherPanel.triggerInject() end,
+	}
 
-	local res = resourcesFn and resourcesFn() or 0
-
-	-- Leech (grid slot 1) — direct train beside the Mother.
-	for _, opt in OPTIONS do
-		local cost = (Config.UNIT_TYPES :: any)[opt.key].cost
-		local slot: CommandCard.Slot = {
-			index   = 1,
-			name    = opt.name,
-			icon    = opt.icon,
-			color   = opt.color,
-			cost    = cost,
-			enabled = res >= cost,
-			desc    = opt.desc,
-			onClick = function()
-				if not activeCCId then return end
-				if (resourcesFn and resourcesFn() or 0) < cost then return end
-				networkRef.trainFromMother(activeCCId, opt.key)
-			end,
-		}
-		-- Show the Leech as a 3D thumbnail (like units in the Bonfire grid) instead of an emoji.
-		if opt.key == "Leech" then
-			slot.icon            = nil
-			slot.viewportKey     = "unit:Leech"
-			slot.viewportFactory = function() return ViewportPreview.forUnit("Leech", Vector2.new(64, 64)) end
-		end
-		table.insert(slots, slot)
-	end
-
-	-- Egg Sacs upgrade (grid slot 2) — repeatable purchase that plants nests + raises
-	-- the egg cap. Each laid egg is clickable: pick the unit it keeps alive. Level is
-	-- read live off the Mother model's attribute.
-	local level    = eggSacLevel()
-	local maxLevel  = Config.MOTHER_EGGSAC_MAX_LEVEL
-	local maxed     = level >= maxLevel
-	local sacCost   = Config.MOTHER_EGGSAC_COST
-	table.insert(slots, {
-		index   = 2,
-		name    = "EGG SACS",
-		color   = EGGSAC_COL,
-		-- 3D thumbnail of the egg nest (with an egg in it) instead of an emoji.
-		viewportKey     = "eggsacnest",
-		viewportFactory = function() return ViewportPreview.forEggSacNest(Vector2.new(64, 64)) end,
-		cost    = maxed and nil or sacCost,
-		badge   = "Lv " .. level .. "/" .. maxLevel,
-		enabled = (not maxed) and res >= sacCost,
-		locked  = maxed,
-		desc    = maxed
-			and ("Egg Sacs maxed — the Mother lays up to " .. Config.eggSacCapacity(level) .. " eggs. Click an egg to choose the unit it hatches.")
-			or ("Grow an Egg Sac cluster: plants nests beside the Mother that lay clickable eggs for free. Click an egg to pick the unit it keeps alive. +"
-				.. Config.MOTHER_EGGSAC_PER_LEVEL .. " max eggs per tier (" .. maxLevel .. " tiers)."),
-		onClick = function()
-			if not activeCCId then return end
-			if eggSacLevel() >= maxLevel then return end
-			if (resourcesFn and resourcesFn() or 0) < sacCost then return end
-			networkRef.upgradeEggSacs(activeCCId)
-		end,
-	})
-
-	-- Embryo evolution is always available now (no unlock needed), so the Mother no
-	-- longer has an Evolve tile — Uproot takes grid slot 3.
-	table.insert(slots, {
-		index   = 3,
-		name    = "UPROOT",
-		icon    = "⬆",
-		color   = UPROOT_COL,
-		desc    = "Lift the Mother into a moveable unit (right-click to move).",
-		onClick = function()
-			if activeCCId then networkRef.mobilizeCC(activeCCId) end
-		end,
-	})
-
-	return { header = "MOTHER", slots = slots, cols = 2 }
+	-- cols = 1 → one tile that fills the whole grid frame.
+	return { header = "MOTHER", slots = { slot }, cols = 1 }
 end
 
 local function renderIfActive()
@@ -162,31 +68,43 @@ local function renderIfActive()
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
-function MotherPanel.init(network: any, getResources: () -> number)
-	networkRef   = network
-	resourcesFn  = getResources
+-- `network` is unused: the injection request goes out through MotherInject, which owns
+-- the ground-targeting mode. Kept in the signature so the wiring in init.client reads
+-- like every other panel's.
+function MotherPanel.init(_network: any, getResources: () -> number)
+	resourcesFn = getResources
+end
+
+-- Called when the player presses INJECT. init.client hands this to MotherInject,
+-- which runs the ground-targeting mode.
+function MotherPanel.onInject(fn: (ccId: string) -> ())
+	injectFn = fn
+end
+
+-- Arms the injection, exactly as clicking the tile would. Shared with the [R] hotkey
+-- in init.client, so the key and the tile cannot drift apart on cost or state checks.
+function MotherPanel.triggerInject()
+	if not activeCCId then return end
+	local cost = Config.MOTHER_INJECT_COST
+	local res  = resourcesFn and resourcesFn() or 0
+	if cost > 0 and res < cost then return end
+	if injectFn then injectFn(activeCCId :: string) end
 end
 
 function MotherPanel.show(ccId: string)
 	activeCCId = ccId
-	-- Live-refresh the Egg Sacs tile when this Mother's level changes (purchase lands).
-	if eggSacConn then eggSacConn:Disconnect(); eggSacConn = nil end
-	local model = activeMotherModel()
-	if model then
-		eggSacConn = model:GetAttributeChangedSignal("EggSacLevel"):Connect(renderIfActive)
-	end
 	CommandCard.show(OWNER, buildPage())
 end
 
 function MotherPanel.hide()
 	activeCCId = nil
-	if eggSacConn then eggSacConn:Disconnect(); eggSacConn = nil end
 	CommandCard.hide(OWNER)
 end
 
--- Fed by init.client's CCMobileSync handler so Uproot ⇄ Downroot flips live.
-function MotherPanel.setMobileState(mobile: boolean)
-	isMobile = mobile
+-- Flips the button to its "waiting for you to click the ground" face.
+function MotherPanel.setAiming(aiming: boolean)
+	if isAiming == aiming then return end
+	isAiming = aiming
 	renderIfActive()
 end
 

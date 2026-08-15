@@ -179,9 +179,15 @@ local gridOccupiedCount                      = 0
 local gridScratch: { string } = {}
 local gridScratchN             = 0
 
--- Active Howitzer fire zones: persist for FULL+FADE seconds, deal DoT to all units.
-type FireZone = { pos: Vector3, elapsed: number, dotAccum: number }
+-- Active Howitzer fire zones: burning craters that persist for FULL+FADE seconds
+-- and scorch every unit standing in one, both teams. Overlapping craters never
+-- stack their damage (see the burn tick); the scratch buffers below collect the
+-- hottest crater touching each unit so one shared tick applies it just once.
+type FireZone = { pos: Vector3, elapsed: number, owner: string }
 local fireZones: { FireZone } = {}
+local fireDotAccum            = 0
+local burnDps:   { [string]: number } = {}
+local burnOwner: { [string]: string } = {}
 
 -- Per-unit anchored decorator parts (treads, pill body, eyes, etc.).
 -- Replaced unanchored+WeldConstraint parts to cut physics body count.
@@ -638,11 +644,34 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 		focusBldId  = nil,
 	}
 
-	-- Leech: don't idle at the nest. Crawl 3–5 tiles out on a random heading to open
-	-- ground, then burrow (heartbeat handles the burrow on arrival via data.autoBurrow).
+	-- Leech: don't idle at the nest. Shuffle clear of it, then burrow (the heartbeat
+	-- does the burrowing on arrival via data.autoBurrow). It only crawls a few studs,
+	-- but it picks its HEADING by sniffing for ore across LEECH_ORE_RADIUS: anchoring
+	-- within that radius of a live deposit doubles what it feeds back, so a clutch
+	-- creeps toward the nearest seam instead of scattering blindly.
 	if unitType == "Leech" then
-		local d    = units[id]
-		local ang  = math.random() * math.pi * 2
+		local d = units[id]
+
+		local toward: Vector3? = nil
+		if mineralManagerRef and mineralManagerRef.getUnclaimedPositions then
+			local bestD2 = Config.LEECH_ORE_RADIUS * Config.LEECH_ORE_RADIUS
+			for _, p in mineralManagerRef.getUnclaimedPositions() do
+				local dx, dz = p.X - position.X, p.Z - position.Z
+				local d2 = dx * dx + dz * dz
+				if d2 < bestD2 then bestD2 = d2; toward = p end
+			end
+		end
+
+		local ang: number
+		if toward then
+			-- Lean at the seam, with enough wobble that a batch fans into a bed
+			-- rather than stacking single file on one bearing.
+			ang = math.atan2(toward.Z - position.Z, toward.X - position.X)
+				+ (math.random() - 0.5) * 0.9
+		else
+			ang = math.random() * math.pi * 2
+		end
+
 		local dist = Config.LEECH_SCATTER_MIN
 			+ math.random() * (Config.LEECH_SCATTER_MAX - Config.LEECH_SCATTER_MIN)
 		local dest = position + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
@@ -676,6 +705,33 @@ local function spawnUnit(player: Player, position: Vector3, unitType: string): s
 	end
 
 	return id
+end
+
+-- ── Focus-fire target ─────────────────────────────────────────────────────────
+-- The part a unit's manual focus order points at. `focusBldId` names either a real
+-- building or one of BuildingManager's attackable eggs/nests, and only that module
+-- knows which — so ask it rather than looking the model up in workspace.Buildings.
+-- Returns nil (and drops the order) once the target is gone.
+local function focusPart(data: UnitData): BasePart?
+	local id = data.focusBldId
+	if not id or not buildingManagerRef then return nil end
+	local part = buildingManagerRef.getTargetPart(id) :: BasePart?
+	if not part or not part.Parent then
+		data.focusBldId = nil
+		return nil
+	end
+	return part
+end
+
+-- Focus target resolved for an attack: (id, aim point), but only while it is inside
+-- `range` and — for units that need a spotter (Sniper) — actually visible.
+local function focusAttackTarget(data: UnitData, myPos: Vector3, range: number,
+	spotter: ((Vector3) -> boolean)?): (string?, Vector3?)
+	local part = focusPart(data)
+	if not part then return nil, nil end
+	if (part.Position - myPos).Magnitude > range then return nil, nil end
+	if spotter and not spotter(part.Position) then return nil, nil end
+	return data.focusBldId, part.Position + Vector3.new(0, part.Size.Y * 0.5, 0)
 end
 
 -- ── Move helpers ──────────────────────────────────────────────────────────────
@@ -1311,6 +1367,13 @@ function UnitManager.sendUnitsTo(player: any, ids: { string }, targetPos: Vector
 	if #ids > 0 then moveUnits(player :: Player, ids, targetPos) end
 end
 
+-- Attack-move a subset of units for a server-side commander (the AI). Identical
+-- semantics to the player's AttackMoveUnits remote: units march in formation and
+-- engage anything they spot on the way.
+function UnitManager.attackMoveUnitsFor(player: any, ids: { string }, targetPos: Vector3)
+	if #ids > 0 then attackMoveUnits(player :: Player, ids, targetPos) end
+end
+
 -- Return a list of { id, part, unitType } for all units owned by player.
 -- Used by the AI to rebuild squad role assignments each strategy tick.
 function UnitManager.getPlayerUnitData(player: any): { { id: string, part: BasePart, unitType: string } }
@@ -1338,6 +1401,25 @@ end
 -- Universal per-owner kill tally (players AND AI), for the end-screen performance graph.
 function UnitManager.getKillTally(): { [string]: number }
 	return killTally
+end
+
+-- Per-owner army snapshot — live unit count and summed unit cost ("army value"),
+-- keyed by owner id string. One pass over the unit table, sampled periodically for
+-- the end-screen performance graph. Free units (cost 0) still carry token value so
+-- a swarm of them registers on the chart.
+function UnitManager.getArmyTally(): { [string]: { count: number, value: number } }
+	local out: { [string]: { count: number, value: number } } = {}
+	for _, data in units do
+		if data.hp <= 0 or data.dying then continue end
+		if not data.owner then continue end
+		local key   = tostring(data.owner.UserId)
+		local entry = out[key]
+		if not entry then entry = { count = 0, value = 0 }; out[key] = entry end
+		local def = Config.UNIT_TYPES[data.unitType]
+		entry.count += 1
+		entry.value += (def and def.cost and def.cost > 0) and def.cost or 20
+	end
+	return out
 end
 
 function UnitManager.resetAll()
@@ -1867,8 +1949,16 @@ function UnitManager.init(resourceManager)
 					data.burrowIncomeAt = now + Config.LEECH_BURROW_INTERVAL
 				elseif now >= (data.burrowIncomeAt :: number) then
 					data.burrowIncomeAt = now + Config.LEECH_BURROW_INTERVAL
-					if resourceManagerRef and data.owner and data.owner.UserId > 0 then
-						resourceManagerRef.add(data.owner, Config.LEECH_BURROW_INCOME)
+					if resourceManagerRef and data.owner then
+						-- Anchored on top of a live seam, it taps the ore as well as the
+						-- ground and pays out double. Bots feed the same way players do.
+						local income = Config.LEECH_BURROW_INCOME
+						if mineralManagerRef and mineralManagerRef.countActiveDepositsNear
+							and mineralManagerRef.countActiveDepositsNear(
+								data.part.Position, Config.LEECH_ORE_RADIUS) > 0 then
+							income += Config.LEECH_ORE_BONUS
+						end
+						resourceManagerRef.add(data.owner, income)
 					end
 					-- Signal every client to play this leech's feeding/harvest animation.
 					RemoteHandler.get(Config.REMOTES.LeechHarvest):FireAllClients(id)
@@ -2045,14 +2135,12 @@ function UnitManager.init(resourceManager)
 			end
 
 			-- ── 1b. Focus building: approach and hold at attack range ──────────
+			-- The focus target may be a building or one of the Hollowed's attackable
+			-- eggs/nests; focusPart resolves either (and clears a dead order).
 			if data.focusBldId and not data.aggroId then
-				local bf    = workspace:FindFirstChild("Buildings")
-				local model = bf and bf:FindFirstChild(data.focusBldId)
-				local base  = model and model:FindFirstChild("Base")
-				if not base or not (base :: BasePart).Parent then
-					data.focusBldId = nil
-				else
-					local bpos  = (base :: BasePart).Position
+				local base = focusPart(data)
+				if base then
+					local bpos  = base.Position
 					local myPos = data.part.Position
 					local dx    = bpos.X - myPos.X
 					local dz    = bpos.Z - myPos.Z
@@ -2654,20 +2742,7 @@ function UnitManager.init(resourceManager)
 					end
 
 					if buildingManagerRef then
-						local bId: string?, bPos: Vector3?
-						if data.focusBldId then
-							local bf    = workspace:FindFirstChild("Buildings")
-							local model = bf and bf:FindFirstChild(data.focusBldId)
-							local base  = model and model:FindFirstChild("Base")
-							if base and (base :: BasePart).Parent then
-								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange then
-									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
-								end
-							else
-								data.focusBldId = nil
-							end
-						end
+						local bId: string?, bPos: Vector3? = focusAttackTarget(data, myPos, atkRange)
 						if not bId then
 							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
 						end
@@ -2758,20 +2833,7 @@ function UnitManager.init(resourceManager)
 						end
 					else
 						-- No enemy units: erupt the whole cluster on a building, else a miner.
-						local bId: string?, bPos: Vector3?
-						if data.focusBldId then
-							local bf    = workspace:FindFirstChild("Buildings")
-							local model = bf and bf:FindFirstChild(data.focusBldId)
-							local base  = model and model:FindFirstChild("Base")
-							if base and (base :: BasePart).Parent then
-								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange then
-									bId = data.focusBldId; bPos = bp.Position
-								end
-							else
-								data.focusBldId = nil
-							end
-						end
+						local bId: string?, bPos: Vector3? = focusAttackTarget(data, myPos, atkRange)
 						if not bId and buildingManagerRef then
 							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
 						end
@@ -2825,20 +2887,7 @@ function UnitManager.init(resourceManager)
 							data.rollerChargeHome   = myPos
 						end
 					elseif buildingManagerRef then
-						local bId: string?, bPos: Vector3?
-						if data.focusBldId then
-							local bf    = workspace:FindFirstChild("Buildings")
-							local model = bf and bf:FindFirstChild(data.focusBldId)
-							local base  = model and model:FindFirstChild("Base")
-							if base and (base :: BasePart).Parent then
-								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange then
-									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
-								end
-							else
-								data.focusBldId = nil
-							end
-						end
+						local bId: string?, bPos: Vector3? = focusAttackTarget(data, myPos, atkRange)
 						if not bId then
 							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
 						end
@@ -2882,20 +2931,7 @@ function UnitManager.init(resourceManager)
 						applyHP(other, true)
 						if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 					elseif buildingManagerRef then
-						local bId: string?, bPos: Vector3?
-						if data.focusBldId then
-							local bf    = workspace:FindFirstChild("Buildings")
-							local model = bf and bf:FindFirstChild(data.focusBldId)
-							local base  = model and model:FindFirstChild("Base")
-							if base and (base :: BasePart).Parent then
-								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange then
-									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
-								end
-							else
-								data.focusBldId = nil
-							end
-						end
+						local bId: string?, bPos: Vector3? = focusAttackTarget(data, myPos, atkRange)
 						if not bId then
 							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange)
 						end
@@ -2932,20 +2968,7 @@ function UnitManager.init(resourceManager)
 						applyHP(other, true)
 						if other.hp <= 0 then other.killedBy = myOwnerStr; table.insert(toRemove, bestId2) end
 					elseif buildingManagerRef then
-						local bId: string?, bPos: Vector3?
-						if data.focusBldId then
-							local bf    = workspace:FindFirstChild("Buildings")
-							local model = bf and bf:FindFirstChild(data.focusBldId)
-							local base  = model and model:FindFirstChild("Base")
-							if base and (base :: BasePart).Parent then
-								local bp = base :: BasePart
-								if (bp.Position - myPos).Magnitude <= atkRange and (not spotter or spotter(bp.Position)) then
-									bId = data.focusBldId; bPos = bp.Position + Vector3.new(0, bp.Size.Y * 0.5, 0)
-								end
-							else
-								data.focusBldId = nil
-							end
-						end
+						local bId: string?, bPos: Vector3? = focusAttackTarget(data, myPos, atkRange, spotter)
 						if not bId then
 							bId, bPos = buildingManagerRef.getNearestEnemyBuilding(myPos, myOwnerStr, atkRange, spotter)
 						end
@@ -2969,10 +2992,9 @@ function UnitManager.init(resourceManager)
 				-- Howitzer: leave a fire zone at the impact site
 				if data.unitType == "Howitzer" then
 					fireZones[#fireZones + 1] = {
-						pos      = Vector3.new(hitPos.X, 0, hitPos.Z),
-						elapsed  = 0,
-						dotAccum = 0,
-						owner    = tostring(data.owner.UserId),   -- for kill credit on burn deaths
+						pos     = Vector3.new(hitPos.X, 0, hitPos.Z),
+						elapsed = 0,
+						owner   = tostring(data.owner.UserId),   -- for kill credit on burn deaths
 					}
 				end
 			end
@@ -2998,41 +3020,77 @@ function UnitManager.init(resourceManager)
 			end
 		end
 
-		-- ── Howitzer fire zone DoT (damages ALL units, both teams) ─────────────
+		-- ── Howitzer fire zone burn (scorches ALL units, both teams) ───────────
+		-- A crater is heat, not a landmine: standing in one costs FIRE_DPS per
+		-- second, applied in small slices so it reads as a burn rather than a
+		-- chunk. Crucially, overlapping craters do NOT stack — a unit sitting in
+		-- three of them takes the hottest, not triple — so a Howitzer line
+		-- shelling one spot can no longer delete whatever steps into the fire.
 		do
 			local FIRE_FULL  = Config.HOWITZER_FIRE_FULL_DURATION
 			local FIRE_FADE  = Config.HOWITZER_FIRE_FADE_DURATION
 			local FIRE_TOTAL = FIRE_FULL + FIRE_FADE
 			local FIRE_R     = Config.HOWITZER_FIRE_RADIUS
+			local FIRE_R2    = FIRE_R * FIRE_R
 			local FIRE_DPS   = Config.HOWITZER_FIRE_DMG_PER_SEC
+			local TICK       = 0.25   -- four burn ticks a second
+
+			-- Age every crater, dropping the ones that have burnt out.
 			local fzi = #fireZones
 			while fzi > 0 do
-				local fz    = fireZones[fzi]
+				local fz = fireZones[fzi]
 				fz.elapsed += dt
-				if fz.elapsed >= FIRE_TOTAL then
-					table.remove(fireZones, fzi)
-				else
-					local dps = FIRE_DPS
-					if fz.elapsed > FIRE_FULL then
-						dps = FIRE_DPS * (1 - (fz.elapsed - FIRE_FULL) / FIRE_FADE)
-					end
-					fz.dotAccum += dt
-					if fz.dotAccum >= 1.0 then
-						fz.dotAccum -= 1.0
-						local dmgTick = math.max(1, math.floor(dps))
+				if fz.elapsed >= FIRE_TOTAL then table.remove(fireZones, fzi) end
+				fzi -= 1
+			end
+
+			if #fireZones == 0 then
+				fireDotAccum = 0
+			else
+				fireDotAccum += dt
+				if fireDotAccum >= TICK then
+					-- Bill for the time that actually elapsed, clamped so a lag
+					-- spike can't dump one huge slice.
+					local slice  = math.min(fireDotAccum, 0.5)
+					fireDotAccum = 0
+
+					for _, fz in fireZones do
+						local dps = FIRE_DPS
+						if fz.elapsed > FIRE_FULL then
+							dps = FIRE_DPS * math.max(0, 1 - (fz.elapsed - FIRE_FULL) / FIRE_FADE)
+						end
 						fillGridScratch(fz.pos, FIRE_R)
 						for gi = 1, gridScratchN do
 							local uid   = gridScratch[gi]
 							local udata = units[uid]
 							if not udata or udata.hp <= 0 then continue end
-							if (udata.part.Position - fz.pos).Magnitude > FIRE_R then continue end
-							udata.hp -= dmgTick
-							applyHP(udata, true)
-							if udata.hp <= 0 then udata.killedBy = fz.owner; table.insert(toRemove, uid) end
+							-- Measure on the ground plane: the crater sits at Y=0 while a
+							-- unit's origin rides at half its height, so a 3D distance would
+							-- shrink the blast and let tall creatures stand in fire untouched.
+							local dx = udata.part.Position.X - fz.pos.X
+							local dz = udata.part.Position.Z - fz.pos.Z
+							if dx * dx + dz * dz > FIRE_R2 then continue end
+							if dps > (burnDps[uid] or 0) then
+								burnDps[uid]   = dps
+								burnOwner[uid] = fz.owner
+							end
 						end
 					end
+
+					for uid, dps in burnDps do
+						local udata = units[uid]
+						if udata and udata.hp > 0 then
+							udata.hp -= dps * slice
+							applyHP(udata, true)
+							if udata.hp <= 0 then
+								udata.killedBy = burnOwner[uid]
+								table.insert(toRemove, uid)
+							end
+						end
+						burnDps[uid]   = nil
+						burnOwner[uid] = nil
+					end
 				end
-				fzi -= 1
 			end
 		end
 

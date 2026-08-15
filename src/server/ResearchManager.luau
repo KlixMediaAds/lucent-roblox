@@ -9,6 +9,25 @@ local ResearchManager = {}
 
 local completionHooks: { (any, string) -> () } = {}
 
+-- AI bots use fake player tables with negative UserIds. They play by the same
+-- research rules as humans (condition unlocks + timed upgrades), so they are
+-- tracked here too; the registry lets kill-credit lookups resolve them, and
+-- isHuman() gates the client remotes fake players can't receive.
+local botPlayers: { [number]: any } = {}
+
+function ResearchManager.registerBotPlayer(player: any)
+	botPlayers[player.UserId] = player
+end
+
+local function isHuman(player: any): boolean
+	return player.UserId > 0
+end
+
+local function resolveCombatant(uid: number): any
+	if uid > 0 then return Players:GetPlayerByUserId(uid) end
+	return botPlayers[uid]
+end
+
 function ResearchManager.addCompletionHook(fn: (any, string) -> ())
 	table.insert(completionHooks, fn)
 end
@@ -106,13 +125,16 @@ local function grantTech(player: any, techName: string)
 		end
 	end
 
-	RemoteHandler.get(Config.REMOTES.UnlockGranted):FireClient(player, techName)
+	if isHuman(player) then
+		RemoteHandler.get(Config.REMOTES.UnlockGranted):FireClient(player, techName)
+	end
 	for _, hook in completionHooks do hook(player, techName) end
 end
 
 -- ── Public recording API ──────────────────────────────────────────────────────
 
 local function fireProgressSync(player: any)
+	if not isHuman(player) then return end
 	local state = getState(player)
 	RemoteHandler.get(Config.REMOTES.CondProgressSync):FireClient(player, {
 		kills   = state.kills,
@@ -122,7 +144,7 @@ local function fireProgressSync(player: any)
 end
 
 function ResearchManager.recordBuildingPlaced(player: any, buildingType: string)
-	if not player or player.UserId <= 0 then return end
+	if not player then return end
 	local state = getState(player)
 	state.builds[buildingType] = (state.builds[buildingType] or 0) + 1
 	fireProgressSync(player)
@@ -130,8 +152,8 @@ end
 
 function ResearchManager.recordEnemyKilled(attackerUserIdStr: string)
 	local uid = tonumber(attackerUserIdStr)
-	if not uid or uid <= 0 then return end
-	local player = Players:GetPlayerByUserId(uid)
+	if not uid or uid == 0 then return end
+	local player = resolveCombatant(uid)
 	if not player then return end
 	local state = getState(player)
 	state.kills += 1
@@ -144,8 +166,8 @@ end
 function ResearchManager.recordEnemyKills(attackerUserIdStr: string, count: number)
 	if count <= 0 then return end
 	local uid = tonumber(attackerUserIdStr)
-	if not uid or uid <= 0 then return end
-	local player = Players:GetPlayerByUserId(uid)
+	if not uid or uid == 0 then return end
+	local player = resolveCombatant(uid)
 	if not player then return end
 	local state = getState(player)
 	state.kills += count
@@ -153,7 +175,7 @@ function ResearchManager.recordEnemyKills(attackerUserIdStr: string, count: numb
 end
 
 function ResearchManager.recordUnitTrained(player: any, unitType: string)
-	if not player or player.UserId <= 0 then return end
+	if not player then return end
 	local state = getState(player)
 	state.trained[unitType] = (state.trained[unitType] or 0) + 1
 	fireProgressSync(player)
@@ -161,10 +183,10 @@ end
 
 -- ── Manual upgrade flow ───────────────────────────────────────────────────────
 
--- Player clicked UPGRADE. Validate requirements & concurrency, then start a timed
--- research that grants the tech when it completes.
+-- Player clicked UPGRADE (or an AI bot decided to research). Validate requirements
+-- & concurrency, then start a timed research that grants the tech when it completes.
 function ResearchManager.requestUpgrade(player: any, techName: string)
-	if not player or player.UserId <= 0 then return end
+	if not player then return end
 	if type(techName) ~= "string" then return end
 	local unlock = (Config.UNLOCKS :: any)[techName]
 	if not unlock then return end
@@ -185,7 +207,9 @@ function ResearchManager.requestUpgrade(player: any, techName: string)
 
 	local endTime = workspace:GetServerTimeNow() + Config.UPGRADE_TIME
 	state.upgrading[techName] = endTime
-	RemoteHandler.get(Config.REMOTES.UpgradeStarted):FireClient(player, techName, endTime)
+	if isHuman(player) then
+		RemoteHandler.get(Config.REMOTES.UpgradeStarted):FireClient(player, techName, endTime)
+	end
 
 	task.delay(Config.UPGRADE_TIME, function()
 		-- Bail if the player reset (state table swapped) or the research was cleared.
@@ -223,7 +247,9 @@ function ResearchManager.getStats(player: any): { kills: number, unitsTrained: n
 	return { kills = state.kills, unitsTrained = totalTrained, buildingsBuilt = totalBuilds }
 end
 
--- AI shortcut: grant a tech directly without conditions or the research timer.
+-- Direct grant, bypassing conditions and the research timer. Competitive AI bots
+-- no longer use this — they research through requestUpgrade like players. It only
+-- remains for special-gamemode setup (Swarm bots are seeded the CreepyBlob tech).
 function ResearchManager.startForPlayer(player: any, _workshopId: string, techName: string)
 	local tech = (Config.UNLOCKS :: any)[techName]
 	if not tech then return end
