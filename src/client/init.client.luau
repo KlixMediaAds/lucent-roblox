@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
+local InjectPlants      = require(Shared:WaitForChild("InjectPlants"))
 
 local Network        = require(script:WaitForChild("Network"))
 local CameraModule   = require(script:WaitForChild("Camera"))
@@ -49,6 +50,7 @@ local Jumpscare      = require(script:WaitForChild("Jumpscare"))
 local MechLegs       = require(script:WaitForChild("MechLegs"))
 local MotherLegs     = require(script:WaitForChild("MotherLegs"))
 local MiniMap        = require(script:WaitForChild("MiniMap"))
+local QuickSelect    = require(script:WaitForChild("QuickSelect"))
 local ScoutManager   = require(script:WaitForChild("ScoutManager"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager    = require(script:WaitForChild("CometManager"))
@@ -524,27 +526,10 @@ MotherPanel.onInject(function(ccId: string)
 	MotherInject.begin(ccId)
 end)
 
-MiniMap.onReturnClicked(function()
-	local base = ownCCBase()
-	if base then CameraModule.returnToBase(base.Position) end
-end)
-
--- The [1] camera button dims while the view is already "home" — near the CC and at
--- default rotation (returning would do nothing) — and brightens once you pan/rotate.
-RunService.RenderStepped:Connect(function()
-	local base = ownCCBase()
-	if not base then
-		MiniMap.setReturnDimmed(true)
-		return
-	end
-	local focus    = CameraModule.getFocus()
-	local d        = (Vector3.new(focus.X, 0, focus.Z)
-		- Vector3.new(base.Position.X, 0, base.Position.Z)).Magnitude
-	local nearBase = d < 55
-	local yawNorm  = ((CameraModule.getYaw() + 180) % 360) - 180
-	local noRot    = math.abs(yawNorm) < 6
-	MiniMap.setReturnDimmed(nearBase and noRot)
-end)
+-- The quick-select bar above the minimap: one button per group the player owns (the
+-- Mother, the egg clutch, the Leeches, the army). Tap takes the group, tap again flies
+-- the camera to it. Its Mother slot is what the minimap's old [1] button became.
+QuickSelect.init(UnitController, CameraModule)
 
 -- ── /xray chat command ────────────────────────────────────────────────────────
 do
@@ -1166,6 +1151,20 @@ UnitController.onOtherBuildingSelected(function(bid: string?, btype: string?)
 	end
 end)
 
+-- ── Wild plant card ───────────────────────────────────────────────────────────
+-- The Mother's growths are scenery, not property, so clicking one has nothing to press:
+-- it names the plant and says the one thing that can be done with it.
+UnitController.onPlantSelected(function(plant: Model?)
+	if plant then
+		local info = InjectPlants.injectInfo(plant)
+		CommandCard.showMessage("plant",
+			((info and info.label) or "GROWTH"):upper(),
+			"Can be injected to evolve")
+	else
+		CommandCard.hide("plant")
+	end
+end)
+
 -- ── Egg-Sac egg panel ───────────────────────────────────────────────────────────
 -- Clicking one of the Mother's eggs opens a 2×2 grid to choose which unit it hatches.
 UnitController.onEggSelected(function(eggIds: { string }?)
@@ -1318,6 +1317,7 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 	if target then
 		MotherInject.clearQueue()   -- a hand-issued move calls off the queued injections
 		Network.moveMobileCC(ownCCId, target)
+		UnitController.playMotherVoice()
 	end
 end)
 

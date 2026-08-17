@@ -6,6 +6,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared           = ReplicatedStorage:WaitForChild("Shared")
 local Config           = require(Shared:WaitForChild("Config"))
 local RangeRing        = require(script.Parent:WaitForChild("RangeRing"))
+local SelectionRing    = require(script.Parent:WaitForChild("SelectionRing"))
+local InjectPlants     = require(Shared:WaitForChild("InjectPlants"))
 
 local UnitController = {}
 
@@ -14,7 +16,7 @@ local mouse        = localPlayer:GetMouse()
 local selected: {string}  = {}
 local knownUnits: {[string]: {part: BasePart, ownerId: number}} = {}
 local knownBuildings: {[string]: {base: BasePart, ownerId: number, buildingType: string}} = {}
-local selectionBoxes: {[string]: SelectionBox} = {}
+local unitRings: {[string]: SelectionRing.Ring} = {}
 local onChangedCb: ((number) -> ())?
 local onBarracksSelectedCb:  ((string?) -> ())?
 local onMineSelectedCb:      ((string?) -> ())?
@@ -39,6 +41,12 @@ local onUnitsSelectedCb:     (({string}) -> ())?
 -- attack-move, focus-attack, or formation), so army-command modes can release them.
 local onMoveIssuedCb:        (({string}) -> ())?
 local isBlockedFn: (() -> boolean)?
+-- The Camera module, handed over in init. The plant picker needs the ground point
+-- under the cursor, which is the camera's to work out.
+local cameraRef: any = nil
+-- Fires with the wild plant the player clicked (or nil on deselect), so init.client can
+-- put its name on the command card.
+local onPlantSelectedCb: ((Model?) -> ())? = nil
 local dragFrame: Frame?
 
 -- Tell every building-info panel to close. Each branch of the selection handler calls
@@ -75,18 +83,28 @@ local function clearBuildingPanelsExcept(exceptType: string?)
 	if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(nil, nil) end
 end
 
+-- ── Selection ring palette ────────────────────────────────────────────────────
+-- One language for "this is picked": a lit circle on the ground, coloured by what kind
+-- of thing is standing in it. Hover is always the same quiet white so it never competes
+-- with a live selection.
+local RING_UNIT  = Color3.fromRGB(90, 215, 255)
+local RING_BLD   = Color3.fromRGB(80, 255, 180)
+local RING_EGG   = Color3.fromRGB(255, 180, 90)
+local RING_PLANT = Color3.fromRGB(215, 110, 255)
+local RING_HOVER = Color3.fromRGB(235, 240, 245)
+
 -- ── Building hover + selection highlight ──────────────────────────────────────
-local hoverBuildingId:     string?      = nil
-local hoverBox:            SelectionBox? = nil
-local selectedBuildingId:  string?      = nil
-local selectedBuildingBox: SelectionBox? = nil
-local multiBldBoxes:       { [string]: SelectionBox } = {}  -- extra boxes from double-click
+local hoverBuildingId:   string?            = nil
+local hoverBldRing:      SelectionRing.Ring? = nil
+local selectedBuildingId: string?           = nil
+local selectedBldRing:   SelectionRing.Ring? = nil
+local multiBldRings:     { [string]: SelectionRing.Ring } = {}  -- extra rings from double-click
 
 -- ── Egg-Sac egg selection (own lightweight highlight; eggs aren't units/buildings) ──
 -- Selecting an egg also selects its descendants in the tentacle tree, so a whole subtree
 -- can be assigned a unit at once. Tracked as a set of egg ids → their highlight boxes.
-local selectedEggIds:   { string }                 = {}
-local selectedEggBoxes: { [string]: SelectionBox } = {}
+local selectedEggIds:  { string }                          = {}
+local selectedEggRings: { [string]: SelectionRing.Ring }   = {}
 
 -- ── Double-click tracking ─────────────────────────────────────────────────────
 local lastClickTime:   number  = 0
@@ -141,6 +159,24 @@ local function playSound(id: number, pitchRange: number, volume: number)
 	s.Parent              = workspace
 	s:Play()
 	s.Ended:Connect(function() s:Destroy() end)
+end
+
+-- The Mother answers a move order the way a marine does: one line, then quiet for a
+-- while. The cooldown IS the feature -- right-clicking over and over is how anyone drives
+-- a piece across an RTS map, and without it she stacks a dozen copies of herself over one
+-- walk. Her order is issued from init.client (she is a building, not a unit), so the line
+-- is exposed as UnitController.playMotherVoice.
+local MOTHER_VOICE_IDS: { number }   = {}   -- her move-order line(s); empty = she stays quiet
+local MOTHER_VOICE_COOLDOWN          = 2    -- seconds of silence after one plays
+local MOTHER_VOICE_VOLUME            = 3    -- she is the size of a building; she carries
+local motherVoiceAt                  = -math.huge
+
+local function motherVoiceLine()
+	if #MOTHER_VOICE_IDS == 0 then return end
+	local now = os.clock()
+	if now - motherVoiceAt < MOTHER_VOICE_COOLDOWN then return end
+	motherVoiceAt = now
+	playSound(MOTHER_VOICE_IDS[math.random(#MOTHER_VOICE_IDS)], 0.08, MOTHER_VOICE_VOLUME)
 end
 
 local function playSoldierVoice() playSound(SOLDIER_VOICE_IDS[math.random(#SOLDIER_VOICE_IDS)], 0.2, 1) end
@@ -385,44 +421,43 @@ local function maybeUnitVoice()
 	end
 end
 
-local function syncSelectionBoxes()
-	-- Remove boxes for units no longer selected
+-- Ring size for a unit: its own footprint, with a floor under it so a 4-stud Survivor
+-- still gets a circle that reads from the RTS camera height.
+local function unitRingRadius(part: BasePart): number
+	return math.max(2.2, SelectionRing.radiusFor(part, 0.5))
+end
+
+local function syncSelectionRings()
+	-- Drop rings for units no longer selected
 	local selectedSet: {[string]: boolean} = {}
 	for _, id in selected do selectedSet[id] = true end
 
-	for id, box in selectionBoxes do
+	for id, ring in unitRings do
 		if not selectedSet[id] then
-			box:Destroy()
-			selectionBoxes[id] = nil
+			SelectionRing.destroy(ring)
+			unitRings[id] = nil
 		end
 	end
 
-	-- Add boxes for newly selected units
+	-- Ring the newly selected ones
 	for _, id in selected do
-		if selectionBoxes[id] then continue end
+		if unitRings[id] then continue end
 		local info = knownUnits[id]
 		if not info or not info.part.Parent then continue end  -- stale / destroyed
 
-		local box                  = Instance.new("SelectionBox")
-		box.Adornee                = info.part
-		box.Color3                 = Color3.fromRGB(0, 200, 255)
-		box.LineThickness          = 0.06
-		box.SurfaceTransparency    = 0.8
-		box.SurfaceColor3          = Color3.fromRGB(0, 200, 255)
-		box.Parent                 = workspace
-
-		selectionBoxes[id] = box
-
-		-- Clean up automatically if the unit is destroyed
-		info.part.Destroying:Connect(function()
-			local b = selectionBoxes[id]
-			if b then b:Destroy(); selectionBoxes[id] = nil end
-		end)
+		-- No per-ring Destroying hook: a unit dying already drops itself from the
+		-- selection (see network.onUnitSpawned) which sweeps its ring on the next sync,
+		-- and SelectionRing drops any ring whose target left the world. Connecting here
+		-- would add one connection per unit per re-selection and never release them.
+		unitRings[id] = SelectionRing.attach(info.part, {
+			color  = RING_UNIT,
+			radius = unitRingRadius(info.part),
+		})
 	end
 end
 
 local function notify()
-	syncSelectionBoxes()
+	syncSelectionRings()
 	if onChangedCb then onChangedCb(#selected) end
 	if onUnitsSelectedCb then onUnitsSelectedCb(selected) end
 end
@@ -549,30 +584,18 @@ local function hitEnemyEgg(): string?
 	return nil
 end
 
--- Returns the Model that owns a building's Base part, or nil.
-local function buildingModel(bid: string): Model?
-	local info = knownBuildings[bid]
-	if not info then return nil end
-	local parent = info.base.Parent
-	return (parent and parent:IsA("Model")) and parent :: Model or nil
-end
+-- Every building ring is drawn around the model's Base part. The base IS the footprint
+-- the structure was placed on, which is what a ground ring wants; a model bounding box
+-- would balloon out to cover the Hollowed Mother's sprawling tentacles and egg nests.
 
--- What a selection/hover SelectionBox should adorn. A Model box spans the whole model's
--- bounding box, which for the Hollowed Mother balloons out to cover her sprawling ground
--- tentacles + egg-sac nests. When the model carries a "ClickHitbox" part (the Mother's
--- tight body-sized selection volume), adorn that instead so the box hugs the creature.
-local function selectionAdornee(model: Model): Instance
-	return model:FindFirstChild("ClickHitbox") or model
-end
-
--- Show/clear the thin white hover outline.
+-- Show/clear the quiet white hover ring.
 local function setHover(bid: string?)
 	if bid == hoverBuildingId then return end
-	if hoverBox then hoverBox:Destroy(); hoverBox = nil end
+	if hoverBldRing then SelectionRing.destroy(hoverBldRing); hoverBldRing = nil end
 	if hoverRing then hoverRing:Destroy(); hoverRing = nil end
 	hoverBuildingId = bid
 
-	-- Don't overlap with the selection box on the same building.
+	-- Don't overlap with the selection ring on the same building.
 	if not bid or bid == selectedBuildingId then return end
 
 	-- Range ring for turrets and mines
@@ -585,28 +608,25 @@ local function setHover(bid: string?)
 		end
 	end
 
-	local model = buildingModel(bid)
-	if not model then return end
+	local binfo = knownBuildings[bid]
+	if not binfo or not binfo.base.Parent then return end
 
-	local box                = Instance.new("SelectionBox")
-	box.Adornee              = selectionAdornee(model)
-	box.Color3               = Color3.fromRGB(255, 255, 255)
-	box.LineThickness        = 0.05
-	box.SurfaceTransparency  = 1
-	box.Parent               = workspace
-	hoverBox                 = box
+	hoverBldRing = SelectionRing.attach(binfo.base, {
+		color  = RING_HOVER,
+		radius = SelectionRing.radiusFor(binfo.base, 1.0),
+	})
 end
 
-local function clearMultiBldBoxes()
-	for _, box in multiBldBoxes do box:Destroy() end
-	multiBldBoxes = {}
+local function clearMultiBldRings()
+	for _, ring in multiBldRings do SelectionRing.destroy(ring) end
+	multiBldRings = {}
 end
 
--- Show/clear the teal selection box with a slight surface fill.
+-- Show/clear the teal selection ring under a structure.
 local function selectBuilding(bid: string?)
-	if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
+	if selectedBldRing then SelectionRing.destroy(selectedBldRing); selectedBldRing = nil end
 	if selectedRing then selectedRing:Destroy(); selectedRing = nil end
-	clearMultiBldBoxes()
+	clearMultiBldRings()
 	selectedBuildingId = bid
 
 	-- Re-evaluate hover so it doesn't stack on the newly selected building.
@@ -624,28 +644,21 @@ local function selectBuilding(bid: string?)
 		end
 	end
 
-	local model = buildingModel(bid)
-	if not model then return end
+	local binfo = knownBuildings[bid]
+	if not binfo or not binfo.base.Parent then return end
 
-	local box                = Instance.new("SelectionBox")
-	box.Adornee              = selectionAdornee(model)
-	box.Color3               = Color3.fromRGB(80, 255, 180)
-	box.LineThickness        = 0.10
-	box.SurfaceTransparency  = 0.78
-	box.SurfaceColor3        = Color3.fromRGB(80, 255, 180)
-	box.Parent               = workspace
-	selectedBuildingBox      = box
+	selectedBldRing = SelectionRing.attach(binfo.base, {
+		color  = RING_BLD,
+		radius = SelectionRing.radiusFor(binfo.base, 1.0),
+	})
 
 	-- Auto-clear when the building is destroyed.
-	local info = knownBuildings[bid]
-	if info then
-		info.base.Destroying:Connect(function()
-			if selectedBuildingId ~= bid then return end
-			if selectedBuildingBox then selectedBuildingBox:Destroy(); selectedBuildingBox = nil end
-			if selectedRing then selectedRing:Destroy(); selectedRing = nil end
-			selectedBuildingId = nil
-		end)
-	end
+	binfo.base.Destroying:Connect(function()
+		if selectedBuildingId ~= bid then return end
+		if selectedBldRing then SelectionRing.destroy(selectedBldRing); selectedBldRing = nil end
+		if selectedRing then selectedRing:Destroy(); selectedRing = nil end
+		selectedBuildingId = nil
+	end)
 end
 
 -- Returns true if a world position is within the current viewport.
@@ -656,9 +669,118 @@ local function isOnScreen(worldPos: Vector3): boolean
 	return sv.X >= 0 and sv.X <= vp.X and sv.Y >= 0 and sv.Y <= vp.Y
 end
 
+-- ── Wild plants ───────────────────────────────────────────────────────────────
+-- The Mother's growths are scenery: no owner, no orders, nothing to command. Clicking
+-- one only names it, so the player can walk up to something strange in the fog and be
+-- told what it is and that a Mother could do something with it.
+--
+-- They are picked off the GROUND POINT under the cursor rather than by a ray at the
+-- plant itself: every part of a plant is CanQuery = false, and giving each one a hitbox
+-- would put a solid object in the path of the rays that drive move orders, building
+-- placement and the Mother's own inject sight. This is the same snap her sight uses.
+local PLANT_PICK_PAD   = 1.5    -- studs of slack beyond the plant's own spread
+local PLANT_CACHE_SECS = 0.5    -- how long a scan of the plant folder is trusted
+
+local selectedPlant:  Model? = nil
+local plantRing:      SelectionRing.Ring? = nil
+local hoverPlant:     Model? = nil
+local plantHoverRing: SelectionRing.Ring? = nil
+
+type PlantHit = { model: Model, x: number, z: number, r2: number }
+local plantCache: { PlantHit } = {}
+local plantCacheAt = 0
+
+-- Plants never move once they are up, and there are hundreds of them, so their positions
+-- are scanned on a timer rather than every time the mouse twitches.
+local function refreshPlantCache()
+	local now = os.clock()
+	if now - plantCacheAt < PLANT_CACHE_SECS then return end
+	plantCacheAt = now
+	plantCache   = {}
+	local folder = workspace:FindFirstChild("InjectPlants")
+	if not folder then return end
+	for _, m in folder:GetChildren() do
+		if not m:IsA("Model") then continue end
+		local variant = m:GetAttribute("Variant")
+		if type(variant) ~= "string" then continue end
+		local r   = ((InjectPlants.RADIUS :: any)[variant] or 4.5) + PLANT_PICK_PAD
+		local pos = m:GetPivot().Position
+		table.insert(plantCache, { model = m, x = pos.X, z = pos.Z, r2 = r * r })
+	end
+end
+
+-- The plant under the cursor, or nil.
+local function hitPlant(): Model?
+	if not cameraRef then return nil end
+	local g = cameraRef.getGroundPosition()
+	if not g then return nil end
+	refreshPlantCache()
+	local best:  Model? = nil
+	local bestD = math.huge
+	for _, e in plantCache do
+		if not e.model.Parent then continue end
+		local dx, dz = e.x - g.X, e.z - g.Z
+		local d = dx * dx + dz * dz
+		if d < e.r2 and d < bestD then best, bestD = e.model, d end
+	end
+	return best
+end
+
+-- The part a plant's ring hangs off: its Anchor sits at the exact spot on the ground the
+-- plant was grown from.
+local function plantAnchor(m: Model): BasePart?
+	local a = m.PrimaryPart or m:FindFirstChild("Anchor")
+	return (a and a:IsA("BasePart")) and a :: BasePart or nil
+end
+
+local function plantRingRadius(m: Model): number
+	local variant = m:GetAttribute("Variant")
+	local r = (type(variant) == "string" and (InjectPlants.RADIUS :: any)[variant]) or 4.5
+	return r + 0.6
+end
+
+local function clearPlantSelection()
+	if plantRing then SelectionRing.destroy(plantRing); plantRing = nil end
+	if selectedPlant then
+		selectedPlant = nil
+		if onPlantSelectedCb then onPlantSelectedCb(nil) end
+	end
+end
+
+local function setPlantHover(m: Model?)
+	if m == hoverPlant then return end
+	hoverPlant = m
+	if plantHoverRing then SelectionRing.destroy(plantHoverRing); plantHoverRing = nil end
+	-- Never stack the hover ring on the plant that is already selected.
+	if not m or m == selectedPlant then return end
+	local anchor = plantAnchor(m)
+	if not anchor then return end
+	plantHoverRing = SelectionRing.attach(anchor, {
+		color  = RING_HOVER,
+		radius = plantRingRadius(m),
+	})
+end
+
+local function selectPlant(m: Model)
+	clearPlantSelection()
+	local anchor = plantAnchor(m)
+	if not anchor then return end
+	setPlantHover(nil)
+	selectedPlant = m
+	plantRing = SelectionRing.attach(anchor, {
+		color  = RING_PLANT,
+		radius = plantRingRadius(m),
+	})
+	-- A Mother injecting it bursts the plant; the card and ring go with it.
+	m.Destroying:Connect(function()
+		if selectedPlant == m then clearPlantSelection() end
+	end)
+	if onPlantSelectedCb then onPlantSelectedCb(m) end
+end
+
 -- Clear all egg highlights + tell init.client to close the EggPanel.
 local function clearEggSelection()
-	for id, box in selectedEggBoxes do box:Destroy(); selectedEggBoxes[id] = nil end
+	for id, ring in selectedEggRings do SelectionRing.destroy(ring); selectedEggRings[id] = nil end
 	if #selectedEggIds > 0 then
 		selectedEggIds = {}
 		if onEggSelectedCb then onEggSelectedCb(nil) end
@@ -699,20 +821,17 @@ local function applyEggSelection(ids: { string }, models: { [string]: Instance }
 	selectedEggIds = ids
 	for _, id in ids do
 		local m = models[id]
-		if m then
-			-- Outline the nest bowl: the egg only exists while a creature is incubating.
-			local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
-			local box               = Instance.new("SelectionBox")
-			box.Adornee             = adornee
-			box.Color3              = Color3.fromRGB(255, 180, 90)
-			box.LineThickness       = 0.06
-			box.SurfaceTransparency = 0.8
-			box.SurfaceColor3       = Color3.fromRGB(255, 180, 90)
-			box.Parent              = workspace
-			selectedEggBoxes[id]    = box
+		-- Ring the nest bowl: the egg only exists while a creature is incubating, and it
+		-- changes size as it grows, so the bowl is the one steady thing to circle.
+		local anchor = m and ((m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg"))
+		if anchor and anchor:IsA("BasePart") then
+			selectedEggRings[id] = SelectionRing.attach(anchor, {
+				color  = RING_EGG,
+				radius = SelectionRing.radiusFor(anchor, 0.8),
+			})
 			m.Destroying:Connect(function()
-				local b = selectedEggBoxes[id]
-				if b then b:Destroy(); selectedEggBoxes[id] = nil end
+				local r = selectedEggRings[id]
+				if r then SelectionRing.destroy(r); selectedEggRings[id] = nil end
 			end)
 		end
 	end
@@ -726,6 +845,7 @@ end
 -- unit/building selection.
 local function selectEgg(rootEggId: string)
 	clearEggSelection()
+	clearPlantSelection()
 	local models = scanOwnedEggs()
 	if not models[rootEggId] then return end
 	applyEggSelection({ rootEggId }, models)
@@ -750,6 +870,7 @@ local function selectAllReadyEggsOnScreen(rootEggId: string)
 	if not models[rootEggId] then return end
 
 	clearEggSelection()
+	clearPlantSelection()
 	local ids: { string } = {}
 	for id, m in models do
 		if not eggIsReady(m) then continue end
@@ -785,7 +906,7 @@ end
 -- Show selection boxes on all owned visible buildings of the same type.
 -- The panel is opened for `primaryId` by the caller via selectBuilding().
 local function multiSelectBuildingsOnScreen(primaryId: string)
-	clearMultiBldBoxes()
+	clearMultiBldRings()
 	local primary = knownBuildings[primaryId]
 	if not primary then return end
 	local cam = workspace.CurrentCamera
@@ -796,21 +917,79 @@ local function multiSelectBuildingsOnScreen(primaryId: string)
 		if binfo.buildingType ~= primary.buildingType then continue end
 		local sv = cam:WorldToViewportPoint(binfo.base.Position)
 		if sv.Z <= 0 or sv.X < 0 or sv.X > vp.X or sv.Y < 0 or sv.Y > vp.Y then continue end
-		local model2 = buildingModel(bid)
-		if not model2 then continue end
-		local box               = Instance.new("SelectionBox")
-		box.Adornee             = selectionAdornee(model2)
-		box.Color3              = Color3.fromRGB(80, 255, 180)
-		box.LineThickness       = 0.10
-		box.SurfaceTransparency = 0.78
-		box.SurfaceColor3       = Color3.fromRGB(80, 255, 180)
-		box.Parent              = workspace
-		multiBldBoxes[bid]      = box
+		multiBldRings[bid] = SelectionRing.attach(binfo.base, {
+			color  = RING_BLD,
+			radius = SelectionRing.radiusFor(binfo.base, 1.0),
+		})
 		binfo.base.Destroying:Connect(function()
-			local b = multiBldBoxes[bid]
-			if b then b:Destroy(); multiBldBoxes[bid] = nil end
+			local r = multiBldRings[bid]
+			if r then SelectionRing.destroy(r); multiBldRings[bid] = nil end
 		end)
 	end
+end
+
+-- Everything that is not a unit selection: the building ring and its panel, the egg
+-- pick and the plant pick. Called before taking a fresh set of units.
+local function clearNonUnitSelection()
+	selectBuilding(nil)
+	clearEggSelection()
+	clearPlantSelection()
+	clearBuildingPanels()
+end
+
+-- Select a building exactly as clicking on it does: its ring, its range ring, and the
+-- one panel that belongs to it. `multi` also rings every visible sibling of its type
+-- (the double-click gesture). Shared by the click handler and the quick-select bar, so
+-- a button press and a click land on identical state.
+local function applyBuildingSelection(bid: string, multi: boolean?)
+	clearEggSelection()
+	clearPlantSelection()
+	clearSelection()
+	selectBuilding(bid)
+	if multi then multiSelectBuildingsOnScreen(bid) end
+
+	local info  = knownBuildings[bid]
+	local owned = info ~= nil and info.ownerId == localPlayer.UserId
+	clearBuildingPanelsExcept(owned and info.buildingType or nil)
+	if not owned then return end
+	local bt = (info :: any).buildingType
+	if bt == "Barracks" then
+		if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
+	elseif bt == "Foundry" then
+		if onMineSelectedCb then onMineSelectedCb(bid) end
+	elseif bt == "CommandCenter" then
+		if onCCSelectedCb then onCCSelectedCb(bid) end
+	elseif bt == "Turret" then
+		if onTurretSelectedCb then onTurretSelectedCb(bid) end
+	elseif bt == "CreepyBlob" then
+		if onBlobSelectedCb then onBlobSelectedCb(bid) end
+	elseif bt == "Deployer" then
+		if onDeployerSelectedCb then onDeployerSelectedCb(bid) end
+	elseif bt == "TEST" then
+		if onTestSelectedCb then onTestSelectedCb(bid) end
+	elseif bt == "LampreyNest" then
+		if onLampreyNestSelectedCb then onLampreyNestSelectedCb(bid) end
+	elseif bt == "EngineeringPost" then
+		if onEngineeringSelectedCb then onEngineeringSelectedCb(bid) end
+	else
+		-- Owned building with no dedicated panel -> generic command card.
+		if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(bid, bt) end
+	end
+end
+
+-- Take every owned, free-standing unit whose type `want` accepts. Riders aboard a
+-- Roller are never taken: the Roller carries them, and ordering a passenger about is
+-- an order that goes nowhere.
+local function selectUnitsMatching(want: (string?) -> boolean): number
+	selected = {}
+	for id, info in knownUnits do
+		if info.ownerId ~= localPlayer.UserId or not info.part.Parent then continue end
+		if info.part:GetAttribute("Carried") then continue end
+		local ut = info.part:FindFirstChild("UnitType") :: StringValue?
+		if want(ut and ut.Value or nil) then table.insert(selected, id) end
+	end
+	notify()
+	return #selected
 end
 
 -- Box-select owned units inside the rectangle. Returns the id of the player's Command
@@ -859,6 +1038,7 @@ end
 function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () -> boolean)
 	dragFrame    = frame
 	isBlockedFn  = isBlocked
+	cameraRef    = cameraModule
 
 	-- ── Right-mouse drag-formation state ───────────────────────────────────────
 	local rmbActive      = false
@@ -1017,9 +1197,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				for i = #selected, 1, -1 do
 					if selected[i] == id then table.remove(selected, i); break end
 				end
-				-- Clean up SelectionBox
-				local box = selectionBoxes[id]
-				if box then box:Destroy(); selectionBoxes[id] = nil end
+				-- Clean up its selection ring
+				local ring = unitRings[id]
+				if ring then SelectionRing.destroy(ring); unitRings[id] = nil end
 				notify()
 			end)
 		end)
@@ -1040,7 +1220,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		base.Destroying:Connect(function()
 			knownBuildings[id] = nil
 			if hoverBuildingId == id then
-				if hoverBox  then hoverBox:Destroy();  hoverBox  = nil end
+				if hoverBldRing then SelectionRing.destroy(hoverBldRing); hoverBldRing = nil end
 				if hoverRing then hoverRing:Destroy(); hoverRing = nil end
 				hoverBuildingId = nil
 			end
@@ -1091,18 +1271,28 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	mouse.Move:Connect(function()
 		if isBlockedFn and isBlockedFn() then
 			setHover(nil)
+			setPlantHover(nil)
 			return
 		end
 		local mp  = UserInputService:GetMouseLocation()
 		local gui = localPlayer.PlayerGui:GetGuiObjectsAtPosition(mp.X, mp.Y)
 		if #gui > 0 then
 			setHover(nil)
+			setPlantHover(nil)
 			return
 		end
 		-- Hovering an egg (a child of the Mother model) shouldn't light up the whole
 		-- Command Center — suppress the building hover in that case.
-		if hitEgg() then setHover(nil); return end
-		setHover(hitBuilding())
+		if hitEgg() then setHover(nil); setPlantHover(nil); return end
+		local hoverBid = hitBuilding()
+		setHover(hoverBid)
+		-- Plants sit behind everything else you can point at: light one up only when the
+		-- cursor is on neither a structure nor a unit.
+		if hoverBid or hitUnit() then
+			setPlantHover(nil)
+		else
+			setPlantHover(hitPlant())
+		end
 	end)
 
 	-- Input
@@ -1114,17 +1304,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 		-- pays out while anchored, so sweeping it into an army selection and marching it
 		-- somewhere silently costs the player their income.
 		if input.KeyCode == Enum.KeyCode.F2 then
-			selected = {}
-			for id, info in knownUnits do
-				if info.ownerId ~= localPlayer.UserId or not info.part.Parent then continue end
-				local ut = info.part:FindFirstChild("UnitType") :: StringValue?
-				if ut and ut.Value == "Leech" then continue end
-				table.insert(selected, id)
-			end
-			notify()
-			selectBuilding(nil)
-			clearEggSelection()
-			clearBuildingPanels()
+			UnitController.selectArmy()
 			return
 		end
 
@@ -1204,6 +1384,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			clearSelection()
 			selectBuilding(nil)
 			clearEggSelection()
+			clearPlantSelection()
 			local boxCCId = boxSelect(
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
@@ -1235,6 +1416,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				end
 				selectBuilding(nil)
 				clearEggSelection()
+				clearPlantSelection()
 				clearBuildingPanels()
 			elseif eggId then
 				-- Own Egg-Sac egg: highlight THAT egg alone and open the "what to hatch" panel.
@@ -1254,40 +1436,10 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			else
 				local bid = hitBuilding()
 				if bid then
-					clearEggSelection()
 					local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == bid
 					lastClickTime   = now
 					lastClickTarget = bid
-					clearSelection()
-					selectBuilding(bid)
-					if isDouble then
-						multiSelectBuildingsOnScreen(bid)
-					end
-					local info = knownBuildings[bid]
-					local owned = info ~= nil and info.ownerId == localPlayer.UserId
-					clearBuildingPanelsExcept(owned and info.buildingType or nil)
-					if owned and info.buildingType == "Barracks" then
-						if onBarracksSelectedCb then onBarracksSelectedCb(bid) end
-					elseif owned and info.buildingType == "Foundry" then
-						if onMineSelectedCb then onMineSelectedCb(bid) end
-					elseif owned and info.buildingType == "CommandCenter" then
-						if onCCSelectedCb then onCCSelectedCb(bid) end
-					elseif owned and info.buildingType == "Turret" then
-						if onTurretSelectedCb then onTurretSelectedCb(bid) end
-					elseif owned and info.buildingType == "CreepyBlob" then
-						if onBlobSelectedCb then onBlobSelectedCb(bid) end
-					elseif owned and info.buildingType == "Deployer" then
-						if onDeployerSelectedCb then onDeployerSelectedCb(bid) end
-					elseif owned and info.buildingType == "TEST" then
-						if onTestSelectedCb then onTestSelectedCb(bid) end
-					elseif owned and info.buildingType == "LampreyNest" then
-						if onLampreyNestSelectedCb then onLampreyNestSelectedCb(bid) end
-					elseif owned and info.buildingType == "EngineeringPost" then
-						if onEngineeringSelectedCb then onEngineeringSelectedCb(bid) end
-					elseif owned then
-						-- Owned building with no dedicated panel → generic command card.
-						if onOtherBuildingSelectedCb then onOtherBuildingSelectedCb(bid, info.buildingType) end
-					end
+					applyBuildingSelection(bid, isDouble)
 				else
 					lastClickTime   = 0
 					lastClickTarget = nil
@@ -1295,6 +1447,14 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 					selectBuilding(nil)
 					clearEggSelection()
 					clearBuildingPanels()
+					-- Nothing of yours under the cursor: a plant standing there is still
+					-- worth naming, so it takes the click before it counts as a deselect.
+					local plant = hitPlant()
+					if plant then
+						selectPlant(plant)
+					else
+						clearPlantSelection()
+					end
 				end
 			end
 		end
@@ -1370,6 +1530,12 @@ function UnitController.onOtherBuildingSelected(fn: (string?, string?) -> ())
 	onOtherBuildingSelectedCb = fn
 end
 
+-- Fires with the wild plant the player clicked, or nil when it is dropped. Plants have
+-- nothing to command, so the card this opens is a name and a line of text.
+function UnitController.onPlantSelected(fn: (Model?) -> ())
+	onPlantSelectedCb = fn
+end
+
 -- Fires with the selected Egg-Sac egg ids (clicked egg + subtree), or nil to close its panel.
 function UnitController.onEggSelected(fn: ({ string }?) -> ())
 	onEggSelectedCb = fn
@@ -1381,7 +1547,7 @@ function UnitController.getSelectedBuildingIds(): {string}
 	if selectedBuildingId then
 		table.insert(result, selectedBuildingId)
 	end
-	for bid in multiBldBoxes do
+	for bid in multiBldRings do
 		table.insert(result, bid)
 	end
 	return result
@@ -1389,6 +1555,134 @@ end
 
 function UnitController.onMoveIssued(fn: ({string}) -> ())
 	onMoveIssuedCb = fn
+end
+
+-- The Mother's move-order line, rate-limited to one every MOTHER_VOICE_COOLDOWN seconds.
+-- Called by init.client, which owns her right-click move order.
+function UnitController.playMotherVoice()
+	motherVoiceLine()
+end
+
+-- ── Quick-select (the bar above the minimap) ──────────────────────────────────
+-- One entry point per group the bar offers. Each leaves the game in exactly the state
+-- the equivalent hand gesture would: the same rings, the same command card, the same
+-- dropped panels. They return how much was taken so the bar can ignore a dead press.
+
+-- Your Command Center (the Mother, or the Fabricator Core). Opens her card.
+function UnitController.selectCommandCenter(): boolean
+	for bid, info in knownBuildings do
+		if info.ownerId == localPlayer.UserId
+			and info.buildingType == "CommandCenter"
+			and info.base.Parent then
+			applyBuildingSelection(bid, false)
+			return true
+		end
+	end
+	return false
+end
+
+-- Every army unit you own. Leeches are left out for the reason [F2] leaves them out:
+-- a Leech is economy, and marching one off its burrow silently costs you the income.
+function UnitController.selectArmy(): number
+	clearNonUnitSelection()
+	return selectUnitsMatching(function(ut) return ut ~= "Leech" end)
+end
+
+-- Every Leech you own, burrowed or crawling.
+function UnitController.selectLeeches(): number
+	clearNonUnitSelection()
+	return selectUnitsMatching(function(ut) return ut == "Leech" end)
+end
+
+-- Every egg you own, and opens the panel that picks what they hatch. Ripe eggs are
+-- taken alone when there are any: a pick spends the whole selection, and eggs still
+-- growing would silently take no part in it. With nothing ripe yet the whole clutch is
+-- taken instead, so the button still shows you where your nests are.
+function UnitController.selectAllEggs(): number
+	local models = scanOwnedEggs()
+	local ready: { string } = {}
+	local all:   { string } = {}
+	for id, m in models do
+		table.insert(all, id)
+		if eggIsReady(m) then table.insert(ready, id) end
+	end
+	local ids = if #ready > 0 then ready else all
+	if #ids == 0 then return 0 end
+
+	clearSelection()
+	selectBuilding(nil)
+	clearPlantSelection()
+	clearBuildingPanels()
+	clearEggSelection()
+	applyEggSelection(ids, models)
+	return #ids
+end
+
+-- What you own right now, for the bar's visibility and its counts. One pass, so the
+-- bar can poll this on a timer rather than walking the world four times.
+export type Tally = { cc: boolean, eggs: number, leeches: number, army: number }
+function UnitController.ownedTally(): Tally
+	local me      = localPlayer.UserId
+	local army    = 0
+	local leeches = 0
+	for _, info in knownUnits do
+		if info.ownerId ~= me or not info.part.Parent then continue end
+		if info.part:GetAttribute("Carried") then continue end
+		local ut = info.part:FindFirstChild("UnitType") :: StringValue?
+		if ut and ut.Value == "Leech" then leeches += 1 else army += 1 end
+	end
+
+	local cc = false
+	for _, info in knownBuildings do
+		if info.ownerId == me and info.buildingType == "CommandCenter" and info.base.Parent then
+			cc = true
+			break
+		end
+	end
+
+	local eggs   = 0
+	local models = scanOwnedEggs()
+	for _ in models do eggs += 1 end
+
+	return { cc = cc, eggs = eggs, leeches = leeches, army = army }
+end
+
+-- Where the current selection is standing, as one point: what the camera flies to when
+-- a quick-select button is tapped twice. Units first, then eggs, then a structure, then
+-- a plant -- whichever of those the selection actually holds.
+function UnitController.selectionCentroid(): Vector3?
+	local sum = Vector3.zero
+	local n   = 0
+
+	for _, id in selected do
+		local info = knownUnits[id]
+		if info and info.part.Parent then
+			sum += info.part.Position
+			n   += 1
+		end
+	end
+	if n > 0 then return sum / n end
+
+	if #selectedEggIds > 0 then
+		local models = scanOwnedEggs()
+		for _, id in selectedEggIds do
+			local m = models[id]
+			if m then
+				sum += (m :: any):GetPivot().Position
+				n   += 1
+			end
+		end
+		if n > 0 then return sum / n end
+	end
+
+	if selectedBuildingId then
+		local info = knownBuildings[selectedBuildingId]
+		if info and info.base.Parent then return info.base.Position end
+	end
+
+	local plant = selectedPlant
+	if plant and plant.Parent then return plant:GetPivot().Position end
+	return nil
 end
 
 return UnitController

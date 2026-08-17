@@ -295,6 +295,79 @@ local function fillGridScratch(fromPos: Vector3, range: number)
 	end
 end
 
+-- ── Terrain-obstacle index ────────────────────────────────────────────────────
+-- Steering repels units off the edges of the wall blocks in workspace.TerrainObstacles,
+-- for every moving unit, every frame. Walking the whole folder each time is
+-- O(units x obstacles) plus a fresh GetChildren() array per unit per frame, which at
+-- sixty units and a few hundred wall blocks was the most expensive thing in the movement
+-- pass. The blocks never move once a match has generated, so they are filed into a coarse
+-- grid once and each unit reads only the cells it can actually reach.
+local OBS_CELL = 32
+local obsGrid: { [number]: { BasePart } } = {}
+local obsFolder: Instance? = nil
+local obsConns: { RBXScriptConnection } = {}
+local obsDirty = true
+local obsScratch:  { BasePart } = {}
+local obsScratchN  = 0
+local obsSeen: { [BasePart]: boolean } = {}
+
+local function rebuildObstacleGrid(folder: Instance)
+	obsGrid = {}
+	for _, obs in folder:GetChildren() do
+		if not obs:IsA("BasePart") then continue end
+		-- Filed under every cell the block's footprint touches, so a long block is
+		-- found from either end of it.
+		local hw, hd = obs.Size.X / 2, obs.Size.Z / 2
+		local pos    = obs.Position
+		for cx = math.floor((pos.X - hw) / OBS_CELL), math.floor((pos.X + hw) / OBS_CELL) do
+			for cz = math.floor((pos.Z - hd) / OBS_CELL), math.floor((pos.Z + hd) / OBS_CELL) do
+				local k    = cx * 4096 + cz
+				local cell = obsGrid[k]
+				if not cell then cell = {}; obsGrid[k] = cell end
+				cell[#cell + 1] = obs
+			end
+		end
+	end
+	obsDirty = false
+end
+
+-- Fill obsScratch with the blocks whose footprint comes within `range` of (x, z).
+-- No table allocation: callers iterate obsScratch[1..obsScratchN].
+local function fillObstacleScratch(x: number, z: number, range: number)
+	obsScratchN = 0
+	local folder = workspace:FindFirstChild("TerrainObstacles")
+	if not folder then
+		obsFolder = nil
+		return
+	end
+	if folder ~= obsFolder then
+		-- Every match builds a brand new folder; re-hook the dirty flag onto this one.
+		for _, c in obsConns do c:Disconnect() end
+		table.clear(obsConns)
+		obsFolder  = folder
+		obsDirty   = true
+		obsConns[1] = folder.ChildAdded:Connect(function() obsDirty = true end)
+		obsConns[2] = folder.ChildRemoved:Connect(function() obsDirty = true end)
+	end
+	if obsDirty then rebuildObstacleGrid(folder) end
+
+	table.clear(obsSeen)
+	for cx = math.floor((x - range) / OBS_CELL), math.floor((x + range) / OBS_CELL) do
+		for cz = math.floor((z - range) / OBS_CELL), math.floor((z + range) / OBS_CELL) do
+			local cell = obsGrid[cx * 4096 + cz]
+			if cell then
+				for _, obs in cell do
+					-- A block filed in two of the cells being read must only repel once.
+					if obsSeen[obs] then continue end
+					obsSeen[obs] = true
+					obsScratchN += 1
+					obsScratch[obsScratchN] = obs
+				end
+			end
+		end
+	end
+end
+
 -- ── Decorator construction ────────────────────────────────────────────────────
 
 -- Builds a unit's static decorator parts from its shared blueprint (see
@@ -2309,12 +2382,12 @@ function UnitManager.init(resourceManager)
 						-- Elevated units (on ramps/platforms) skip this so the platform
 						-- obstacle parts don't push them sideways off the terrain.
 						local unitIsElevated = pos.Y > data.part.Size.Y / 2 + 4
-						local terrainF = if unitIsElevated then nil else workspace:FindFirstChild("TerrainObstacles")
-						if terrainF then
+						if not unitIsElevated then
 							local repX, repZ = 0, 0
 							local AVOID_R = Config.TERRAIN_AVOIDANCE_RADIUS
-							for _, obs in terrainF:GetChildren() do
-								if not obs:IsA("BasePart") then continue end
+							fillObstacleScratch(pos.X, pos.Z, AVOID_R)
+							for oi = 1, obsScratchN do
+								local obs = obsScratch[oi]
 								local hw = obs.Size.X / 2
 								local hd = obs.Size.Z / 2
 								local ox = obs.Position.X

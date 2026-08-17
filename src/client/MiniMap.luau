@@ -50,14 +50,6 @@ local canvas:      Frame
 local cameraRef:   any
 local localUserId: number
 
--- "Return to Command Center" camera button. Always visible; dims when the view is
--- already home (near the CC / no rotation). Wired via MiniMap.onReturnClicked.
-local returnBtn:     TextButton?   = nil
-local returnStroke:  UIStroke?     = nil
-local returnBadge:   TextLabel?    = nil
-local returnClickFn: (() -> ())?   = nil
-local returnDimmed   = false
-
 local unitMarkers: { [string]: TextLabel } = {}
 -- Last written pose per unit marker — GUI property writes invalidate the minimap
 -- canvas, so idle units are skipped entirely (see syncUnitTriangles).
@@ -625,62 +617,10 @@ local function buildUI()
 	lbl.TextXAlignment        = Enum.TextXAlignment.Center
 	lbl.Parent                = border
 
-	-- ── Return-to-CC button ───────────────────────────────────────────────────
-	-- Anchored to the far LEFT of the bottom bar, flush with the minimap's left edge, the
-	-- way an RTS parks its army/control-group buttons. HUD's resource + population
-	-- row starts clear of it (see RES_CX there) and shares this coordinate space, so the
-	-- two must be moved together.
-	local rBtn                = Instance.new("TextButton")
-	rBtn.Name                 = "ReturnToCCBtn"
-	rBtn.Size                 = UDim2.fromOffset(28, 28)
-	rBtn.AnchorPoint          = Vector2.new(0, 1)
-	rBtn.Position             = UDim2.new(0, PADDING, 1, -(MAP_SIZE + 4 + PADDING) - 5)
-	rBtn.BackgroundColor3     = Color3.fromRGB(7, 9, 14)
-	rBtn.BackgroundTransparency = 0.06
-	rBtn.AutoButtonColor      = false
-	rBtn.Text                 = "⌂"
-	rBtn.Font                 = Enum.Font.GothamBold
-	rBtn.TextSize             = 18
-	rBtn.TextColor3           = C_CC_OWN
-	rBtn.BorderSizePixel      = 0
-	rBtn.Visible              = true
-	rBtn.ZIndex               = 6
-	rBtn.Parent               = sg
-	Instance.new("UICorner", rBtn).CornerRadius = UDim.new(0, 6)
-	local rStroke             = Instance.new("UIStroke")
-	rStroke.Color             = C_CC_OWN
-	rStroke.Thickness         = 1
-	rStroke.Transparency      = 0.3
-	rStroke.Parent            = rBtn
-	returnStroke              = rStroke
-
-	-- Small "1" key badge in the corner
-	local rBadge              = Instance.new("TextLabel")
-	rBadge.Size               = UDim2.fromOffset(11, 9)
-	rBadge.AnchorPoint        = Vector2.new(1, 1)
-	rBadge.Position           = UDim2.new(1, -2, 1, -1)
-	rBadge.BackgroundTransparency = 1
-	rBadge.Text               = "1"
-	rBadge.Font               = Enum.Font.GothamBold
-	rBadge.TextSize           = 9
-	rBadge.TextColor3         = Color3.fromRGB(150, 170, 200)
-	rBadge.TextXAlignment     = Enum.TextXAlignment.Right
-	rBadge.ZIndex             = 7
-	rBadge.Parent             = rBtn
-	returnBadge               = rBadge
-
-	rBtn.MouseEnter:Connect(function()
-		TweenService:Create(rBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(20, 26, 38) }):Play()
-		TweenService:Create(rStroke, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.8 }):Play()
-	end)
-	rBtn.MouseLeave:Connect(function()
-		TweenService:Create(rBtn,    TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(7, 9, 14) }):Play()
-		TweenService:Create(rStroke, TweenInfo.new(0.12), { Transparency = 0.3, Thickness = 1 }):Play()
-	end)
-	rBtn.MouseButton1Click:Connect(function()
-		if returnClickFn then returnClickFn() end
-	end)
-	returnBtn = rBtn
+	-- The [1] return-to-base button that used to sit here is gone: it became the MOTHER
+	-- slot of the quick-select row (QuickSelect.luau), which stands on the command bar
+	-- and hops the camera on a double tap. The row above the map is HUD's resource and
+	-- population readout alone.
 
 	return inner, clickArea
 end
@@ -861,30 +801,6 @@ function MiniMap.pruneDeadEnemyStructures()
 			fadeOutEnemyMark(box)
 		end
 	end
-end
-
--- ── Return-to-CC button API ───────────────────────────────────────────────────
-
--- Register the callback fired when the player clicks the return-to-CC button.
-function MiniMap.onReturnClicked(fn: () -> ())
-	returnClickFn = fn
-end
-
--- Show or hide the return-to-CC button.
-function MiniMap.setReturnVisible(v: boolean)
-	if returnBtn then returnBtn.Visible = v end
-end
-
--- Dim the [1] camera button when the view is already "home" (return is redundant),
--- brighten it once the player has panned / rotated away. Applies only on a state
--- change so it doesn't fight the hover tweens each frame.
-function MiniMap.setReturnDimmed(dimmed: boolean)
-	if dimmed == returnDimmed then return end
-	returnDimmed = dimmed
-	if returnBtn    then returnBtn.BackgroundTransparency = dimmed and 0.7 or 0.06 end
-	if returnBtn    then (returnBtn :: TextButton).TextTransparency = dimmed and 0.55 or 0 end
-	if returnStroke then returnStroke.Transparency = dimmed and 0.75 or 0.3 end
-	if returnBadge  then returnBadge.TextTransparency = dimmed and 0.55 or 0 end
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────

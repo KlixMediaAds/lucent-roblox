@@ -18,6 +18,12 @@
 	    pass straight through. It also ignores any tree already faded out, so a canopy in
 	    the middle of the screen does not raise an outline for something you can see fine.
 
+	Highlights are RATIONED. Roblox stops rendering them past about thirty on screen and
+	they are one of the most expensive things a client can draw, so an army of sixty units
+	standing in a wood would otherwise spend its frame budget outlining itself. Only the
+	nearest MAX_ON covered things get an edge, handed out from a fixed pool of Highlight
+	instances that are re-pointed rather than created per unit.
+
 	Purely local and purely cosmetic: nothing here replicates or is queryable.
 ]]
 
@@ -34,13 +40,15 @@ local FILL_TRANS = 0.78   -- the body is a faint wash; the edge does the work
 local TICK       = 1/10   -- seconds between occlusion checks
 local AIM_UP     = 2      -- studs above the root the sight line aims at
 local STOP_SHORT = 3      -- studs the ray stops short, so the target's own ground is not cover
+-- How many covered things may wear an edge at once. Roblox renders at most ~31 Highlights
+-- and charges dearly for each, so this is a hard budget, spent on the ones nearest the
+-- camera: those are the ones the player is actually looking for.
+local MAX_ON     = 14
 
 -- ── State ───────────────────────────────────────────────────────────────────
 type Entry = {
 	root:    BasePart,    -- what the sight line aims at
 	adornee: Instance,    -- what the Highlight wraps (the model for a building, the part for a unit)
-	hl:      Highlight?,  -- built the first time it is actually needed
-	on:      boolean,
 }
 
 local entries: { [Instance]: Entry } = {}
@@ -53,31 +61,58 @@ local rp = RaycastParams.new()
 rp.FilterType  = Enum.RaycastFilterType.Exclude
 rp.IgnoreWater = true
 
--- ── Book-keeping ────────────────────────────────────────────────────────────
-local function setOn(e: Entry, on: boolean)
-	if e.on == on then return end
-	e.on = on
+-- ── The Highlight pool ──────────────────────────────────────────────────────
+-- At most MAX_ON of these ever exist. They are handed to whatever is covered and nearest
+-- this tick and taken back when it stops being either, so in the steady state a Highlight
+-- is never created, destroyed or reparented, only re-adorned.
+local pool:     { Highlight }             = {}
+local assigned: { [Instance]: Highlight } = {}   -- adornee -> the Highlight wearing it
 
-	local hl = e.hl
-	if on and not hl then
-		hl                     = Instance.new("Highlight")
-		hl.Name                = "OccludedEdge"
-		hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-		hl.FillColor           = EDGE_COL
-		hl.FillTransparency    = FILL_TRANS
-		hl.OutlineColor        = EDGE_COL
-		hl.OutlineTransparency = 0
-		hl.Adornee             = e.adornee
-		hl.Parent              = e.adornee
-		e.hl                   = hl
+local function newHighlight(): Highlight
+	local hl                = Instance.new("Highlight")
+	hl.Name                 = "OccludedEdge"
+	hl.DepthMode            = Enum.HighlightDepthMode.AlwaysOnTop
+	hl.FillColor            = EDGE_COL
+	hl.FillTransparency     = FILL_TRANS
+	hl.OutlineColor         = EDGE_COL
+	hl.OutlineTransparency  = 0
+	hl.Enabled              = false
+	hl.Parent               = workspace
+	table.insert(pool, hl)
+	return hl
+end
+
+local function release(adornee: Instance)
+	local hl = assigned[adornee]
+	if not hl then return end
+	assigned[adornee] = nil
+	hl.Enabled = false
+	hl.Adornee = nil
+end
+
+-- Give `adornee` an edge, taking a spare from the pool (or growing it, up to MAX_ON).
+-- Returns false when the budget is already spent.
+local function acquire(adornee: Instance): boolean
+	if assigned[adornee] then return true end
+	local free: Highlight? = nil
+	for _, hl in pool do
+		if hl.Adornee == nil then free = hl; break end
 	end
-	if hl then hl.Enabled = on end
+	if not free then
+		if #pool >= MAX_ON then return false end
+		free = newHighlight()
+	end
+	local hl = free :: Highlight
+	hl.Adornee = adornee
+	hl.Enabled = true
+	assigned[adornee] = hl
+	return true
 end
 
 local function drop(key: Instance)
 	local e = entries[key]
 	if not e then return end
-	if e.hl then e.hl:Destroy() end
+	release(e.adornee)
 	entries[key] = nil
 end
 
@@ -92,14 +127,14 @@ local function claim(inst: Instance, isUnit: boolean)
 
 		if isUnit then
 			if inst:IsA("BasePart") then
-				entries[inst] = { root = inst, adornee = inst, hl = nil, on = false }
+				entries[inst] = { root = inst, adornee = inst }
 			end
 			return
 		end
 
 		local base = inst:WaitForChild("Base", 15)
 		if base and base:IsA("BasePart") and inst.Parent and not entries[inst] then
-			entries[inst] = { root = base, adornee = inst, hl = nil, on = false }
+			entries[inst] = { root = base, adornee = inst }
 		end
 	end)
 end
@@ -116,6 +151,12 @@ local function rewire()
 	for _, c in conns do c:Disconnect() end
 	conns = {}
 	for key in entries do drop(key) end
+	-- Nothing keeps an edge across a match boundary; hand the whole pool back.
+	for _, hl in pool do
+		hl.Enabled = false
+		hl.Adornee = nil
+	end
+	table.clear(assigned)
 
 	local units = workspace:FindFirstChild("Units")
 	if units then attach(units, true) end
@@ -125,6 +166,10 @@ end
 
 -- ── Per-tick work ───────────────────────────────────────────────────────────
 local ignore: { Instance } = {}
+-- What is covered right now, gathered before any edge is handed out: the budget can
+-- only be spent on the nearest few once the whole set is known.
+type Covered = { adornee: Instance, dist: number }
+local covered: { Covered } = {}
 
 local function refresh()
 	local cam = workspace.CurrentCamera
@@ -141,6 +186,8 @@ local function refresh()
 	if miners then table.insert(ignore, miners) end
 	rp.FilterDescendantsInstances = ignore
 
+	table.clear(covered)
+
 	for key, e in entries do
 		if not e.root.Parent or not key.Parent then
 			drop(key)
@@ -152,7 +199,7 @@ local function refresh()
 		local dist   = to.Magnitude
 		if fwd:Dot(to) <= 0 or dist < STOP_SHORT + 1 then
 			-- Behind the camera, or the camera is sitting on top of it. Nothing to draw.
-			setOn(e, false)
+			release(e.adornee)
 			continue
 		end
 
@@ -163,7 +210,25 @@ local function refresh()
 		if not blocked then
 			blocked = ForestFade.blocksSight(eye, target)
 		end
-		setOn(e, blocked)
+		if blocked then
+			table.insert(covered, { adornee = e.adornee, dist = dist })
+		else
+			release(e.adornee)
+		end
+	end
+
+	-- Spend the budget nearest-first. The sort only matters once more is covered than
+	-- there is budget, which is exactly the case this pool exists for.
+	if #covered > MAX_ON then
+		table.sort(covered, function(a, b) return a.dist < b.dist end)
+		-- Everything past the budget gives its edge back BEFORE the winners ask for one;
+		-- otherwise the pool is still full when they ask and the nearest units flicker.
+		for i = MAX_ON + 1, #covered do
+			release(covered[i].adornee)
+		end
+	end
+	for i = 1, math.min(#covered, MAX_ON) do
+		acquire(covered[i].adornee)
 	end
 end
 

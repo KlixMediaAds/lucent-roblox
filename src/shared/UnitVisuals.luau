@@ -569,7 +569,14 @@ do
 			local zFoot   = zHip + (isFront and -1.4 or 1.2)   -- front pair reaches forward, rear back
 			table.insert(MOTHER_LEGS, {
 				hip   = Vector3.new(s * 2.4, 2.5, zHip),        -- buried inside the trunk mass
-				knee  = Vector3.new(s * 4.9, 2.0, zHip + (isFront and -0.6 or 0.5)),
+				-- The knee rides ABOVE the hip, salamander-style. That is not only the
+				-- silhouette: hip-to-foot is a fixed distance, so raising the knee is what
+				-- buys the limb its slack. With the knee level, the two bones summed to
+				-- barely more than the stance was wide (93% extension standing still) and
+				-- the animator had nothing to give -- every step over-reached and the
+				-- shin, which is drawn as a segment BETWEEN two points, stretched to span
+				-- the gap. Standing extension is ~74% now.
+				knee  = Vector3.new(s * 5.3, 3.1, zHip + (isFront and -0.6 or 0.5)),
 				foot  = Vector3.new(s * 6.0, 0.4, zFoot),
 				pad   = Vector3.new(s * 6.1, 0.3, zFoot),
 				phase = (isFront == (s < 0)) and 0 or math.pi,
@@ -578,6 +585,23 @@ do
 	end
 end
 UnitVisuals.MOTHER_LEGS = MOTHER_LEGS
+
+--[[
+	Her decor is authored around the GROUND POINT she stands on, and the builder is
+	handed that point already turned 180 degrees (MOTHER_FLIP) so her head faces the
+	default camera. Her Base is neither of those things: it is a 14x10x14 box whose
+	origin sits half its own height ABOVE the ground point, carrying no flip at all.
+
+	So anything that reads her rig back off the Base -- the walk animator above all --
+	has to undo both, or it poses her legs five studs in the air and mirrored end for
+	end. motherBodyCF is that undoing, and it is the ONLY place the relationship is
+	written down.
+]]
+UnitVisuals.MOTHER_FLIP = CFrame.Angles(0, math.pi, 0)
+
+function UnitVisuals.motherBodyCF(base: BasePart): CFrame
+	return base.CFrame * CFrame.new(0, -base.Size.Y * 0.5, 0) * UnitVisuals.MOTHER_FLIP
+end
 
 function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, castShadows: boolean?)
 	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh
@@ -643,6 +667,11 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 	-- ── Four stubby splayed legs (salamander stance), rooted deep in the trunk ──
 	-- Indexed names let the client walk animator re-pose these exact parts.
 	for i, L in MOTHER_LEGS do
+		-- A socket ball sunk into the trunk at the hip. The upper bone pivots about this
+		-- point, so with the ball there the limb always reads as growing out of her
+		-- rather than as a stick that happens to end near her side.
+		dp("Shoulder" .. i, Vector3.new(2.4, 2.4, 2.4), CFrame.new(L.hip), cChitin,
+			Enum.Material.Slate, Enum.PartType.Ball, true)
 		seg("LegUpper" .. i, L.hip,  L.knee, 1.35, cChitin, Enum.Material.Slate)
 		seg("LegFore"  .. i, L.knee, L.foot, 1.0,  cChitin, Enum.Material.Slate)
 		dp("Foot" .. i, Vector3.new(2.1, 0.7, 2.5), CFrame.new(L.pad), cChitin, Enum.Material.Slate, Enum.PartType.Ball)

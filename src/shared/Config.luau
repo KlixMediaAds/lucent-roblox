@@ -333,7 +333,7 @@ Config.MOTHER_INJECT_RANGE    = 400   -- max studs from the Mother a target poin
 Config.MOTHER_INJECT_PLANT_LEECHES = 3   -- Leeches out of a spire
 Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- her own egg nests out of a pod cluster
 
--- Spike Gland: the structure a frond bursts into. Each one standing shaves 5% off the
+-- Spike Gland: the structure a frond bursts into. Each one standing shaves 20% off the
 -- Mother's spike cooldown, compounding, so a player who keeps injecting fronds injects
 -- faster. It is a real building with HP: the buff is only as durable as the glands are.
 --
@@ -341,7 +341,7 @@ Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- her own egg nests out of a pod clust
 -- another gland, so the loop feeds itself; without a hard floor the cooldown converges on
 -- zero and the ability stops being an ability. MIN is what that loop is allowed to reach.
 Config.MOTHER_INJECT_COOLDOWN_MIN = 2.5   -- seconds; no number of glands goes under this
-Config.GLAND_COOLDOWN_REDUCTION   = 0.05  -- each standing gland cuts the cooldown by 5%
+Config.GLAND_COOLDOWN_REDUCTION   = 0.20  -- each standing gland cuts the cooldown by 20%
 Config.MOTHER_INJECT_PLANT_GLANDS = 1     -- glands out of a frond
 Config.GLAND_SIZE                 = Vector3.new(10, 9, 10)
 
@@ -575,7 +575,7 @@ Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 2
 -- Combat / Health
 -- Roller: heavily armored (high HP), but its bite is a constant grind — low damage
 -- per hit at a very fast attack rate (short melee range so it rolls right up and stays).
-Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 220, Watcher = 170, Needler = 140 }
+Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 264, Watcher = 170, Needler = 140 }
 Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600, Gland = 300 }
 Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20, Needler = 42 }
 Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }

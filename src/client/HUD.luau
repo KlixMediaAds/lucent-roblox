@@ -774,13 +774,15 @@ function HUD.create(): (Frame, TextButton)
 	local MAP_W = 148   -- minimap border width (MAP_SIZE 144 + 4)
 	local ROW_Y = -(MAP_W + 10 + 6)   -- bottom edge of the resource row (above the map)
 
-	-- Horizontal stops along that row, left to right. The first ~40px belong to the
-	-- minimap's [1] return-to-base button (built in MiniMap.luau against the same
-	-- inset-ignoring, same-scaled coordinate space), which anchors the left end of the
-	-- bottom bar; everything here starts clear of it.
-	local RES_CX      = 56    -- resource gem centre
-	local RES_LABEL_X = 72    -- resource number, left-aligned
-	local POP_CX      = 166   -- population glyph centre
+	-- The readout is a COLUMN of two rows above the map, not one row across it: the
+	-- resource count on the bottom row (nearest the map) and the population directly
+	-- above it, both hung off the same two stops so their glyphs and their numbers line
+	-- up. Swap which row each sits on by swapping ROW_Y and POP_ROW_Y below.
+	-- Nothing else is drawn over the map: the quick-select group buttons that briefly
+	-- shared this space now stand on the command bar (QuickSelect.luau).
+	local RES_CX      = 56    -- glyph centre, both rows
+	local RES_LABEL_X = 72    -- number, left-aligned, both rows
+	local POP_ROW_Y   = ROW_Y - 32   -- population row: one step up from the resource row
 
 	-- Designed resource crystal: a faceted purple gem with a smaller cluster shard,
 	-- a lavender rim, a gradient body and a bright inner facet + highlight glint.
@@ -881,13 +883,13 @@ function HUD.create(): (Frame, TextButton)
 	resLabel = rLbl
 
 	-- ── Population: a figure glyph + "alive / cap" ───────────────────────────
-	-- Sits in the same row as the resource count, one step to its right. The cap is a
+	-- Sits directly above the resource count, sharing its left edge. The cap is a
 	-- hard refusal on the server (a nest whose egg is ready simply holds), so the player
 	-- needs to see it coming. The glyph is the standard supply read: a head over a pair
 	-- of shoulders, which says "bodies" at a glance where three abstract pips did not.
 	do
-		local PCX = POP_CX               -- glyph centre
-		local PCY = ROW_Y - 15           -- same vertical centre as the resource gem
+		local PCX = RES_CX               -- same column as the resource gem
+		local PCY = POP_ROW_Y - 15       -- vertical centre of the row above it
 
 		-- Soft halo behind the figure, matching the resource gem's glow treatment.
 		local halo                      = Instance.new("Frame")
@@ -932,7 +934,7 @@ function HUD.create(): (Frame, TextButton)
 		pLbl.Name                       = "PopLabel"
 		pLbl.Size                       = UDim2.fromOffset(84, 30)
 		pLbl.AnchorPoint                = Vector2.new(0, 1)
-		pLbl.Position                   = UDim2.new(0, PCX + 14, 1, ROW_Y)
+		pLbl.Position                   = UDim2.new(0, RES_LABEL_X, 1, POP_ROW_Y)
 		pLbl.BackgroundTransparency     = 1
 		pLbl.Text                       = ""
 		pLbl.Font                       = Enum.Font.GothamBold

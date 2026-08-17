@@ -210,6 +210,41 @@ local function clearPlantsAround(pos: Vector3, radius: number)
 	end
 end
 
+-- ── The spike's sounds ────────────────────────────────────────────────────────
+-- Two separate moments, and they are not the same event: the spike GOING IN happens on
+-- every injection, while the second only plays when what she went into gives something
+-- up (a plant bursting into Leeches, nests or a gland). Injecting bare ground is the
+-- first sound alone.
+local SND_INJECT = "rbxassetid://117742365588721"
+local SND_EVOLVE = "rbxassetid://77665012026179"
+
+-- One-shot world sound at a point. Both come from the WOUND rather than from her body,
+-- so a shift-queued run reads as a line of separate strikes across the ground instead of
+-- a stack of noises following her around.
+local function playInjectSound(pos: Vector3, soundId: string, volume: number)
+	local anchor        = Instance.new("Part")
+	anchor.Name         = "_InjectSFX"
+	anchor.Anchored     = true
+	anchor.CanCollide   = false
+	anchor.CanQuery     = false
+	anchor.CanTouch     = false
+	anchor.CastShadow   = false
+	anchor.Transparency = 1
+	anchor.Size         = Vector3.one * 0.1
+	anchor.Position     = pos
+	anchor.Parent       = workspace
+
+	local snd              = Instance.new("Sound")
+	snd.SoundId            = soundId
+	snd.Volume             = volume
+	snd.RollOffMode        = Enum.RollOffMode.Linear
+	snd.RollOffMinDistance = 12
+	snd.RollOffMaxDistance = 190
+	snd.Parent             = anchor
+	snd:Play()
+	Debris:AddItem(anchor, 8)
+end
+
 -- The wound itself: a purple bloom at the point where the spike goes in.
 local function injectBurst(pos: Vector3)
 	local flash        = Instance.new("Part")
@@ -240,6 +275,7 @@ local function harvestInjectPlant(ccId: string, owner: any, plant: Model, origin
 	plant:Destroy()
 	injectBurst(origin)
 	if not kind then return end
+	playInjectSound(origin, SND_EVOLVE, 1.1)
 
 	local function surfaceAt(x: number, z: number): number
 		return (terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)) or origin.Y
@@ -384,6 +420,7 @@ local function runInjection(ccId: string, order: InjectOrder)
 	-- not just whoever ordered it.
 	data.base:SetAttribute("Injecting", true)
 	injectBurst(origin)
+	playInjectSound(origin, SND_INJECT, 0.95)
 	task.wait(Config.MOTHER_INJECT_DURATION)
 	if data.base.Parent then data.base:SetAttribute("Injecting", false) end
 
@@ -711,8 +748,11 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 
 			-- Flip the creature 180° so its head faces +Z — i.e. toward the default
 			-- camera (which sits at +Z looking toward -Z) — instead of away from it.
-			-- Preview/ghost builders apply the same flip so every view stays aligned.
-			UnitVisuals.buildMotherDecor(model, CFrame.new(position) * CFrame.Angles(0, math.pi, 0), player.TeamColor, true)
+			-- The flip is UnitVisuals.MOTHER_FLIP rather than a literal here because the
+			-- client walk animator has to undo exactly this to find her rig again
+			-- (UnitVisuals.motherBodyCF); the two must never drift apart.
+			UnitVisuals.buildMotherDecor(model,
+				CFrame.new(position) * UnitVisuals.MOTHER_FLIP, player.TeamColor, true)
 
 			-- The Mother's head / body / gaster are all CanQuery=false decor and
 			-- sprawl well beyond and above the invisible 14×14 Base, so clicks on the
