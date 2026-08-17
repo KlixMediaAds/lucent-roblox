@@ -33,12 +33,14 @@
 ]]
 
 local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
 local TweenService      = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
+local UILib             = require(script.Parent:WaitForChild("UILib"))
 
 local LobbyUI     = {}
 local localPlayer = Players.LocalPlayer
@@ -281,6 +283,370 @@ local function syncTerrain(mode: string)
 	end
 end
 
+-- ── Player stat card (hover) ───────────────────────────────────────────────────
+-- Hovering the avatar on any player's banner -- yours or anyone else's -- opens a small
+-- readout of how long they have played and when they first turned up.
+--
+-- Nothing is requested to build it. The server writes both figures onto the Player object
+-- as attributes (see PlayerStats), and attributes replicate to every client, so another
+-- player's numbers are already sitting locally by the time the cursor arrives.
+--
+-- Parented to the ScreenGui rather than into the scaled container: it is a tooltip pinned
+-- to a screen position, so it is placed from the avatar's AbsolutePosition and stays a
+-- fixed readable size at any resolution.
+local STAT_W, STAT_H = 340, 268
+local BADGE_PX       = 26      -- same footprint the egg mark uses in the world
+
+local statCard:      Frame?     = nil
+local statName:      TextLabel?
+local statPlay:      TextLabel?
+local statJoin:      TextLabel?
+local statNote:      TextLabel?
+local statBadgeRow:  Frame?     = nil
+local statDim:       TextButton? = nil     -- full-screen dimmer behind the window
+local statScale:     UIScale?    = nil     -- drives the open/close pop
+local statConns:     { RBXScriptConnection } = {}
+
+-- The badge tooltip is a second layer on top of the stat card: hovering a badge names it,
+-- describes it, and dates it.
+local BADGE_TIP_W = 210
+local badgeTip:     Frame?     = nil
+local badgeTipName: TextLabel?
+local badgeTipDesc: TextLabel?
+local badgeTipDate: TextLabel?
+
+-- Live pips on the open card, breathing off one clock exactly as the world marks do.
+local badgePips: { UILib.ReadyPip } = {}
+local pipConn:   RBXScriptConnection? = nil
+
+-- Forward-declared: buildStatCard wires it into its own close button, and it is defined
+-- further down once the pieces it closes over exist.
+local hideBadgeTip: () -> ()
+local hideStatCard: () -> ()
+
+local MONTHS = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
+
+-- Playtime reads at the coarsest unit that still says something: hours once there are
+-- hours, and seconds only for someone who has barely played.
+local function fmtPlaytime(secs: number): string
+	secs = math.max(0, math.floor(secs))
+	if secs < 60 then return secs .. "s" end
+	local h = math.floor(secs / 3600)
+	local m = math.floor(secs / 60) % 60
+	if h > 0 then return string.format("%dh %dm", h, m) end
+	return string.format("%dm %ds", m, secs % 60)
+end
+
+local function fmtDate(unix: number): string
+	if unix <= 0 then return "Unknown" end
+	local t = os.date("!*t", unix)
+	return string.format("%d %s %d", t.day, MONTHS[t.month] or "?", t.year)
+end
+
+local function buildStatCard()
+	if statCard then return end
+
+	-- Dim the lobby behind the window. It also swallows clicks, so nothing underneath can
+	-- be pressed through it, and clicking it closes -- the near-universal expectation for
+	-- a dimmed modal, with the X there for anyone who reaches for that instead.
+	local dim = Instance.new("TextButton")
+	dim.Name = "ProfileDim"
+	dim.Size = UDim2.new(1, 0, 1, 0)
+	dim.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	dim.BackgroundTransparency = 1
+	dim.AutoButtonColor = false
+	dim.Text = ""
+	dim.BorderSizePixel = 0
+	dim.Visible = false
+	dim.ZIndex = 58
+	dim.Parent = sg
+	statDim = dim
+
+	local f = Instance.new("Frame")
+	f.Name = "PlayerStatCard"
+	f.Size = UDim2.fromOffset(STAT_W, STAT_H)
+	f.AnchorPoint = Vector2.new(0.5, 0.5)
+	f.Position = UDim2.new(0.5, 0, 0.5, 0)   -- centred; it is a window, not a tooltip
+	f.BackgroundColor3 = Color3.fromRGB(12, 15, 23)
+	f.BackgroundTransparency = 0.04
+	f.BorderSizePixel = 0
+	f.Visible = false
+	f.ZIndex = 60
+	f.Parent = sg
+	corner(f, 12)
+	local st = stroke(f, C_GOLD, 1); st.Transparency = 0.3
+	gradient(f, Color3.fromRGB(18, 22, 33), Color3.fromRGB(10, 12, 19), 90)
+	statScale = Instance.new("UIScale"); statScale.Scale = 1; statScale.Parent = f
+
+	statName = label(f, "", 22, C_TITLE, Enum.Font.GothamBold,
+		UDim2.new(1, -80, 0, 28), UDim2.fromOffset(22, 20), Enum.TextXAlignment.Left)
+	;(statName :: TextLabel).TextTruncate = Enum.TextTruncate.AtEnd
+	;(statName :: TextLabel).ZIndex = 61
+
+	local hr = Instance.new("Frame")
+	hr.Size = UDim2.new(1, -44, 0, 1)
+	hr.Position = UDim2.fromOffset(22, 56)
+	hr.BackgroundColor3 = C_GOLD
+	hr.BackgroundTransparency = 0.72
+	hr.BorderSizePixel = 0
+	hr.ZIndex = 61
+	hr.Parent = f
+
+	local function row(capText: string, y: number): TextLabel
+		local cap = label(f, capText, 11, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, y), Enum.TextXAlignment.Left)
+		cap.ZIndex = 61
+		local val = label(f, "", 24, C_TEXT, Enum.Font.GothamMedium,
+			UDim2.new(1, -44, 0, 28), UDim2.fromOffset(22, y + 14), Enum.TextXAlignment.Left)
+		val.ZIndex = 61
+		return val
+	end
+
+	statPlay = row("PLAYTIME", 74)
+	statJoin = row("JOINED",  126)
+
+	local bcap = label(f, "BADGES", 11, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, 178), Enum.TextXAlignment.Left)
+	bcap.ZIndex = 61
+
+	local brow = Instance.new("Frame")
+	brow.Name = "Badges"
+	brow.Size = UDim2.new(1, -44, 0, BADGE_PX)
+	brow.Position = UDim2.fromOffset(22, 194)
+	brow.BackgroundTransparency = 1
+	brow.ZIndex = 61
+	brow.Parent = f
+	statBadgeRow = brow
+
+	-- Only shown when the figures could not be loaded, so a session-only number is never
+	-- passed off as a lifetime one.
+	statNote = label(f, "", 11, C_SUBTEXT, Enum.Font.Gotham,
+		UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, STAT_H - 24), Enum.TextXAlignment.Left)
+	;(statNote :: TextLabel).ZIndex = 61
+
+	-- Close. The X is DRAWN from two rotated bars rather than typed: Gotham has no glyph
+	-- for the multiplication/ballot characters, so a literal one renders as a blank box.
+	local close = Instance.new("TextButton")
+	close.Name = "Close"
+	close.Size = UDim2.fromOffset(28, 28)
+	close.Position = UDim2.new(1, -42, 0, 18)
+	close.BackgroundColor3 = Color3.fromRGB(28, 32, 44)
+	close.BackgroundTransparency = 0.25
+	close.AutoButtonColor = false
+	close.Text = ""
+	close.BorderSizePixel = 0
+	close.ZIndex = 62
+	close.Parent = f
+	corner(close, 6)
+
+	local bars: { Frame } = {}
+	for _, rot in { 45, -45 } do
+		local bar = Instance.new("Frame")
+		bar.Size = UDim2.fromOffset(14, 2)
+		bar.AnchorPoint = Vector2.new(0.5, 0.5)
+		bar.Position = UDim2.fromScale(0.5, 0.5)
+		bar.Rotation = rot
+		bar.BackgroundColor3 = C_SUBTEXT
+		bar.BorderSizePixel = 0
+		bar.ZIndex = 63
+		bar.Parent = close
+		corner(bar, 1)
+		table.insert(bars, bar)
+	end
+
+	close.MouseEnter:Connect(function()
+		close.BackgroundTransparency = 0.05
+		for _, b in bars do b.BackgroundColor3 = C_TITLE end
+	end)
+	close.MouseLeave:Connect(function()
+		close.BackgroundTransparency = 0.25
+		for _, b in bars do b.BackgroundColor3 = C_SUBTEXT end
+	end)
+	close.MouseButton1Click:Connect(function() hideStatCard() end)
+	dim.MouseButton1Click:Connect(function() hideStatCard() end)
+
+	statCard = f
+end
+
+
+-- ── Badge tooltip ─────────────────────────────────────────────────────────────
+local function buildBadgeTip()
+	if badgeTip then return end
+	local f = Instance.new("Frame")
+	f.Name = "BadgeTip"
+	f.Size = UDim2.fromOffset(BADGE_TIP_W, 96)
+	f.BackgroundColor3 = Color3.fromRGB(10, 12, 19)
+	f.BackgroundTransparency = 0.02
+	f.BorderSizePixel = 0
+	f.Visible = false
+	f.ZIndex = 70
+	f.Parent = sg
+	corner(f, 8)
+	local st = stroke(f, C_GOLD, 1); st.Transparency = 0.25
+
+	badgeTipName = label(f, "", 13, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -20, 0, 16), UDim2.fromOffset(10, 8), Enum.TextXAlignment.Left)
+	;(badgeTipName :: TextLabel).ZIndex = 71
+
+	badgeTipDesc = label(f, "", 11, C_TEXT, Enum.Font.Gotham,
+		UDim2.new(1, -20, 0, 40), UDim2.fromOffset(10, 26), Enum.TextXAlignment.Left)
+	;(badgeTipDesc :: TextLabel).TextWrapped   = true
+	;(badgeTipDesc :: TextLabel).TextYAlignment = Enum.TextYAlignment.Top
+	;(badgeTipDesc :: TextLabel).ZIndex = 71
+
+	local cap = label(f, "OBTAINED", 9, C_GOLD, Enum.Font.GothamBold,
+		UDim2.new(1, -20, 0, 11), UDim2.fromOffset(10, 68), Enum.TextXAlignment.Left)
+	cap.ZIndex = 71
+	badgeTipDate = label(f, "", 12, C_TEXT, Enum.Font.GothamMedium,
+		UDim2.new(1, -20, 0, 15), UDim2.fromOffset(10, 79), Enum.TextXAlignment.Left)
+	;(badgeTipDate :: TextLabel).ZIndex = 71
+
+	badgeTip = f
+end
+
+function hideBadgeTip()
+	if badgeTip then badgeTip.Visible = false end
+end
+
+local function showBadgeTip(anchorGui: GuiObject, badgeId: string, earnedAt: number)
+	buildBadgeTip()
+	local f   = badgeTip :: Frame
+	local def = (Config.BADGES :: any)[badgeId]
+	if badgeTipName then badgeTipName.Text = (def and def.name) or badgeId end
+	if badgeTipDesc then badgeTipDesc.Text = (def and def.desc) or "" end
+	if badgeTipDate then badgeTipDate.Text = fmtDate(earnedAt) end
+
+	-- Sits under the badge, nudged on screen if the card is near an edge.
+	local pos  = anchorGui.AbsolutePosition
+	local size = anchorGui.AbsoluteSize
+	local vp   = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+	local x    = math.clamp(pos.X - 6, 8, math.max(8, vp.X - BADGE_TIP_W - 8))
+	local y    = pos.Y + size.Y + 6
+	if y + f.AbsoluteSize.Y > vp.Y - 8 then y = pos.Y - f.AbsoluteSize.Y - 6 end
+	f.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+	f.Visible  = true
+end
+
+-- ── Badge row ─────────────────────────────────────────────────────────────────
+-- One pip per badge the player holds, using the very mark a ripe egg wears in the world
+-- (UILib.readyPip), so the two read as the same language of "this is a thing you have".
+local function fillBadges(userId: number)
+	local row = statBadgeRow
+	if not row then return end
+	for _, c in row:GetChildren() do
+		if c:IsA("GuiObject") then c:Destroy() end
+	end
+	table.clear(badgePips)
+
+	local plr = userId > 0 and Players:GetPlayerByUserId(userId) or nil
+	if not plr then return end
+
+	local x = 0
+	for id in Config.BADGES do
+		local earned = plr:GetAttribute("StatsBadge_" .. id)
+		if type(earned) ~= "number" or earned <= 0 then continue end
+
+		local slot = Instance.new("Frame")
+		slot.Name = id
+		slot.Size = UDim2.fromOffset(BADGE_PX, BADGE_PX)
+		slot.Position = UDim2.fromOffset(x, 0)
+		slot.BackgroundTransparency = 1
+		slot.ZIndex = 61
+		slot.Parent = row
+		table.insert(badgePips, UILib.readyPip(slot, 61))
+
+		local hit = Instance.new("TextButton")
+		hit.Size = UDim2.new(1, 0, 1, 0)
+		hit.BackgroundTransparency = 1
+		hit.AutoButtonColor = false
+		hit.Text = ""
+		hit.ZIndex = 63
+		hit.Parent = slot
+		local at = earned
+		hit.MouseEnter:Connect(function() showBadgeTip(slot, id, at) end)
+		hit.MouseLeave:Connect(hideBadgeTip)
+
+		x += BADGE_PX + 6
+	end
+end
+
+local function fillStatCard(name: string, userId: number)
+	local plr   = userId > 0 and Players:GetPlayerByUserId(userId) or nil
+	local first = plr and plr:GetAttribute("StatsFirstJoin")
+	local secs  = plr and plr:GetAttribute("StatsPlaySecs")
+	local ok    = plr ~= nil and plr:GetAttribute("StatsLoaded") == true
+
+	if statName then statName.Text = name end
+	if statPlay then statPlay.Text = fmtPlaytime(type(secs) == "number" and secs or 0) end
+	if statJoin then statJoin.Text = fmtDate(type(first) == "number" and first or 0) end
+	if statNote then
+		statNote.Text = if plr == nil then "player has left"
+			elseif not ok then "this session only" else ""
+	end
+	fillBadges(userId)
+end
+
+function hideStatCard()
+	for _, c in statConns do c:Disconnect() end
+	table.clear(statConns)
+	if pipConn then pipConn:Disconnect(); pipConn = nil end
+	table.clear(badgePips)
+	hideBadgeTip()
+	local dim = statDim
+	if dim and dim.Visible then
+		local t = TweenService:Create(dim, TweenInfo.new(0.12), { BackgroundTransparency = 1 })
+		t.Completed:Once(function() if dim then dim.Visible = false end end)
+		t:Play()
+	end
+	if statCard then statCard.Visible = false end
+end
+
+-- Open the profile window, centred over a dimmed lobby. Called on a CLICK of the avatar's
+-- VIEW PROFILE overlay, not on hover.
+local function showStatCard(name: string, userId: number)
+	buildStatCard()
+	local f = statCard :: Frame
+	hideStatCard()
+	fillStatCard(name, userId)
+
+	-- The profile may still be resolving when the cursor arrives (the server is waiting on
+	-- a DataStore), so follow the attributes rather than showing one stale reading.
+	local plr = userId > 0 and Players:GetPlayerByUserId(userId) or nil
+	if plr then
+		for _, attr in { "StatsFirstJoin", "StatsPlaySecs", "StatsLoaded" } do
+			table.insert(statConns, plr:GetAttributeChangedSignal(attr):Connect(function()
+				fillStatCard(name, userId)
+			end))
+		end
+	end
+
+	-- Centred, so it does not have to be chased around the screen after whichever banner
+	-- was clicked, and the dimmed lobby behind it makes the centre the obvious place to be.
+	local dim = statDim
+	if dim then
+		dim.BackgroundTransparency = 1
+		dim.Visible = true
+		TweenService:Create(dim, TweenInfo.new(0.16), { BackgroundTransparency = 0.55 }):Play()
+	end
+
+	f.Visible = true
+	if statScale then
+		statScale.Scale = 0.94
+		TweenService:Create(statScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{ Scale = 1 }):Play()
+	end
+
+	-- Every badge on the card breathes off ONE clock, exactly as a colony of ripe eggs
+	-- does in the world, so they stay in step with each other.
+	if pipConn then pipConn:Disconnect() end
+	pipConn = RunService.RenderStepped:Connect(function()
+		if #badgePips == 0 then return end
+		local pulse = 0.5 + 0.5 * math.sin(os.clock() * 3.4)
+		for _, pip in badgePips do UILib.pulseReadyPip(pip, pulse) end
+	end)
+end
+
 -- ── Player banners ─────────────────────────────────────────────────────────────
 -- Up to MAX_BANNERS tall vertical cards, one per combatant. Each shows, top to
 -- bottom: the player name, their profile avatar, and a 3D preview of the race
@@ -380,6 +746,62 @@ local function buildBanner(opts: {
 		img.ScaleType = Enum.ScaleType.Crop
 		img.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", opts.userId)
 		img.Parent = holder
+
+		-- Hovering the avatar does not open anything by itself: it fades a VIEW PROFILE
+		-- plate over the headshot, and THAT is what opens the window when clicked. Hover
+		-- alone opening a window made the profile something you triggered by accident on
+		-- the way to somewhere else, and made its badges awkward to reach.
+		local uid   = opts.userId
+		local pname = opts.name or ""
+
+		local plate = Instance.new("Frame")
+		plate.Name = "ViewProfile"
+		plate.Size = UDim2.new(1, 0, 1, 0)
+		plate.BackgroundColor3 = Color3.fromRGB(6, 8, 13)
+		plate.BackgroundTransparency = 1          -- faded in on hover
+		plate.BorderSizePixel = 0
+		plate.ZIndex = 5
+		plate.Parent = holder
+
+		local plateLbl = label(plate, "VIEW PROFILE", 12, C_GOLD, Enum.Font.GothamBold,
+			UDim2.new(1, -8, 1, 0), UDim2.fromOffset(4, 0))
+		plateLbl.TextWrapped    = true   -- wraps to two lines inside the avatar box
+		plateLbl.TextYAlignment = Enum.TextYAlignment.Center
+		plateLbl.TextTransparency = 1
+		plateLbl.ZIndex = 6
+
+		local FADE = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local function setPlate(shown: boolean)
+			TweenService:Create(plate, FADE,
+				{ BackgroundTransparency = shown and 0.35 or 1 }):Play()
+			TweenService:Create(plateLbl, FADE,
+				{ TextTransparency = shown and 0 or 1 }):Play()
+		end
+
+		-- A button rather than the frame's own MouseEnter, matching how the AI banner picks
+		-- up its race clicks, so the plate and image below cannot swallow the hover.
+		local probe = Instance.new("TextButton")
+		probe.Name = "StatsHover"
+		probe.Size = UDim2.new(1, 0, 1, 0)
+		probe.BackgroundTransparency = 1
+		probe.AutoButtonColor = false
+		probe.Text = ""
+		probe.ZIndex = 7
+		probe.Parent = holder
+		probe.MouseEnter:Connect(function()
+			hst.Transparency = 0; hst.Thickness = 2
+			setPlate(true)
+		end)
+		probe.MouseLeave:Connect(function()
+			hst.Transparency = 0.5; hst.Thickness = 1
+			setPlate(false)
+		end)
+		probe.MouseButton1Click:Connect(function()
+			showStatCard(pname, uid)
+		end)
+		-- The roster rebuilds wholesale on any change, which destroys this banner; the
+		-- window is positioned against it, so it would be left hanging over nothing.
+		probe.Destroying:Connect(function() hideStatCard() end)
 	else
 		-- No valid avatar (e.g. a Studio test session): fall back to a name initial.
 		local g = label(holder, string.sub(opts.name or "?", 1, 1):upper(), 54, C_GOLD,
@@ -1166,6 +1588,16 @@ local function buildUI()
 	local old = localPlayer.PlayerGui:FindFirstChild("LobbyUI")
 	if old then old:Destroy() end
 	lastRosterSig = ""
+
+	-- A previous lobby's ScreenGui was destroyed when the match started, and took the hover
+	-- stat card with it. Drop the stale references so it is rebuilt into this one rather
+	-- than kept as a handle to a detached instance that never shows again.
+	for _, c in statConns do c:Disconnect() end
+	table.clear(statConns)
+	if pipConn then pipConn:Disconnect(); pipConn = nil end
+	table.clear(badgePips)
+	statCard, badgeTip, statBadgeRow = nil, nil, nil
+	statDim, statScale = nil, nil
 
 	sg = Instance.new("ScreenGui")
 	sg.Name = "LobbyUI"; sg.ResetOnSpawn = false

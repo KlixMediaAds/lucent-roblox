@@ -40,6 +40,10 @@ local MotherInject = {}
 local networkRef:   any
 local cameraRef:    any
 local onAimChanged: ((boolean) -> ())? = nil
+-- Told the InjectPlants `preview` name of whatever the sight is over (nil for bare ground
+-- or a plant with nothing to give). MotherPanel uses it to turn the INJECT tile into a
+-- picture of what the plant under the cursor would become.
+local onHoverChanged: ((string?) -> ())? = nil
 local ccBaseFn:     (() -> BasePart?)? = nil
 local resourcesFn:  (() -> number)?    = nil
 
@@ -65,7 +69,21 @@ local hoverPlant: Model? = nil
 local hoverInfo:  InjectPlants.InjectInfo? = nil
 local hoverPos:   Vector3? = nil
 local lastHoverScan = 0
-local HOVER_RADIUS  = 9      -- studs from the cursor a plant is picked up at
+-- How near the cursor a plant is snapped onto. This MUST stay below
+-- Config.MOTHER_INJECT_CLEAR: a plant inside this radius becomes the TARGET, so if it
+-- reached as far as the clear radius there would be no band of ground left that is both
+-- aimed-at-bare-ground and too crowded to take a spike, and the crowding rule below could
+-- never fire at all. At 5 vs a clear radius of 8 the band is 5-8 studs, which refuses
+-- about seven of every ten attempts to re-inject a spot already worked over.
+-- 5 studs still sits inside the body of every plant (the widest, the frond, is ~6), so
+-- pointing at one to burst it is unchanged in practice.
+local HOVER_RADIUS  = 5
+local CLEAR_D       = Config.MOTHER_INJECT_CLEAR * 2   -- hologram disc diameter
+
+-- Set while the sight is over BARE GROUND that has a plant standing too close to take a
+-- spike. Refreshed by every hover scan, since the Mother can be walking a queued run and
+-- growing plants under her own sight while the player is still aiming.
+local groundCrowded = false
 local HOVER_PERIOD  = 0.08   -- seconds between scans of her plants
 
 -- One dim ghost per spot on the queue, so the run can be read off the ground. Each keeps
@@ -80,6 +98,7 @@ local queuedPlants: { [Model]: boolean } = {}
 local MARK_COL  = Color3.fromRGB(196, 90, 255)
 local TEXT_COL  = Color3.fromRGB(236, 214, 255)
 local BLOCK_COL = Color3.fromRGB(200, 62, 72)   -- target she cannot take: refuses the click
+local WAIT_COL  = Color3.fromRGB(150, 196, 255)  -- spike still recharging: allowed, but it waits
 
 -- What the sight says it is about to inject. Only the ground is injectable for now, so
 -- this is fixed; once she can inject other things it becomes a lookup on whatever the
@@ -138,6 +157,17 @@ local function buildReadout(parent: BasePart): (TextLabel, TextLabel)
 	return name, sub
 end
 
+-- Seconds until her spike can go in again, off the timestamp the server stamps on her
+-- base. Injecting is free, so this is the pacing the player actually feels: the sight
+-- reports it, but does not refuse the click -- a spot laid onto a run already under way is
+-- accepted, and the server is the one that decides.
+local function cooldownLeft(): number
+	local base = ccBaseFn and ccBaseFn()
+	local v    = base and base:GetAttribute("InjectReadyAt")
+	if type(v) ~= "number" then return 0 end
+	return math.max(0, v - workspace:GetServerTimeNow())
+end
+
 -- Can she pay for one more wound? The server charges per injection, queued ones included,
 -- so a target she cannot afford is refused here rather than silently dropped there.
 local function canAfford(): boolean
@@ -151,6 +181,7 @@ end
 local function blockedTarget(): boolean
 	if hoverInfo and not hoverInfo.kind then return true end
 	if hoverPlant and queuedPlants[hoverPlant] then return true end
+	if groundCrowded then return true end
 	return not canAfford()
 end
 
@@ -167,13 +198,23 @@ local function refreshReadout()
 	elseif hoverPlant and queuedPlants[hoverPlant] then
 		sub.Text       = "ALREADY QUEUED"
 		sub.TextColor3  = BLOCK_COL
+	elseif groundCrowded then
+		sub.Text       = "GROUND TOO CROWDED"
+		sub.TextColor3 = BLOCK_COL
 	elseif hoverInfo then
 		sub.Text       = hoverInfo.yield
 		sub.TextColor3 = hoverInfo.kind and MARK_COL or BLOCK_COL
 	else
-		local n        = #ghosts
-		sub.Text       = n > 0 and ("+" .. n .. " QUEUED") or "[SHIFT] TO QUEUE"
-		sub.TextColor3 = MARK_COL
+		local cd = cooldownLeft()
+		if cd > 0 then
+			-- She is between wounds: the spot can still be laid down, it just waits its turn.
+			sub.Text       = "SPIKE READY IN " .. math.ceil(cd) .. "s"
+			sub.TextColor3 = WAIT_COL
+		else
+			local n        = #ghosts
+			sub.Text       = n > 0 and ("+" .. n .. " QUEUED") or "[SHIFT] TO QUEUE"
+			sub.TextColor3 = MARK_COL
+		end
 	end
 end
 
@@ -185,7 +226,9 @@ local function buildMarker(): Model
 	local disc        = Instance.new("Part")
 	disc.Name         = "Disc"
 	disc.Shape        = Enum.PartType.Cylinder
-	disc.Size         = Vector3.new(0.4, 16, 16)
+	-- Sized straight off MOTHER_INJECT_CLEAR: the ring the player sees IS the ground that
+	-- has to be clear of plants, so the refusal below never comes as a surprise.
+	disc.Size         = Vector3.new(0.4, CLEAR_D, CLEAR_D)
 	disc.CFrame       = CFrame.new(0, -500, 0) * CFrame.Angles(0, 0, math.pi / 2)
 	disc.Color        = MARK_COL
 	disc.Material     = Enum.Material.Neon
@@ -249,25 +292,45 @@ local function scanHover(groundPos: Vector3)
 	local bestD    = HOVER_RADIUS * HOVER_RADIUS
 	local userId   = Players.LocalPlayer.UserId
 
+	-- Anything standing inside the hologram, whoever grew it. Kept separate from the snap
+	-- search: the snap only takes plants she is allowed to inject, but a rival's plant (or
+	-- one she cannot target) still occupies the ground and still blocks a spike.
+	local clearR2 = Config.MOTHER_INJECT_CLEAR * Config.MOTHER_INJECT_CLEAR
+	local crowded = false
+
 	if folder then
 		for _, child in folder:GetChildren() do
 			if not child:IsA("Model") then continue end
-			if child:GetAttribute("OwnerUserId") ~= userId then continue end
-			local info = InjectPlants.injectInfo(child)
-			if not info then continue end
 			local p  = child:GetPivot().Position
 			local dx = p.X - groundPos.X
 			local dz = p.Z - groundPos.Z
 			local d  = dx * dx + dz * dz
+			if d < clearR2 then crowded = true end
+
+			-- Hers, or wild: a plant with no owner grew on its own (WildPlants seeds the
+			-- map with them) and is anyone's to take. Someone else's is off limits.
+			local owner = child:GetAttribute("OwnerUserId")
+			if owner ~= nil and owner ~= userId then continue end
+			local info = InjectPlants.injectInfo(child)
+			if not info then continue end
 			if d < bestD then
 				bestD, bestPl, bestIn, bestPos = d, child, info, p
 			end
 		end
 	end
 
-	if bestPl == hoverPlant then return end
+	-- Only bare ground can be crowded out; aiming at a plant is a deliberate target.
+	local nowCrowded = crowded and bestPl == nil
+	local changed    = nowCrowded ~= groundCrowded
+	groundCrowded    = nowCrowded
+
+	if bestPl == hoverPlant then
+		if changed then refreshReadout() end
+		return
+	end
 	hoverPlant, hoverInfo, hoverPos = bestPl, bestIn, bestPos
 	refreshReadout()
+	if onHoverChanged then onHoverChanged(bestIn and bestIn.preview or nil) end
 end
 
 -- ── Queued ghosts ─────────────────────────────────────────────────────────────
@@ -280,7 +343,7 @@ local function spawnGhost(pos: Vector3, label: string, plant: Model?)
 	local disc        = Instance.new("Part")
 	disc.Name         = "Disc"
 	disc.Shape        = Enum.PartType.Cylinder
-	disc.Size         = Vector3.new(0.3, 13, 13)
+	disc.Size         = Vector3.new(0.3, CLEAR_D * 0.82, CLEAR_D * 0.82)
 	disc.CFrame       = CFrame.new(pos + Vector3.new(0, 0.15, 0)) * CFrame.Angles(0, 0, math.pi / 2)
 	disc.Color        = MARK_COL
 	disc.Material     = Enum.Material.Neon
@@ -371,16 +434,20 @@ local function stopAiming()
 	if renderConn then renderConn:Disconnect(); renderConn = nil end
 	destroyMarker()
 	hoverPlant, hoverInfo, hoverPos = nil, nil, nil
+	groundCrowded = false
+	if onHoverChanged then onHoverChanged(nil) end
 	if onAimChanged then onAimChanged(false) end
 end
 
 function MotherInject.init(network: any, cameraModule: any, aimChanged: ((boolean) -> ())?,
-	getCCBase: (() -> BasePart?)?, getResources: (() -> number)?)
-	networkRef   = network
-	cameraRef    = cameraModule
-	onAimChanged = aimChanged
-	ccBaseFn     = getCCBase
-	resourcesFn  = getResources
+	getCCBase: (() -> BasePart?)?, getResources: (() -> number)?,
+	hoverChanged: ((string?) -> ())?)
+	networkRef     = network
+	cameraRef      = cameraModule
+	onAimChanged   = aimChanged
+	ccBaseFn       = getCCBase
+	resourcesFn    = getResources
+	onHoverChanged = hoverChanged
 
 	RunService.Heartbeat:Connect(function()
 		if #ghosts == 0 then return end
@@ -442,6 +509,7 @@ function MotherInject.begin(ccId: string)
 	if onAimChanged then onAimChanged(true) end
 
 	local wasBlocked = blockedTarget()
+	local wasCdShown = -1
 	renderConn = RunService.RenderStepped:Connect(function()
 		local disc, core = markerDisc, markerCore
 		if not (disc and core) then return end
@@ -462,6 +530,14 @@ function MotherInject.begin(ccId: string)
 		local blocked = blockedTarget()
 		if blocked ~= wasBlocked then
 			wasBlocked = blocked
+			refreshReadout()
+		end
+
+		-- The readout only rebuilds on a change, so tick it whenever the second it is
+		-- printing rolls over.
+		local cdShown = math.ceil(cooldownLeft())
+		if cdShown ~= wasCdShown then
+			wasCdShown = cdShown
 			refreshReadout()
 		end
 		local col = blocked and BLOCK_COL or MARK_COL

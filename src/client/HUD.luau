@@ -37,9 +37,17 @@ local C           = UILib.C
 -- ── State ─────────────────────────────────────────────────────────────────────
 local resLabel:  TextLabel?
 local incLabel:  TextLabel?
+local popLabel:  TextLabel?
+-- The tinted pieces of the population glyph (a small figure). Recoloured together as
+-- the cap closes in, so the icon warns alongside the numbers.
+local popIcon:   { Frame }  = {}
 local selLabel:  TextLabel?
 
 local currentResources = 0
+-- Live army population and its hard cap (server-pushed). Every spawn -- bonfire summon,
+-- egg hatch, trained unit -- is silently refused at the cap, so the number is on the HUD.
+local currentPop    = 0
+local currentPopCap = 0
 local currentIncome    = 0
 local buildMenuOpen    = false
 
@@ -279,6 +287,37 @@ local function relayoutNodes()
 				n.startPos.Y.Scale, n.startPos.Y.Offset
 			)
 		end
+	end
+end
+
+-- ── Population display ────────────────────────────────────────────────────────
+-- Reads calm while there is room, warns as the cap closes in, and goes red the moment
+-- it is reached -- which is the only warning a player gets that a hatch was refused.
+local POP_OK   = C.TEXT
+local POP_WARN = Color3.fromRGB(255, 195,  45)
+local POP_FULL = Color3.fromRGB(255,  90,  90)
+
+local function popColor(): Color3
+	if currentPopCap <= 0 then return POP_OK end
+	if currentPop >= currentPopCap then return POP_FULL end
+	if currentPop >= currentPopCap * 0.85 then return POP_WARN end
+	return POP_OK
+end
+
+local function refreshPopDisplay()
+	if not popLabel then return end
+	local lbl = popLabel :: TextLabel
+	if currentPopCap <= 0 then
+		lbl.Text = ""
+		for _, piece in popIcon do piece.Visible = false end
+		return
+	end
+	local col = popColor()
+	lbl.Text      = currentPop .. " / " .. currentPopCap
+	lbl.TextColor3 = col
+	for _, piece in popIcon do
+		piece.Visible          = true
+		piece.BackgroundColor3 = col
 	end
 end
 
@@ -735,10 +774,18 @@ function HUD.create(): (Frame, TextButton)
 	local MAP_W = 148   -- minimap border width (MAP_SIZE 144 + 4)
 	local ROW_Y = -(MAP_W + 10 + 6)   -- bottom edge of the resource row (above the map)
 
+	-- Horizontal stops along that row, left to right. The first ~40px belong to the
+	-- minimap's [1] return-to-base button (built in MiniMap.luau against the same
+	-- inset-ignoring, same-scaled coordinate space), which anchors the left end of the
+	-- bottom bar; everything here starts clear of it.
+	local RES_CX      = 56    -- resource gem centre
+	local RES_LABEL_X = 72    -- resource number, left-aligned
+	local POP_CX      = 166   -- population glyph centre
+
 	-- Designed resource crystal: a faceted purple gem with a smaller cluster shard,
 	-- a lavender rim, a gradient body and a bright inner facet + highlight glint.
 	do
-		local CX, CY = 22, ROW_Y - 15   -- gem centre (row is 30px tall, anchored bottom)
+		local CX, CY = RES_CX, ROW_Y - 15   -- gem centre (row is 30px tall, anchored bottom)
 
 		-- Soft outer glow
 		local glow                      = Instance.new("Frame")
@@ -817,9 +864,9 @@ function HUD.create(): (Frame, TextButton)
 
 	local rLbl                      = Instance.new("TextLabel")
 	rLbl.Name                       = "ResLabel"
-	rLbl.Size                       = UDim2.fromOffset(86, 30)
+	rLbl.Size                       = UDim2.fromOffset(80, 30)
 	rLbl.AnchorPoint                = Vector2.new(0, 1)
-	rLbl.Position                   = UDim2.new(0, 40, 1, ROW_Y)
+	rLbl.Position                   = UDim2.new(0, RES_LABEL_X, 1, ROW_Y)
 	rLbl.BackgroundTransparency     = 1
 	rLbl.Text                       = "0"
 	rLbl.Font                       = Enum.Font.GothamBlack
@@ -832,6 +879,73 @@ function HUD.create(): (Frame, TextButton)
 	rLbl.ZIndex                     = 5
 	rLbl.Parent                     = mapSg
 	resLabel = rLbl
+
+	-- ── Population: a figure glyph + "alive / cap" ───────────────────────────
+	-- Sits in the same row as the resource count, one step to its right. The cap is a
+	-- hard refusal on the server (a nest whose egg is ready simply holds), so the player
+	-- needs to see it coming. The glyph is the standard supply read: a head over a pair
+	-- of shoulders, which says "bodies" at a glance where three abstract pips did not.
+	do
+		local PCX = POP_CX               -- glyph centre
+		local PCY = ROW_Y - 15           -- same vertical centre as the resource gem
+
+		-- Soft halo behind the figure, matching the resource gem's glow treatment.
+		local halo                      = Instance.new("Frame")
+		halo.Name                       = "PopGlow"
+		halo.Size                       = UDim2.fromOffset(28, 28)
+		halo.AnchorPoint                = Vector2.new(0.5, 0.5)
+		halo.Position                   = UDim2.new(0, PCX, 1, PCY)
+		halo.BackgroundColor3           = C.TEXT
+		halo.BackgroundTransparency     = 0.86
+		halo.BorderSizePixel            = 0
+		halo.ZIndex                     = 4
+		halo.Visible                    = false
+		halo.Parent                     = mapSg
+		UILib.corner(halo, 14)
+		-- Tinted and shown/hidden with the figure, so the whole mark warns as one.
+		table.insert(popIcon, halo)
+
+		-- head, shoulders, and a square-off strip that flattens the shoulders' underside
+		-- (a plain rounded rectangle would read as a pill, not a torso).
+		local pieces = {
+			{ name = "PopHead",     w =  9, h =  9, dy = -6.5, r = 5, z = 6 },
+			{ name = "PopBody",     w = 17, h = 11, dy =  4.0, r = 6, z = 6 },
+			{ name = "PopBodyFoot", w = 17, h =  5, dy =  7.0, r = 0, z = 6 },
+		}
+		for _, spec in pieces do
+			local f                     = Instance.new("Frame")
+			f.Name                      = spec.name
+			f.Size                      = UDim2.fromOffset(spec.w, spec.h)
+			f.AnchorPoint               = Vector2.new(0.5, 0.5)
+			f.Position                  = UDim2.new(0, PCX, 1, PCY + spec.dy)
+			f.BackgroundColor3          = C.TEXT
+			f.BackgroundTransparency    = 0.05
+			f.BorderSizePixel           = 0
+			f.ZIndex                    = spec.z
+			f.Visible                   = false
+			f.Parent                    = mapSg
+			if spec.r > 0 then UILib.corner(f, spec.r) end
+			table.insert(popIcon, f)
+		end
+
+		local pLbl                      = Instance.new("TextLabel")
+		pLbl.Name                       = "PopLabel"
+		pLbl.Size                       = UDim2.fromOffset(84, 30)
+		pLbl.AnchorPoint                = Vector2.new(0, 1)
+		pLbl.Position                   = UDim2.new(0, PCX + 14, 1, ROW_Y)
+		pLbl.BackgroundTransparency     = 1
+		pLbl.Text                       = ""
+		pLbl.Font                       = Enum.Font.GothamBold
+		pLbl.TextSize                   = 17
+		pLbl.TextColor3                 = C.TEXT
+		pLbl.TextStrokeTransparency     = 0.4
+		pLbl.TextStrokeColor3           = Color3.new(0, 0, 0)
+		pLbl.TextXAlignment             = Enum.TextXAlignment.Left
+		pLbl.TextYAlignment             = Enum.TextYAlignment.Center
+		pLbl.ZIndex                     = 5
+		pLbl.Parent                     = mapSg
+		popLabel = pLbl
+	end
 
 	-- ── Upgrades — small icon button at the top-right of the minimap ──────────
 	-- Opens the Workshop research panel. Hidden until the player earns/places the
@@ -1469,6 +1583,13 @@ function HUD.setResources(n: number)
 	updateAllNodes()
 end
 
+-- (units alive, cap) straight off the server's own counter.
+function HUD.setPopulation(n: number, cap: number)
+	currentPop    = n
+	currentPopCap = cap
+	refreshPopDisplay()
+end
+
 function HUD.setIncome(perMin: number)
 	currentIncome = perMin
 	refreshResDisplay()
@@ -1520,7 +1641,7 @@ function HUD.setHasResearch(fn: (string) -> boolean)
 end
 
 function HUD.setUpgradesVisible(_visible: boolean)
-	-- Upgrades button is hidden for now (its spot is used by the camera [1] button).
+	-- Upgrades button is hidden for now (the Workshop panel it opens is not in play).
 	if upgradeMapBtn then upgradeMapBtn.Visible = false end
 end
 
@@ -1655,6 +1776,11 @@ function HUD.wire(
 	-- Resource sync
 	network.onResourceSync(function(n: number)
 		HUD.setResources(n)
+	end)
+
+	-- Population sync (army size / cap)
+	network.onPopulationSync(function(n: number, cap: number)
+		HUD.setPopulation(n, cap)
 	end)
 
 	-- Selection display

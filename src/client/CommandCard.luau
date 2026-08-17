@@ -19,6 +19,7 @@
 	showMessage() — render a centered message (e.g. "Upgrades coming soon!").
 ]]
 
+local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
@@ -45,6 +46,12 @@ local TXT        = Color3.fromRGB(214, 224, 238)
 local TXT_DIM    = Color3.fromRGB(120, 134, 158)
 local HOTKEY_COL = Color3.fromRGB(228, 198, 120)
 
+-- Cooldown palette: the shade's leading edge, the printed seconds, and the ring that
+-- fires when the ability comes back up.
+local CD_EDGE  = Color3.fromRGB(150, 196, 255)
+local CD_TEXT  = Color3.fromRGB(226, 238, 255)
+local CD_READY = Color3.fromRGB(190, 226, 255)
+
 -- Monochrome palette for locked / unavailable options.
 local MONO_BG   = Color3.fromRGB(18, 18, 20)
 local MONO_LINE = Color3.fromRGB(64, 64, 70)
@@ -67,6 +74,12 @@ export type Slot = {
 	viewportFactory: (() -> ViewportFrame)?,
 	badge:           string?,
 	progress:        number?,
+	-- Ability cooldown. `cooldownUntil` is a workspace:GetServerTimeNow() timestamp (so it
+	-- needs no per-frame pushing from the panel) and `cooldownTotal` its full length, which
+	-- is what the sweep divides by. Set both, or neither. The card animates it from there
+	-- and fires a ready-pulse on the tile the moment it lapses.
+	cooldownUntil:   number?,
+	cooldownTotal:   number?,
 	desc:            string?,
 	hotkey:          string?,
 	onClick:         () -> (),
@@ -158,6 +171,14 @@ type Tile = {
 	label:    TextLabel,
 	track:    Frame,
 	fill:     Frame,
+	cdScrim:  Frame,
+	cdEdge:   Frame,
+	cdText:   TextLabel,
+	cdRing:   Frame,
+	cdRingStroke: UIStroke,
+	cdUntil:  number?,
+	cdTotal:  number?,
+	cdActive: boolean,
 	onClick:  (() -> ())?,
 	tip:      TipData?,
 	restColor: Color3,
@@ -221,6 +242,60 @@ local function flashTile(tile: Tile)
 	tile.iconScale.Scale = 1.28
 	TweenService:Create(tile.iconScale, FLASH_POP, { Scale = HOVER_ICON }):Play()
 end
+
+-- The ability came back up. A wash over the tile, an edge snap, an icon punch and a ring
+-- thrown outward: the same vocabulary as a successful press, so "ready again" reads as a
+-- small reward rather than the mere absence of a shade.
+local CD_RING_OUT = TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+local function readyPulse(tile: Tile)
+	flashTile(tile)
+
+	local ring   = tile.cdRing
+	local stroke = tile.cdRingStroke
+	ring.Size          = UDim2.fromScale(1, 1)
+	ring.Visible       = true
+	stroke.Color       = CD_READY
+	stroke.Thickness   = 2
+	stroke.Transparency = 0.05
+
+	TweenService:Create(ring,   CD_RING_OUT, { Size = UDim2.fromScale(1.42, 1.42) }):Play()
+	local fade = TweenService:Create(stroke, CD_RING_OUT, { Transparency = 1, Thickness = 0.5 })
+	fade.Completed:Once(function() ring.Visible = false end)
+	fade:Play()
+end
+
+-- Drives every tile carrying a live cooldown. Runs off the shared server clock, so the
+-- panel sets the window once and never has to re-render for the countdown.
+local function stepCooldowns()
+	local now = workspace:GetServerTimeNow()
+	for _, tile in tiles do
+		local untilT = tile.cdUntil
+		if untilT == nil then continue end
+
+		local left = untilT - now
+		if left <= 0 then
+			tile.cdUntil        = nil
+			tile.cdScrim.Visible = false
+			tile.cdText.Visible  = false
+			if tile.cdActive then
+				tile.cdActive = false
+				readyPulse(tile)
+			end
+		else
+			tile.cdActive        = true
+			local total          = tile.cdTotal or left
+			tile.cdScrim.Size    = UDim2.fromScale(1, math.clamp(left / math.max(total, 0.001), 0, 1))
+			tile.cdScrim.Visible = true
+			tile.cdText.Visible  = true
+			-- Whole seconds while there is time to read them, tenths in the last second so
+			-- the number is visibly moving as it lands.
+			tile.cdText.Text = left >= 1 and tostring(math.ceil(left)) or string.format("%.1f", left)
+		end
+	end
+end
+
+RunService.RenderStepped:Connect(stepCooldowns)
 
 local function makeTile(parent: Instance, index: number): Tile
 	local row = math.floor((index - 1) / COLS)
@@ -353,6 +428,62 @@ local function makeTile(parent: Instance, index: number): Tile
 	fill.Parent                    = track
 	UILib.corner(fill, 1)
 
+	-- ── Cooldown layers ───────────────────────────────────────────────────────
+	-- A dark shade covering the tile, whose height shrinks to nothing as the ability
+	-- recharges: the art fills back in from the bottom, which is the read every RTS/MOBA
+	-- player already has. A bright line rides the shade's lower edge so the wipe is
+	-- legible even in the last second, and the seconds left are printed over the middle.
+	local cdScrim                  = Instance.new("Frame")
+	cdScrim.Name                   = "CDScrim"
+	cdScrim.AnchorPoint            = Vector2.new(0, 0)
+	cdScrim.Position               = UDim2.fromScale(0, 0)
+	cdScrim.Size                   = UDim2.fromScale(1, 1)
+	cdScrim.BackgroundColor3       = Color3.fromRGB(4, 6, 11)
+	cdScrim.BackgroundTransparency = 0.32
+	cdScrim.BorderSizePixel        = 0
+	cdScrim.Visible                = false
+	cdScrim.ZIndex                 = 20
+	cdScrim.Parent                 = btn
+
+	local cdEdge                   = Instance.new("Frame")
+	cdEdge.Name                    = "CDEdge"
+	cdEdge.AnchorPoint             = Vector2.new(0, 1)
+	cdEdge.Position                = UDim2.fromScale(0, 1)
+	cdEdge.Size                    = UDim2.new(1, 0, 0, 2)
+	cdEdge.BackgroundColor3        = CD_EDGE
+	cdEdge.BackgroundTransparency  = 0.15
+	cdEdge.BorderSizePixel         = 0
+	cdEdge.ZIndex                  = 21
+	cdEdge.Parent                  = cdScrim
+
+	local cdText                   = Instance.new("TextLabel")
+	cdText.Name                    = "CDText"
+	cdText.Size                    = UDim2.fromScale(1, 1)
+	cdText.BackgroundTransparency  = 1
+	cdText.Font                    = Enum.Font.GothamBlack
+	cdText.TextColor3              = CD_TEXT
+	cdText.TextStrokeTransparency  = 0.35
+	cdText.TextStrokeColor3        = Color3.new(0, 0, 0)
+	cdText.Text                    = ""
+	cdText.Visible                 = false
+	cdText.ZIndex                  = 22
+	cdText.Parent                  = btn
+
+	-- Ready-pulse ring: snaps to the tile's edge and expands outward as it fades, so the
+	-- ability coming back up is caught in peripheral vision.
+	local cdRing                   = Instance.new("Frame")
+	cdRing.Name                    = "CDRing"
+	cdRing.AnchorPoint             = Vector2.new(0.5, 0.5)
+	cdRing.Position                = UDim2.fromScale(0.5, 0.5)
+	cdRing.Size                    = UDim2.fromScale(1, 1)
+	cdRing.BackgroundTransparency  = 1
+	cdRing.BorderSizePixel         = 0
+	cdRing.Visible                 = false
+	cdRing.ZIndex                  = 22
+	cdRing.Parent                  = wrapper   -- on the wrapper: it grows past the tile edge
+	UILib.corner(cdRing, 4)
+	local cdRingStroke             = UILib.stroke(cdRing, CD_READY, 2)
+
 	-- Success-press bloom: a bright full-tile wash on top that fades out. Hidden at rest
 	-- and non-interactive (plain Frame — doesn't steal the button's clicks).
 	local flash                    = Instance.new("Frame")
@@ -362,7 +493,7 @@ local function makeTile(parent: Instance, index: number): Tile
 	flash.BackgroundTransparency   = 1
 	flash.BorderSizePixel          = 0
 	flash.Visible                  = false
-	flash.ZIndex                   = 19
+	flash.ZIndex                   = 23   -- above the cooldown shade, so a pulse washes over it
 	flash.Parent                   = btn
 	UILib.corner(flash, 3)
 
@@ -370,6 +501,8 @@ local function makeTile(parent: Instance, index: number): Tile
 		wrapper = wrapper, btn = btn, stroke = stroke, holder = holder,
 		iconScale = iconScale, flash = flash,
 		hotkey = hotkey, badge = badge, label = label, track = track, fill = fill,
+		cdScrim = cdScrim, cdEdge = cdEdge, cdText = cdText,
+		cdRing = cdRing, cdRingStroke = cdRingStroke, cdActive = false,
 		onClick = nil, tip = nil, restColor = BORDER, restBg = TILE_BG,
 		locked = false, enabled = true,
 	}
@@ -476,6 +609,20 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 	tile.hotkey.Text      = slot.hotkey or ""
 	tile.hotkey.TextColor3 = locked and MONO_TXT or HOTKEY_COL
 
+	-- Cooldown window. Adopting it here (rather than each frame) keeps the countdown off
+	-- the re-render path: the panel names the window once and stepCooldowns runs it out.
+	-- cdActive is only ever cleared by stepCooldowns, so the ready-pulse still fires on a
+	-- tile that was re-rendered mid-cooldown.
+	tile.cdUntil = slot.cooldownUntil
+	tile.cdTotal = slot.cooldownTotal
+	if slot.cooldownUntil == nil then
+		tile.cdActive        = false
+		tile.cdScrim.Visible = false
+		tile.cdText.Visible  = false
+	else
+		tile.cdText.TextSize = math.floor(tilePx * 0.34)
+	end
+
 	if slot.progress ~= nil then
 		tile.track.Visible = true
 		tile.fill.Size     = UDim2.new(math.clamp(slot.progress, 0, 1), 0, 1, 0)
@@ -493,12 +640,25 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 	}
 end
 
+-- Drop a tile's cooldown outright. Tiles are pooled and reused by whatever page opens
+-- next, so a hidden one must not keep counting down someone else's ability -- or fire a
+-- ready-pulse on a page nobody is looking at.
+local function clearTileCooldown(t: Tile)
+	t.cdUntil            = nil
+	t.cdTotal            = nil
+	t.cdActive           = false
+	t.cdScrim.Visible    = false
+	t.cdText.Visible     = false
+	t.cdRing.Visible     = false
+end
+
 local function hideAllTiles()
 	for i = 1, SLOTS do
 		local t = tiles[i]
 		t.wrapper.Visible = false
 		t.onClick = nil
 		t.tip = nil
+		clearTileCooldown(t)
 		setHolderViewport(t, nil)
 	end
 end
@@ -755,6 +915,7 @@ local function renderPage(page: Page)
 			t.wrapper.Visible = false
 			t.onClick = nil
 			t.tip = nil
+			clearTileCooldown(t)
 			setHolderViewport(t, nil)
 		end
 	end

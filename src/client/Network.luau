@@ -44,6 +44,13 @@ function Network.onResourceSync(fn: (number) -> ())
 	RemoteHandler.get(Config.REMOTES.SyncResources).OnClientEvent:Connect(fn)
 end
 
+-- Live population readout: (units alive, cap). Pushed by UnitManager whenever the
+-- local player's unit count moves, so the HUD can show how much room is left before
+-- new spawns (bonfire summons, egg hatches) start being refused.
+function Network.onPopulationSync(fn: (number, number) -> ())
+	RemoteHandler.get(Config.REMOTES.PopulationSync).OnClientEvent:Connect(fn)
+end
+
 function Network.onUnitSpawned(fn: (string, number, Vector3) -> ())
 	RemoteHandler.get(Config.REMOTES.UnitSpawned).OnClientEvent:Connect(fn)
 end

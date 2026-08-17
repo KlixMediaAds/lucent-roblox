@@ -337,6 +337,57 @@ end
 
 -- ── Divider ───────────────────────────────────────────────────────────────────
 
+-- ── Ready pip ─────────────────────────────────────────────────────────────────
+-- The little floating diamond that marks a Mother's egg as ripe: a soft breathing halo
+-- with a bright core, both rotated 45°. Shared so the world overlay (EggReadyIcon) and
+-- anywhere else that wants the same "this is ready / you have this" mark are literally
+-- the same design rather than two drifting copies of it.
+--
+-- Returns the halo, which is what the caller animates: driving the pulse from the caller
+-- lets a whole colony of pips breathe off ONE clock instead of each running its own.
+export type ReadyPip = { halo: Frame, core: Frame }
+
+local PIP_HALO = Color3.fromRGB(255, 150, 70)    -- the egg's own warm orange
+local PIP_CORE = Color3.fromRGB(255, 226, 190)
+
+function UILib.readyPip(parent: GuiObject, zIndex: number?, haloColor: Color3?, coreColor: Color3?): ReadyPip
+	local z = zIndex or 15
+
+	local halo                  = Instance.new("Frame")
+	halo.Name                   = "Halo"
+	halo.Size                   = UDim2.fromScale(1, 1)
+	halo.Position               = UDim2.fromScale(0.5, 0.5)
+	halo.AnchorPoint            = Vector2.new(0.5, 0.5)
+	halo.Rotation               = 45
+	halo.BackgroundColor3       = haloColor or PIP_HALO
+	halo.BackgroundTransparency = 0.62
+	halo.BorderSizePixel        = 0
+	halo.ZIndex                 = z
+	halo.Parent                 = parent
+	local hc = Instance.new("UICorner"); hc.CornerRadius = UDim.new(0, 5); hc.Parent = halo
+
+	local core                  = Instance.new("Frame")
+	core.Name                   = "Pip"
+	core.Size                   = UDim2.fromScale(0.46, 0.46)
+	core.Position               = UDim2.fromScale(0.5, 0.5)
+	core.AnchorPoint            = Vector2.new(0.5, 0.5)
+	core.Rotation               = 45
+	core.BackgroundColor3       = coreColor or PIP_CORE
+	core.BorderSizePixel        = 0
+	core.ZIndex                 = z + 1
+	core.Parent                 = parent
+	local pc = Instance.new("UICorner"); pc.CornerRadius = UDim.new(0, 3); pc.Parent = core
+
+	return { halo = halo, core = core }
+end
+
+-- One breath of the pip, given a 0..1 pulse. Kept here with the builder so the motion
+-- travels with the look.
+function UILib.pulseReadyPip(pip: ReadyPip, pulse: number)
+	pip.halo.Size                   = UDim2.fromScale(0.82 + 0.26 * pulse, 0.82 + 0.26 * pulse)
+	pip.halo.BackgroundTransparency = 0.5 + 0.28 * (1 - pulse)
+end
+
 function UILib.divider(parent: Instance, yOff: number, xPad: number?, zIndex: number?): Frame
 	local xp                 = xPad or 10
 	local d                  = Instance.new("Frame")

@@ -65,18 +65,26 @@ local nestLauncherBusy: { [string]: boolean } = {}  -- LampreyNest id → a laun
 
 -- Hollowed Mother "Egg Sacs" upgrade state, per Command Center (Mother) id.
 local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs purchases (0–MAX)
--- Persistent nests planted by the Egg Sacs upgrade, one per purchase. A nest arrives with a
--- dormant egg already in it; the egg only starts growing and breathing once the player picks
--- the unit it should keep alive (see incubateSacEgg), and it is spent the moment that unit
--- hatches. From then on the nest sits empty and grows a fresh egg only when its unit dies.
--- Each nest is a clickable spawner that keeps exactly one such unit alive; eggId doubles as
--- the "deployer" id used to alive-track that unit.
+-- Persistent nests planted by the Egg Sacs upgrade, one per purchase. Each nest is an
+-- ON-DEMAND spawner, not a standing order:
+--
+--   planted → grows for EGG_GROW_TIME → RIPE and waiting → player picks a creature →
+--   shell carries it for EGG_HATCH_TIME → creature climbs out, shell spent → regrows → ripe
+--
+-- Nothing hatches on its own and a nest remembers no creature between hatches: every hatch
+-- is a fresh choice made at the moment it is taken.
+--
+-- `ripeAt` is the os.clock() the growing egg finishes at (nil once it has) and `ready` is
+-- whether it is sitting ripe and can be ordered right now; `hatchAt`/`hatching` are the
+-- deadline and the creature for an order already placed. Exactly one of the three phases is
+-- live at a time. The egg part mirrors `ready` in an "EggReady" attribute and the creature
+-- in flight in "SpawnType", so clients can read a colony's state without asking.
 -- `parentId`/`dir`/`numChildren` describe this egg's place in the tentacle tree: its parent
 -- node (nil = grown from the Mother), its outward growth direction (XZ unit), and how many
 -- children have branched off it (used to fan the next sibling into its own direction).
--- `baseY` is the top of the egg's nest slab: the egg swells while it incubates, so it is
+-- `baseY` is the top of the egg's nest slab: the egg swells while it grows, so it is
 -- re-seated on that Y every frame instead of growing symmetrically about its center.
-type SacEgg = { egg: BasePart, unitType: string?, spawnAt: number?, parentId: string?, dir: Vector3, numChildren: number, baseY: number }
+type SacEgg = { egg: BasePart, ripeAt: number?, ready: boolean, hatchAt: number?, hatching: string?, parentId: string?, dir: Vector3, numChildren: number, baseY: number }
 local eggSacEggs:       { [string]: { [string]: SacEgg } } = {}  -- Mother id → eggId → egg state
 local eggSacEggCounter  = 0
 
@@ -128,12 +136,26 @@ local playerCCId:       { [number]: string  } = {}  -- userId → their CC build
 type InjectOrder = { target: Vector3, phase: string, wasRooted: boolean, plant: Model? }  -- phase: "walk" | "inject"
 local injectOrders: { [string]: InjectOrder } = {}
 
+-- Take her out of the injection pose wherever an order is abandoned rather than finished.
+local function clearInjectPose(ccId: string)
+	local data = buildingData[ccId]
+	if data and data.base and data.base.Parent then
+		data.base:SetAttribute("Injecting", false)
+	end
+end
+
 -- Shift-clicked spots waiting behind the active order, oldest first. She works through
 -- them one after another without rooting back down in between; `wasRooted` rides along
 -- on the running order, so she only settles once the last wound is made.
 type InjectQueued = { target: Vector3, plant: Model? }
 local injectQueues: { [string]: { InjectQueued } } = {}
 local MAX_INJECT_QUEUE = 8
+
+-- ccId → the workspace:GetServerTimeNow() moment this Mother's spike is usable again.
+-- Injecting costs nothing now, so this is the whole limiter. The same timestamp is
+-- stamped on her base as an "InjectReadyAt" attribute, which replicates, so every client
+-- can run the countdown on the INJECT tile without asking the server for it.
+local injectReadyAt: { [string]: number } = {}
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -172,6 +194,22 @@ local function injectPlantFolder(): Folder
 	return f
 end
 
+-- Clear any inject plants a structure is about to be dropped on, wild or planted. Same
+-- idea as felling the forest under a footprint; plants are scenery too, so they just go.
+local function clearPlantsAround(pos: Vector3, radius: number)
+	local folder = workspace:FindFirstChild("InjectPlants")
+	if not folder then return end
+	local r2 = radius * radius
+	for _, child in folder:GetChildren() do
+		if child:IsA("Model") then
+			local p  = child:GetPivot().Position
+			local dx = p.X - pos.X
+			local dz = p.Z - pos.Z
+			if dx * dx + dz * dz <= r2 then child:Destroy() end
+		end
+	end
+end
+
 -- The wound itself: a purple bloom at the point where the spike goes in.
 local function injectBurst(pos: Vector3)
 	local flash        = Instance.new("Part")
@@ -194,9 +232,9 @@ local function injectBurst(pos: Vector3)
 end
 
 -- The spike goes into one of her own plants: it bursts and gives up whatever it was
--- growing. A spire lets a knot of Leeches out; a pod cluster is planted over as Lamprey
--- Nests. The plant is spent either way, so it comes down first.
-local function harvestInjectPlant(owner: any, plant: Model, origin: Vector3)
+-- growing. A spire lets a knot of Leeches out; a pod cluster comes up as more of her own
+-- egg nests. The plant is spent either way, so it comes down first.
+local function harvestInjectPlant(ccId: string, owner: any, plant: Model, origin: Vector3)
 	local info = InjectPlants.injectInfo(plant)
 	local kind = info and info.kind
 	plant:Destroy()
@@ -221,27 +259,82 @@ local function harvestInjectPlant(owner: any, plant: Model, origin: Vector3)
 		return
 	end
 
+	if kind == "glands" then
+		-- Called through the module table for the same reason the nests below are: the
+		-- planter needs createBuilding, which is declared much further down this file.
+		BuildingManager.plantInjectGland(ccId, origin, Config.MOTHER_INJECT_PLANT_GLANDS)
+		return
+	end
+
 	if kind == "nests" then
-		-- Read straight off Config rather than buildingSize(), which is declared below.
-		local size  = Config.LAMPREY_NEST_SIZE
-		local clear = math.max(size.X, size.Z) * 0.5 + 2
-		local ring  = math.max(size.X, size.Z) + 3
-		for i = 1, Config.MOTHER_INJECT_PLANT_NESTS do
-			local baseA = ((i - 1) / Config.MOTHER_INJECT_PLANT_NESTS) * math.pi * 2
-			-- Walk the ring outwards until the footprint has room, so two nests out of one
-			-- plant never land inside each other or on top of anything already standing.
-			for attempt = 0, 7 do
-				local a  = baseA + attempt * 0.5
-				local r  = ring + attempt * 2
-				local px = origin.X + math.cos(a) * r
-				local pz = origin.Z + math.sin(a) * r
-				if not BuildingManager.blocksMovement(px, pz, clear) then
-					local id = BuildingManager.morphStructureForPlayer(owner,
-						Vector3.new(px, surfaceAt(px, pz), pz), "LampreyNest")
-					if id then break end
-				end
-			end
+		-- Her own egg nests, the same ones the Egg Sacs purchase plants: tentacled out of
+		-- the node tree around her, each one a clickable spawner. Called through the module
+		-- table because the planter itself is declared much further down this file.
+		BuildingManager.plantInjectEggNests(ccId, Config.MOTHER_INJECT_PLANT_NESTS)
+	end
+end
+
+-- Is `target` clear enough of standing plants to take a spike? Every plant counts, whoever
+-- grew it: a rival's growth occupies the ground just as much as her own.
+local function groundClearForInject(target: Vector3): boolean
+	local folder = workspace:FindFirstChild("InjectPlants")
+	if not folder then return true end
+	local r2 = Config.MOTHER_INJECT_CLEAR * Config.MOTHER_INJECT_CLEAR
+	for _, child in folder:GetChildren() do
+		if not child:IsA("Model") then continue end
+		local p  = child:GetPivot().Position
+		local dx = p.X - target.X
+		local dz = p.Z - target.Z
+		if dx * dx + dz * dz < r2 then return false end
+	end
+	return true
+end
+
+-- Seconds until this Mother's spike is usable again; 0 when she is ready.
+local function injectCooldownLeft(ccId: string): number
+	local ready = injectReadyAt[ccId]
+	if not ready then return 0 end
+	return math.max(0, ready - workspace:GetServerTimeNow())
+end
+
+-- How many Spike Glands this owner has standing. Counted live off buildingData rather
+-- than tallied, so a gland shot down stops shortening her cooldown the moment it dies and
+-- there is no bookkeeping to leak.
+local function glandCount(owner: any): number
+	local n = 0
+	for _, d in buildingData do
+		if d.buildingType == "Gland" and d.owner == owner and not d.isConstructing then
+			n += 1
 		end
+	end
+	return n
+end
+
+-- Restate the spike's current window length on every Mother this owner has. Called when
+-- the gland count moves (one raised, one shot down), so the INJECT tile can name the real
+-- number without waiting for the next injection to stamp it.
+local function refreshInjectCooldownAttr(owner: any)
+	if not owner then return end
+	local cd = Config.injectCooldown(glandCount(owner))
+	for _, d in buildingData do
+		if d.buildingType == "CommandCenter" and d.owner == owner and d.base.Parent then
+			d.base:SetAttribute("InjectCooldown", cd)
+		end
+	end
+end
+
+-- Put the spike on cooldown, starting now. Both the moment it comes back AND the length
+-- of the window are stamped on her base: the client needs the length to draw the sweep at
+-- the right fraction, and glands make it a moving number.
+local function startInjectCooldown(ccId: string)
+	local data = buildingData[ccId]
+	local cd   = Config.injectCooldown(data and glandCount(data.owner) or 0)
+	if cd <= 0 then return end
+	local ready         = workspace:GetServerTimeNow() + cd
+	injectReadyAt[ccId] = ready
+	if data and data.base.Parent then
+		data.base:SetAttribute("InjectReadyAt", ready)
+		data.base:SetAttribute("InjectCooldown", cd)
 	end
 end
 
@@ -250,7 +343,7 @@ end
 -- was aimed at). Runs on its own thread (it waits out the injection).
 local function runInjection(ccId: string, order: InjectOrder)
 	local data = buildingData[ccId]
-	if not data then injectOrders[ccId] = nil; injectQueues[ccId] = nil; return end
+	if not data then injectOrders[ccId] = nil; injectQueues[ccId] = nil; clearInjectPose(ccId); return end
 
 	local groundY = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(order.target.X, order.target.Z)) or 0
 	local origin  = Vector3.new(order.target.X, groundY, order.target.Z)
@@ -265,30 +358,63 @@ local function runInjection(ccId: string, order: InjectOrder)
 		end
 	end
 
+	-- The clock starts HERE, as the spike goes in -- not when the order was given. Her
+	-- walk can be most of a minute, and counting it as cooldown meant the tile recovered
+	-- while she was still on her way to the wound that was supposed to have cost it.
+	--
+	-- The wound that STARTS a run finds the clock already at zero (ordering it is what
+	-- required that), so this waits for nothing. Wounds stacked behind it on the queue do
+	-- wait, which is what paces a run to one wound per window.
+	local wait = injectCooldownLeft(ccId)
+	if wait > 0 then
+		task.wait(wait)
+		-- The run can be called off from under her while she waits (a hand-issued move
+		-- order, a re-root), and she can die standing there.
+		if injectOrders[ccId] ~= order then return end
+		if not data.base.Parent then
+			injectOrders[ccId] = nil
+			injectQueues[ccId] = nil
+			clearInjectPose(ccId)
+			return
+		end
+	end
+	startInjectCooldown(ccId)
+
+	-- Replicated so every client animates the brace (MotherLegs reads this attribute),
+	-- not just whoever ordered it.
+	data.base:SetAttribute("Injecting", true)
 	injectBurst(origin)
 	task.wait(Config.MOTHER_INJECT_DURATION)
+	if data.base.Parent then data.base:SetAttribute("Injecting", false) end
 
 	-- She may have died mid-injection; the ground still keeps what she put in it.
 	local plant = order.plant
 	if plant then
 		-- Someone (or a queued order of her own) already burst it: this spike finds
 		-- nothing, and nothing grows in its place.
-		if plant.Parent then harvestInjectPlant(data.owner, plant, origin) end
+		if plant.Parent then harvestInjectPlant(ccId, data.owner, plant, origin) end
 	else
 		local folder   = injectPlantFolder()
 		local variants = InjectPlants.VARIANTS
 		local seed     = rng:NextInteger(1, 1000000)
 		local count    = Config.MOTHER_INJECT_PLANTS
 		for i = 1, count do
+			local variant = variants[((i - 1) % #variants) + 1]
 			local a  = ((i - 1) / count) * math.pi * 2 + rng:NextNumber(-0.4, 0.4)
 			local d  = Config.MOTHER_INJECT_SPREAD * rng:NextNumber(0.45, 1.0)
-			local px = origin.X + math.cos(a) * d
-			local pz = origin.Z + math.sin(a) * d
-			local py = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz)) or groundY
-			local grown = InjectPlants.grow(folder, Vector3.new(px, py, pz),
-				variants[((i - 1) % #variants) + 1], seed + i)
-			-- Only her own plants take her spike, so each one remembers whose it is.
-			grown:SetAttribute("OwnerUserId", data.owner.UserId)
+			-- The ring is only where each plant WANTS to come up. Angular jitter can put
+			-- two of them almost on top of each other (and the ground may already be
+			-- growing something), so findSpot walks it out to where there is actually
+			-- room. No room at all means this one simply does not come up, which is
+			-- better than a plant growing through its neighbour.
+			local px, pz = InjectPlants.findSpot(folder,
+				origin.X + math.cos(a) * d, origin.Z + math.sin(a) * d, variant, rng)
+			if px and pz then
+				local py = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz)) or groundY
+				local grown = InjectPlants.grow(folder, Vector3.new(px, py, pz), variant, seed + i)
+				-- Only her own plants take her spike, so each one remembers whose it is.
+				grown:SetAttribute("OwnerUserId", data.owner.UserId)
+			end
 		end
 	end
 
@@ -327,6 +453,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
+	if buildingType == "Gland"         then return Config.GLAND_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -907,6 +1034,12 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		base.Transparency = 1
 		UnitVisuals.buildEngineeringPostDecor(model, CFrame.new(position), player.TeamColor, true)
 
+	elseif buildingType == "Gland" then
+		-- Spike Gland: invisible logic box + the shared organ decor. Never placed by hand;
+		-- it only ever comes up out of a frond the Mother injected.
+		base.Transparency = 1
+		UnitVisuals.buildGlandDecor(model, CFrame.new(position), player.TeamColor, true)
+
 	else
 		-- Generic fallback: keep the team-coloured base visible. No placeable type reaches
 		-- here now that the Barracks is gone, but stay safe for any unknown type.
@@ -934,6 +1067,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			or  (math.max(size.X, size.Z) / 2 + 6)
 		forestManagerRef.clearAround(position, clearR)
 	end
+	clearPlantsAround(position, math.max(size.X, size.Z) / 2 + 3)
 
 	local maxHp    = (Config.BUILDING_HP :: any)[buildingType] or 400
 	local buildTime: number
@@ -2079,6 +2213,7 @@ function BuildingManager.resetAll()
 	ccMoveTargets            = {}
 	injectOrders             = {}
 	injectQueues             = {}
+	injectReadyAt            = {}
 	playerCCId               = {}
 	local plants = workspace:FindFirstChild("InjectPlants")
 	if plants then plants:Destroy() end
@@ -3230,41 +3365,6 @@ local function growTentacle(parent: Instance, ccId: string, from: Vector3, to: V
 end
 
 -- Emoji shown on top of an egg for the unit it is set to hatch.
-local EGG_UNIT_ICON: { [string]: string } = {
-	Lamprey = "🐍", Hagfish = "🪱", Roller = "⚙", Needler = "🦂",
-}
-
--- Show/refresh (or hide, when unitType is nil) the little icon floating over an egg
--- that tells the player which unit that egg keeps alive.
-local function eggSacUpdateIcon(egg: BasePart, unitType: string?)
-	local bb = egg:FindFirstChild("SpawnIcon") :: BillboardGui?
-	if not unitType then
-		if bb then bb.Enabled = false end
-		return
-	end
-	if not bb then
-		bb = Instance.new("BillboardGui")
-		bb.Name           = "SpawnIcon"
-		bb.Size           = UDim2.fromOffset(34, 34)
-		bb.StudsOffset    = Vector3.new(0, 2.7, 0)
-		bb.AlwaysOnTop    = true
-		bb.LightInfluence = 0
-		bb.MaxDistance    = 240
-		bb.Parent         = egg
-		local lbl         = Instance.new("TextLabel")
-		lbl.Name          = "Icon"
-		lbl.Size          = UDim2.fromScale(1, 1)
-		lbl.BackgroundTransparency = 1
-		lbl.Font          = Enum.Font.GothamBold
-		lbl.TextScaled    = true
-		lbl.TextColor3    = Color3.fromRGB(255, 255, 255)
-		lbl.Parent        = bb
-	end
-	bb.Enabled = true
-	local lbl = bb:FindFirstChild("Icon") :: TextLabel?
-	if lbl then lbl.Text = EGG_UNIT_ICON[unitType] or "?" end
-end
-
 local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
 
 -- A freshly-planted nest is not empty: a dormant egg sits in its socket from the moment
@@ -3427,10 +3527,9 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 
 	buildEggNest(clump, nestPos)
 
-	-- The egg itself. It sits dormant in the socket from the moment the nest is revealed,
-	-- incubateSacEgg swells it once a unit is picked, and after that creature hatches the
-	-- shell is spent — the nest stays empty until the unit dies and a new egg grows.
-	-- Built at dormant size; revealEggClump fades it in.
+	-- The egg itself. It sits as a bud in the socket from the moment the nest is revealed,
+	-- growSacEgg swells it to ripeness over EGG_GROW_TIME, and it then waits there until
+	-- the player spends it on a creature. Built at dormant size; revealEggClump fades it in.
 	local egg         = Instance.new("Part")
 	egg.Name          = "Egg"
 	egg.Shape         = Enum.PartType.Ball
@@ -3450,8 +3549,8 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 	eggLight.Range      = 10
 	eggLight.Parent     = egg
 
-	-- Incubation progress bar, same look as the Mother's spat eggs. Hidden until the egg
-	-- starts growing its unit (see incubateSacEgg).
+	-- Growth progress bar, same look as the Mother's spat eggs. Runs while the egg ripens
+	-- (see growSacEgg) and comes down once it is ready to spend.
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "EggProgress"
 	bb.Size             = UDim2.fromOffset(48, 7)
@@ -3641,8 +3740,134 @@ local function revealEggClump(egg: BasePart, nestPos: Vector3, owner: any)
 	buildEggGrass(clump, nestPos, nestPos.Y)
 end
 
--- Size an incubating egg swells to: half the size of the creature growing inside it, never
--- smaller than a plain egg (so a Needler's egg still reads as an egg).
+-- Where an egg starts: a bud in the goo, before it packs itself out.
+local EGG_SEED = EGG_FULL * 0.34
+
+-- Mark an egg ripe (or spent) both in state and on the part, so clients can pick the
+-- usable ones out of a colony without asking the server.
+local function setEggReady(entry: SacEgg, ready: boolean)
+	entry.ready = ready
+	if entry.egg.Parent then entry.egg:SetAttribute("EggReady", ready) end
+end
+
+-- Grow a nest's egg to ripeness over Config.EGG_GROW_TIME. The egg forms in the goo as a
+-- small bud, the client sprouts the same enveloping tentacles a spat Mother egg gets, a
+-- progress bar fills, and the egg breathes while it swells. When the clock runs out it
+-- STAYS: a ripe egg sits in its nest waiting to be spent, where the old incubation
+-- collapsed the shell the instant its creature was due.
+local function growSacEgg(entry: SacEgg)
+	local egg = entry.egg
+	-- The previous brood's shell may still be collapsing; wait it out rather than skip this one.
+	for _ = 1, 40 do
+		if not eggIncubating[egg] then break end
+		task.wait(0.05)
+	end
+	if not egg.Parent or eggIncubating[egg] or not entry.ripeAt then return end
+	eggIncubating[egg] = true
+	local clump = egg.Parent :: Model
+	local light = egg:FindFirstChildWhichIsA("PointLight")
+	local bar   = egg:FindFirstChild("EggProgress") :: BillboardGui?
+	local barBg = bar and bar:FindFirstChild("Bg")
+	local fill  = barBg and barBg:FindFirstChild("Fill") :: Frame?
+	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
+	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
+
+	if bar then bar.Enabled = true end
+	if fill then fill.Size = UDim2.fromScale(0, 1) end
+
+	-- A nest that has never hatched still has its dormant egg in the socket, so growth
+	-- picks up from that size. A regrow after a hatch has no shell left, so it wells back
+	-- up out of the goo as a fresh bud.
+	local startSize = if egg.Transparency < 1 then egg.Size else EGG_SEED
+	egg.Size     = startSize
+	egg.Position = Vector3.new(egg.Position.X, entry.baseY + startSize.Y * 0.5, egg.Position.Z)
+	TweenService:Create(egg, TweenInfo.new(0.4), { Transparency = 0.1 }):Play()
+	if goo then TweenService:Create(goo, TweenInfo.new(0.4), { Transparency = 0.25 }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.4), { Brightness = 3 }):Play() end
+
+	-- Tentacles erupt from the egg's base and climb it, hugging its live size (MotherEggBody).
+	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg)
+
+	-- Progress is read off the deadline, so bar and swell stay in step even if this
+	-- animation started a beat late.
+	local dur = Config.EGG_GROW_TIME
+	while entry.ripeAt and egg.Parent do
+		local now     = os.clock()
+		local left    = (entry.ripeAt :: number) - now
+		if left <= 0 then break end
+		local k       = math.clamp(1 - left / dur, 0, 1)
+		local breathe = 1 + 0.06 * math.sin(now * 4.5)          -- same beat as a spat Mother egg
+		local size    = startSize:Lerp(EGG_FULL, k) * breathe
+		egg.Size      = size
+		egg.Position  = Vector3.new(egg.Position.X, entry.baseY + size.Y * 0.5, egg.Position.Z)
+		if light then light.Brightness = 2.5 + 2.5 * (0.5 + 0.5 * math.sin(now * 4.5)) end
+		if fill then fill.Size = UDim2.fromScale(k, 1) end
+		if bar  then bar.StudsOffset  = Vector3.new(0, size.Y * 0.62, 0) end
+		task.wait(1 / 20)
+	end
+
+	eggIncubating[egg] = nil
+	if not egg.Parent then return end
+	-- Cancelled out from under us (the nest was destroyed, or a hatch raced in): leave the
+	-- shell exactly as the canceller left it.
+	if not entry.ripeAt then return end
+
+	-- Ripe. The shell settles at full size and stays lit; the growth bar has nothing left
+	-- to report, so it comes down and the egg itself is the signal.
+	entry.ripeAt = nil
+	egg.Size     = EGG_FULL
+	egg.Position = Vector3.new(egg.Position.X, entry.baseY + EGG_FULL.Y * 0.5, egg.Position.Z)
+	egg.Transparency = 0.1
+	if bar then bar.Enabled = false end
+	if light then light.Brightness = 4 end
+	setEggReady(entry, true)
+end
+
+-- Start (or restart) an egg's growth clock.
+local function beginEggGrowth(entry: SacEgg)
+	setEggReady(entry, false)
+	entry.ripeAt = os.clock() + Config.EGG_GROW_TIME
+	task.spawn(growSacEgg, entry)
+end
+
+-- Spend a ripe egg: the shell collapses back into the goo and the tentacles let go,
+-- leaving an empty nest that immediately starts growing the next one.
+local function spendSacEgg(entry: SacEgg)
+	local egg = entry.egg
+	setEggReady(entry, false)
+	entry.ripeAt = nil
+	if not egg.Parent then return end
+
+	local clump    = egg.Parent :: Model
+	local light    = egg:FindFirstChildWhichIsA("PointLight")
+	local bar      = egg:FindFirstChild("EggProgress") :: BillboardGui?
+	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
+	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
+
+	eggIncubating[egg] = true   -- held through the collapse so the regrow cannot fight it
+	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg, true)   -- retract tentacles
+	if bar   then bar.Enabled = false end
+	if light then TweenService:Create(light, TweenInfo.new(0.3), { Brightness = 0 }):Play() end
+	if goo then TweenService:Create(goo, TweenInfo.new(0.5), { Transparency = 0.55 }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = NEST_GOO_REST }):Play() end
+
+	local COLLAPSE = 0.3
+	TweenService:Create(egg, TweenInfo.new(COLLAPSE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size         = EGG_SEED,
+		Position     = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z),
+		Transparency = 1,
+	}):Play()
+
+	task.spawn(function()
+		task.wait(COLLAPSE)
+		eggIncubating[egg] = nil
+		if egg.Parent then beginEggGrowth(entry) end
+	end)
+end
+
+-- How big the shell swells to while it carries a creature: half that creature's size,
+-- never smaller than a plain egg (so a Needler's shell still reads as an egg). A Roller
+-- visibly strains its shell where a Needler barely fills it.
 local function sacEggTargetSize(unitType: string?): Vector3
 	local def = unitType and (Config.UNIT_TYPES :: any)[unitType]
 	if not def then return EGG_FULL end
@@ -3654,85 +3879,87 @@ local function sacEggTargetSize(unitType: string?): Vector3
 	)
 end
 
--- Where an egg starts: a bud in the goo, before the creature packs it out.
-local EGG_SEED = EGG_FULL * 0.34
+-- How long a finished shell waits before trying again when the spawn was refused (the
+-- owner is at their unit cap). The creature is already paid for, so it is held rather than
+-- thrown away: short enough that it turns up as soon as a slot frees, long enough that a
+-- capped colony is not asking every frame.
+local EGG_HATCH_RETRY = 1.0
 
--- Run the Mother-egg incubation on a planted Egg Sac egg. The egg forms in the nest's goo as
--- a small bud, the client sprouts the same enveloping tentacles a spat Mother egg gets, a
--- progress bar fills over the spawn delay, and the egg breathes while swelling toward half
--- the size of the creature inside it. Ends the moment `entry.spawnAt` clears (the hatch, or
--- its unit turning up alive): the tentacles let go and the spent egg sinks away, leaving an
--- empty nest until the next brood.
-local function incubateSacEgg(entry: SacEgg)
-	local egg = entry.egg
-	-- The previous brood's shell may still be collapsing; wait it out rather than skip this one.
-	for _ = 1, 40 do
-		if not eggIncubating[egg] then break end
-		task.wait(0.05)
-	end
-	if not egg.Parent or eggIncubating[egg] or not entry.spawnAt then return end
-	eggIncubating[egg] = true
-	local clump = egg.Parent :: Model
-	local light = egg:FindFirstChildWhichIsA("PointLight")
-	local bar   = egg:FindFirstChild("EggProgress") :: BillboardGui?
-	local barBg = bar and bar:FindFirstChild("Bg")
-	local fill  = barBg and barBg:FindFirstChild("Fill") :: Frame?
-	local icon  = egg:FindFirstChild("SpawnIcon") :: BillboardGui?
-	local goo      = clump:FindFirstChild("NestGoo") :: BasePart?
+-- Carry an ordered creature to term, then let it out. The shell swells toward the thing
+-- inside it while a progress bar runs down EGG_HATCH_TIME, and only then does the unit
+-- appear -- picking a creature is an ORDER, not a delivery.
+--
+-- `refund` hands the price back if the shell is destroyed before the creature is out; the
+-- player paid at the moment of ordering.
+local function hatchSacEgg(entry: SacEgg, player: any, refund: () -> ())
+	local egg      = entry.egg
+	local unitType = entry.hatching
+	if not unitType then return end
+
+	local clump    = egg.Parent :: Model
+	local light    = egg:FindFirstChildWhichIsA("PointLight")
+	local bar      = egg:FindFirstChild("EggProgress") :: BillboardGui?
+	local barBg    = bar and bar:FindFirstChild("Bg")
+	local fill     = barBg and barBg:FindFirstChild("Fill") :: Frame?
+	local goo      = clump and clump:FindFirstChild("NestGoo") :: BasePart?
 	local gooLight = goo and goo:FindFirstChildWhichIsA("PointLight")
 
-	if bar then bar.Enabled = true end
+	eggIncubating[egg] = true
+	if bar  then bar.Enabled = true end
 	if fill then fill.Size = UDim2.fromScale(0, 1) end
+	if goo  then TweenService:Create(goo, TweenInfo.new(0.3), { Transparency = 0.2 }):Play() end
 
-	-- Where the swell starts. A nest that has never hatched still has its dormant egg in
-	-- the socket, so growth picks up from that size — the egg the player was looking at is
-	-- the one that starts moving. A respawn after the previous creature hatched has no egg
-	-- left, so it wells back up out of the goo as a fresh bud.
-	local startSize = if egg.Transparency < 1 then egg.Size else EGG_SEED
-	egg.Size     = startSize
-	egg.Position = Vector3.new(egg.Position.X, entry.baseY + startSize.Y * 0.5, egg.Position.Z)
-	TweenService:Create(egg, TweenInfo.new(0.4), { Transparency = 0.1 }):Play()
-	if goo then TweenService:Create(goo, TweenInfo.new(0.4), { Transparency = 0.25 }):Play() end
-	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.4), { Brightness = 3 }):Play() end
+	local startSize = egg.Size
+	local target    = sacEggTargetSize(unitType)
+	local dur       = Config.EGG_HATCH_TIME
 
-	-- Tentacles erupt from the egg's base and climb it, hugging its live size (MotherEggBody).
-	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg)
-
-	-- Progress is read off the hatch deadline, so the bar and the swell stay in step even if
-	-- this animation started a beat late, or the player re-picks the unit mid-incubation
-	-- (which resets the deadline to the new creature's gestation).
-	while entry.spawnAt and egg.Parent do
-		local now     = os.clock()
-		local dur     = Config.eggSpawnTime(entry.unitType)
-		local k       = math.clamp(1 - ((entry.spawnAt or now) - now) / dur, 0, 1)
-		local breathe = 1 + 0.06 * math.sin(now * 4.5)          -- same beat as a spat Mother egg
-		local size    = startSize:Lerp(sacEggTargetSize(entry.unitType), k) * breathe
+	while entry.hatchAt and egg.Parent do
+		local now  = os.clock()
+		local left = (entry.hatchAt :: number) - now
+		if left <= 0 then break end
+		local k       = math.clamp(1 - left / dur, 0, 1)
+		local breathe = 1 + 0.07 * math.sin(now * 5.2)   -- a harder beat than ripening: something is in there
+		local size    = startSize:Lerp(target, k) * breathe
 		egg.Size      = size
 		egg.Position  = Vector3.new(egg.Position.X, entry.baseY + size.Y * 0.5, egg.Position.Z)
-		if light then light.Brightness = 2.5 + 2.5 * (0.5 + 0.5 * math.sin(now * 4.5)) end
+		if light then light.Brightness = 3 + 3 * (0.5 + 0.5 * math.sin(now * 5.2)) end
 		if fill then fill.Size = UDim2.fromScale(k, 1) end
-		if bar  then bar.StudsOffset  = Vector3.new(0, size.Y * 0.62, 0) end
-		if icon then icon.StudsOffset = Vector3.new(0, size.Y * 0.62 + 1.3, 0) end
-		task.wait(1 / 20)   -- gestations run up to 30s, so keep the replicated churn modest
+		if bar  then bar.StudsOffset = Vector3.new(0, size.Y * 0.62, 0) end
+		task.wait(1 / 20)
 	end
 
-	-- Spent: the creature is out (or never came), so the shell collapses back into the goo
-	-- and the tentacles let go, leaving the nest empty.
-	if not egg.Parent then eggIncubating[egg] = nil; return end
-	RemoteHandler.get(Config.REMOTES.MotherEggLand):FireAllClients(egg, true)   -- retract tentacles
-	if bar  then bar.Enabled = false end
-	if icon then icon.StudsOffset = Vector3.new(0, 2.7, 0) end
-	if light then TweenService:Create(light, TweenInfo.new(0.3), { Brightness = 0 }):Play() end
-	if goo then TweenService:Create(goo, TweenInfo.new(0.5), { Transparency = 0.55 }):Play() end
-	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = NEST_GOO_REST }):Play() end
-	local COLLAPSE = 0.3
-	TweenService:Create(egg, TweenInfo.new(COLLAPSE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size         = EGG_SEED,
-		Position     = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z),
-		Transparency = 1,
-	}):Play()
-	task.wait(COLLAPSE)
-	eggIncubating[egg] = nil   -- held through the collapse so a fresh brood cannot fight it
+	-- The nest was destroyed out from under the order: the creature is never coming, so
+	-- the player gets their money back.
+	if not egg.Parent or not entry.hatchAt then
+		eggIncubating[egg] = nil
+		if entry.hatchAt then refund() end
+		entry.hatchAt, entry.hatching = nil, nil
+		return
+	end
+
+	-- Term. Hold at full and keep knocking if the owner is capped; bursting the shell on a
+	-- creature that cannot be born would throw away both the wait and the price.
+	local p = egg.Position
+	local uid: string? = nil
+	while egg.Parent do
+		uid = unitManagerRef and unitManagerRef.spawnUnitNow(player, Vector3.new(p.X, 0, p.Z), unitType)
+		if uid then break end
+		task.wait(EGG_HATCH_RETRY)
+	end
+
+	eggIncubating[egg] = nil
+	entry.hatchAt, entry.hatching = nil, nil
+	if egg.Parent then egg:SetAttribute("SpawnType", nil) end
+
+	if not uid then
+		-- Only reachable if the shell went away while we were knocking.
+		refund()
+		return
+	end
+
+	spawnEggHatchVFX(p)
+	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(p, p, "LampreyEggHatch")
+	spendSacEgg(entry)
 end
 
 -- Plant `toSlot - fromSlot` new eggs (one per purchase) as nodes of the tentacle tree —
@@ -3745,8 +3972,9 @@ local function plantEggSacNests(base: BasePart, ccId: string, ownerId: number, f
 	for _ = fromSlot + 1, toSlot do
 		local pos, origin, parentId, dir = planEgg(ccId, base)
 		local eggId, egg = buildEggClump(container, ownerId, pos, parentId)
-		eggs[eggId] = { egg = egg, unitType = nil, spawnAt = nil, parentId = parentId, dir = dir,
-			numChildren = 0, baseY = pos.Y + NEST_FLOOR_Y }   -- eggs sit in the goo pool
+		local entry: SacEgg = { egg = egg, ripeAt = nil, ready = false, parentId = parentId,
+			dir = dir, numChildren = 0, baseY = pos.Y + NEST_FLOOR_Y }   -- eggs sit in the goo pool
+		eggs[eggId] = entry
 		if parentId and eggs[parentId] then eggs[parentId].numChildren += 1 end
 
 		task.spawn(function()
@@ -3754,35 +3982,57 @@ local function plantEggSacNests(base: BasePart, ccId: string, ownerId: number, f
 			local cc = buildingData[ccId]
 			if cc and egg.Parent then
 				revealEggClump(egg, pos, cc.owner)
+				-- The nest is in the ground: its first egg starts growing straight away.
+				beginEggGrowth(entry)
 			end
 		end)
 	end
 end
 
--- Assign (or change) the unit an egg keeps alive. Only affects the NEXT spawn — a unit
--- from a previous choice already alive is left alone until it dies. Returns whether set.
-function BuildingManager.assignEggUnit(player: any, eggId: string, unitType: string): boolean
-	if type(eggId) ~= "string" or type(unitType) ~= "string" then return false end
-	if unitType ~= "Lamprey" and unitType ~= "Hagfish"
-		and unitType ~= "Roller" and unitType ~= "Needler" then return false end
+-- The only creatures a nest will hatch. The client sends a bare string and hatching is
+-- FREE, so without this a crafted request would spawn anything in Config.UNIT_TYPES at no
+-- cost -- a Broodmother out of a 40-resource nest.
+local EGG_HATCHABLE: { [string]: boolean } = {
+	Lamprey = true, Hagfish = true, Roller = true, Needler = true,
+}
+
+-- Order `unitType` out of one ripe egg. The price is charged now and the shell starts
+-- carrying that creature; it climbs out EGG_HATCH_TIME later (see hatchSacEgg), and only
+-- then is the shell spent and regrown. Refused if the creature is not one a nest hatches,
+-- the egg is not ripe (already growing, or already carrying an order), it is not this
+-- player's, or they cannot pay -- and a refusal leaves the egg untouched and still ripe.
+-- Returns whether an order was actually placed.
+function BuildingManager.hatchEgg(player: any, eggId: string, unitType: string): boolean
+	if not unitManagerRef then return false end
+	if not EGG_HATCHABLE[unitType] then return false end
+	local typeDef = (Config.UNIT_TYPES :: any)[unitType]
+	if not typeDef then return false end
+
 	for ccId, eggs in eggSacEggs do
 		local entry = eggs[eggId]
-		if entry then
-			local data = buildingData[ccId]
-			if not data or data.owner ~= player then return false end
-			local prev = entry.unitType
-			entry.unitType = unitType
-			-- Re-picking while the nest is already incubating switches what is growing in
-			-- there, so restart the clock on the new creature's gestation.
-			if entry.spawnAt and prev ~= unitType then
-				entry.spawnAt = os.clock() + Config.eggSpawnTime(unitType)
-			end
-			if entry.egg.Parent then
-				entry.egg:SetAttribute("SpawnType", unitType)
-				eggSacUpdateIcon(entry.egg, unitType)
-			end
-			return true
+		if not entry then continue end
+		local data = buildingData[ccId]
+		if not data or data.owner ~= player then return false end
+		if not entry.ready or entry.hatching or not entry.egg.Parent then return false end
+
+		-- The egg is the timer; the creature still costs what it costs. Charged at the
+		-- moment of ordering, and handed back by hatchSacEgg if the shell is destroyed
+		-- before the creature is out.
+		local cost = typeDef.cost or 0
+		if cost > 0 then
+			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return false end
 		end
+		local function refund()
+			if cost > 0 and resourceManagerRef then resourceManagerRef.add(player, cost) end
+		end
+
+		-- Ordered: no longer available to order again, and now visibly carrying something.
+		setEggReady(entry, false)
+		entry.hatching = unitType
+		entry.hatchAt  = os.clock() + Config.EGG_HATCH_TIME
+		entry.egg:SetAttribute("SpawnType", unitType)
+		task.spawn(hatchSacEgg, entry, player, refund)
+		return true
 	end
 	return false
 end
@@ -3790,6 +4040,39 @@ end
 -- Purchase one Egg Sacs upgrade for `player`'s Mother `ccId`: charges the cost, bumps
 -- the level, plants the new pair of nests, and stamps the level on the model (an
 -- attribute the client MotherPanel reads to render the tile). Returns whether it bought.
+-- Plant `count` extra egg nests on a Mother out of band, with no purchase behind them and
+-- no level spent: an injected pod cluster comes up as her nests. They join the same tentacle
+-- tree and the same eggSacEggs bookkeeping as bought ones, so they click and hatch identically.
+-- Raise `count` Spike Glands where an injected frond stood. Real buildings, owned by the
+-- Mother's owner and standing on their own: they can be shot down, which is the only thing
+-- holding the inject → frond → gland → faster inject loop in check.
+function BuildingManager.plantInjectGland(ccId: string, origin: Vector3, count: number)
+	local data = buildingData[ccId]
+	if not data or not data.owner then return end
+	local size = Config.GLAND_SIZE
+	for i = 1, math.max(1, count) do
+		-- One gland lands on the spot; any beyond the first ring around it so they do not
+		-- grow through each other.
+		local px, pz = origin.X, origin.Z
+		if i > 1 then
+			local a = ((i - 2) / math.max(1, count - 1)) * math.pi * 2
+			px += math.cos(a) * (size.X + 2)
+			pz += math.sin(a) * (size.Z + 2)
+		end
+		-- Instant: the spike forced it up, there is no crew building it.
+		skipNextConstruction = true
+		createBuilding(data.owner, Vector3.new(px, 0, pz), "Gland")
+		skipNextConstruction = false
+	end
+	refreshInjectCooldownAttr(data.owner)
+end
+
+function BuildingManager.plantInjectEggNests(ccId: string, count: number)
+	local data = buildingData[ccId]
+	if not data or not data.base or not data.base.Parent then return end
+	plantEggSacNests(data.base, ccId, (data.owner and data.owner.UserId) or 0, 0, count)
+end
+
 function BuildingManager.upgradeEggSacsForPlayer(player: any, ccId: string): boolean
 	local data = buildingData[ccId]
 	if not data or data.buildingType ~= "CommandCenter" then return false end
@@ -3899,6 +4182,7 @@ function BuildingManager.damage(id: string, amount: number)
 
 	local wasCC       = data.buildingType == "CommandCenter"
 	local wasMonument = data.buildingType == "Monument"
+	local wasGland    = data.buildingType == "Gland"
 	local owner       = data.owner
 	buildingData[id]      = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
 	turretTimers[id]      = nil
@@ -3943,6 +4227,11 @@ function BuildingManager.damage(id: string, amount: number)
 			playerCCId[owner.UserId] = nil
 			if onCCDestroyedCb then onCCDestroyedCb(owner) end
 		end
+	end
+
+	if wasGland then
+		-- One fewer organ feeding her spike: her cooldown goes straight back up.
+		refreshInjectCooldownAttr(owner)
 	end
 
 	if wasMonument then
@@ -4389,34 +4678,13 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
-		-- ── Mother Egg Sacs: keep each egg's chosen unit alive ──────────────────
-		-- Every egg the Mother has planted is a clickable spawner. Once the player assigns
-		-- it a unit, it keeps exactly one of that unit alive, respawning it a short beat
-		-- after it dies. Free (the Egg Sacs upgrade paid).
-		local eggNow = os.clock()
-		for id, eggs in eggSacEggs do
-			local data = buildingData[id]
-			if not data or data.isConstructing then continue end
+		-- ── Mother Egg Sacs: reap destroyed nests ──────────────────────────────
+		-- Nothing hatches on a timer any more: a nest's egg grows on its own clock
+		-- (growSacEgg) and then waits to be spent by hand, so all this loop has left to do
+		-- is drop the bookkeeping for eggs whose nest is gone.
+		for _, eggs in eggSacEggs do
 			for eggId, entry in eggs do
-				if not entry.egg.Parent then eggs[eggId] = nil; continue end
-				if not entry.unitType then continue end
-				local alive = unitManagerRef and unitManagerRef.getDeployerAliveCount(eggId) > 0
-				if alive then
-					entry.spawnAt = nil
-				elseif unitManagerRef then
-					if not entry.spawnAt then
-						-- Fresh incubation: the creature's own gestation, animated end to end.
-						entry.spawnAt = eggNow + Config.eggSpawnTime(entry.unitType)
-						task.spawn(incubateSacEgg, entry)
-					end
-					if eggNow >= entry.spawnAt then
-						local p = entry.egg.Position
-						spawnEggHatchVFX(p)
-						RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(p, p, "LampreyEggHatch")
-						unitManagerRef.spawnForDeployer(eggId, data.owner, Vector3.new(p.X, 0, p.Z), entry.unitType)
-						entry.spawnAt = nil
-					end
-				end
+				if not entry.egg.Parent then eggs[eggId] = nil end
 			end
 		end
 
@@ -4604,6 +4872,24 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			end
 		end
 
+		-- ── "She is on it" flag ───────────────────────────────────────────────
+		-- Now that the cooldown only starts at the spike, the stretch between the click
+		-- and the wound would otherwise read as a fully idle tile. This says she is
+		-- already working, so a press during it is understood as re-aiming her rather
+		-- than as ordering a second injection.
+		--
+		-- Derived here each tick rather than stamped at every mutation: an order can be
+		-- called off from half a dozen places (a move order, a re-root, her death, the run
+		-- running dry) and a flag set by hand would eventually be left standing by one of
+		-- them.
+		for ccId, d in buildingData do
+			if d.buildingType ~= "CommandCenter" or not d.base.Parent then continue end
+			local busy = injectOrders[ccId] ~= nil
+			if (d.base:GetAttribute("InjectBusy") == true) ~= busy then
+				d.base:SetAttribute("InjectBusy", busy)
+			end
+		end
+
 	end)
 
 	-- ── MobilizeCC remote ────────────────────────────────────────────────
@@ -4690,15 +4976,17 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if not isHollowed(player) then return end
 		if not data.base.Parent then return end
 
-		-- A plant target is only as good as the plant: it has to be one of hers, still
-		-- standing, and one of the kinds that actually gives something up. The client
-		-- sends the model itself, so the spot comes off the plant, not off the cursor.
+		-- A plant target is only as good as the plant: it has to be hers or wild (no
+		-- owner, so grown by WildPlants rather than planted by a rival), still standing,
+		-- and one of the kinds that actually gives something up. The client sends the
+		-- model itself, so the spot comes off the plant, not off the cursor.
 		local plant: Model? = nil
 		if plantInst ~= nil then
 			if typeof(plantInst) ~= "Instance" or not plantInst:IsA("Model") then return end
 			local folder = workspace:FindFirstChild("InjectPlants")
 			if not folder or plantInst.Parent ~= folder then return end
-			if plantInst:GetAttribute("OwnerUserId") ~= player.UserId then return end
+			local owner = plantInst:GetAttribute("OwnerUserId")
+			if owner ~= nil and owner ~= player.UserId then return end
 			local info = InjectPlants.injectInfo(plantInst)
 			if not (info and info.kind) then return end
 			plant = plantInst
@@ -4708,6 +4996,12 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		local target = Vector3.new(pos.X, 0, pos.Z)
 		local here   = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 		if (target - here).Magnitude > Config.MOTHER_INJECT_RANGE then return end
+
+		-- Bare ground has to BE bare. Without this the same clearing takes spike after
+		-- spike and grows into a thicket; the client draws the very radius being tested
+		-- (the hologram disc), so a refusal here is one the player already saw coming.
+		-- Aiming at a plant skips it: that is a deliberate target, not a crowded patch.
+		if not plant and not groundClearForInject(target) then return end
 
 		local wantQueue = queued == true
 		local order     = injectOrders[ccId]
@@ -4719,11 +5013,11 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		local queue = injectQueues[ccId]
 		if wantQueue and order and queue and #queue >= MAX_INJECT_QUEUE then return end
 
-		-- Every wound costs, but nudging the spot of an order already under way is free.
-		local cost = Config.MOTHER_INJECT_COST
-		if cost > 0 and (wantQueue or not order) then
-			if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
-		end
+		-- Injecting is free; the spike's cooldown is the limiter, and it is only checked
+		-- when STARTING a run. Nudging the spot of an order already under way, or stacking
+		-- another wound behind it, is laying out a plan rather than driving a spike --
+		-- each queued wound waits out the cooldown itself when she gets there.
+		if not order and injectCooldownLeft(ccId) > 0 then return end
 
 		if wantQueue and order then
 			if not queue then queue = {}; injectQueues[ccId] = queue end
@@ -5015,12 +5309,13 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		BuildingManager.upgradeEggSacsForPlayer(player, ccId)
 	end)
 
-	-- ── AssignEgg remote: pick which unit one of a Mother's eggs keeps alive ─────
-	-- The egg starts hatching that unit and respawns it whenever it dies. Changing the
-	-- choice only takes effect once the currently-hatched unit dies.
+	-- ── AssignEgg remote: spend a ripe egg on a creature ────────────────────────
+	-- The creature comes out at once and the shell is spent; the nest then regrows its
+	-- egg. Nothing is remembered between hatches, so this is a one-shot order rather than
+	-- a standing choice. hatchEgg does every check (ownership, ripeness, unit cap).
 	RemoteHandler.get(Config.REMOTES.AssignEgg).OnServerEvent:Connect(function(player, eggId, unitType)
 		if type(eggId) ~= "string" or type(unitType) ~= "string" then return end
-		BuildingManager.assignEggUnit(player, eggId, unitType)
+		BuildingManager.hatchEgg(player, eggId, unitType)
 	end)
 
 	-- ── TEST building remotes (separate Supply + Spawn Rate upgrades) ───────────

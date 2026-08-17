@@ -256,6 +256,146 @@ local function addHagfishPreview(parent: Instance, body: BasePart)
 	end
 end
 
+-- Preview-only static Roller: the armored ball the live unit rolls on, held still.
+-- Mirrors RollerBody's geometry and palette (axle runs left-to-right, plates and blunt
+-- spikes wrapped in latitude bands, one stoic eye on each side pole) so the thumbnail is
+-- the same creature the client animator draws.
+local function addRollerPreview(parent: Instance, body: BasePart)
+	local C_BODY  = Color3.fromRGB(48, 40, 56)
+	local C_PLATE = Color3.fromRGB(66, 57, 78)
+	local C_PLATE2= Color3.fromRGB(40, 34, 48)
+	local C_SPIKE = Color3.fromRGB(96, 32, 66)
+	local C_EYE   = Color3.fromRGB(255, 120, 60)
+	local C_LEG   = Color3.fromRGB(70, 50, 78)
+
+	local R  = 5.0
+	local RS = R * 0.92
+
+	local function ap(sz: Vector3, cf: CFrame, color: Color3, material: Enum.Material,
+		shape: Enum.PartType?): Part
+		local p    = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Size     = sz
+		p.CFrame   = cf
+		p.Color    = color
+		p.Material = material
+		return p
+	end
+
+	-- Core shell.
+	ap(Vector3.new(RS * 2, RS * 2, RS * 2), CFrame.new(), C_BODY, Enum.Material.SmoothPlastic,
+		Enum.PartType.Ball)
+
+	-- Armour plates + spikes in latitude bands. phi = 0 is the equator; the poles (±X)
+	-- carry the eyes, so the bands tilt toward them rather than around a flat tread.
+	for _, lat in { { phi = 0.0, n = 11 }, { phi = math.rad(34), n = 9 }, { phi = -math.rad(34), n = 9 } } do
+		for i = 1, lat.n do
+			local a  = (i / lat.n) * math.pi * 2
+			local dir = Vector3.new(math.sin(lat.phi), math.cos(lat.phi) * math.sin(a),
+				math.cos(lat.phi) * math.cos(a))
+			ap(Vector3.new(1.5, 1.15, 0.55), CFrame.lookAt(dir * (RS * 0.99), dir * (RS * 2)),
+				C_PLATE, Enum.Material.Metal)
+		end
+	end
+	for _, lat in { { phi = 0.0, n = 10 }, { phi = math.rad(30), n = 6 }, { phi = -math.rad(30), n = 6 } } do
+		for i = 1, lat.n do
+			local a   = ((i - 0.5) / lat.n) * math.pi * 2
+			local dir = Vector3.new(math.sin(lat.phi), math.cos(lat.phi) * math.sin(a),
+				math.cos(lat.phi) * math.cos(a))
+			ap(Vector3.new(0.5, 0.5, 1.5), CFrame.lookAt(dir * (RS + 0.5), dir * (RS * 3)),
+				C_SPIKE, Enum.Material.Metal)
+		end
+	end
+
+	-- One narrow eye per side pole, sunk in a darker socket. These never spin on the live
+	-- unit, which is what makes it read as a creature rather than a wheel.
+	for _, sx in { -1, 1 } do
+		ap(Vector3.new(0.5, 2.3, 2.3), CFrame.new(sx * RS * 0.97, 0, 0) * CFrame.Angles(0, 0, math.pi / 2),
+			C_PLATE2, Enum.Material.Metal, Enum.PartType.Cylinder)
+		ap(Vector3.new(0.45, 1.25, 0.5), CFrame.new(sx * (RS + 0.16), 0, 0), C_EYE, Enum.Material.Neon)
+	end
+
+	-- Blunt mouth on the leading face (−Z), and stubby legs tucked under the shell.
+	ap(Vector3.new(1.9, 0.5, 0.7), CFrame.new(0, -RS * 0.42, -RS * 0.93), C_SPIKE,
+		Enum.Material.SmoothPlastic)
+	for i = 1, 4 do
+		local sx = (i <= 2) and -1 or 1
+		local sz = (i % 2 == 0) and 1 or -1
+		ap(Vector3.new(0.55, 1.5, 0.55),
+			CFrame.new(sx * RS * 0.5, -RS * 0.82, sz * RS * 0.42) * CFrame.Angles(0, 0, math.rad(sx * 14)),
+			C_LEG, Enum.Material.SmoothPlastic)
+	end
+
+	local _ = body
+end
+
+-- Preview-only static Needler: the spherical body, its two amber side eyes, and the one
+-- long two-jointed insect arm folded in its resting reach. Mirrors NeedlerBody.
+local function addNeedlerPreview(parent: Instance, body: BasePart)
+	local C_FLESH  = Color3.fromRGB(58, 34, 42)
+	local C_BELLY  = Color3.fromRGB(44, 25, 32)
+	local C_CHITIN = Color3.fromRGB(80, 47, 41)
+	local C_JOINT  = Color3.fromRGB(52, 30, 28)
+	local C_CLAW   = Color3.fromRGB(158, 100, 62)
+	local C_SOCKET = Color3.fromRGB(30, 18, 22)
+	local C_SCLERA = Color3.fromRGB(235, 150, 78)
+	local C_PUPIL  = Color3.fromRGB(18, 9, 12)
+
+	local BODY_R = 1.5
+	local CY     = -0.6   -- body centre, relative to the pivot block's middle
+
+	local function ap(sz: Vector3, cf: CFrame, color: Color3, material: Enum.Material,
+		shape: Enum.PartType?): Part
+		local p    = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Size     = sz
+		p.CFrame   = cf
+		p.Color    = color
+		p.Material = material
+		return p
+	end
+
+	-- Body: a sphere with a heavier underside lobe.
+	ap(Vector3.new(BODY_R * 2, BODY_R * 2, BODY_R * 2), CFrame.new(0, CY, 0), C_FLESH,
+		Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	ap(Vector3.new(BODY_R * 1.7, BODY_R * 1.2, BODY_R * 1.7), CFrame.new(0, CY - BODY_R * 0.55, 0),
+		C_BELLY, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+
+	-- Amber eyes on each side of the front, each recessed into a dark socket.
+	for _, sx in { -1, 1 } do
+		local eye = Vector3.new(sx * BODY_R * 0.92, CY + BODY_R * 0.12, -BODY_R * 0.34)
+		ap(Vector3.new(1.22, 1.22, 1.22), CFrame.new(eye), C_SOCKET, Enum.Material.SmoothPlastic,
+			Enum.PartType.Ball)
+		ap(Vector3.new(0.98, 0.98, 0.98), CFrame.new(eye + Vector3.new(sx * 0.1, 0, -0.12)),
+			C_SCLERA, Enum.Material.Neon, Enum.PartType.Ball)
+		ap(Vector3.new(0.42, 0.42, 0.42), CFrame.new(eye + Vector3.new(sx * 0.2, 0, -0.5)),
+			C_PUPIL, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	end
+
+	-- The arm: shoulder → elbow → point, posed mid-reach so its two joints are legible.
+	local shoulder = Vector3.new(0, CY + BODY_R * 0.78, -BODY_R * 0.15)
+	local elbow    = shoulder + Vector3.new(0.4, 3.5, -3.4)
+	local tip      = elbow    + Vector3.new(0.2, -3.9, -3.9)
+
+	local function limb(a: Vector3, b: Vector3, thick: number, color: Color3)
+		local mid = (a + b) / 2
+		local len = (b - a).Magnitude
+		local p   = ap(Vector3.new(thick, thick, len), CFrame.lookAt(mid, b), color, Enum.Material.SmoothPlastic)
+		return p
+	end
+
+	ap(Vector3.new(0.95, 0.95, 0.95), CFrame.new(shoulder), C_JOINT, Enum.Material.SmoothPlastic,
+		Enum.PartType.Ball)
+	limb(shoulder, elbow, 0.71, C_CHITIN)
+	ap(Vector3.new(0.8, 0.8, 0.8), CFrame.new(elbow), C_JOINT, Enum.Material.SmoothPlastic,
+		Enum.PartType.Ball)
+	limb(elbow, tip, 0.51, C_CHITIN)
+	ap(Vector3.new(0.36, 0.36, 1.1), CFrame.lookAt(tip, tip + (tip - elbow).Unit), C_CLAW,
+		Enum.Material.SmoothPlastic)
+
+	local _ = body
+end
+
 -- Preview-only static Broodmother: a towering tripod standing on three tentacle
 -- legs, crowned with a lumpy sea-anemone mass ringed in lamprey-like fang clusters
 -- (each facing its own way) and topped with a fan of swaying tendrils. The live
@@ -372,6 +512,7 @@ local function buildingSize(buildingType: string): Vector3
 	if buildingType == "Deployer"      then return Config.BONFIRE_SIZE end
 	if buildingType == "TEST"          then return Config.TEST_SIZE end
 	if buildingType == "EngineeringPost" then return Config.ENGINEERING_POST_SIZE end
+	if buildingType == "Gland"         then return Config.GLAND_SIZE end
 	return Config.BUILDING_SIZE
 end
 
@@ -525,6 +666,84 @@ function UnitVisuals.buildMotherDecor(parent: Instance, groundCF: CFrame, teamCo
 	-- ── Egg vent at the gaster tip ───────────────────────────────────────────────
 	dp("EggVent", Vector3.new(1.0, 2.8, 2.8),
 		CFrame.new(0, 2.2, 12.4) * CFrame.Angles(0, math.rad(90), 0), cChitin, Enum.Material.Slate, Enum.PartType.Cylinder)
+end
+
+-- ── Spike Gland ───────────────────────────────────────────────────────────────
+-- The structure a frond bursts into when the Mother injects it: a swollen fleshy sac
+-- slung in a cage of chitin ribs, venting into a short nozzle at the top. It reads as an
+-- organ rather than a building, which is the point -- it is feeding her spike, and every
+-- one standing shortens her cooldown.
+--
+-- Shared by createBuilding (live, withFX) and buildBuildingPreview (thumbnail) so the
+-- two can never drift. groundCF is the ground-level centre of the footprint (Y = 0).
+function UnitVisuals.buildGlandDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
+	local cHide   = Color3.fromRGB(36, 20, 26)   -- dark maroon-black flesh (matches the Mother)
+	local cSac    = Color3.fromRGB(104, 44, 72)  -- the sac itself, lighter and wetter
+	local cChitin = Color3.fromRGB(12, 10, 14)   -- near-black ribs
+	local cGlow   = teamColor.Color              -- fluid light through the skin
+
+	local function dp(name: string, size: Vector3, localCF: CFrame, color: Color3,
+		material: Enum.Material, shape: Enum.PartType?): Part
+		local p = Instance.new("Part")
+		p.Name       = name
+		if shape then (p :: any).Shape = shape end
+		p.Size       = size
+		p.CFrame     = groundCF * localCF
+		p.Color      = color
+		p.Material   = material
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CanQuery   = false
+		p.CastShadow = false
+		p.Parent     = parent
+		return p
+	end
+
+	-- Root mound it grew out of, half sunk into the soil.
+	local mound   = dp("Mound", Vector3.new(9.0, 4.4, 9.0), CFrame.new(0, 0.9, 0),
+		cHide, Enum.Material.Slate, Enum.PartType.Ball)
+	local _ = mound
+
+	-- The sac: three stacked ovoids, widest in the middle, so it bulges.
+	dp("SacLower", Vector3.new(6.6, 5.0, 6.6), CFrame.new(0, 3.4, 0), cSac, Enum.Material.Slate, Enum.PartType.Ball)
+	dp("SacMid",   Vector3.new(7.4, 5.6, 7.4), CFrame.new(0, 5.2, 0), cSac, Enum.Material.Slate, Enum.PartType.Ball)
+	dp("SacUpper", Vector3.new(5.4, 4.4, 5.4), CFrame.new(0, 7.0, 0), cSac, Enum.Material.Slate, Enum.PartType.Ball)
+
+	-- Chitin ribs slung up over the sac, meeting at the neck. Named so the client could
+	-- animate a swallow later without hunting for them.
+	for i = 1, 5 do
+		local a = (i / 5) * math.pi * 2
+		local x = math.cos(a)
+		local z = math.sin(a)
+		dp("Rib" .. i, Vector3.new(0.7, 7.6, 1.5),
+			CFrame.new(x * 3.3, 4.6, z * 3.3) * CFrame.Angles(0, -a, 0) * CFrame.Angles(0, 0, math.rad(13)),
+			cChitin, Enum.Material.Slate)
+		-- Foot where the rib bites into the mound.
+		dp("RibFoot" .. i, Vector3.new(1.5, 1.5, 1.5), CFrame.new(x * 3.9, 1.5, z * 3.9),
+			cChitin, Enum.Material.Slate, Enum.PartType.Ball)
+	end
+
+	-- Fluid light showing through the skin, and the vent it feeds out of.
+	for _, off in { Vector3.new(2.4, 5.6, 1.4), Vector3.new(-2.2, 4.4, -1.8),
+	                Vector3.new(0.6, 6.8, -2.6), Vector3.new(-1.4, 3.4, 2.4) } do
+		dp("GlandGlow", Vector3.new(1.1, 1.1, 1.1), CFrame.new(off), cGlow,
+			Enum.Material.Neon, Enum.PartType.Ball)
+	end
+
+	dp("Neck",  Vector3.new(2.2, 2.0, 2.2), CFrame.new(0, 8.8, 0), cChitin, Enum.Material.Slate)
+	local vent = dp("Vent", Vector3.new(1.6, 0.5, 1.6), CFrame.new(0, 9.9, 0), cGlow,
+		Enum.Material.Neon, Enum.PartType.Cylinder)
+	-- The cylinder's axis is local X, so stand it up.
+	vent.CFrame = groundCF * (CFrame.new(0, 9.9, 0) * CFrame.Angles(0, 0, math.pi / 2))
+
+	if withFX then
+		local light      = Instance.new("PointLight")
+		light.Color      = cGlow
+		light.Brightness = 3
+		light.Range      = 22
+		light.Shadows    = false
+		light.Parent     = vent
+	end
 end
 
 function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
@@ -1434,6 +1653,14 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		body.Transparency = 1   -- live unit + preview draw the worm, not the pivot block
 		addLeechPreview(parent, false)
 	end
+	if unitType == "Roller" then
+		body.Transparency = 1   -- live unit + preview draw the shell, not the pivot block
+		addRollerPreview(parent, body)
+	end
+	if unitType == "Needler" then
+		body.Transparency = 1   -- live unit + preview draw the creature, not the pivot block
+		addNeedlerPreview(parent, body)
+	end
 
 	return body
 end
@@ -1501,6 +1728,10 @@ function UnitVisuals.buildBuildingPreview(
 	elseif buildingType == "EngineeringPost" then
 		base.Transparency = 1
 		UnitVisuals.buildEngineeringPostDecor(parent, CFrame.new(position), color, false)
+
+	elseif buildingType == "Gland" then
+		base.Transparency = 1
+		UnitVisuals.buildGlandDecor(parent, CFrame.new(position), color, false)
 
 	elseif buildingType == "Turret" then
 		-- Military tripod machine gun — matches BuildingManager's in-world geometry

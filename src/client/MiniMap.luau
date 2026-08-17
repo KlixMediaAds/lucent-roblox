@@ -625,12 +625,16 @@ local function buildUI()
 	lbl.TextXAlignment        = Enum.TextXAlignment.Center
 	lbl.Parent                = border
 
-	-- ── Return-to-CC button (just left of the minimap) ────────────────────────
+	-- ── Return-to-CC button ───────────────────────────────────────────────────
+	-- Anchored to the far LEFT of the bottom bar, flush with the minimap's left edge, the
+	-- way an RTS parks its army/control-group buttons. HUD's resource + population
+	-- row starts clear of it (see RES_CX there) and shares this coordinate space, so the
+	-- two must be moved together.
 	local rBtn                = Instance.new("TextButton")
 	rBtn.Name                 = "ReturnToCCBtn"
 	rBtn.Size                 = UDim2.fromOffset(28, 28)
-	rBtn.AnchorPoint          = Vector2.new(1, 1)
-	rBtn.Position             = UDim2.new(0, MAP_SIZE + 4 + PADDING, 1, -(MAP_SIZE + 4 + PADDING) - 5)
+	rBtn.AnchorPoint          = Vector2.new(0, 1)
+	rBtn.Position             = UDim2.new(0, PADDING, 1, -(MAP_SIZE + 4 + PADDING) - 5)
 	rBtn.BackgroundColor3     = Color3.fromRGB(7, 9, 14)
 	rBtn.BackgroundTransparency = 0.06
 	rBtn.AutoButtonColor      = false

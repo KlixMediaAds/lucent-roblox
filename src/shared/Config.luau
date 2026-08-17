@@ -4,7 +4,7 @@ local Config = {}
 Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 
 -- Economy
-Config.STARTING_RESOURCES   = 200
+Config.STARTING_RESOURCES   = 30
 Config.BUILDING_COST         = 50   -- Barracks cost
 Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure; scales — see below)
 
@@ -101,24 +101,26 @@ Config.UNIT_TYPES = {
 	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
 	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
 	Foamer        = { cost = 80,  size = Vector3.new(6, 5, 7)  },
-	Lamprey       = { cost = 110, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
-	Hagfish       = { cost = 120, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
+	Lamprey       = { cost = 35, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
+	Hagfish       = { cost = 70, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
 	Broodmother   = { cost = 200, size = Vector3.new(13.2, 24, 13.2) }, -- towering anemone-bodied tripod (visuals drawn client-side; 1.2× the base 11×20×11)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 	-- ── Hollowed race (trained from the Mother) — MVP single black parts ──
 	Leech         = { cost = 50,  size = Vector3.new(4, 3, 5) },  -- burrows to become a passive-income structure
 	Embryo        = { cost = 40,  size = Vector3.new(4, 4, 4) },  -- simple melee combatant; evolves once the Mother's Evolve is unlocked
-	Roller        = { cost = 130, size = Vector3.new(6, 10, 10) }, -- armored rolling disc (Whirlipede-like), evolves from an Embryo; visuals drawn client-side (RollerBody)
+	Roller        = { cost = 120, size = Vector3.new(6, 10, 10) }, -- armored rolling disc (Whirlipede-like), evolves from an Embryo; visuals drawn client-side (RollerBody)
 	Watcher       = { cost = 90,  size = Vector3.new(6, 6, 6)  }, -- slow-drifting cluster of eyes (hagfish-eye inspired), evolves from a Leech; ranged gaze attack; visuals drawn client-side (WatcherBody)
-	Needler       = { cost = 100, size = Vector3.new(4, 6, 4)  }, -- spherical body + side eyes + a single long two-jointed insect arm, evolves from an Embryo; anchored-pull gait, stationary mantis-shrimp melee strike; visuals drawn client-side (NeedlerBody)
+	Needler       = { cost = 15, size = Vector3.new(4, 6, 4)  }, -- spherical body + side eyes + a single long two-jointed insect arm, evolves from an Embryo; anchored-pull gait, stationary mantis-shrimp melee strike; visuals drawn client-side (NeedlerBody)
 }
 
 -- Field upgrade: a selected Survivor can be re-kitted into a Sniper (command-card
 -- action on the unit, not a Bonfire summon option). Charged per Survivor upgraded.
 Config.SNIPER_UPGRADE_COST = 60
 
-Config.CC_PASSIVE_INCOME      = 10    -- resources granted per tick to every standing Command Center
-Config.CC_PASSIVE_INTERVAL    = 6     -- seconds between Command Center passive-income ticks
+-- The baseline economy: every standing Command Center pays 1 resource a second, so the
+-- trickle is legible on the counter rather than arriving in lumps.
+Config.CC_PASSIVE_INCOME      = 1     -- resources granted per tick to every standing Command Center
+Config.CC_PASSIVE_INTERVAL    = 1     -- seconds between Command Center passive-income ticks
 
 -- Leech (Hollowed): when burrowed it enters a structure state and pays out passive
 -- income to its owner each interval (mirrors the Command Center passive income).
@@ -276,13 +278,24 @@ Config.MOTHER_EGGSAC_MAX_LEVEL   = 50   -- purchases allowed per Mother (one egg
 Config.MOTHER_EGGSAC_PER_LEVEL   = 1    -- eggs added per purchase (one nest + one egg)
 Config.MOTHER_EGGSAC_NESTS_PER_LEVEL = 1  -- nests planted around the Mother per purchase
 Config.MOTHER_EGG_SPAWN_DELAY    = 4.0  -- fallback incubation for a unit with no EGG_SPAWN_TIME entry
--- Per-creature incubation: seconds a planted nest takes to (re)hatch its chosen unit after
--- it is assigned, or after the last one died. Bigger creatures take longer to grow, so this
--- is the real cost of a nest's unit choice. Surfaced on the egg command card (EggPanel).
+-- Per-creature incubation: seconds a spat Mother egg / Lamprey Nest egg takes to hatch.
+-- NOT used by the Mother's Egg-Sac nests, which grow on a flat clock (EGG_GROW_TIME below)
+-- and hatch the instant a creature is picked.
 Config.EGG_SPAWN_TIME = { Lamprey = 15, Hagfish = 25, Roller = 30, Needler = 10 }
 function Config.eggSpawnTime(unitType: string?): number
 	return (unitType and (Config.EGG_SPAWN_TIME :: any)[unitType]) or Config.MOTHER_EGG_SPAWN_DELAY
 end
+
+-- Egg-Sac nests are on-demand spawners, not standing orders. A nest's egg grows on this
+-- flat clock, ripens, and then waits: nothing hatches until the player picks a creature,
+-- and picking one hatches it at once and spends the shell. The same clock regrows it.
+-- Flat rather than per-creature on purpose -- the choice is made at the moment of hatching
+-- now, so a per-creature gestation would be charging for a decision already taken.
+Config.EGG_GROW_TIME  = 5   -- seconds a nest's egg takes to ripen, and to regrow after a hatch
+-- Picking a creature is an order, not a delivery: the shell then carries THAT creature for
+-- this long before it comes out. Kept separate from the ripening clock so the wait to be
+-- able to order and the wait for the thing ordered can be tuned apart.
+Config.EGG_HATCH_TIME = 5   -- seconds between picking a creature and it climbing out
 -- Eggs available once `level` Egg Sacs purchases have been made (one egg per purchase).
 function Config.eggSacCapacity(level: number): number
 	return math.max(0, level) * Config.MOTHER_EGGSAC_PER_LEVEL
@@ -292,16 +305,53 @@ end
 -- ground point, the Mother walks over (uprooting herself if she was rooted), drives her
 -- spike into the soil, and three plants tear their way up out of the wound. She re-roots
 -- afterwards if that is how she started.
-Config.MOTHER_INJECT_COST     = 10    -- resources per injection, ground or plant
+-- Injecting is FREE: the limiter is the cooldown, not the wallet. She may only drive her
+-- spike in once every MOTHER_INJECT_COOLDOWN seconds, and a queued run paces itself
+-- against the same clock (she stands over the next spot until the spike is ready again).
+Config.MOTHER_INJECT_COST     = 0     -- resources per injection, ground or plant
+Config.MOTHER_INJECT_COOLDOWN = 10    -- seconds between one spike going in and the next
 Config.MOTHER_INJECT_ARRIVE   = 14    -- studs from the point that counts as "stood over it"
 Config.MOTHER_INJECT_DURATION = 1.8   -- seconds she stays hunched over the injection
 Config.MOTHER_INJECT_PLANTS   = 3     -- plants that rise per injection
-Config.MOTHER_INJECT_SPREAD   = 9     -- studs out from the point the plants ring around
+Config.MOTHER_INJECT_SPREAD   = 12.6  -- studs out from the point the plants ring around
+-- Bare ground will not take a spike with a plant already standing inside this radius, so
+-- the same clearing cannot be injected over and over into a thicket. This is exactly the
+-- radius of the targeting hologram's disc (MotherInject sizes the disc from it), so the
+-- ring drawn on the ground IS the area that has to be clear -- there is nothing to guess.
+-- Aiming AT a plant is unaffected: that is a deliberate target, not a crowded patch.
+--
+-- Note it sits below MOTHER_INJECT_SPREAD: an injection scatters its plants 5.7-12.6 studs
+-- out, so some land inside this and some outside. Raising it past SPREAD would make a spot
+-- unusable for good after one injection.
+-- Paired with MotherInject's HOVER_RADIUS (the snap-onto-a-plant distance), which has to
+-- stay BELOW this or the rule is unreachable: anything inside the snap becomes a target
+-- rather than an obstruction, so the two radii leave a band and the band is what refuses.
+Config.MOTHER_INJECT_CLEAR    = 8     -- studs of clear ground a bare-ground injection needs
 Config.MOTHER_INJECT_RANGE    = 400   -- max studs from the Mother a target point may sit
 -- Injecting one of her own grown plants instead of bare ground: the plant bursts and
 -- gives up what it was growing. Which plant gives what lives in InjectPlants.INJECT.
 Config.MOTHER_INJECT_PLANT_LEECHES = 3   -- Leeches out of a spire
-Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- Lamprey Nests out of a pod cluster
+Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- her own egg nests out of a pod cluster
+
+-- Spike Gland: the structure a frond bursts into. Each one standing shaves 5% off the
+-- Mother's spike cooldown, compounding, so a player who keeps injecting fronds injects
+-- faster. It is a real building with HP: the buff is only as durable as the glands are.
+--
+-- The floor matters. Injecting bare ground grows one frond every time, and every frond is
+-- another gland, so the loop feeds itself; without a hard floor the cooldown converges on
+-- zero and the ability stops being an ability. MIN is what that loop is allowed to reach.
+Config.MOTHER_INJECT_COOLDOWN_MIN = 2.5   -- seconds; no number of glands goes under this
+Config.GLAND_COOLDOWN_REDUCTION   = 0.05  -- each standing gland cuts the cooldown by 5%
+Config.MOTHER_INJECT_PLANT_GLANDS = 1     -- glands out of a frond
+Config.GLAND_SIZE                 = Vector3.new(10, 9, 10)
+
+-- The Mother's spike cooldown with `glands` of hers standing. Shared so the server's
+-- clock and the client's countdown ring can never disagree on how long the window is.
+function Config.injectCooldown(glands: number): number
+	local cd = Config.MOTHER_INJECT_COOLDOWN
+		* (1 - Config.GLAND_COOLDOWN_REDUCTION) ^ math.max(0, glands)
+	return math.max(Config.MOTHER_INJECT_COOLDOWN_MIN, cd)
+end
 
 -- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest
 -- births eggs: instead of settling them around its own footprint, the nest LAUNCHES
@@ -526,7 +576,7 @@ Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 2
 -- Roller: heavily armored (high HP), but its bite is a constant grind — low damage
 -- per hit at a very fast attack rate (short melee range so it rolls right up and stays).
 Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 220, Watcher = 170, Needler = 140 }
-Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600 }
+Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600, Gland = 300 }
 Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20, Needler = 42 }
 Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }
 Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 2.1, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
@@ -541,6 +591,22 @@ Config.NEEDLER_MERGE_RANGE = 55   -- studs to reach the next Needler to merge wi
 
 -- Terrain obstacles (generated in lobby when terrain is toggled on)
 Config.TERRAIN_AVOIDANCE_RADIUS = 9   -- studs; units steer away from obstacle edges within this distance
+
+-- ── Player badges ─────────────────────────────────────────────────────────────
+-- Marks shown on a player's card in the menu. Held per player, with the moment each was
+-- earned, and awarded by PlayerStats when its condition first holds.
+--
+-- BETA TESTER is awarded to anyone who loads the place before the cutoff below. Move the
+-- date when the game leaves beta; everyone who already holds it keeps it, because the
+-- award is written into their profile rather than re-derived from the cutoff each time.
+Config.BETA_TESTER_UNTIL = 1798761600   -- unix seconds (2027-01-01 UTC)
+
+Config.BADGES = {
+	BetaTester = {
+		name = "Beta Tester",
+		desc = "Played while the game was still in beta, back when everything was liable to change underfoot.",
+	},
+}
 
 -- Camera
 Config.CAMERA_PITCH          = 55    -- degrees down from horizon
@@ -619,6 +685,7 @@ Config.REMOTES = {
 	TestUpdate              = "TestUpdate",
 	UpgradeTest             = "UpgradeTest",
 	LampreyEgg              = "LampreyEgg",
+	PopulationSync          = "PopulationSync",
 	HagfishStrike           = "HagfishStrike",
 	BroodmotherDeath        = "BroodmotherDeath",
 	UpgradeNest             = "UpgradeNest",

@@ -667,6 +667,8 @@ end
 
 -- Scan the local player's egg clump Models, returning eggId → clump Model plus a
 -- parentEggId → { childEggId } adjacency map (from each clump's "ParentEgg" attribute).
+-- The adjacency map no longer drives selection (a click takes one egg); it is kept because
+-- the tentacle tree is still what the nests are physically grown along.
 -- Nests sit in workspace.EggNests (grouped per owning Mother) rather than under the
 -- Mother's model, so they stay put when she uproots and walks off.
 local function scanOwnedEggs(): ({ [string]: Instance }, { [string]: { string } })
@@ -691,8 +693,8 @@ local function scanOwnedEggs(): ({ [string]: Instance }, { [string]: { string } 
 	return models, children
 end
 
--- Highlight the given eggs and open the panel for the whole set (one unit choice applies to
--- all of them). Caller supplies the id list plus the eggId → clump Model lookup.
+-- Highlight the given eggs and open the panel for the set. Picking a creature spends every
+-- ripe egg in it. Caller supplies the id list plus the eggId → clump Model lookup.
 local function applyEggSelection(ids: { string }, models: { [string]: Instance })
 	selectedEggIds = ids
 	for _, id in ids do
@@ -717,56 +719,47 @@ local function applyEggSelection(ids: { string }, models: { [string]: Instance }
 	if onEggSelectedCb then onEggSelectedCb(ids) end
 end
 
--- Highlight a clicked egg AND its descendants in the tentacle tree, then open the panel for
--- the whole set (so one unit choice applies to the subtree). Caller has already cleared
+-- Select the clicked egg and NOTHING else. A click used to take the whole tentacle
+-- subtree under it, which made a single egg impossible to spend on its own: every pick
+-- went to the sisters too. The tree is still there, it just no longer decides selection.
+-- Double-clicking is how you get the whole colony (see below). Caller has already cleared
 -- unit/building selection.
 local function selectEgg(rootEggId: string)
 	clearEggSelection()
-	local models, children = scanOwnedEggs()
-
-	-- BFS the subtree rooted at the clicked egg.
-	local ids:   { string }           = {}
-	local stack: { string }           = { rootEggId }
-	local seen:  { [string]: boolean } = {}
-	while #stack > 0 do
-		local e = table.remove(stack) :: string
-		if not seen[e] then
-			seen[e] = true
-			table.insert(ids, e)
-			for _, c in (children[e] or {}) do table.insert(stack, c) end
-		end
-	end
-
-	applyEggSelection(ids, models)
-end
-
--- The creature an egg nest is set to hatch ("Lamprey", "Hagfish", …), or nil while
--- it is still unassigned. The server stamps this on the egg part whenever a unit is
--- picked (BuildingManager.assignEggUnit), so it replicates to every client.
-local function eggSpawnType(clump: Instance): string?
-	local egg = (clump :: any):FindFirstChild("Egg")
-	local st  = egg and egg:GetAttribute("SpawnType")
-	return type(st) == "string" and st or nil
-end
-
--- Double-click on an egg: select every owned egg on screen that hatches the SAME
--- creature — the unit/building double-click "select all visible of this kind"
--- behaviour. Eggs that have not been assigned a unit yet group with each other,
--- so double-clicking a fresh nest grabs all the other empty ones to set at once.
-local function selectAllSameEggTypeOnScreen(rootEggId: string)
 	local models = scanOwnedEggs()
-	local root   = models[rootEggId]
-	if not root then selectEgg(rootEggId); return end
-	local targetType = eggSpawnType(root)
+	if not models[rootEggId] then return end
+	applyEggSelection({ rootEggId }, models)
+end
+
+-- Is this nest's egg grown and waiting to be spent? The server stamps "EggReady" on the
+-- egg part as it ripens and clears it the moment it is spent, so it replicates.
+local function eggIsReady(clump: Instance): boolean
+	local egg = (clump :: any):FindFirstChild("Egg")
+	return egg ~= nil and egg:GetAttribute("EggReady") == true
+end
+
+-- Double-click on an egg: take every AVAILABLE egg on screen, meaning every one of yours
+-- that has finished growing. Since a hatch is now a one-shot order rather than a standing
+-- choice, this is the "spend the whole colony at once" gesture: double-click, pick a
+-- creature, and every ripe nest hatches one.
+--
+-- Eggs still growing are deliberately left out. Including them would put tiles in front of
+-- the player that silently do nothing for part of the selection.
+local function selectAllReadyEggsOnScreen(rootEggId: string)
+	local models = scanOwnedEggs()
+	if not models[rootEggId] then return end
 
 	clearEggSelection()
 	local ids: { string } = {}
 	for id, m in models do
-		if eggSpawnType(m) ~= targetType then continue end
+		if not eggIsReady(m) then continue end
 		local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
 		local pos = adornee:IsA("BasePart") and adornee.Position or (m :: any):GetPivot().Position
 		if isOnScreen(pos) then table.insert(ids, id) end
 	end
+	-- Double-clicking a nest whose own egg is still growing would otherwise select nothing
+	-- and read as a dead click; fall back to just that egg.
+	if #ids == 0 then applyEggSelection({ rootEggId }, models); return end
 	applyEggSelection(ids, models)
 end
 
@@ -820,17 +813,47 @@ local function multiSelectBuildingsOnScreen(primaryId: string)
 	end
 end
 
-local function boxSelect(x0: number, y0: number, x1: number, y1: number)
+-- Box-select owned units inside the rectangle. Returns the id of the player's Command
+-- Center if the box caught THAT instead, which the caller opens as a building selection.
+--
+-- The Hollowed Mother walks with the army and is the piece that player moves most, but she
+-- is a BUILDING, so a units-only box never touched her and she could only be picked by
+-- clicking her directly. She is taken only when the box caught no units at all: a
+-- selection cannot hold units and a building at once, and dragging a box over a fight
+-- should give you the fighters, not the thing standing behind them.
+local function boxSelect(x0: number, y0: number, x1: number, y1: number): string?
+	local cam = workspace.CurrentCamera
+	local function inBox(pos: Vector3): boolean
+		local sp = cam:WorldToViewportPoint(pos)
+		return sp.X >= x0 and sp.X <= x1 and sp.Y >= y0 and sp.Y <= y1 and sp.Z > 0
+	end
+
 	selected = {}
 	for id, info in knownUnits do
 		if info.ownerId ~= localPlayer.UserId then continue end
 		if info.part:GetAttribute("Carried") then continue end   -- riders aboard a Roller
-		local sp = workspace.CurrentCamera:WorldToViewportPoint(info.part.Position)
-		if sp.X >= x0 and sp.X <= x1 and sp.Y >= y0 and sp.Y <= y1 and sp.Z > 0 then
-			table.insert(selected, id)
-		end
+		if inBox(info.part.Position) then table.insert(selected, id) end
 	end
 	notify()
+	if #selected > 0 then return nil end
+
+	for bid, info in knownBuildings do
+		if info.ownerId ~= localPlayer.UserId then continue end
+		if info.buildingType ~= "CommandCenter" then continue end
+		if not info.base.Parent then continue end
+		-- Her footprint, not just her centre. A unit is a dot on screen so one point is
+		-- enough; the Mother is tens of studs across, and a box drawn over the half of her
+		-- you can see would miss a centre-only test and read as a dead drag.
+		local c  = info.base.Position
+		local hx = info.base.Size.X * 0.5
+		local hz = info.base.Size.Z * 0.5
+		if inBox(c)
+			or inBox(c + Vector3.new(-hx, 0, -hz)) or inBox(c + Vector3.new(hx, 0, -hz))
+			or inBox(c + Vector3.new(-hx, 0,  hz)) or inBox(c + Vector3.new(hx, 0,  hz)) then
+			return bid
+		end
+	end
+	return nil
 end
 
 function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () -> boolean)
@@ -1086,13 +1109,17 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
 
-		-- F2: select all owned living units (works even during building placement)
+		-- F2: select all owned living units (works even during building placement).
+		-- Leeches are excluded: a Leech is economy, not army -- it crawls off to burrow and
+		-- pays out while anchored, so sweeping it into an army selection and marching it
+		-- somewhere silently costs the player their income.
 		if input.KeyCode == Enum.KeyCode.F2 then
 			selected = {}
 			for id, info in knownUnits do
-				if info.ownerId == localPlayer.UserId and info.part.Parent then
-					table.insert(selected, id)
-				end
+				if info.ownerId ~= localPlayer.UserId or not info.part.Parent then continue end
+				local ut = info.part:FindFirstChild("UnitType") :: StringValue?
+				if ut and ut.Value == "Leech" then continue end
+				table.insert(selected, id)
 			end
 			notify()
 			selectBuilding(nil)
@@ -1177,11 +1204,19 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			clearSelection()
 			selectBuilding(nil)
 			clearEggSelection()
-			boxSelect(
+			local boxCCId = boxSelect(
 				math.min(dragStart.X, dragEnd.X), math.min(dragStart.Y, dragEnd.Y),
 				math.max(dragStart.X, dragEnd.X), math.max(dragStart.Y, dragEnd.Y)
 			)
-			clearBuildingPanels()
+			if boxCCId then
+				-- The box found her and nothing else: select her exactly as a click would,
+				-- so her card opens and right-click becomes a move order again.
+				clearBuildingPanelsExcept("CommandCenter")
+				selectBuilding(boxCCId)
+				if onCCSelectedCb then onCCSelectedCb(boxCCId) end
+			else
+				clearBuildingPanels()
+			end
 		else
 			-- Single / double click — check unit first, then eggs, then buildings
 			local now = os.clock()
@@ -1202,8 +1237,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				clearEggSelection()
 				clearBuildingPanels()
 			elseif eggId then
-				-- Own Egg-Sac egg: highlight it (+ its subtree) and open the "what to hatch" panel.
-				-- Double-clicking one selects every on-screen egg hatching the same creature.
+				-- Own Egg-Sac egg: highlight THAT egg alone and open the "what to hatch" panel.
+				-- Double-clicking takes every ripe egg on screen instead, so a whole colony
+				-- can be spent on one pick.
 				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == eggId
 				lastClickTime   = now
 				lastClickTarget = eggId
@@ -1211,7 +1247,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				selectBuilding(nil)
 				clearBuildingPanels()
 				if isDouble then
-					selectAllSameEggTypeOnScreen(eggId)
+					selectAllReadyEggsOnScreen(eggId)
 				else
 					selectEgg(eggId)
 				end

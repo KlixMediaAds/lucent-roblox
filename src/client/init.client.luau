@@ -53,6 +53,9 @@ local ScoutManager   = require(script:WaitForChild("ScoutManager"))
 local Tutorial       = require(script:WaitForChild("Tutorial"))
 local CometManager    = require(script:WaitForChild("CometManager"))
 local DepositFX       = require(script:WaitForChild("DepositFX"))
+local EggReadyIcon    = require(script:WaitForChild("EggReadyIcon"))
+local ForestFade      = require(script:WaitForChild("ForestFade"))
+local OcclusionOutline = require(script:WaitForChild("OcclusionOutline"))
 local LobbyUI         = require(script:WaitForChild("LobbyUI"))
 local MainMenu        = require(script:WaitForChild("MainMenu"))
 local ShaderManager   = require(script:WaitForChild("ShaderManager"))
@@ -219,6 +222,11 @@ end
 
 -- Whether the local player's CC is currently in mobile (walking) state
 local ccIsMobile = false
+-- Which Command Center is currently selected (nil = none). A right-click is only a move
+-- order for a CC that is actually selected; without this the Mother, who is mobile for
+-- most of a match, walked off after EVERY right-click on the map -- including the ones
+-- meant to move units or to dismiss a selection.
+local ccSelectedId: string? = nil
 
 -- Core deploy flow: the local player's Core unit id (pre-CC), and a guard so the
 -- DEPLOY button can only be pressed once per Core.
@@ -465,7 +473,7 @@ CCMobilePanel.init(Network,
 MotherPanel.init(Network, function() return currentResources end)
 LeechPanel.init(Network)
 EmbryoPanel.init(Network)
-EggPanel.init(Network)
+EggPanel.init(Network, function() return currentResources end)
 RollerPanel.init(Network)
 NeedlerPanel.init(Network)
 DeployerPanel.init(Network,
@@ -507,7 +515,11 @@ end
 -- which is why this wiring sits below that helper rather than up with the other panels.
 MotherInject.init(Network, CameraModule, function(aiming: boolean)
 	MotherPanel.setAiming(aiming)
-end, ownCCBase, function() return currentResources end)
+end, ownCCBase, function() return currentResources end, function(preview: string?)
+	-- The sight moved onto (or off) one of her plants: the tile's 3D face follows, so it
+	-- shows what that plant would become instead of her own head.
+	MotherPanel.setHover(preview)
+end)
 MotherPanel.onInject(function(ccId: string)
 	MotherInject.begin(ccId)
 end)
@@ -1059,6 +1071,7 @@ end)
 
 -- ── Command Center mobility panel ─────────────────────────────────────────────
 UnitController.onCCSelected(function(ccId: string?)
+	ccSelectedId = ccId
 	if ccId then
 		MinePanel.hide()
 		TurretPanel.hide()
@@ -1267,9 +1280,16 @@ Network.onCCMobileSync(function(ccId: string, isUnlocked: boolean, isMobile: boo
 	end
 end)
 
--- Update CC move ghost position every frame
+-- Update CC move ghost position every frame. The ghost is the visible half of the move
+-- order, so it follows the same rule: on screen only while the CC is selected.
 RunService.RenderStepped:Connect(function()
-	if not ccIsMobile or not ccMoveGhost then return end
+	if not ccMoveGhost then return end
+	local ghost = ccMoveGhost :: Model
+	if not (ccIsMobile and ccSelectedId == ownCCId) then
+		if ghost.Parent then ghost.Parent = nil end
+		return
+	end
+	if not ghost.Parent then ghost.Parent = workspace end
 	local halfH = Config.COMMAND_CENTER_SIZE.Y / 2
 	local pos   = CameraModule.getPositionAtHeight(halfH)
 	if pos then
@@ -1284,11 +1304,15 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
--- Right-click while CC is mobile: issue a move-to command at the ghost's snapped position
+-- Right-click while the CC is SELECTED and mobile: issue a move-to command at the ghost's
+-- snapped position. The selection check is what keeps her still: she is mobile nearly all
+-- the time, so without it every right-click aimed at anything else was also an order to
+-- get up and walk there.
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if processed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
 	if not ccIsMobile or not ownCCId then return end
+	if ccSelectedId ~= ownCCId then return end   -- not selected: this right-click is not hers
 	if MotherInject.isAiming() then return end   -- that right-click called off the injection
 	local target = ccMoveTarget or CameraModule.getGroundPosition()
 	if target then
@@ -1634,6 +1658,7 @@ Network.onResourceSync(function(amount: number)
 	DeployerPanel.refreshIfVisible()
 	TestPanel.refreshIfVisible()
 	SurvivorPanel.refreshIfVisible()
+	EggPanel.refreshIfVisible()
 	MotherPanel.refreshIfVisible()
 	LeechPanel.refreshIfVisible()
 end)
@@ -5372,6 +5397,9 @@ end
 end -- startGame
 
 CometManager.init()
+EggReadyIcon.start()   -- mark over each Egg-Sac egg that has grown ripe and can be spent
+ForestFade.start()   -- trees dissolve out of the middle of the view; watches for the forest itself
+OcclusionOutline.start()   -- your own units/buildings keep an edge when something covers them
 
 -- Main menu first: a tabbed shell. The READY UP tab reveals the Map/AI lobby (which
 -- owns the game-start flow) beneath the persistent tab bar; the lobby only builds the

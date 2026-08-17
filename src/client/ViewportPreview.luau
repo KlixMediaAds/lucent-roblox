@@ -230,6 +230,77 @@ function ViewportPreview.forEggSacNest(pixelSize: Vector2, teamColor: BrickColor
 	end)
 end
 
+-- Close-up portrait of the Hollowed Mother's head: the Diplocaulus boomerang skull,
+-- its swept horn wings and her two glowing eyes, framed tight and lit from the front.
+-- Everything behind the neck is stripped out, so the tile reads as a face rather than a
+-- shrunken whole creature. Used as the face of the Mother's INJECT tile.
+local MOTHER_HEAD_PARTS: { [string]: boolean } = {
+	Skull = true, Snout = true, HornWing = true, Eye = true, Neck = true,
+}
+
+function ViewportPreview.forMotherHead(pixelSize: Vector2, teamColor: BrickColor?): ViewportFrame
+	local vpf                  = Instance.new("ViewportFrame")
+	vpf.Size                   = UDim2.fromOffset(pixelSize.X, pixelSize.Y)
+	vpf.BackgroundTransparency = 1
+	vpf.BorderSizePixel        = 0
+	vpf.Ambient                = Color3.fromRGB(150, 132, 150)
+	vpf.LightColor             = Color3.fromRGB(255, 246, 255)
+	-- Lit from in front of her face (she looks down -Z) so the skull reads in silhouette.
+	vpf.LightDirection         = Vector3.new(-0.4, -0.7, 1)
+
+	-- Built into a Model purely so GetBoundingBox can frame the head accurately: the horn
+	-- wings are rotated wedges, and an axis-aligned guess off Position/Size would crop them.
+	local head    = Instance.new("Model")
+	head.Name     = "MotherHead"
+	head.Parent   = vpf
+
+	UnitVisuals.buildMotherDecor(head, CFrame.new(), teamColor or BrickColor.new("Bright violet"), false)
+
+	-- Keep the head; drop the body, legs and gaster so the camera has nothing to fit
+	-- but the face.
+	local kept = 0
+	for _, d in head:GetDescendants() do
+		if d:IsA("BasePart") then
+			if MOTHER_HEAD_PARTS[d.Name] then
+				kept += 1
+			else
+				d:Destroy()
+			end
+		end
+	end
+
+	local cam         = Instance.new("Camera")
+	cam.FieldOfView   = FOV
+	cam.Parent        = vpf
+	vpf.CurrentCamera = cam
+
+	if kept > 0 then
+		local bbCF, bbSize = head:GetBoundingBox()
+		local centre       = bbCF.Position
+		local maxExtent    = math.max(bbSize.X, bbSize.Y, bbSize.Z)
+		local dist         = (maxExtent / 2) / math.tan(math.rad(FOV / 2)) * 1.02
+		-- Three-quarter face: mostly head-on (-Z is her front) with a little yaw and a
+		-- downward tilt, so both horn wings and both eyes stay visible.
+		local yaw, pitch = math.rad(26), math.rad(18)
+		local dir = Vector3.new(
+			 math.sin(yaw)  * math.cos(pitch),
+			 math.sin(pitch),
+			-math.cos(yaw)  * math.cos(pitch)
+		)
+		cam.CFrame = CFrame.lookAt(centre + dir * dist, centre)
+	end
+
+	return vpf
+end
+
+-- Preview of the Spike Gland: the organ a frond bursts into when the Mother injects it.
+-- Same builder as the live structure, so the tile shows exactly what will come up.
+function ViewportPreview.forGland(pixelSize: Vector2, teamColor: BrickColor?): ViewportFrame
+	return build(pixelSize, function(vpf)
+		UnitVisuals.buildGlandDecor(vpf, CFrame.new(), teamColor or BrickColor.new("Bright violet"), false)
+	end)
+end
+
 -- A bespoke icon for the Bonfire's "Empower" upgrade: a violet flame crowned by a
 -- glowing gold up-chevron (capacity/speed rising). Built here so it renders with the
 -- same framing/lighting as the other 3D slot icons.

@@ -65,14 +65,17 @@ local MineralManager   = require(script:WaitForChild("MineralManager"))
 local ResearchManager  = require(script:WaitForChild("ResearchManager"))
 local AIManager        = require(script:WaitForChild("AIManager"))
 local LobbyManager     = require(script:WaitForChild("LobbyManager"))
+local PlayerStats    = require(script:WaitForChild("PlayerStats"))
 local TerrainManager   = require(script:WaitForChild("TerrainManager"))
 local ForestManager    = require(script:WaitForChild("ForestManager"))
+local WildPlants       = require(script:WaitForChild("WildPlants"))
 local NavGrid          = require(script:WaitForChild("NavGrid"))
 local SpawnPoints      = require(script:WaitForChild("SpawnPoints"))
 
 TeamManager.init()
 ResourceManager.init()
 ResearchManager.init()
+PlayerStats.init()
 MineralManager.init(ResourceManager)
 MineralManager.setResearchManager(ResearchManager)
 UnitManager.init(ResourceManager)
@@ -89,9 +92,10 @@ AIManager.setMineralManager(MineralManager)
 
 ForestManager.init(MineralManager)
 ForestManager.setTerrainManager(TerrainManager)
+WildPlants.init(MineralManager)
+WildPlants.setTerrainManager(TerrainManager)
 BuildingManager.setForestManager(ForestManager)
 BuildingManager.setTerrainManager(TerrainManager)
-UnitManager.setForestManager(ForestManager)
 MineralManager.setForestManager(ForestManager)
 
 -- Keep the walled map's rock clear of wherever a base might spawn.
@@ -229,6 +233,7 @@ local deliverBaseForPlayer: (Player) -> ()
 local function returnToLobby()
 	if gameResetInProgress then return end
 	gameResetInProgress = true
+	PlayerStats.setMatchActive(false)   -- back to the ready-up menu: stop the clock
 	returningToLobby = true
 	pendingSurrender = nil
 	matchOver        = false
@@ -269,6 +274,7 @@ end
 local function triggerEndGame(winnerUserId: number, reason: string)
 	if matchOver or gameResetInProgress then return end
 	matchOver = true
+	PlayerStats.setMatchActive(false)   -- the end screen is not play
 	matchGen += 1   -- stop the timeline sampler
 
 	local statsTable = {}
@@ -599,6 +605,7 @@ end)
 -- ── Lobby → game handoff ──────────────────────────────────────────────────────
 LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	gameStartTime     = os.clock()
+	PlayerStats.setMatchActive(true)   -- playtime counts from here, not from the lobby
 	nextBaseIndex     = 0
 	nextLaneAIIdx     = 0
 	currentGamemode   = gamemode or "Default"
@@ -641,6 +648,8 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 
 	-- Grow the forest now that bases/deposits exist (it avoids both).
 	ForestManager.generate()
+	-- Then seed the wild Hollowed flora, which additionally avoids the woods it just grew.
+	WildPlants.generate()
 
 	-- Late joiners also get auto-placed bases. Connect once (onLobbyEnd runs again each
 	-- time the lobby is re-opened after a match, so guard against stacking handlers).

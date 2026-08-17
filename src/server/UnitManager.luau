@@ -103,16 +103,9 @@ local buildingManagerRef:  any
 local resourceManagerRef:  any
 local researchManagerRef:  any
 local mineralManagerRef:   any
-local forestManagerRef:    any
 local terrainManagerRef:   any
 local navGridRef:          any
 local broodDeathRemote:    any   -- RemoteEvent fired (to all clients) when a Broodmother begins dying
-
--- Units big enough to bulldoze trees as they move (basic 4×4 infantry can't).
-local FELLS_TREES: { [string]: boolean } = {}
-for utype, info in Config.UNIT_TYPES do
-	if math.max(info.size.X, info.size.Z) >= 5 then FELLS_TREES[utype] = true end
-end
 
 local barrackQueues:     { [string]: { QueueItem } } = {}
 local barrackIsTraining: { [string]: boolean }       = {}
@@ -209,6 +202,13 @@ local GROUND_CACHE_MAX = 500000  -- safety cap; wipe-and-refill beyond this
 -- Live unit count per player userId (for unit cap enforcement).
 local playerUnitCount: { [number]: number } = {}
 local MAX_UNITS_PER_PLAYER = 30
+
+-- Last population number pushed to each player's HUD, so the readout is only sent when
+-- the count actually moves. A player at the cap has every new spawn refused silently
+-- (bonfire summons, egg hatches), so the number has to be on screen.
+local popLastSent: { [number]: number } = {}
+local popSyncAcc = 0
+local POP_SYNC_INTERVAL = 0.4
 
 -- Universal "enemy units destroyed" tally per combatant owner id string (players AND
 -- AI, unlike ResearchManager which is player-only). Drives the end-screen performance
@@ -432,31 +432,6 @@ local function applyHP(data: UnitData, tookDamage: boolean?)
 			end
 		end)
 	end
-end
-
--- A Lamprey that fells trees grows: every felled tree scales its body size and
--- max HP by LAMPREY_GROWTH_PER_TREE, compounding up to LAMPREY_GROWTH_MAX_SCALE.
--- The client LampreyBody animator derives its render scale from part.Size.Y, so
--- simply resizing the (invisible) pivot part grows the whole visible creature.
-local LAMPREY_BASE_Y = Config.UNIT_TYPES.Lamprey.size.Y
-local function growLamprey(data: UnitData, treeCount: number)
-	local g        = 1 + Config.LAMPREY_GROWTH_PER_TREE
-	local maxScale = Config.LAMPREY_GROWTH_MAX_SCALE
-	for _ = 1, treeCount do
-		if data.part.Size.Y / LAMPREY_BASE_Y >= maxScale then break end
-		local oldY  = data.part.Size.Y
-		data.part.Size = data.part.Size * g
-		-- Keep ground-snapped: the pivot centre rises by half the height gained.
-		data.part.CFrame = data.part.CFrame + Vector3.new(0, (data.part.Size.Y - oldY) / 2, 0)
-		-- Toughen alongside size (current HP scales too, so a healthy Lamprey
-		-- stays healthy rather than suddenly looking wounded).
-		data.maxHp = data.maxHp * g
-		data.hp    = data.hp * g
-	end
-	-- Grow the health bar's length to match the new (larger) max HP.
-	local bb = data.part:FindFirstChild("HealthBar") :: BillboardGui?
-	if bb then bb.Size = UDim2.new(0, hpBarWidth(data.maxHp), 0, 4) end
-	applyHP(data)
 end
 
 -- Returns the effective damage dealt to a unit after applying Hardened Armor.
@@ -1254,7 +1229,10 @@ end
 
 -- Spawns a unit for a Deployer and records it in the tracking tables.
 -- Deployed units automatically attack-march toward enemy territory at no resource cost.
-function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3, unitType: string?)
+-- Returns the new unit's id, or nil if nothing was born (the owner is at the unit cap).
+-- Callers that burn something to spawn (an egg spending its whole gestation) must check
+-- it and hold, rather than assume a creature turned up.
+function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnPos: Vector3, unitType: string?): string?
 	local spawnType = unitType or "Survivor"
 	local uid = spawnUnit(player, spawnPos, spawnType)
 	if uid then
@@ -1270,6 +1248,7 @@ function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnP
 		-- bonfire afterwards. The player (or the AI brain) then commands them. Previously
 		-- human bonfires auto-attack-marched toward the enemy corner; that is removed.
 	end
+	return uid
 end
 
 -- Field-upgrade one of `player`'s living Survivors into a Sniper in place: charges
@@ -1392,6 +1371,11 @@ function UnitManager.removeAllUnitsFor(player: any)
 		if data.owner == player then table.insert(toRemove, id) end
 	end
 	for _, id in toRemove do
+		-- Give the cap back too: an eliminated commander who is rebuilt (AI bots are)
+		-- would otherwise carry a permanently full unit count and never spawn again.
+		playerUnitCount[units[id].owner.UserId] =
+			math.max(0, (playerUnitCount[units[id].owner.UserId] or 1) - 1)
+		unitDecorators[id] = nil
 		units[id].part:Destroy()
 		units[id] = nil
 		clearDeployerLinks(id)
@@ -1431,6 +1415,7 @@ function UnitManager.resetAll()
 	deployerUnits    = {}
 	unitDeployers    = {}
 	playerUnitCount  = {}
+	popLastSent      = {}
 	playerStatMult   = {}
 	playerUpgradeLog = {}
 	killTally        = {}
@@ -1494,10 +1479,6 @@ end
 
 function UnitManager.setMineralManager(mm: any)
 	mineralManagerRef = mm
-end
-
-function UnitManager.setForestManager(fm: any)
-	forestManagerRef = fm
 end
 
 function UnitManager.setTerrainManager(tm: any)
@@ -1739,6 +1720,7 @@ function UnitManager.init(resourceManager)
 	local unitDiedRemote = RemoteHandler.get(Config.REMOTES.UnitDied)
 	local healBeamRemote = RemoteHandler.get(Config.REMOTES.HealBeam)
 	local hagfishStrikeRemote = RemoteHandler.get(Config.REMOTES.HagfishStrike)
+	local popSyncRemote       = RemoteHandler.get(Config.REMOTES.PopulationSync)
 	broodDeathRemote          = RemoteHandler.get(Config.REMOTES.BroodmotherDeath)
 
 	-- Terrain-height snapping: cast straight down to find the surface Y at any XZ.
@@ -2388,15 +2370,6 @@ function UnitManager.init(resourceManager)
 						end
 					else
 						data.part.Position = newPos
-					end
-
-					-- Medium+ units bulldoze any trees they push into.
-					if forestManagerRef and FELLS_TREES[data.unitType] then
-						local felled = forestManagerRef.knockNear(newPos, math.max(data.part.Size.X, data.part.Size.Z) * 0.5)
-						-- Lampreys feed on the forest: each felled tree grows them.
-						if felled > 0 and data.unitType == "Lamprey" then
-							growLamprey(data, felled)
-						end
 					end
 				end
 			end
@@ -3223,6 +3196,22 @@ function UnitManager.init(resourceManager)
 				researchManagerRef.recordEnemyKills(attackerStr, n)      -- player-only research
 			end
 		end
+
+		-- ── Population readout ────────────────────────────────────────────────
+		-- Pushed from here rather than from every spawn/death site: one place, and only
+		-- when the number has moved. The cap rides along so the HUD never has to keep
+		-- its own copy of it.
+		popSyncAcc += dt
+		if popSyncAcc >= POP_SYNC_INTERVAL then
+			popSyncAcc = 0
+			for _, player in Players:GetPlayers() do
+				local n = playerUnitCount[player.UserId] or 0
+				if popLastSent[player.UserId] ~= n then
+					popLastSent[player.UserId] = n
+					popSyncRemote:FireClient(player, n, MAX_UNITS_PER_PLAYER)
+				end
+			end
+		end
 	end)
 
 	-- Train remote
@@ -3573,6 +3562,9 @@ function UnitManager.init(resourceManager)
 			if data.owner == player then table.insert(toRemove, id) end
 		end
 		for _, id in toRemove do
+			playerUnitCount[units[id].owner.UserId] =
+				math.max(0, (playerUnitCount[units[id].owner.UserId] or 1) - 1)
+			unitDecorators[id] = nil
 			units[id].part:Destroy()
 			units[id] = nil
 			clearDeployerLinks(id)
