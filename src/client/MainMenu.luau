@@ -24,6 +24,7 @@ local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local UnitVisuals = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UnitVisuals"))
 
 local MainMenu    = {}
@@ -579,7 +580,7 @@ function MainMenu.init(opts: { buildLobby: () -> (), setLobbyVisible: (boolean) 
 		-- Customization tab is showing; self-disconnects when the menu is torn down.
 		local phase = { 0.0, 1.3, 2.4 }
 		local idleConn: RBXScriptConnection
-		idleConn = RunService.RenderStepped:Connect(function()
+		idleConn = PerfProbe.onRender("MainMenu", function()
 			if not sg.Parent then idleConn:Disconnect(); return end
 			if activeTab ~= "Customization" then return end
 			local now = os.clock()
@@ -664,7 +665,7 @@ function MainMenu.init(opts: { buildLobby: () -> (), setLobbyVisible: (boolean) 
 	-- Slow hue cycle on the bottom glow.
 	local hue = 0.58
 	local cycleConn: RBXScriptConnection
-	cycleConn = RunService.RenderStepped:Connect(function(dt)
+	cycleConn = PerfProbe.onRender("MainMenu", function(dt)
 		hue = (hue + dt * 0.02) % 1   -- ~50s per full loop
 		glow.BackgroundColor3 = Color3.fromHSV(hue, 0.5, 0.5)
 	end)

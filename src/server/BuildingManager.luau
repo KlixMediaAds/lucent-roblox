@@ -4,12 +4,17 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris            = game:GetService("Debris")
 local TweenService      = game:GetService("TweenService")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 local InjectPlants      = require(Shared:WaitForChild("InjectPlants"))
 local AlertManager      = require(script.Parent:WaitForChild("AlertManager"))
 local GoreManager       = require(script.Parent:WaitForChild("GoreManager"))
+-- Every one-shot world effect the building systems throw off (explosions, gore, bursts,
+-- the spike's sounds). Pulled out of this file: it is pure scenery, and this chunk lives
+-- close enough to Luau's 200-local ceiling that a dozen VFX helpers is real weight.
+local BuildFX           = require(script.Parent:WaitForChild("BuildFX"))
 
 local rng = Random.new()
 
@@ -37,11 +42,24 @@ local turretTimers:      { [string]: number } = {}   -- attackTimer per turret i
 local deployerTimers:    { [string]: number } = {}   -- auto-spawn cooldown per deployer id
 local deployerUnitType:  { [string]: string } = {}   -- deployerId → unit type to spawn
 local deployerUpdateAcc: { [string]: number } = {}   -- accumulator for periodic client updates
-local deployerLevel:     { [string]: number } = {}   -- bonfire Empower upgrades bought per id
+-- Bonfire unit unlocks bought per id. The only thing a bonfire upgrades: it decides WHICH
+-- units that one may summon (Config.BONFIRE_UNLOCK_ORDER), not how fast or how many.
+local deployerUnlock:    { [string]: number } = {}
 -- TEST building shares the deployer summon maps above (timers/unitType/updateAcc) but
 -- tracks its two upgrades SEPARATELY: supply (capacity) and rate (summon interval).
 local testSupplyLevel:   { [string]: number } = {}   -- TEST id → Supply upgrades bought
 local testRateLevel:     { [string]: number } = {}   -- TEST id → Spawn Rate upgrades bought
+
+-- Record a bonfire's unit-unlock level and mirror it onto the model, which is how every
+-- client reads it back (the panel needs it for a bonfire it has merely selected, so an
+-- owner-only remote would not do). Returns the unit the purchase just taught it.
+local function applyBonfireUnlock(deployerId: string, level: number): string?
+	deployerUnlock[deployerId] = level
+	local data  = buildingData[deployerId]
+	local model = data and data.base and data.base.Parent
+	if model then model:SetAttribute("BonfireUnlock", level) end
+	return Config.BONFIRE_UNLOCK_ORDER[level + 1]
+end
 
 -- Engineering Post research state per building id.
 local engState:     { [string]: string } = {}   -- "idle" | "researching" | "ready"
@@ -54,7 +72,9 @@ local monumentByOwner:       { [number]: string } = {}  -- userId → buildingId
 local monumentWinTimer:      { [string]: number } = {}  -- buildingId → active seconds elapsed
 local monumentHeartbeatAccum = 0
 local ccIncomeAccum          = 0   -- accumulator for Command Center passive income
-local foundryIncomeAccum     = 0   -- accumulator for Foundry passive income
+-- Foundry payout clocks, one per Foundry id. Each runs from when that Foundry finished
+-- building, so their income ticks are staggered rather than all landing on one beat.
+local foundryTimers: { [string]: number } = {}
 
 local ccAttackThrottle: { [number]: number } = {}   -- userId → last-fire timestamp
 local CC_ATTACK_THROTTLE = 5  -- seconds between CC attack notifications
@@ -84,9 +104,17 @@ local eggSacLevel:      { [string]: number } = {}   -- Mother id → Egg Sacs pu
 -- children have branched off it (used to fan the next sibling into its own direction).
 -- `baseY` is the top of the egg's nest slab: the egg swells while it grows, so it is
 -- re-seated on that Y every frame instead of growing symmetrically about its center.
-type SacEgg = { egg: BasePart, ripeAt: number?, ready: boolean, hatchAt: number?, hatching: string?, parentId: string?, dir: Vector3, numChildren: number, baseY: number }
+-- `slot` is which egg of its nest this is. A nest starts with one and grows another every
+-- time the Mother injects it (BuildingManager.swellEggNest), all of them sharing the one
+-- bowl, the one click box and the one health bar. Only slot 1 is a node of the tentacle
+-- tree -- `parentId`, `dir` and `numChildren` describe where the NEST hangs, and the eggs
+-- that come after it are inside that nest rather than anywhere new.
+-- `scale` sizes the shell against a normal egg. A Large nest's single PRIME egg carries
+-- Config.NEST_PRIME_EGG_SCALE; every other egg is 1.
+type SacEgg = { egg: BasePart, ripeAt: number?, ready: boolean, hatchAt: number?, hatching: string?, parentId: string?, dir: Vector3, numChildren: number, baseY: number, slot: number, scale: number }
 local eggSacEggs:       { [string]: { [string]: SacEgg } } = {}  -- Mother id → eggId → egg state
 local eggSacEggCounter  = 0
+local eggSacNestCounter = 0   -- nests are named apart from the eggs they hold
 
 -- Eggs and Egg-Sac nests that enemies can shoot. Declared up here (rather than beside the
 -- egg code far below) so resetAll can clear the registry between matches; the functions
@@ -110,14 +138,20 @@ local laneModeActive       = false  -- blocks non-CC placement from the PlaceBui
 -- pod lands, its welding arms assemble the structure on-site through staged passes
 -- (foundation → support beams → roof outline) before the finished building rises
 -- from the ground and the scaffold sinks away.
-local DROP_POD_FLIGHT_TIME      = 2.5   -- seconds from CC launch to ground impact
--- The on-site assembly fills the structure's Config.BUILD_TIME; these fractions
--- weight how that time splits across the foundation → beams → roof stages (they
--- sum to 1). The final building-rise is a fixed tail on top.
-local CONSTRUCT_FOUNDATION_FRAC = 0.30  -- foundation slab welds in
-local CONSTRUCT_BEAMS_FRAC      = 0.42  -- support beams + scaffold posts rise
-local CONSTRUCT_ROOF_FRAC       = 0.28  -- roof-outline frame welded across the top
-local CONSTRUCT_RISE_TIME       = 1.30  -- finished building rises as the scaffold sinks
+-- One table rather than seven locals: this chunk lives close to Luau's ceiling of 200
+-- locals, and a bag of build-timing numbers has no need of a register each.
+-- The on-site assembly fills the structure's Config.BUILD_TIME; the FRAC fields weight how
+-- that time splits across the foundation → beams → roof stages (they sum to 1). The final
+-- building-rise is a fixed tail on top.
+local BUILD = {
+	POD_FLIGHT_TIME  = 2.5,   -- seconds from CC launch to ground impact
+	FOUNDATION_FRAC  = 0.30,  -- foundation slab welds in
+	BEAMS_FRAC       = 0.42,  -- support beams + scaffold posts rise
+	ROOF_FRAC        = 0.28,  -- roof-outline frame welded across the top
+	RISE_TIME        = 1.30,  -- finished building rises as the scaffold sinks
+	RELAY_CATCH_Y    = 11,    -- studs above a relay's base to aim for (top of its CatchRing)
+	SPARK_TEX        = "rbxasset://textures/particles/sparkles_main.dds",
+}
 
 local nextBuildRiseTime: number? = nil  -- overrides BUILD_TIME for the next createBuilding call
 
@@ -133,7 +167,10 @@ local playerCCId:       { [number]: string  } = {}  -- userId → their CC build
 -- root her back down once she is done.
 -- `plant` set means the spike goes into one of her own grown plants instead of bare
 -- ground: the plant bursts and gives up what it was growing (InjectPlants.INJECT).
-type InjectOrder = { target: Vector3, phase: string, wasRooted: boolean, plant: Model? }  -- phase: "walk" | "inject"
+-- `nest` set means it goes into one of her own egg nests instead, which swells that nest
+-- and grows another egg in it (BuildingManager.swellEggNest). The two are exclusive: the
+-- client aims at one thing at a time.
+type InjectOrder = { target: Vector3, phase: string, wasRooted: boolean, plant: Model?, nest: Model? }  -- phase: "walk" | "inject"
 local injectOrders: { [string]: InjectOrder } = {}
 
 -- Take her out of the injection pose wherever an order is abandoned rather than finished.
@@ -147,7 +184,7 @@ end
 -- Shift-clicked spots waiting behind the active order, oldest first. She works through
 -- them one after another without rooting back down in between; `wasRooted` rides along
 -- on the running order, so she only settles once the last wound is made.
-type InjectQueued = { target: Vector3, plant: Model? }
+type InjectQueued = { target: Vector3, plant: Model?, nest: Model? }
 local injectQueues: { [string]: { InjectQueued } } = {}
 local MAX_INJECT_QUEUE = 8
 
@@ -210,62 +247,6 @@ local function clearPlantsAround(pos: Vector3, radius: number)
 	end
 end
 
--- ── The spike's sounds ────────────────────────────────────────────────────────
--- Two separate moments, and they are not the same event: the spike GOING IN happens on
--- every injection, while the second only plays when what she went into gives something
--- up (a plant bursting into Leeches, nests or a gland). Injecting bare ground is the
--- first sound alone.
-local SND_INJECT = "rbxassetid://117742365588721"
-local SND_EVOLVE = "rbxassetid://77665012026179"
-
--- One-shot world sound at a point. Both come from the WOUND rather than from her body,
--- so a shift-queued run reads as a line of separate strikes across the ground instead of
--- a stack of noises following her around.
-local function playInjectSound(pos: Vector3, soundId: string, volume: number)
-	local anchor        = Instance.new("Part")
-	anchor.Name         = "_InjectSFX"
-	anchor.Anchored     = true
-	anchor.CanCollide   = false
-	anchor.CanQuery     = false
-	anchor.CanTouch     = false
-	anchor.CastShadow   = false
-	anchor.Transparency = 1
-	anchor.Size         = Vector3.one * 0.1
-	anchor.Position     = pos
-	anchor.Parent       = workspace
-
-	local snd              = Instance.new("Sound")
-	snd.SoundId            = soundId
-	snd.Volume             = volume
-	snd.RollOffMode        = Enum.RollOffMode.Linear
-	snd.RollOffMinDistance = 12
-	snd.RollOffMaxDistance = 190
-	snd.Parent             = anchor
-	snd:Play()
-	Debris:AddItem(anchor, 8)
-end
-
--- The wound itself: a purple bloom at the point where the spike goes in.
-local function injectBurst(pos: Vector3)
-	local flash        = Instance.new("Part")
-	flash.Shape        = Enum.PartType.Ball
-	flash.Size         = Vector3.new(3, 3, 3)
-	flash.Position     = pos + Vector3.new(0, 0.5, 0)
-	flash.Color        = Color3.fromRGB(196, 90, 255)
-	flash.Material     = Enum.Material.Neon
-	flash.Anchored     = true
-	flash.CanCollide   = false
-	flash.CanQuery     = false
-	flash.CastShadow   = false
-	flash.Transparency = 0.15
-	flash.Parent       = workspace
-	TweenService:Create(flash, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size         = Vector3.new(20, 6, 20),
-		Transparency = 1,
-	}):Play()
-	Debris:AddItem(flash, 0.8)
-end
-
 -- The spike goes into one of her own plants: it bursts and gives up whatever it was
 -- growing. A spire lets a knot of Leeches out; a pod cluster comes up as more of her own
 -- egg nests. The plant is spent either way, so it comes down first.
@@ -273,9 +254,9 @@ local function harvestInjectPlant(ccId: string, owner: any, plant: Model, origin
 	local info = InjectPlants.injectInfo(plant)
 	local kind = info and info.kind
 	plant:Destroy()
-	injectBurst(origin)
+	BuildFX.injectBurst(origin)
 	if not kind then return end
-	playInjectSound(origin, SND_EVOLVE, 1.1)
+	BuildFX.injectSound(origin, BuildFX.SND_EVOLVE, 1.1)
 
 	local function surfaceAt(x: number, z: number): number
 		return (terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z)) or origin.Y
@@ -419,14 +400,26 @@ local function runInjection(ccId: string, order: InjectOrder)
 	-- Replicated so every client animates the brace (MotherLegs reads this attribute),
 	-- not just whoever ordered it.
 	data.base:SetAttribute("Injecting", true)
-	injectBurst(origin)
-	playInjectSound(origin, SND_INJECT, 0.95)
+	BuildFX.injectBurst(origin)
+	BuildFX.injectSound(origin, BuildFX.SND_INJECT, 0.95)
 	task.wait(Config.MOTHER_INJECT_DURATION)
 	if data.base.Parent then data.base:SetAttribute("Injecting", false) end
 
 	-- She may have died mid-injection; the ground still keeps what she put in it.
 	local plant = order.plant
-	if plant then
+	local nest  = order.nest
+	if nest then
+		-- The spike goes into a standing nest: it swells rather than bursts. Raided out
+		-- from under the order (or already swollen to its cap) and the spike finds
+		-- nothing, exactly as with a plant someone else got to first.
+		if nest.Parent then
+			BuildFX.injectBurst(origin)
+			BuildFX.injectSound(origin, BuildFX.SND_EVOLVE, 1.1)
+			-- Through the module table: the swelling needs the egg builders, which are
+			-- declared much further down this file.
+			BuildingManager.swellEggNest(ccId, nest)
+		end
+	elseif plant then
 		-- Someone (or a queued order of her own) already burst it: this spike finds
 		-- nothing, and nothing grows in its place.
 		if plant.Parent then harvestInjectPlant(ccId, data.owner, plant, origin) end
@@ -448,9 +441,15 @@ local function runInjection(ccId: string, order: InjectOrder)
 				origin.X + math.cos(a) * d, origin.Z + math.sin(a) * d, variant, rng)
 			if px and pz then
 				local py = (terrainManagerRef and terrainManagerRef.surfaceHeightAt(px, pz)) or groundY
-				local grown = InjectPlants.grow(folder, Vector3.new(px, py, pz), variant, seed + i)
-				-- Only her own plants take her spike, so each one remembers whose it is.
-				grown:SetAttribute("OwnerUserId", data.owner.UserId)
+				-- The plant does not simply push up here: it is carried out of the wound by
+				-- a parasite that runs to this spot first (clients animate that from
+				-- ParasiteFrom), so it waits underground for exactly that long. Ownership
+				-- rides along because only her own plants take her spike.
+				InjectPlants.grow(folder, Vector3.new(px, py, pz), variant, seed + i, false, {
+					ownerUserId  = data.owner.UserId,
+					parasiteFrom = origin,
+					delay        = Config.injectParasiteLead(),
+				})
 			end
 		end
 	end
@@ -468,6 +467,7 @@ local function runInjection(ccId: string, order: InjectOrder)
 			phase     = "walk",
 			wasRooted = order.wasRooted,
 			plant     = nextUp.plant,
+			nest      = nextUp.nest,
 		}
 		if not ccMobile[ccId] then setCCMobileState(ccId, live.owner, true) end
 		ccMoveTargets[ccId] = nextUp.target
@@ -495,9 +495,6 @@ local function buildingSize(buildingType: string): Vector3
 end
 
 -- Forward-declared so functions defined before their bodies can call them.
-local spawnDestructionVFX: (Vector3) -> ()
-local spawnWormBurstVFX:   (Vector3) -> ()
-local spawnEggHatchVFX:    (Vector3) -> ()
 local produceLampreyEgg:   (string, any, string) -> ()
 
 local function snapGrid(v: Vector3): Vector3
@@ -768,6 +765,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 			mhb.Anchored     = true
 			mhb.CanCollide   = false
 			mhb.CanQuery     = true
+			mhb.CanTouch     = false
 			mhb.CastShadow   = false
 			mhb.Parent       = model
 		else
@@ -1064,7 +1062,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	elseif buildingType == "Foundry" then
 		-- Foundry: the team-coloured base stays as the invisible collision/HP box; the
 		-- molten-crucible structure comes from the shared builder so the thumbnail
-		-- preview stays in sync. A floating "Boosted +X%" label is added below.
+		-- preview stays in sync. A floating "Refining +N" label is added below.
 		base.Transparency = 1
 		UnitVisuals.buildFoundryDecor(model, CFrame.new(position), player.TeamColor, true)
 
@@ -1128,7 +1126,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	end
 
 	if buildingType == "Foundry" then
-		-- Floating "Boosted +X%" readout, updated by the income tick. Server-created so
+		-- Floating "Refining +N" readout, updated by the income tick. Server-created so
 		-- it replicates to every client; hidden until a deposit is actually boosting it.
 		local bl           = Instance.new("BillboardGui")
 		bl.Name            = "BoostLabel"
@@ -1145,7 +1143,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 		lbl.TextSize               = 9
 		lbl.TextColor3             = Color3.fromRGB(255, 190, 70)
 		lbl.TextStrokeTransparency = 0.3
-		lbl.Text                   = "Boosted +0%"
+		lbl.Text                   = "Refining +0"
 		lbl.Parent                 = bl
 	end
 
@@ -1190,11 +1188,20 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 	if buildingType == "Turret" then
 		turretTimers[id] = 0
 	end
+	if buildingType == "Foundry" then
+		-- Seeded here, but only advanced once isConstructing clears, so the payout clock
+		-- starts from the moment this Foundry is standing.
+		foundryTimers[id] = 0
+	end
 	if buildingType == "Deployer" then
 		deployerTimers[id]    = 0
 		deployerUnitType[id]  = "Survivor"
 		deployerUpdateAcc[id] = 0
-		deployerLevel[id]     = 0
+		-- Knows only the first unit on the ladder until its unlocks are bought. The level
+		-- rides on the model as an attribute so every client can read it straight off the
+		-- bonfire it has selected (see DeployerPanel).
+		deployerUnlock[id]    = 0
+		model:SetAttribute("BonfireUnlock", 0)
 	end
 	if buildingType == "TEST" then
 		deployerTimers[id]    = 0
@@ -1297,7 +1304,7 @@ local function createBuilding(player: any, position: Vector3, buildingType: stri
 					model:PivotTo(CFrame.new(position.X, surfY + finalY + 4, position.Z))
 
 					-- Erupt: VFX, spawn 10 soldiers, destroy the building
-					task.spawn(spawnWormBurstVFX, position + Vector3.new(0, 5, 0))
+					task.spawn(BuildFX.wormBurst, position + Vector3.new(0, 5, 0))
 					if unitManagerRef then
 						for i = 1, 10 do
 							local angle  = (i / 10) * math.pi * 2
@@ -1522,7 +1529,6 @@ local function startMutantSoldierLoop(turretId: string, data: any, owner: Player
 	end)
 end
 
-
 -- ── Drop pod model ────────────────────────────────────────────────────────────
 
 local function createDropPodModel(): Model
@@ -1627,10 +1633,7 @@ local function createDropPodModel(): Model
 	return model
 end
 
-
 -- ── Relay chain helpers ───────────────────────────────────────────────────────
-
-local RELAY_CATCH_HEIGHT = 11  -- studs above relay base position to aim for (top of CatchRing)
 
 -- Returns ordered relay base positions the pod should hop through from ccPos to targetPos.
 -- Each relay in the list is closer to targetPos than the previous hop.
@@ -1672,30 +1675,7 @@ local function findRelayModelAt(pos: Vector3, owner: any): Model?
 	return nil
 end
 
-local function relayFlash(model: Model)
-	for _, p in model:GetDescendants() do
-		if not p:IsA("BasePart") or p.Material ~= Enum.Material.Neon then continue end
-		task.spawn(function()
-			local orig = p.Color
-			p.Color = Color3.new(1, 1, 1)
-			task.wait(0.1)
-			if p.Parent then p.Color = orig end
-		end)
-	end
-	local cr = model:FindFirstChild("CatchRing")
-	if cr then
-		local flash      = Instance.new("PointLight")
-		flash.Color      = Color3.fromRGB(180, 230, 255)
-		flash.Brightness = 16
-		flash.Range      = 50
-		flash.Parent     = cr
-		Debris:AddItem(flash, 0.8)
-	end
-end
-
 -- ── On-site construction (welding-arm assembly) ────────────────────────────
-
-local CONSTRUCT_SPARK_TEX = "rbxasset://textures/particles/sparkles_main.dds"
 
 -- Open the four landing fins outward; they stay attached so the grounded pod
 -- reads as the fabrication rig the welding arms extend from.
@@ -1826,7 +1806,7 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 		local tip   = mk("ArmTip",   Vector3.new(0.4, 0.4, 0.4), CFrame.new(shoulder),
 			Color3.fromRGB(255, 170, 60), Enum.Material.Neon, Enum.PartType.Ball)
 		local pe         = Instance.new("ParticleEmitter")
-		pe.Texture       = CONSTRUCT_SPARK_TEX
+		pe.Texture       = BUILD.SPARK_TEX
 		pe.Color         = ColorSequence.new(Color3.fromRGB(255, 220, 150), Color3.fromRGB(255, 120, 30))
 		pe.LightEmission = 1
 		pe.Size          = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 0.05) })
@@ -1843,17 +1823,17 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 	-- fill the structure's configured Config.BUILD_TIME; the rise is a fixed tail.
 	local buildTime = (Config.BUILD_TIME :: any)[buildingType] or 8
 	local assembly  = assemblyOverride or math.max(buildTime, 2)
-	local F  = assembly * CONSTRUCT_FOUNDATION_FRAC
-	local B  = F + assembly * CONSTRUCT_BEAMS_FRAC
-	local R  = B + assembly * CONSTRUCT_ROOF_FRAC
-	local Ri = R + CONSTRUCT_RISE_TIME
+	local F  = assembly * BUILD.FOUNDATION_FRAC
+	local B  = F + assembly * BUILD.BEAMS_FRAC
+	local R  = B + assembly * BUILD.ROOF_FRAC
+	local Ri = R + BUILD.RISE_TIME
 
 	local built    = false
 	local podParts: { BasePart } = {}
 	local sinkBase: { [BasePart]: CFrame } = {}
 	local elapsed  = 0
 	local conn: RBXScriptConnection
-	conn = RunService.Heartbeat:Connect(function(dt)
+	conn = PerfProbe.onHeartbeat("BuildingManager", function(dt)
 		elapsed += dt
 		local t = elapsed
 
@@ -1913,7 +1893,7 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 				-- The CC is instant in createBuilding (buildTime 0) and wouldn't
 				-- consume this override, so only arm it for buildings that rise.
 				if buildingType ~= "CommandCenter" then
-					nextBuildRiseTime = CONSTRUCT_RISE_TIME
+					nextBuildRiseTime = BUILD.RISE_TIME
 				end
 				-- Use the exact height the pod landed at and the on-site rig built
 				-- around, so the finished structure lines up with them instead of
@@ -1977,8 +1957,6 @@ local function runConstruction(player: any, targetPos: Vector3, buildingType: st
 	end)
 end
 
-
-
 -- ── Drop pod flight & building deployment ─────────────────────────────────────
 
 -- launchPos: already-elevated world position to fire from (CC roof or relay CatchRing).
@@ -1990,7 +1968,7 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 	local endPos: Vector3
 	if isHop then
 		local rp = relayChain[1]
-		endPos   = Vector3.new(rp.X, rp.Y + RELAY_CATCH_HEIGHT, rp.Z)
+		endPos   = Vector3.new(rp.X, rp.Y + BUILD.RELAY_CATCH_Y, rp.Z)
 	else
 		endPos = targetPos + Vector3.new(0, 4, 0)
 	end
@@ -2051,10 +2029,10 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 
 	local elapsed = 0
 	local conn: RBXScriptConnection
-	conn = RunService.Heartbeat:Connect(function(dt)
+	conn = PerfProbe.onHeartbeat("BuildingManager", function(dt)
 		if not pod or not pod.Parent then conn:Disconnect(); return end
 		elapsed = elapsed + dt
-		local t    = math.min(elapsed / DROP_POD_FLIGHT_TIME, 1)
+		local t    = math.min(elapsed / BUILD.POD_FLIGHT_TIME, 1)
 		local ease = t * t * (3 - 2 * t)
 		local u    = 1 - ease
 
@@ -2089,7 +2067,7 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 			end
 
 			local relayModel = findRelayModelAt(relayChain[1], player)
-			if relayModel then relayFlash(relayModel) end
+			if relayModel then BuildFX.relayFlash(relayModel) end
 
 			local remaining: {Vector3} = {}
 			for i = 2, #relayChain do table.insert(remaining, relayChain[i]) end
@@ -2154,7 +2132,6 @@ local function launchDropPod(player: any, launchPos: Vector3, relayChain: {Vecto
 		end
 	end)
 end
-
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
@@ -2228,9 +2205,9 @@ function BuildingManager.resetAll()
 	playerHasCC              = {}
 	turretTimers             = {}
 	deployerTimers           = {}
+	deployerUnlock           = {}
 	deployerUnitType         = {}
 	deployerUpdateAcc        = {}
-	deployerLevel            = {}
 	testSupplyLevel          = {}
 	testRateLevel            = {}
 	eggSacLevel              = {}
@@ -2243,7 +2220,7 @@ function BuildingManager.resetAll()
 	monumentWinTimer         = {}
 	monumentHeartbeatAccum   = 0
 	ccIncomeAccum            = 0
-	foundryIncomeAccum       = 0
+	foundryTimers            = {}
 	engState                 = {}
 	engResearchEnd           = {}
 	engUpdateAcc             = {}
@@ -2347,241 +2324,19 @@ function BuildingManager.setTerrainManager(tm: any)
 	terrainManagerRef = tm
 end
 
--- ── Destruction VFX (server-side) ────────────────────────────────────────────
-
-spawnDestructionVFX = function(pos: Vector3)
-	-- 3D destruction sound
-	local soundPart            = Instance.new("Part")
-	soundPart.Anchored         = true
-	soundPart.CanCollide       = false
-	soundPart.CanTouch         = false
-	soundPart.Transparency     = 1
-	soundPart.Size             = Vector3.new(1, 1, 1)
-	soundPart.CastShadow       = false
-	soundPart.Position         = pos
-	soundPart.Parent           = workspace
-	local snd                  = Instance.new("Sound")
-	snd.SoundId                = "rbxassetid://117211977307268"
-	snd.Volume                 = 1.1
-	snd.RollOffMaxDistance     = 200
-	snd.RollOffMinDistance     = 12
-	snd.Parent                 = soundPart
-	snd:Play()
-	Debris:AddItem(soundPart, 6)
-
-	-- Primary explosion
-	local exp              = Instance.new("Explosion")
-	exp.BlastRadius        = 0
-	exp.BlastPressure      = 0
-	exp.Position           = pos
-	exp.ExplosionType      = Enum.ExplosionType.NoCraters
-	exp.Parent             = workspace
-
-	-- Secondary offset explosion
-	task.delay(0.08, function()
-		local exp2          = Instance.new("Explosion")
-		exp2.BlastRadius    = 0
-		exp2.BlastPressure  = 0
-		exp2.Position       = pos + Vector3.new(rng:NextNumber(-2.5, 2.5), 1.5, rng:NextNumber(-2.5, 2.5))
-		exp2.ExplosionType  = Enum.ExplosionType.NoCraters
-		exp2.Parent         = workspace
-	end)
-
-	-- Tertiary small explosion
-	task.delay(0.18, function()
-		local exp3          = Instance.new("Explosion")
-		exp3.BlastRadius    = 0
-		exp3.BlastPressure  = 0
-		exp3.Position       = pos + Vector3.new(rng:NextNumber(-3, 3), rng:NextNumber(0, 2), rng:NextNumber(-3, 3))
-		exp3.ExplosionType  = Enum.ExplosionType.NoCraters
-		exp3.Parent         = workspace
-	end)
-
-	-- Flash light burst
-	local flashPart            = Instance.new("Part")
-	flashPart.Anchored         = true
-	flashPart.CanCollide       = false
-	flashPart.CanTouch         = false
-	flashPart.CastShadow       = false
-	flashPart.Transparency     = 1
-	flashPart.Size             = Vector3.new(1, 1, 1)
-	flashPart.Position         = pos + Vector3.new(0, 3, 0)
-	flashPart.Parent           = workspace
-	local light                = Instance.new("PointLight")
-	light.Brightness           = 10
-	light.Range                = 50
-	light.Color                = Color3.fromRGB(255, 150, 50)
-	light.Parent               = flashPart
-	Debris:AddItem(flashPart, 0.45)
-
-	-- Debris chunks
-	local debrisColors = {
-		Color3.fromRGB(120, 110, 100),
-		Color3.fromRGB(80,  75,  70),
-		Color3.fromRGB(60,  55,  50),
-	}
-	for _ = 1, 10 do
-		local d            = Instance.new("Part")
-		d.Anchored         = false
-		d.CanCollide       = false
-		d.CanTouch         = false
-		d.CastShadow       = false
-		d.Size             = Vector3.new(
-			rng:NextNumber(0.25, 0.9),
-			rng:NextNumber(0.25, 0.9),
-			rng:NextNumber(0.25, 0.9)
-		)
-		d.Color            = debrisColors[rng:NextInteger(1, #debrisColors)]
-		d.Material         = Enum.Material.SmoothPlastic
-		d.Position         = pos + Vector3.new(
-			rng:NextNumber(-2, 2),
-			rng:NextNumber(0.5, 2.5),
-			rng:NextNumber(-2, 2)
-		)
-		d.Parent           = workspace
-		d.AssemblyLinearVelocity = Vector3.new(
-			rng:NextNumber(-14, 14),
-			rng:NextNumber(9, 22),
-			rng:NextNumber(-14, 14)
-		)
-		d.AssemblyAngularVelocity = Vector3.new(
-			rng:NextNumber(-6, 6),
-			rng:NextNumber(-6, 6),
-			rng:NextNumber(-6, 6)
-		)
-		Debris:AddItem(d, rng:NextNumber(1.5, 3.0))
-	end
-end
-
--- ── Worm burst VFX (server-side) ─────────────────────────────────────────────
-
-spawnWormBurstVFX = function(pos: Vector3)
-	-- Burst sound (reuses the building-destruction sound)
-	local soundPart            = Instance.new("Part")
-	soundPart.Anchored         = true
-	soundPart.CanCollide       = false
-	soundPart.CanTouch         = false
-	soundPart.Transparency     = 1
-	soundPart.Size             = Vector3.new(1, 1, 1)
-	soundPart.CastShadow       = false
-	soundPart.Position         = pos
-	soundPart.Parent           = workspace
-	local snd                  = Instance.new("Sound")
-	snd.SoundId                = "rbxassetid://117211977307268"
-	snd.Volume                 = 1.3
-	snd.RollOffMaxDistance     = 220
-	snd.RollOffMinDistance     = 14
-	snd.Parent                 = soundPart
-	snd:Play()
-	Debris:AddItem(soundPart, 6)
-
-	-- Earthen dirt chunks hurled outward
-	local dirtColors = {
-		Color3.fromRGB(90,  60, 30),
-		Color3.fromRGB(70,  45, 20),
-		Color3.fromRGB(110, 80, 40),
-		Color3.fromRGB(55,  85, 20),
-	}
-	for _ = 1, 18 do
-		local d            = Instance.new("Part")
-		d.Anchored         = false
-		d.CanCollide       = false
-		d.CanTouch         = false
-		d.CastShadow       = false
-		d.Size             = Vector3.new(
-			rng:NextNumber(0.3, 1.2),
-			rng:NextNumber(0.3, 1.2),
-			rng:NextNumber(0.3, 1.2)
-		)
-		d.Color            = dirtColors[rng:NextInteger(1, #dirtColors)]
-		d.Material         = Enum.Material.SmoothPlastic
-		d.Position         = pos + Vector3.new(
-			rng:NextNumber(-3, 3),
-			rng:NextNumber(0.5, 3.0),
-			rng:NextNumber(-3, 3)
-		)
-		d.Parent           = workspace
-		d.AssemblyLinearVelocity = Vector3.new(
-			rng:NextNumber(-20, 20),
-			rng:NextNumber(14, 30),
-			rng:NextNumber(-20, 20)
-		)
-		d.AssemblyAngularVelocity = Vector3.new(
-			rng:NextNumber(-9, 9),
-			rng:NextNumber(-9, 9),
-			rng:NextNumber(-9, 9)
-		)
-		Debris:AddItem(d, rng:NextNumber(1.5, 3.5))
-	end
-end
-
--- ── Lamprey egg hatch VFX (server-side) ──────────────────────────────────────
-spawnEggHatchVFX = function(pos: Vector3)
-	-- Expanding green flash that fades out
-	local flash            = Instance.new("Part")
-	flash.Shape            = Enum.PartType.Ball
-	flash.Size             = Vector3.new(2, 2, 2)
-	flash.Position         = pos
-	flash.Color            = Color3.fromRGB(150, 230, 90)
-	flash.Material         = Enum.Material.Neon
-	flash.Anchored         = true
-	flash.CanCollide       = false
-	flash.CanQuery         = false
-	flash.CastShadow       = false
-	flash.Transparency     = 0.1
-	flash.Parent           = workspace
-	TweenService:Create(flash, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size         = Vector3.new(9, 9, 9),
-		Transparency = 1,
-	}):Play()
-	Debris:AddItem(flash, 0.6)
-
-	-- Eggshell shards + slime flung outward
-	local shardColors = {
-		Color3.fromRGB(150, 210, 90),
-		Color3.fromRGB(110, 170, 60),
-		Color3.fromRGB(90, 120, 50),
-	}
-	for _ = 1, 12 do
-		local s            = Instance.new("Part")
-		s.Anchored         = false
-		s.CanCollide       = false
-		s.CanTouch         = false
-		s.CastShadow       = false
-		s.Size             = Vector3.new(
-			rng:NextNumber(0.3, 0.9),
-			rng:NextNumber(0.3, 0.9),
-			rng:NextNumber(0.3, 0.9)
-		)
-		s.Color            = shardColors[rng:NextInteger(1, #shardColors)]
-		s.Material         = Enum.Material.SmoothPlastic
-		s.Position         = pos + Vector3.new(
-			rng:NextNumber(-1.5, 1.5),
-			rng:NextNumber(0.5, 2.5),
-			rng:NextNumber(-1.5, 1.5)
-		)
-		s.Parent           = workspace
-		s.AssemblyLinearVelocity = Vector3.new(
-			rng:NextNumber(-16, 16),
-			rng:NextNumber(10, 22),
-			rng:NextNumber(-16, 16)
-		)
-		s.AssemblyAngularVelocity = Vector3.new(
-			rng:NextNumber(-8, 8), rng:NextNumber(-8, 8), rng:NextNumber(-8, 8)
-		)
-		Debris:AddItem(s, rng:NextNumber(1.2, 2.5))
-	end
-end
-
 -- ── Launcher tentacle (rally-upgraded nests) ────────────────────────────────
 -- A single large tentacle sprouting from the centre of an upgraded nest. It aims
 -- at the rally point and whips toward it to fling each egg in that direction.
-local LAUNCHER_M    = 5      -- spine segments
-local LAUNCHER_H    = 16     -- length (larger than the decorative tentacles)
-local LAUNCHER_BT   = 2.3    -- base thickness
-local LAUNCHER_TT   = 0.9    -- tip thickness
-local LAUNCHER_COL  = Color3.fromRGB(96, 32, 66)
-local LAUNCHER_REST = 0.55   -- rest lean (radians) toward the aim direction
+-- Grouped into one table rather than six locals: this module sits near Luau's 200-local
+-- ceiling per chunk, and a bag of constants costs one register instead of six.
+local LAUNCHER = {
+	M    = 5,      -- spine segments
+	H    = 16,     -- length (larger than the decorative tentacles)
+	BT   = 2.3,    -- base thickness
+	TT   = 0.9,    -- tip thickness
+	COL  = Color3.fromRGB(96, 32, 66),
+	REST = 0.55,   -- rest lean (radians) toward the aim direction
+}
 
 -- Where an upgraded nest's launcher tentacle sprouts from (centre, near the Core).
 local function launcherBase(data: BuildingData): Vector3
@@ -2592,11 +2347,11 @@ end
 -- Curved spine of the launcher: rises from `basePos`, bending toward the horizontal
 -- `aimDir` by `lean` radians (negative leans back, away from aim).
 local function launcherSpine(basePos: Vector3, aimDir: Vector3, lean: number): { Vector3 }
-	local segLen = LAUNCHER_H / LAUNCHER_M
+	local segLen = LAUNCHER.H / LAUNCHER.M
 	local pts    = { basePos }
 	local pos    = basePos
-	for j = 1, LAUNCHER_M do
-		local s    = j / LAUNCHER_M
+	for j = 1, LAUNCHER.M do
+		local s    = j / LAUNCHER.M
 		local bend = (s ^ 1.7) * lean
 		local dir  = (Vector3.yAxis * math.cos(bend) + aimDir * math.sin(bend)).Unit
 		pos = pos + dir * segLen
@@ -2608,23 +2363,23 @@ end
 -- Position the launcher parts (found by name) along the spine. Returns tip pos + dir.
 local function layoutNestLauncher(model: Instance, basePos: Vector3, aimDir: Vector3, lean: number): (Vector3, Vector3)
 	local pts = launcherSpine(basePos, aimDir, lean)
-	for j = 1, LAUNCHER_M do
+	for j = 1, LAUNCHER.M do
 		local segP = model:FindFirstChild("Launcher_Seg" .. j) :: BasePart?
 		if segP then
-			local th = LAUNCHER_BT + (LAUNCHER_TT - LAUNCHER_BT) * ((j - 1) / LAUNCHER_M)
+			local th = LAUNCHER.BT + (LAUNCHER.TT - LAUNCHER.BT) * ((j - 1) / LAUNCHER.M)
 			UnitVisuals.orientYBetween(segP, pts[j], pts[j + 1], th)
 		end
-		if j < LAUNCHER_M then
+		if j < LAUNCHER.M then
 			local knot = model:FindFirstChild("Launcher_Knot" .. j) :: BasePart?
 			if knot then
-				local th = LAUNCHER_BT + (LAUNCHER_TT - LAUNCHER_BT) * (j / LAUNCHER_M)
+				local th = LAUNCHER.BT + (LAUNCHER.TT - LAUNCHER.BT) * (j / LAUNCHER.M)
 				knot.Size   = Vector3.new(th, th, th)
 				knot.CFrame = CFrame.new(pts[j + 1])
 			end
 		end
 	end
-	local tipPos = pts[LAUNCHER_M + 1]
-	local tipDir = (pts[LAUNCHER_M + 1] - pts[LAUNCHER_M]).Unit
+	local tipPos = pts[LAUNCHER.M + 1]
+	local tipDir = (pts[LAUNCHER.M + 1] - pts[LAUNCHER.M]).Unit
 	local tip    = model:FindFirstChild("Launcher_Tip") :: BasePart?
 	if tip then tip.CFrame = CFrame.new(tipPos) end
 	return tipPos, tipDir
@@ -2637,29 +2392,30 @@ local function buildNestLauncher(model: Instance, basePos: Vector3, aimDir: Vect
 		local p      = Instance.new("Part")
 		p.Name       = name
 		if shape then (p :: any).Shape = shape end
-		p.Color      = LAUNCHER_COL
+		p.Color      = LAUNCHER.COL
 		p.Material   = Enum.Material.SmoothPlastic
 		p.Size       = Vector3.new(1, 1, 1)
 		p.Anchored   = true
 		p.CanCollide = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.CastShadow = false
 		p.Parent     = model
 		return p
 	end
-	for j = 1, LAUNCHER_M do lp("Launcher_Seg" .. j) end
-	for j = 1, LAUNCHER_M - 1 do lp("Launcher_Knot" .. j, Enum.PartType.Ball) end
+	for j = 1, LAUNCHER.M do lp("Launcher_Seg" .. j) end
+	for j = 1, LAUNCHER.M - 1 do lp("Launcher_Knot" .. j, Enum.PartType.Ball) end
 	local tip = lp("Launcher_Tip", Enum.PartType.Ball)
 	tip.Size  = Vector3.new(1.9, 1.9, 1.9)
 	tip.Color = Color3.fromRGB(66, 22, 46)
-	layoutNestLauncher(model, basePos, aimDir, LAUNCHER_REST)
+	layoutNestLauncher(model, basePos, aimDir, LAUNCHER.REST)
 end
 
 -- Animate the launcher whipping toward `aimDir` and fling `egg` to `target`.
 -- Blocks (stepping via task.wait) until the egg reaches the target.
 local function throwNestLauncher(model: Instance, basePos: Vector3, aimDir: Vector3, egg: BasePart, eggFull: Vector3, target: Vector3)
 	local WIND, WHIP, FLIGHT      = 0.18, 0.16, 0.62
-	local restLean, backLean, whipLean = LAUNCHER_REST, -0.55, 1.75
+	local restLean, backLean, whipLean = LAUNCHER.REST, -0.55, 1.75
 
 	-- Seat the egg on the tip before the windup so it doesn't flash at the Core.
 	local seatPos = layoutNestLauncher(model, basePos, aimDir, restLean)
@@ -2762,7 +2518,7 @@ local function killEggTarget(id: string, e: EggTarget)
 	-- Take the shell down first: the gore's ground raycast would otherwise land the
 	-- blood pool on top of the egg it just burst, leaving a stain floating in the air.
 	if e.root.Parent then e.root:Destroy() end
-	spawnEggHatchVFX(pos)
+	BuildFX.eggHatch(pos)
 	GoreManager.spawn(e.gore, pos, 2, e.maxHp)
 	if e.onDeath then task.spawn(e.onDeath) end
 end
@@ -2810,13 +2566,13 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	local startPos = core and core.Position or (basePos + Vector3.new(0, data.base.Size.Y, 0))
 
 	local halfX    = buildingSize("LampreyNest").X / 2
-	local EGG_FULL = Vector3.new(3, 3.8, 3)
+	local eggFull = Vector3.new(3, 3.8, 3)
 	-- Eggs must rest on whichever terrain tier they land on — a fixed world Y left
 	-- them buried below a raised nest (looking like nothing spawned). Resolve the
 	-- settle height per-XZ from the real terrain surface.
 	local function settleYAt(x: number, z: number): number
 		local surf = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z) or 0
-		return surf + EGG_FULL.Y / 2
+		return surf + eggFull.Y / 2
 	end
 
 	-- Where the egg settles. With the rally upgrade the nest LAUNCHES the egg to the
@@ -2860,13 +2616,14 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	local egg           = Instance.new("Part")
 	egg.Name            = "Egg_" .. nestEggCounter
 	egg.Shape           = Enum.PartType.Ball
-	egg.Size            = EGG_FULL * 0.4
+	egg.Size            = eggFull * 0.4
 	egg.Position        = startPos
 	egg.Color           = eggColor
 	egg.Material        = Enum.Material.Neon
 	egg.Anchored        = true
 	egg.CanCollide      = false
 	egg.CanQuery        = false
+	egg.CanTouch        = false
 	egg.CastShadow      = false
 	egg.Transparency    = 0.1
 	egg.Parent          = model
@@ -2927,7 +2684,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 		local lbase = launcherBase(data)
 		local aim   = Vector3.new(target.X - lbase.X, 0, target.Z - lbase.Z)
 		aim = if aim.Magnitude > 0.1 then aim.Unit else Vector3.new(0, 0, 1)
-		throwNestLauncher(model, lbase, aim, egg, EGG_FULL, target)
+		throwNestLauncher(model, lbase, aim, egg, eggFull, target)
 		nestLauncherBusy[nestId] = nil
 		if egg.Parent == nil then return end
 	else
@@ -2938,7 +2695,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 			(startPos.Z + target.Z) / 2
 		)
 		TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Position = apex, Size = EGG_FULL,
+			Position = apex, Size = eggFull,
 		}):Play()
 		task.wait(halfEject)
 		if egg.Parent == nil then return end
@@ -2954,6 +2711,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	-- hatches, and doing so gives the nest its reserved slot back. Only now does it take
 	-- raycasts — while it was arcing through the air it was untouchable scenery.
 	egg.CanQuery = true
+	egg.CanTouch = false
 	registerEggTarget(egg, egg, player, Config.EGG_HP, unitType, nil, function()
 		nestEggs[nestId] = math.max(0, (nestEggs[nestId] or 1) - 1)
 	end)
@@ -2961,7 +2719,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	-- ── Incubate: the egg breathes green until it hatches ─────────────────────
 	TweenService:Create(egg,
 		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
-			Size = EGG_FULL * 1.12, Transparency = 0,
+			Size = eggFull * 1.12, Transparency = 0,
 		}):Play()
 	TweenService:Create(eggLight,
 		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
@@ -2978,7 +2736,7 @@ produceLampreyEgg = function(nestId: string, player: any, unitType: string)
 	end
 	local hatchPos = egg.Position
 	egg:Destroy()
-	spawnEggHatchVFX(hatchPos)
+	BuildFX.eggHatch(hatchPos)
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
 	if unitManagerRef then
 		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), unitType)
@@ -3042,10 +2800,10 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	fwd = Vector3.new(fwd.X, 0, fwd.Z)
 	fwd = fwd.Magnitude > 0.01 and fwd.Unit or Vector3.new(0, 0, 1)
 
-	local EGG_FULL = Vector3.new(2.6, 3.2, 2.6)
+	local eggFull = Vector3.new(2.6, 3.2, 2.6)
 	local function settleYAt(x: number, z: number): number
 		local surf = terrainManagerRef and terrainManagerRef.surfaceHeightAt(x, z) or 0
-		return surf + EGG_FULL.Y / 2
+		return surf + eggFull.Y / 2
 	end
 	local clutch = eggNestFolder(ccId)
 	local function overlapsEgg(x: number, z: number): boolean
@@ -3078,13 +2836,14 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	local egg           = Instance.new("Part")
 	egg.Name            = "MotherEgg_" .. motherEggCounter
 	egg.Shape           = Enum.PartType.Ball
-	egg.Size            = EGG_FULL * 0.4
+	egg.Size            = eggFull * 0.4
 	egg.Position        = startPos
 	egg.Color           = Color3.fromRGB(255, 120, 60)   -- warm orange (Hagfish-eye glow)
 	egg.Material        = Enum.Material.Neon
 	egg.Anchored        = true
 	egg.CanCollide      = false
 	egg.CanQuery        = false
+	egg.CanTouch        = false
 	egg.CastShadow      = false
 	egg.Transparency    = 0.1
 	egg.Parent          = clutch
@@ -3098,7 +2857,7 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "EggProgress"
 	bb.Size             = UDim2.fromOffset(48, 7)
-	bb.StudsOffset      = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
+	bb.StudsOffset      = Vector3.new(0, eggFull.Y * 0.95, 0)
 	bb.AlwaysOnTop      = true
 	bb.LightInfluence   = 0
 	bb.MaxDistance      = 240
@@ -3128,7 +2887,7 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	)
 	local halfEject = 0.28
 	TweenService:Create(egg, TweenInfo.new(halfEject, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Position = apex, Size = EGG_FULL,
+		Position = apex, Size = eggFull,
 	}):Play()
 	task.wait(halfEject)
 	if egg.Parent == nil then return end
@@ -3145,13 +2904,14 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 
 	-- Lying in the open in front of the Mother, so it can be shot before it hatches.
 	egg.CanQuery = true
+	egg.CanTouch = false
 	registerEggTarget(egg, egg, player, Config.EGG_HP, unitType, nil)
 
 	-- Incubate: the egg breathes while the progress bar fills over the incubation.
 	bb.Enabled = true
 	TweenService:Create(egg,
 		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-		{ Size = EGG_FULL * 1.12 }):Play()
+		{ Size = eggFull * 1.12 }):Play()
 	TweenService:Create(eggLight,
 		TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
 		{ Brightness = 5 }):Play()
@@ -3166,7 +2926,7 @@ function BuildingManager.produceMotherEgg(player: any, ccId: string, unitType: s
 	if not buildingData[ccId] then egg:Destroy(); return end
 	local hatchPos = egg.Position
 	egg:Destroy()
-	spawnEggHatchVFX(hatchPos)
+	BuildFX.eggHatch(hatchPos)
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(hatchPos, hatchPos, "LampreyEggHatch")
 	if unitManagerRef then
 		unitManagerRef.spawnUnitNow(player, Vector3.new(hatchPos.X, 0, hatchPos.Z), unitType)
@@ -3181,16 +2941,20 @@ end
 -- so a farther egg simply takes longer — and once
 -- it reaches the spot the egg forms at the tip. The tentacles double as the edges of a
 -- growing node network.
-local EGG_GRASS_COLOR    = Color3.fromRGB(10, 9, 13)
-local EGG_GLOW_COLOR     = Color3.fromRGB(150, 55, 225)  -- swarm purple
-local EGG_MIN_SPACING    = 11                            -- min distance between egg centers
-local EGG_TENTACLE_SPEED = 22                            -- studs/sec the tentacle grows (fixed; distance → time)
-local EGG_BRANCH_MIN     = 11.5                          -- min distance a child sits from its parent node
-local EGG_BRANCH_MAX     = 22                            -- max (each egg picks a random length in between → uneven, organic spacing)
-local EGG_GOLDEN         = math.rad(137.5)               -- root children fan around the Mother by the golden angle
-local EGG_ROOT_MAX_KIDS  = 6                             -- eggs that attach directly to the Mother
-local EGG_NODE_MAX_KIDS  = 3                             -- children each egg branches into
-local EGG_NODE_FAN       = { 0, math.rad(58), math.rad(-58) }  -- sibling fan slots around a node's outward dir
+-- One table rather than ten locals: this module sits near Luau's 200-local ceiling per
+-- chunk, and none of these are read anywhere hot enough to want a register of their own.
+local EGG = {
+	GRASS_COLOR    = Color3.fromRGB(10, 9, 13),
+	GLOW_COLOR     = Color3.fromRGB(150, 55, 225),  -- swarm purple
+	MIN_SPACING    = 11,                            -- min distance between egg centers
+	TENTACLE_SPEED = 22,                            -- studs/sec the tentacle grows (fixed; distance → time)
+	BRANCH_MIN     = 11.5,                          -- min distance a child sits from its parent node
+	BRANCH_MAX     = 22,                            -- max (each egg picks a random length in between → uneven, organic spacing)
+	GOLDEN         = math.rad(137.5),               -- root children fan around the Mother by the golden angle
+	ROOT_MAX_KIDS  = 6,                             -- eggs that attach directly to the Mother
+	NODE_MAX_KIDS  = 3,                             -- children each egg branches into
+	NODE_FAN       = { 0, math.rad(58), math.rad(-58) },  -- sibling fan slots around a node's outward dir
+}
 
 -- A thin dark vein hugging the ground from `a` to `b` (both already at ground Y). Used for
 -- both the creepygrass strands and the node-network edges between eggs.
@@ -3201,7 +2965,7 @@ local function addGroundVein(parent: Instance, a: Vector3, b: Vector3, width: nu
 	local mid = (a + b) * 0.5
 	local seg        = Instance.new("Part")
 	seg.Size         = Vector3.new(width, 0.16, len + 0.15)   -- slight overlap hides seams
-	seg.Color        = EGG_GRASS_COLOR
+	seg.Color        = EGG.GRASS_COLOR
 	seg.Transparency = 0.45
 	seg.Material     = Enum.Material.Slate
 	seg.Anchored     = true
@@ -3218,7 +2982,7 @@ local function addGlowBlob(parent: Instance, pos: Vector3, size: number)
 	local g        = Instance.new("Part")
 	g.Shape        = Enum.PartType.Ball
 	g.Size         = Vector3.new(size, size, size)
-	g.Color        = EGG_GLOW_COLOR
+	g.Color        = EGG.GLOW_COLOR
 	g.Material     = Enum.Material.Neon
 	g.Anchored     = true
 	g.CanCollide   = false
@@ -3267,15 +3031,17 @@ local function eggRotY(v: Vector3, a: number): Vector3
 	return Vector3.new(v.X * c - v.Z * s, 0, v.X * s + v.Z * c)
 end
 
--- True if (x,z) is within EGG_MIN_SPACING of any of this Mother's eggs.
+-- True if (x,z) is within EGG.MIN_SPACING of any of this Mother's nests. Only the first
+-- egg of each is consulted: the rest share its bowl, so they stand on ground that is
+-- already spoken for.
 local function eggTooClose(ccId: string, x: number, z: number): boolean
 	local eggs = eggSacEggs[ccId]
 	if not eggs then return false end
 	for _, e in eggs do
-		if e.egg.Parent then
+		if e.slot == 1 and e.egg.Parent then
 			local p = e.egg.Position
 			local dx, dz = p.X - x, p.Z - z
-			if dx * dx + dz * dz < EGG_MIN_SPACING * EGG_MIN_SPACING then return true end
+			if dx * dx + dz * dz < EGG.MIN_SPACING * EGG.MIN_SPACING then return true end
 		end
 	end
 	return false
@@ -3285,7 +3051,7 @@ end
 -- branch length (so nest spacing is uneven / organic), then the length grows and the angle
 -- nudges until it clears every other egg. Returns nil if it can't.
 local function eggTryBranch(ccId: string, fromX: number, fromZ: number, dir: Vector3): Vector3?
-	local baseLen = EGG_BRANCH_MIN + math.random() * (EGG_BRANCH_MAX - EGG_BRANCH_MIN)
+	local baseLen = EGG.BRANCH_MIN + math.random() * (EGG.BRANCH_MAX - EGG.BRANCH_MIN)
 	for _, extra in { 0, 3, 6, 10, 15 } do
 		local len = baseLen + extra
 		for _, aj in { 0, 0.22, -0.22, 0.45, -0.45 } do
@@ -3314,26 +3080,28 @@ local function planEgg(ccId: string, base: BasePart): (Vector3, Vector3, string?
 	type Cand = { pos: Vector3, dir: Vector3, parentId: string?, score: number }
 	local cands: { Cand } = {}
 
+	-- Only slot-1 eggs are nodes of the tree; the eggs an injection adds sit inside a nest
+	-- that is already hanging somewhere and are not places anything can branch from.
 	local rootCount = 0
-	if eggs then for _, e in eggs do if e.egg.Parent and not e.parentId then rootCount += 1 end end end
-	if rootCount < EGG_ROOT_MAX_KIDS then
-		local ang = rootCount * EGG_GOLDEN + (math.random() - 0.5) * 0.35   -- golden spread + organic jitter
+	if eggs then for _, e in eggs do if e.slot == 1 and e.egg.Parent and not e.parentId then rootCount += 1 end end end
+	if rootCount < EGG.ROOT_MAX_KIDS then
+		local ang = rootCount * EGG.GOLDEN + (math.random() - 0.5) * 0.35   -- golden spread + organic jitter
 		table.insert(cands, {
 			pos = motherPos, parentId = nil,
 			dir = Vector3.new(math.cos(ang), 0, math.sin(ang)),
-			score = math.random() * EGG_MIN_SPACING,  -- inner (dist 0) + jitter
+			score = math.random() * EGG.MIN_SPACING,  -- inner (dist 0) + jitter
 		})
 	end
 	if eggs then
 		for id, e in eggs do
-			if e.egg.Parent and e.numChildren < EGG_NODE_MAX_KIDS then
+			if e.slot == 1 and e.egg.Parent and e.numChildren < EGG.NODE_MAX_KIDS then
 				local p    = e.egg.Position
 				local dist = math.sqrt((p.X - center.X) ^ 2 + (p.Z - center.Z) ^ 2)
-				local fan  = (EGG_NODE_FAN[e.numChildren + 1] or 0) + (math.random() - 0.5) * 0.35
+				local fan  = (EGG.NODE_FAN[e.numChildren + 1] or 0) + (math.random() - 0.5) * 0.35
 				table.insert(cands, {
 					pos = Vector3.new(p.X, eggGroundY(p.X, p.Z), p.Z), parentId = id,
 					dir = eggRotY(e.dir, fan),                          -- fan around parent's outward dir + jitter
-					score = dist + math.random() * (EGG_MIN_SPACING * 1.5),  -- inner-biased, jittered
+					score = dist + math.random() * (EGG.MIN_SPACING * 1.5),  -- inner-biased, jittered
 				})
 			end
 		end
@@ -3352,7 +3120,7 @@ local function planEgg(ccId: string, base: BasePart): (Vector3, Vector3, string?
 
 	-- Fallback (everything crowded): drop on a random outer ring off the Mother.
 	local eggCount = 0
-	if eggs then for _ in eggs do eggCount += 1 end end
+	if eggs then for _, e in eggs do if e.slot == 1 then eggCount += 1 end end end
 	local ang  = math.random() * math.pi * 2
 	local r    = Config.COMMAND_CENTER_SIZE.X / 2 + 6 + eggCount * 1.5
 	local x, z = center.X + math.cos(ang) * r, center.Z + math.sin(ang) * r
@@ -3400,37 +3168,39 @@ local function growTentacle(parent: Instance, ccId: string, from: Vector3, to: V
 		local width = 1.5 * (1 - t) + 0.3              -- taper thick base → thin tip
 		addGroundVein(container, pts[i], pts[i + 1], width)
 		if math.random() < 0.12 then addGlowBlob(container, pts[i + 1], 0.28 + math.random() * 0.2) end
-		task.wait(segLen / EGG_TENTACLE_SPEED)
+		task.wait(segLen / EGG.TENTACLE_SPEED)
 	end
 end
 
 -- Emoji shown on top of an egg for the unit it is set to hatch.
-local EGG_FULL = Vector3.new(2.2, 2.7, 2.2)
+EGG.FULL = Vector3.new(2.2, 2.7, 2.2)
 
 -- A freshly-planted nest is not empty: a dormant egg sits in its socket from the moment
 -- the nest pops in, so the colony reads as eggs rather than bowls. It is inert — no
 -- breathing, no light, no progress bar — until the player picks the unit it should keep
 -- alive, at which point incubation takes over and swells it. Once that first creature
 -- hatches the egg is spent for good; the nest only grows another when its unit dies.
-local EGG_DORMANT = EGG_FULL * 0.78
-local EGG_DORMANT_TRANS = 0.18
+EGG.DORMANT       = EGG.FULL * 0.78
+EGG.DORMANT_TRANS = 0.18
 
 -- ── The nest an Egg Sac egg is laid in ──────────────────────────────────────────
 -- A shallow bramble bowl rather than a slab: a ring of dark flesh ribs that lean out of
 -- the ground and curl back inward over the socket, a few pale bone slivers woven across
 -- the rim, and a black goo pool in the middle that the egg sits in.
-local NEST_FLESH    = Color3.fromRGB(24, 15, 26)
-local NEST_FLESH_HI = Color3.fromRGB(38, 22, 40)
-local NEST_BONE     = Color3.fromRGB(96, 84, 84)
-local NEST_RIM_R    = 2.95   -- radius the rim curls over at
-local NEST_RIBS     = 15
-local NEST_FLOOR_Y  = 0.3    -- top of the goo pool: where an egg sits
-
--- The socket pool. Black and unlit at rest; it only warms up while a creature is
--- incubating, so the glow reads as the egg growing rather than as nest decoration.
-local NEST_GOO_COLOR = Color3.fromRGB(8, 7, 10)
-local NEST_GOO_LIGHT = Color3.fromRGB(255, 140, 70)   -- matches the egg's own light
-local NEST_GOO_REST  = 0                              -- goo light brightness with nothing growing
+-- One table rather than nine locals; see LAUNCHER above for why.
+local NEST = {
+	FLESH    = Color3.fromRGB(24, 15, 26),
+	FLESH_HI = Color3.fromRGB(38, 22, 40),
+	BONE     = Color3.fromRGB(96, 84, 84),
+	RIM_R    = 2.95,   -- radius the rim curls over at
+	RIBS     = 15,
+	FLOOR_Y  = 0.3,    -- top of the goo pool: where an egg sits
+	-- The socket pool. Black and unlit at rest; it only warms up while a creature is
+	-- incubating, so the glow reads as the egg growing rather than as nest decoration.
+	GOO_COLOR = Color3.fromRGB(8, 7, 10),
+	GOO_LIGHT = Color3.fromRGB(255, 140, 70),   -- matches the egg's own light
+	GOO_REST  = 0,                              -- goo light brightness with nothing growing
+}
 
 -- One tapered strand from `a` to `b`. Unlike addGroundVein this one is free in 3D, so the
 -- ribs can climb and curl.
@@ -3483,23 +3253,23 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 	local ground = nestPos.Y
 
 	-- Wet floor, then the goo pool that sits in it (the socket the egg forms in).
-	addNestDisc(clump, nestPos + Vector3.new(0, 0.12, 0), NEST_RIM_R * 1.75, 0.24,
+	addNestDisc(clump, nestPos + Vector3.new(0, 0.12, 0), NEST.RIM_R * 1.75, 0.24,
 		Color3.fromRGB(18, 11, 20), Enum.Material.Slate, "NestFloor")
-	local goo = addNestDisc(clump, nestPos + Vector3.new(0, NEST_FLOOR_Y, 0), NEST_RIM_R * 1.25, 0.22,
-		NEST_GOO_COLOR, Enum.Material.Slate, "NestGoo")
+	local goo = addNestDisc(clump, nestPos + Vector3.new(0, NEST.FLOOR_Y, 0), NEST.RIM_R * 1.25, 0.22,
+		NEST.GOO_COLOR, Enum.Material.Slate, "NestGoo")
 	goo:SetAttribute("ShownAt", 0.55)
 
 	-- Rim ribs: each roots just outside the pool, leans out and up to the rim, then curls
 	-- back in over the socket. Lengths and angles jitter so no two nests read the same.
-	for i = 1, NEST_RIBS do
-		local ang  = (i / NEST_RIBS) * math.pi * 2 + (math.random() - 0.5) * 0.2
+	for i = 1, NEST.RIBS do
+		local ang  = (i / NEST.RIBS) * math.pi * 2 + (math.random() - 0.5) * 0.2
 		local out  = Vector3.new(math.cos(ang), 0, math.sin(ang))
-		local r0   = NEST_RIM_R * (0.6 + math.random() * 0.12)
+		local r0   = NEST.RIM_R * (0.6 + math.random() * 0.12)
 		local h    = 1.1 + math.random() * 0.6
 		local root = nestPos + out * r0 + Vector3.new(0, 0.05, 0)
-		local rim  = nestPos + out * NEST_RIM_R + Vector3.new(0, h * 0.66, 0)
+		local rim  = nestPos + out * NEST.RIM_R + Vector3.new(0, h * 0.66, 0)
 		local tip  = rim - out * (0.5 + math.random() * 0.55) + Vector3.new(0, h * 0.38, 0)
-		local col  = if math.random() < 0.3 then NEST_FLESH_HI else NEST_FLESH
+		local col  = if math.random() < 0.3 then NEST.FLESH_HI else NEST.FLESH
 		addNestStrand(clump, root, rim, 0.66, col)
 		addNestStrand(clump, rim,  tip, 0.4,  col)
 	end
@@ -3509,27 +3279,27 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 		local ang  = math.random() * math.pi * 2
 		local span = 0.5 + math.random() * 0.35
 		local y    = ground + 0.75 + math.random() * 0.45
-		local a    = Vector3.new(nestPos.X + math.cos(ang) * NEST_RIM_R, y, nestPos.Z + math.sin(ang) * NEST_RIM_R)
-		local b    = Vector3.new(nestPos.X + math.cos(ang + span) * NEST_RIM_R, y + (math.random() - 0.5) * 0.3,
-			nestPos.Z + math.sin(ang + span) * NEST_RIM_R)
-		addNestStrand(clump, a, b, 0.3, NEST_BONE)
+		local a    = Vector3.new(nestPos.X + math.cos(ang) * NEST.RIM_R, y, nestPos.Z + math.sin(ang) * NEST.RIM_R)
+		local b    = Vector3.new(nestPos.X + math.cos(ang + span) * NEST.RIM_R, y + (math.random() - 0.5) * 0.3,
+			nestPos.Z + math.sin(ang + span) * NEST.RIM_R)
+		addNestStrand(clump, a, b, 0.3, NEST.BONE)
 	end
 
 	-- Glow nubs tucked between the ribs so an empty nest still looks alive at night.
 	for _ = 1, 4 do
 		local ang  = math.random() * math.pi * 2
 		local blob = addGlowBlob(clump, Vector3.new(
-			nestPos.X + math.cos(ang) * NEST_RIM_R * 0.85,
+			nestPos.X + math.cos(ang) * NEST.RIM_R * 0.85,
 			ground + 0.1,
-			nestPos.Z + math.sin(ang) * NEST_RIM_R * 0.85
+			nestPos.Z + math.sin(ang) * NEST.RIM_R * 0.85
 		), 0.3 + math.random() * 0.25)
 		blob.Transparency = 1
 	end
 
 	local light      = Instance.new("PointLight")
 	light.Name       = "NestLight"
-	light.Color      = NEST_GOO_LIGHT
-	light.Brightness = NEST_GOO_REST   -- dark until something incubates in the socket
+	light.Color      = NEST.GOO_LIGHT
+	light.Brightness = NEST.GOO_REST   -- dark until something incubates in the socket
 	light.Range      = 12
 	light.Parent     = goo
 
@@ -3538,7 +3308,7 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 	-- deliberately oversized, so neither is a good fit for an outline.
 	local bowl        = Instance.new("Part")
 	bowl.Name         = "Bowl"
-	bowl.Size         = Vector3.new(NEST_RIM_R * 2 + 0.5, 2, NEST_RIM_R * 2 + 0.5)
+	bowl.Size         = Vector3.new(NEST.RIM_R * 2 + 0.5, 2, NEST.RIM_R * 2 + 0.5)
 	bowl.Position     = nestPos + Vector3.new(0, 1, 0)
 	bowl.Anchored     = true
 	bowl.CanCollide   = false
@@ -3550,31 +3320,75 @@ local function buildEggNest(clump: Model, nestPos: Vector3)
 	bowl.Parent       = clump
 end
 
--- Build one egg clump at `nestPos`: the bramble nest, the (hidden) egg that forms in it while
--- a creature incubates, and a generous invisible click box, grouped in a Model tagged with
--- EggId/EggOwnerId (+ ParentEgg for the selection tree). Created HIDDEN (invisible,
--- unclickable): revealEggClump pops it in once its tentacle finishes growing. Returns the
--- eggId plus the egg part.
-local function buildEggClump(container: Instance, ownerId: number, nestPos: Vector3, parentId: string?): (string, BasePart)
+-- ── The eggs a nest holds ───────────────────────────────────────────────────────
+-- A nest starts with one egg in the middle of its socket and grows another every time the
+-- Mother injects it, all of them sharing the one bowl. They are siblings, all named "Egg",
+-- each stamped with its own EggId, and `layoutNestEggs` seats them: one sits dead centre,
+-- and any more ring the socket evenly.
+
+-- How far out from the socket's centre the eggs of a shared nest sit, at nest scale 1.
+-- Sized against a RIPE shell (EGG.FULL, 1.1 across the radius), which is what a nest looks
+-- like nearly all of the time. A shell carrying something big swells past this for the
+-- length of the hatch and the two press into each other, which on a bramble full of meat
+-- reads as a twin-lobed sac rather than as a mistake.
+EGG.SLOT_SPREAD = 1.3
+
+-- What tier a nest stands at: 1 Small (as planted), 2 Medium, 3 Large. Stamped on the
+-- clump by every injection, so both sides can read it off the model.
+local function nestTier(clump: Instance): number
+	return (clump:GetAttribute("NestTier") :: number?) or 1
+end
+
+-- The id stamped on a shell, or nil for scenery (a Large nest's buds carry none).
+local function eggIdOf(egg: BasePart): string?
+	local id = egg:GetAttribute("EggId")
+	return type(id) == "string" and id or nil
+end
+
+-- The nest's ground point and its current size, both read straight off the Bowl (which is
+-- centred on the socket and swells with the rest of the bramble), so nothing has to be
+-- remembered between injections.
+local function nestGround(clump: Model): (Vector3, number)
+	local bowl = clump:FindFirstChild("Bowl") :: BasePart?
+	if not bowl then return clump:GetPivot().Position, 1 end
+	local scale = (clump:GetAttribute("NestScale") :: number?) or 1
+	return bowl.Position - Vector3.new(0, bowl.Size.Y * 0.5, 0), scale
+end
+
+-- Seat `entries` in the socket at `centre` and re-seat each on the (possibly new) floor.
+-- Called on every injection, so an egg already ripening simply slides over to make room:
+-- growSacEgg drives only the egg's Y, and reads X/Z back off the part, so a move sticks.
+local function layoutNestEggs(entries: { SacEgg }, centre: Vector3, scale: number)
+	local floorY = NEST.FLOOR_Y * scale
+	local n      = #entries
+	for i, e in entries do
+		local x, z = centre.X, centre.Z
+		if n > 1 then
+			local ang = ((i - 1) / n) * math.pi * 2
+			x += math.cos(ang) * EGG.SLOT_SPREAD * scale
+			z += math.sin(ang) * EGG.SLOT_SPREAD * scale
+		end
+		e.baseY        = centre.Y + floorY
+		e.egg.Position = Vector3.new(x, e.baseY + e.egg.Size.Y * 0.5, z)
+	end
+end
+
+-- Build one egg shell in `clump`'s socket: the shell itself, the light it carries while it
+-- is alive, and its growth bar. Built dormant (invisible, seated at the centre) -- either
+-- revealEggClump fades it in with the rest of a new nest, or growSacEgg wells it up out of
+-- the goo when an injection adds it to a nest already standing. Returns its id and part.
+-- `scale` is the NEST's size (where the shell sits); `eggScale` is the shell's own size
+-- against a normal egg, which only a Large nest's prime egg raises.
+local function buildSacEgg(clump: Model, nestPos: Vector3, scale: number, eggScale: number?): (string, BasePart)
+	local es = eggScale or 1
 	eggSacEggCounter += 1
 	local eggId = "SacEgg_" .. eggSacEggCounter
 
-	local clump = Instance.new("Model")
-	clump.Name  = eggId
-	clump:SetAttribute("EggId", eggId)
-	clump:SetAttribute("EggOwnerId", ownerId)
-	if parentId then clump:SetAttribute("ParentEgg", parentId) end
-
-	buildEggNest(clump, nestPos)
-
-	-- The egg itself. It sits as a bud in the socket from the moment the nest is revealed,
-	-- growSacEgg swells it to ripeness over EGG_GROW_TIME, and it then waits there until
-	-- the player spends it on a creature. Built at dormant size; revealEggClump fades it in.
 	local egg         = Instance.new("Part")
 	egg.Name          = "Egg"
 	egg.Shape         = Enum.PartType.Ball
-	egg.Size          = EGG_DORMANT
-	egg.Position      = nestPos + Vector3.new(0, NEST_FLOOR_Y + EGG_DORMANT.Y * 0.5, 0)
+	egg.Size          = EGG.DORMANT * es
+	egg.Position      = nestPos + Vector3.new(0, NEST.FLOOR_Y * scale + EGG.DORMANT.Y * es * 0.5, 0)
 	egg.Color         = Color3.fromRGB(255, 120, 60)
 	egg.Material      = Enum.Material.Neon
 	egg.Anchored      = true
@@ -3582,6 +3396,7 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 	egg.CanQuery      = false     -- the Hitbox takes every click; the egg is often not there
 	egg.CastShadow    = false
 	egg.Transparency  = 1
+	egg:SetAttribute("EggId", eggId)   -- the id lives on the shell: a nest holds several
 	egg.Parent        = clump
 	local eggLight      = Instance.new("PointLight")
 	eggLight.Color      = Color3.fromRGB(255, 140, 70)
@@ -3594,7 +3409,7 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 	local bb            = Instance.new("BillboardGui")
 	bb.Name             = "EggProgress"
 	bb.Size             = UDim2.fromOffset(48, 7)
-	bb.StudsOffset      = Vector3.new(0, EGG_FULL.Y * 0.95, 0)
+	bb.StudsOffset      = Vector3.new(0, EGG.FULL.Y * es * 0.95, 0)
 	bb.AlwaysOnTop      = true
 	bb.LightInfluence   = 0
 	bb.MaxDistance      = 240
@@ -3617,9 +3432,31 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 	fill.Parent         = barBg
 	local fillCorner    = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
 
+	return eggId, egg
+end
+
+-- Build one egg clump at `nestPos`: the bramble nest, the (hidden) first egg that forms in
+-- it, and a generous invisible click box, grouped in a Model tagged with NestId/EggOwnerId.
+-- The NEST is what the client clicks and what carries the health bar; the eggs inside it
+-- carry their own ids. Created HIDDEN (invisible, unclickable): revealEggClump pops it in
+-- once its tentacle finishes growing. Returns the clump, the first egg's id and its part.
+local function buildEggClump(container: Instance, ownerId: number, nestPos: Vector3): (Model, string, BasePart)
+	eggSacNestCounter += 1
+	local nestId = "SacNest_" .. eggSacNestCounter
+
+	local clump = Instance.new("Model")
+	clump.Name  = nestId
+	clump:SetAttribute("NestId", nestId)
+	clump:SetAttribute("EggOwnerId", ownerId)
+	clump:SetAttribute("NestScale", 1)
+
+	buildEggNest(clump, nestPos)
+	local eggId, egg = buildSacEgg(clump, nestPos, 1)
+
 	-- Generous invisible click box: the low bowl and its thin ribs are awkward targets at RTS
 	-- camera pitch, so a tall box around the whole clump makes the nest easy to grab from any
-	-- angle. Enabled on reveal. Width < egg spacing (11) so it never grabs a neighbour.
+	-- angle. Enabled on reveal. Width < egg spacing (11) so it never grabs a neighbour, even
+	-- once an injection has swollen it.
 	local hit        = Instance.new("Part")
 	hit.Name         = "Hitbox"
 	hit.Size         = Vector3.new(7, 8, 7)
@@ -3634,113 +3471,7 @@ local function buildEggClump(container: Instance, ownerId: number, nestPos: Vect
 
 	clump.PrimaryPart = egg
 	clump.Parent      = container
-	return eggId, egg
-end
-
--- ── Egg-nest birth burst ────────────────────────────────────────────────────
--- Plays when a fresh egg nest pops into view: a wet "pop" sound plus a splash of
--- translucent water-blue globs flung outward like a burst water balloon.
-local function spawnEggNestBurstVFX(pos: Vector3)
-	-- Positional pop sound on a throwaway part.
-	local soundPart          = Instance.new("Part")
-	soundPart.Anchored       = true
-	soundPart.CanCollide     = false
-	soundPart.CanQuery       = false
-	soundPart.Transparency   = 1
-	soundPart.Size           = Vector3.new(1, 1, 1)
-	soundPart.CastShadow     = false
-	soundPart.Position       = pos
-	soundPart.Parent         = workspace
-	local snd                = Instance.new("Sound")
-	snd.SoundId              = "rbxassetid://9120495961"
-	snd.Volume               = 1.0
-	snd.RollOffMaxDistance   = 180
-	snd.RollOffMinDistance   = 10
-	snd.Parent               = soundPart
-	snd:Play()
-	Debris:AddItem(soundPart, 5)
-
-	-- Expanding translucent splash ring that fades out (the balloon's water skin).
-	local splash           = Instance.new("Part")
-	splash.Shape           = Enum.PartType.Ball
-	splash.Size            = Vector3.new(1.5, 1.5, 1.5)
-	splash.Position        = pos
-	splash.Color           = Color3.fromRGB(120, 205, 255)
-	splash.Material        = Enum.Material.Glass
-	splash.Anchored        = true
-	splash.CanCollide      = false
-	splash.CanQuery        = false
-	splash.CastShadow      = false
-	splash.Transparency    = 0.35
-	splash.Parent          = workspace
-	TweenService:Create(splash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size         = Vector3.new(10, 6, 10),
-		Transparency = 1,
-	}):Play()
-	Debris:AddItem(splash, 0.6)
-
-	-- Water globs flung outward + up, dragged down by gravity so they splatter.
-	local waterColors = {
-		Color3.fromRGB(120, 205, 255),
-		Color3.fromRGB( 90, 175, 240),
-		Color3.fromRGB(160, 225, 255),
-	}
-	for _ = 1, 18 do
-		local g            = Instance.new("Part")
-		g.Shape            = Enum.PartType.Ball
-		g.Anchored         = false
-		g.CanCollide       = false
-		g.CanTouch         = false
-		g.CastShadow       = false
-		local r            = rng:NextNumber(0.35, 0.85)
-		g.Size             = Vector3.new(r, r, r)
-		g.Color            = waterColors[rng:NextInteger(1, #waterColors)]
-		g.Material         = Enum.Material.Glass
-		g.Transparency     = 0.3
-		g.Position         = pos + Vector3.new(
-			rng:NextNumber(-1.2, 1.2),
-			rng:NextNumber(0.4, 1.8),
-			rng:NextNumber(-1.2, 1.2)
-		)
-		g.Parent           = workspace
-		g.AssemblyLinearVelocity = Vector3.new(
-			rng:NextNumber(-20, 20),
-			rng:NextNumber(12, 26),
-			rng:NextNumber(-20, 20)
-		)
-		Debris:AddItem(g, rng:NextNumber(0.9, 1.8))
-	end
-
-	-- Fine spray mist for the wet burst feel.
-	local sprayPart        = Instance.new("Part")
-	sprayPart.Anchored     = true
-	sprayPart.CanCollide   = false
-	sprayPart.CanQuery     = false
-	sprayPart.Transparency = 1
-	sprayPart.Size         = Vector3.new(1, 1, 1)
-	sprayPart.CastShadow   = false
-	sprayPart.Position     = pos + Vector3.new(0, 0.6, 0)
-	sprayPart.Parent       = workspace
-	local spray            = Instance.new("ParticleEmitter")
-	spray.Color            = ColorSequence.new(Color3.fromRGB(150, 220, 255))
-	spray.Size             = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.8),
-		NumberSequenceKeypoint.new(1, 0),
-	})
-	spray.Transparency     = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.2),
-		NumberSequenceKeypoint.new(1, 1),
-	})
-	spray.Lifetime         = NumberRange.new(0.35, 0.7)
-	spray.Speed            = NumberRange.new(14, 26)
-	spray.SpreadAngle      = Vector2.new(180, 180)
-	spray.Acceleration     = Vector3.new(0, -40, 0)
-	spray.Rotation         = NumberRange.new(0, 360)
-	spray.LightEmission    = 0.3
-	spray.Enabled          = false
-	spray.Parent           = sprayPart
-	spray:Emit(28)
-	Debris:AddItem(sprayPart, 1.2)
+	return clump, eggId, egg
 end
 
 -- Eggs currently mid-incubation, so a second incubation cannot start on top of one that is
@@ -3756,13 +3487,17 @@ local function revealEggClump(egg: BasePart, nestPos: Vector3, owner: any)
 	if hit then hit.CanQuery = true end
 
 	-- A standing nest is a structure worth raiding: it respawns its creature forever
-	-- until someone breaks it. Aimed at (and health-barred on) the egg so the bar sits
-	-- low over the bowl; killing it takes the whole clump, spawner and all. The bar
-	-- height is pinned because incubation tweens the shell's size continuously.
-	registerEggTarget(egg, clump, owner, Config.EGG_NEST_HP, "Embryo", 3.4)
+	-- until someone breaks it. ONE target for the whole nest however many eggs it ends up
+	-- holding, aimed at (and health-barred on) the invisible Bowl: the bowl is centred on
+	-- the socket and always there, where a shell wanders off-centre once an injection puts
+	-- a second egg beside it and is gone entirely between broods. Killing it takes the
+	-- whole clump, eggs and all. The bar height is pinned because incubation tweens the
+	-- shells' sizes continuously.
+	local bowl = clump:FindFirstChild("Bowl") :: BasePart?
+	registerEggTarget(bowl or egg, clump, owner, Config.EGG_NEST_HP, "Embryo", 3.4)
 
 	-- Wet water-balloon burst + pop sound the instant the nest appears.
-	spawnEggNestBurstVFX(nestPos + Vector3.new(0, 0.6, 0))
+	BuildFX.eggNestBurst(nestPos + Vector3.new(0, 0.6, 0))
 
 	for _, part in clump:GetChildren() do
 		if part:IsA("BasePart") and part ~= egg and part ~= hit then
@@ -3774,14 +3509,14 @@ local function revealEggClump(egg: BasePart, nestPos: Vector3, owner: any)
 	-- The dormant egg, unless incubation already claimed it (the player can pick a unit
 	-- the instant the nest lands, and that animation owns the egg's size/transparency).
 	if not eggIncubating[egg] then
-		TweenService:Create(egg, TweenInfo.new(0.35), { Transparency = EGG_DORMANT_TRANS }):Play()
+		TweenService:Create(egg, TweenInfo.new(0.35), { Transparency = EGG.DORMANT_TRANS }):Play()
 	end
 
 	buildEggGrass(clump, nestPos, nestPos.Y)
 end
 
 -- Where an egg starts: a bud in the goo, before it packs itself out.
-local EGG_SEED = EGG_FULL * 0.34
+EGG.SEED = EGG.FULL * 0.34
 
 -- Mark an egg ripe (or spent) both in state and on the part, so clients can pick the
 -- usable ones out of a colony without asking the server.
@@ -3818,7 +3553,8 @@ local function growSacEgg(entry: SacEgg)
 	-- A nest that has never hatched still has its dormant egg in the socket, so growth
 	-- picks up from that size. A regrow after a hatch has no shell left, so it wells back
 	-- up out of the goo as a fresh bud.
-	local startSize = if egg.Transparency < 1 then egg.Size else EGG_SEED
+	local full      = EGG.FULL * entry.scale
+	local startSize = if egg.Transparency < 1 then egg.Size else EGG.SEED * entry.scale
 	egg.Size     = startSize
 	egg.Position = Vector3.new(egg.Position.X, entry.baseY + startSize.Y * 0.5, egg.Position.Z)
 	TweenService:Create(egg, TweenInfo.new(0.4), { Transparency = 0.1 }):Play()
@@ -3837,7 +3573,7 @@ local function growSacEgg(entry: SacEgg)
 		if left <= 0 then break end
 		local k       = math.clamp(1 - left / dur, 0, 1)
 		local breathe = 1 + 0.06 * math.sin(now * 4.5)          -- same beat as a spat Mother egg
-		local size    = startSize:Lerp(EGG_FULL, k) * breathe
+		local size    = startSize:Lerp(full, k) * breathe
 		egg.Size      = size
 		egg.Position  = Vector3.new(egg.Position.X, entry.baseY + size.Y * 0.5, egg.Position.Z)
 		if light then light.Brightness = 2.5 + 2.5 * (0.5 + 0.5 * math.sin(now * 4.5)) end
@@ -3855,8 +3591,8 @@ local function growSacEgg(entry: SacEgg)
 	-- Ripe. The shell settles at full size and stays lit; the growth bar has nothing left
 	-- to report, so it comes down and the egg itself is the signal.
 	entry.ripeAt = nil
-	egg.Size     = EGG_FULL
-	egg.Position = Vector3.new(egg.Position.X, entry.baseY + EGG_FULL.Y * 0.5, egg.Position.Z)
+	egg.Size     = full
+	egg.Position = Vector3.new(egg.Position.X, entry.baseY + full.Y * 0.5, egg.Position.Z)
 	egg.Transparency = 0.1
 	if bar then bar.Enabled = false end
 	if light then light.Brightness = 4 end
@@ -3889,12 +3625,12 @@ local function spendSacEgg(entry: SacEgg)
 	if bar   then bar.Enabled = false end
 	if light then TweenService:Create(light, TweenInfo.new(0.3), { Brightness = 0 }):Play() end
 	if goo then TweenService:Create(goo, TweenInfo.new(0.5), { Transparency = 0.55 }):Play() end
-	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = NEST_GOO_REST }):Play() end
+	if gooLight then TweenService:Create(gooLight, TweenInfo.new(0.5), { Brightness = NEST.GOO_REST }):Play() end
 
 	local COLLAPSE = 0.3
 	TweenService:Create(egg, TweenInfo.new(COLLAPSE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size         = EGG_SEED,
-		Position     = Vector3.new(egg.Position.X, entry.baseY + EGG_SEED.Y * 0.5, egg.Position.Z),
+		Size         = EGG.SEED * entry.scale,
+		Position     = Vector3.new(egg.Position.X, entry.baseY + EGG.SEED.Y * entry.scale * 0.5, egg.Position.Z),
 		Transparency = 1,
 	}):Play()
 
@@ -3908,14 +3644,15 @@ end
 -- How big the shell swells to while it carries a creature: half that creature's size,
 -- never smaller than a plain egg (so a Needler's shell still reads as an egg). A Roller
 -- visibly strains its shell where a Needler barely fills it.
-local function sacEggTargetSize(unitType: string?): Vector3
-	local def = unitType and (Config.UNIT_TYPES :: any)[unitType]
-	if not def then return EGG_FULL end
+local function sacEggTargetSize(unitType: string?, eggScale: number?): Vector3
+	local full = EGG.FULL * (eggScale or 1)
+	local def  = unitType and (Config.UNIT_TYPES :: any)[unitType]
+	if not def then return full end
 	local s = def.size * 0.5
 	return Vector3.new(
-		math.max(s.X, EGG_FULL.X),
-		math.max(s.Y, EGG_FULL.Y),
-		math.max(s.Z, EGG_FULL.Z)
+		math.max(s.X, full.X),
+		math.max(s.Y, full.Y),
+		math.max(s.Z, full.Z)
 	)
 end
 
@@ -3923,7 +3660,7 @@ end
 -- owner is at their unit cap). The creature is already paid for, so it is held rather than
 -- thrown away: short enough that it turns up as soon as a slot frees, long enough that a
 -- capped colony is not asking every frame.
-local EGG_HATCH_RETRY = 1.0
+EGG.HATCH_RETRY = 1.0
 
 -- Carry an ordered creature to term, then let it out. The shell swells toward the thing
 -- inside it while a progress bar runs down EGG_HATCH_TIME, and only then does the unit
@@ -3950,7 +3687,7 @@ local function hatchSacEgg(entry: SacEgg, player: any, refund: () -> ())
 	if goo  then TweenService:Create(goo, TweenInfo.new(0.3), { Transparency = 0.2 }):Play() end
 
 	local startSize = egg.Size
-	local target    = sacEggTargetSize(unitType)
+	local target    = sacEggTargetSize(unitType, entry.scale)
 	local dur       = Config.EGG_HATCH_TIME
 
 	while entry.hatchAt and egg.Parent do
@@ -3984,7 +3721,7 @@ local function hatchSacEgg(entry: SacEgg, player: any, refund: () -> ())
 	while egg.Parent do
 		uid = unitManagerRef and unitManagerRef.spawnUnitNow(player, Vector3.new(p.X, 0, p.Z), unitType)
 		if uid then break end
-		task.wait(EGG_HATCH_RETRY)
+		task.wait(EGG.HATCH_RETRY)
 	end
 
 	eggIncubating[egg] = nil
@@ -3997,7 +3734,7 @@ local function hatchSacEgg(entry: SacEgg, player: any, refund: () -> ())
 		return
 	end
 
-	spawnEggHatchVFX(p)
+	BuildFX.eggHatch(p)
 	RemoteHandler.get(Config.REMOTES.UnitHit):FireAllClients(p, p, "LampreyEggHatch")
 	spendSacEgg(entry)
 end
@@ -4011,9 +3748,10 @@ local function plantEggSacNests(base: BasePart, ccId: string, ownerId: number, f
 	local container = eggNestFolder(ccId)
 	for _ = fromSlot + 1, toSlot do
 		local pos, origin, parentId, dir = planEgg(ccId, base)
-		local eggId, egg = buildEggClump(container, ownerId, pos, parentId)
+		local _, eggId, egg = buildEggClump(container, ownerId, pos)
 		local entry: SacEgg = { egg = egg, ripeAt = nil, ready = false, parentId = parentId,
-			dir = dir, numChildren = 0, baseY = pos.Y + NEST_FLOOR_Y }   -- eggs sit in the goo pool
+			dir = dir, numChildren = 0, baseY = pos.Y + NEST.FLOOR_Y,   -- eggs sit in the goo pool
+			slot = 1, scale = 1 }
 		eggs[eggId] = entry
 		if parentId and eggs[parentId] then eggs[parentId].numChildren += 1 end
 
@@ -4029,12 +3767,27 @@ local function plantEggSacNests(base: BasePart, ccId: string, ownerId: number, f
 	end
 end
 
--- The only creatures a nest will hatch. The client sends a bare string and hatching is
--- FREE, so without this a crafted request would spawn anything in Config.UNIT_TYPES at no
--- cost -- a Broodmother out of a 40-resource nest.
-local EGG_HATCHABLE: { [string]: boolean } = {
-	Lamprey = true, Hagfish = true, Roller = true, Needler = true,
+-- The only creatures a nest will hatch, and it depends on the nest. The client sends a
+-- bare string, so without this a crafted request would order anything in Config.UNIT_TYPES
+-- out of any egg -- a Broodmother from a nest that was never worked for.
+--
+-- Small and Medium nests field the ordinary brood. A LARGE nest (three injections' worth of
+-- her spike) fields the heavy three instead, and only one at a time: that is the whole
+-- trade the tier makes. The Roller sits on the heavy list and nowhere else.
+local EGG_HATCHABLE_BASIC: { [string]: boolean } = {
+	Lamprey = true, Hagfish = true, Needler = true,
 }
+local EGG_HATCHABLE_PRIME: { [string]: boolean } = {
+	Roller = true, Broodmother = true, Watcher = true,
+}
+local function eggHatchable(clump: Instance?, unitType: string): boolean
+	if clump and nestTier(clump) >= Config.MOTHER_INJECT_NEST_TIERS then
+		return EGG_HATCHABLE_PRIME[unitType] == true
+	end
+	return EGG_HATCHABLE_BASIC[unitType] == true
+end
+BuildingManager.EGG_HATCHABLE_BASIC = EGG_HATCHABLE_BASIC
+BuildingManager.EGG_HATCHABLE_PRIME = EGG_HATCHABLE_PRIME
 
 -- Order `unitType` out of one ripe egg. The price is charged now and the shell starts
 -- carrying that creature; it climbs out EGG_HATCH_TIME later (see hatchSacEgg), and only
@@ -4044,7 +3797,6 @@ local EGG_HATCHABLE: { [string]: boolean } = {
 -- Returns whether an order was actually placed.
 function BuildingManager.hatchEgg(player: any, eggId: string, unitType: string): boolean
 	if not unitManagerRef then return false end
-	if not EGG_HATCHABLE[unitType] then return false end
 	local typeDef = (Config.UNIT_TYPES :: any)[unitType]
 	if not typeDef then return false end
 
@@ -4054,6 +3806,8 @@ function BuildingManager.hatchEgg(player: any, eggId: string, unitType: string):
 		local data = buildingData[ccId]
 		if not data or data.owner ~= player then return false end
 		if not entry.ready or entry.hatching or not entry.egg.Parent then return false end
+		-- Which list this egg draws from is the NEST's business, not the client's.
+		if not eggHatchable(entry.egg.Parent, unitType) then return false end
 
 		-- The egg is the timer; the creature still costs what it costs. Charged at the
 		-- moment of ordering, and handed back by hatchSacEgg if the shell is destroyed
@@ -4111,6 +3865,177 @@ function BuildingManager.plantInjectEggNests(ccId: string, count: number)
 	local data = buildingData[ccId]
 	if not data or not data.base or not data.base.Parent then return end
 	plantEggSacNests(data.base, ccId, (data.owner and data.owner.UserId) or 0, 0, count)
+end
+
+-- ── Injecting an egg nest ───────────────────────────────────────────────────
+-- Her spike goes into a nest she already has rather than into the ground. The nest does
+-- not burst and it does not split off a second nest: it SWELLS. The whole bramble grows by
+-- Config.MOTHER_INJECT_NEST_SWELL and another egg forms in the socket alongside the first,
+-- so what stands there is still one nest -- one thing to click, one health bar, one thing
+-- to raid -- that now carries two eggs. Each egg keeps its own clock and its own creature,
+-- which is the whole point: a swollen nest hatches two at a time.
+
+-- The nest clump an egg entry sits in, or nil if it has already come down.
+local function eggClumpOf(entry: SacEgg): Model?
+	local clump = entry.egg.Parent
+	if clump and clump:IsA("Model") then return clump end
+	return nil
+end
+
+-- Every one of this Mother's eggs that sits in `clump`, ordered by slot so a re-layout
+-- always seats them the same way round.
+local function nestEggEntries(ccId: string, clump: Model): { SacEgg }
+	local out: { SacEgg } = {}
+	local eggs = eggSacEggs[ccId]
+	if not eggs then return out end
+	for _, entry in eggs do
+		if eggClumpOf(entry) == clump then table.insert(out, entry) end
+	end
+	table.sort(out, function(a, b) return a.slot < b.slot end)
+	return out
+end
+
+-- Can this nest take a spike? Only a standing nest of `ccId`'s that is not already Large.
+-- Returns the eggs it holds, so the caller does not look them up twice.
+local function eggNestInjectable(ccId: string, clump: Model): { SacEgg }?
+	if not clump.Parent then return nil end
+	if type(clump:GetAttribute("NestId")) ~= "string" then return nil end
+	-- Still growing in at the tip of its tentacle: there is nothing standing there to
+	-- spike yet. The click box going live is what says a nest has arrived.
+	local hit = clump:FindFirstChild("Hitbox") :: BasePart?
+	if not hit or not hit.CanQuery then return nil end
+	if nestTier(clump) >= Config.MOTHER_INJECT_NEST_TIERS then return nil end
+	local entries = nestEggEntries(ccId, clump)
+	if #entries == 0 then return nil end   -- not one of hers, or already dead
+	return entries
+end
+
+-- Grow every part of a nest outward from its own centre. Position offsets and sizes both
+-- scale, so the bowl, its ribs, its click box and the creepygrass around it all swell as
+-- one piece. The eggs are left alone: they are seated by layoutNestEggs afterwards and
+-- keep their own size, since an egg is an egg however big the nest holding it is.
+local function swellNest(clump: Model, centre: Vector3, factor: number)
+	local tween = TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	-- Every piece of the bramble is a direct child of the clump (the bowl, its ribs, the
+	-- goo, the click box, the creepygrass roots), so this never reaches inside an egg.
+	for _, p in clump:GetChildren() do
+		if not p:IsA("BasePart") or p.Name == "Egg" then continue end
+		local cf  = p.CFrame
+		local off = cf.Position - centre
+		TweenService:Create(p, tween, {
+			CFrame = (cf - cf.Position) + (centre + off * factor),
+			Size   = p.Size * factor,
+		}):Play()
+		-- The socket's own glow reaches as far as the bowl now does.
+		for _, l in p:GetChildren() do
+			if l:IsA("PointLight") then l.Range *= factor end
+		end
+	end
+end
+
+-- One of the small shells that ring a Large nest's prime egg. They are scenery: no EggId,
+-- no entry, no clock, nothing to click -- what the Large nest actually hatches is the one
+-- big egg in the middle. They exist so the nest reads as a brood rather than as one egg
+-- that got fat.
+local function addNestBud(clump: Model, pos: Vector3, size: Vector3)
+	local bud        = Instance.new("Part")
+	bud.Name         = "NestBud"
+	bud.Shape        = Enum.PartType.Ball
+	bud.Size         = size
+	bud.Position     = pos
+	bud.Color        = Color3.fromRGB(255, 120, 60)
+	bud.Material     = Enum.Material.Neon
+	bud.Anchored     = true
+	bud.CanCollide   = false
+	bud.CanQuery     = false
+	bud.CanTouch     = false
+	bud.CastShadow   = false
+	bud.Transparency = 1
+	bud.Parent       = clump
+	TweenService:Create(bud, TweenInfo.new(0.4), { Transparency = EGG.DORMANT_TRANS }):Play()
+	return bud
+end
+
+-- Take `clump` (one of `ccId`'s egg nests) up one tier. The bowl swells either way; what
+-- happens in the socket depends on where it lands:
+--
+--   Small → Medium  a second egg forms beside the first. Both are real eggs on their own
+--                   clocks, so one pick of a creature hatches two.
+--   Medium → Large  the pair is spent and replaced by a single PRIME egg, 40% across a
+--                   normal one, ringed by three small buds. It hatches ONE creature at a
+--                   time -- but from the heavy list nothing else can produce.
+--
+-- Silently does nothing if the nest died on the way or it is already Large; both are
+-- re-checked here, since an order can sit on the queue through a long walk.
+function BuildingManager.swellEggNest(ccId: string, clump: Model)
+	local data = buildingData[ccId]
+	if not data or not data.owner then return end
+	local entries = eggNestInjectable(ccId, clump)
+	if not entries then return end
+
+	local eggs = eggSacEggs[ccId]
+	if not eggs then return end
+
+	local centre, scale = nestGround(clump)
+	local newScale      = scale * Config.MOTHER_INJECT_NEST_SWELL
+	local newTier       = nestTier(clump) + 1
+	swellNest(clump, centre, Config.MOTHER_INJECT_NEST_SWELL)
+	clump:SetAttribute("NestScale", newScale)
+	clump:SetAttribute("NestTier", newTier)
+	BuildFX.eggNestBurst(centre + Vector3.new(0, 0.6, 0))
+
+	if newTier >= Config.MOTHER_INJECT_NEST_TIERS then
+		-- ── Large: one prime egg where the brood was ──────────────────────────
+		-- The nest's first egg is kept and swollen into the prime; the rest are spent as
+		-- raw material. One of those spent shells may have been carrying a paid order --
+		-- destroying it is how hatchSacEgg learns to hand the price back.
+		local prime = entries[1]
+		for i = #entries, 2, -1 do
+			local e  = entries[i]
+			local id = eggIdOf(e.egg)
+			if id then eggs[id] = nil end
+			e.ripeAt, e.hatchAt = nil, nil
+			e.egg:Destroy()          -- an order in flight on it refunds itself (hatchSacEgg)
+			table.remove(entries, i)
+		end
+		prime.scale = Config.NEST_PRIME_EGG_SCALE
+		layoutNestEggs(entries, centre, newScale)
+
+		-- The buds ringing it. Scenery, evenly spread but jittered so no two Large nests
+		-- wear the same arrangement. Sized against a NORMAL egg, like the prime is: the
+		-- bowl grew, the brood inside it did not become a different species.
+		local budSize = EGG.FULL * Config.NEST_BUD_SCALE
+		local ring    = (EGG.FULL.X * Config.NEST_PRIME_EGG_SCALE + budSize.X) * 0.5 + 0.35
+		for i = 1, Config.NEST_BUDS do
+			local ang = ((i - 1) / Config.NEST_BUDS) * math.pi * 2 + rng:NextNumber(-0.45, 0.45)
+			local d   = ring * rng:NextNumber(0.88, 1.12)
+			addNestBud(clump, Vector3.new(
+				centre.X + math.cos(ang) * d,
+				centre.Y + NEST.FLOOR_Y * newScale + budSize.Y * 0.5,
+				centre.Z + math.sin(ang) * d), budSize)
+		end
+
+		-- The prime grows from scratch at its new size, and the wait is part of what the
+		-- heavy creatures are priced against. An egg already carrying an order is left to
+		-- finish: spendSacEgg regrows it as the prime the moment its creature is out.
+		if not prime.hatching then beginEggGrowth(prime) end
+		return
+	end
+
+	-- ── Medium: another egg beside the first ──────────────────────────────────
+	-- Built dormant and invisible; beginEggGrowth is what pushes it up out of the goo, so
+	-- it arrives as something forming rather than something placed.
+	local eggId, egg = buildSacEgg(clump, centre, newScale)
+	local entry: SacEgg = { egg = egg, ripeAt = nil, ready = false, parentId = nil,
+		dir = Vector3.new(1, 0, 0), numChildren = 0, baseY = centre.Y + NEST.FLOOR_Y * newScale,
+		slot = #entries + 1, scale = 1 }
+	eggs[eggId] = entry
+	table.insert(entries, entry)
+
+	-- Everything in the socket is re-seated together: one egg sits centred, two or more
+	-- ring the middle, and all of them ride the new (higher) floor.
+	layoutNestEggs(entries, centre, newScale)
+	beginEggGrowth(entry)
 end
 
 function BuildingManager.upgradeEggSacsForPlayer(player: any, ccId: string): boolean
@@ -4193,6 +4118,40 @@ function BuildingManager.requestBlobSoldier(player: any, blobId: string): boolea
 	return true
 end
 
+-- ── The last Command Center coming down ─────────────────────────────────────────
+-- A commander's final Centre is the match turning over, so its death is staged instead of
+-- played the instant its HP runs out (see Config.FINAL_BLOW_*). Three beats:
+--
+--   1. every client is told where it is happening and jumps its camera there, winner and
+--      loser alike -- the one who landed the blow watches it land, the one who lost it
+--      watches it go;
+--   2. the Centre comes apart under those cameras -- a Core goes up in a chain of blasts,
+--      a Mother ruptures and floods the ground she was rooted in;
+--   3. only once the wreck has settled is the commander actually eliminated, which is
+--      what raises the victory/defeat card.
+--
+-- The whole point is that nobody reads how the match ended off a card that appeared out
+-- of nowhere: they see it happen first. The deaths themselves are BuildFX.coreDeath /
+-- BuildFX.motherDeath; what lives here is the pacing.
+
+-- Run the three beats above for `owner`, whose last Centre (`model`, standing at `pos`)
+-- has just taken its killing blow. Yields, so it is always called on its own thread.
+local function runFinalBlow(owner: any, model: Instance?, pos: Vector3)
+	local hollowed = isHollowed(owner)
+	RemoteHandler.get(Config.REMOTES.FinalBlow):FireAllClients((owner and owner.UserId) or 0, pos, hollowed)
+
+	-- It stands through the camera's flight, so the cameras land on a building that is
+	-- still there and then watch it die. Nothing can target, repair or use it in the
+	-- meantime: it left buildingData with its last point of HP.
+	task.wait(Config.FINAL_BLOW_CAM_LEAD)
+	if model and model.Parent then model:Destroy() end
+	if hollowed then BuildFX.motherDeath(pos) else BuildFX.coreDeath(pos) end
+
+	-- The verdict waits for the wreck.
+	task.wait(Config.FINAL_BLOW_DEATH_HOLD)
+	if onCCDestroyedCb then onCCDestroyedCb(owner) end
+end
+
 function BuildingManager.damage(id: string, amount: number)
 	if isEggTargetId(id) then
 		damageEggTarget(id, amount)   -- eggs/nests keep their own HP; see the egg registry
@@ -4226,10 +4185,11 @@ function BuildingManager.damage(id: string, amount: number)
 	local owner       = data.owner
 	buildingData[id]      = nil   -- nil BEFORE Destroy so construction coroutine exits cleanly
 	turretTimers[id]      = nil
+	foundryTimers[id]     = nil
 	deployerTimers[id]    = nil
+	deployerUnlock[id]    = nil
 	deployerUnitType[id]  = nil
 	deployerUpdateAcc[id] = nil
-	deployerLevel[id]     = nil
 	testSupplyLevel[id]   = nil
 	testRateLevel[id]     = nil
 	nestEggs[id]          = nil
@@ -4242,17 +4202,12 @@ function BuildingManager.damage(id: string, amount: number)
 
 	local model      = buildingsFolder:FindFirstChild(id)
 	local destroyPos = data.base.Position + Vector3.new(0, data.base.Size.Y * 0.5, 0)
-	if model then model:Destroy() end
 
-	-- CreepyWorm vanishes silently (either burst already fired VFX, or destroyed mid-construction)
-	if data.buildingType ~= "CreepyWorm" then
-		task.spawn(spawnDestructionVFX, destroyPos)
-	end
-
+	-- A player can own several Command Centers (Embryo → Mother stacks them). Only the
+	-- LAST one falling ends their match; any other just re-points the primary CC id and
+	-- comes down like any building.
+	local lastCC = false
 	if wasCC then
-		-- A player can own several Command Centers (Embryo → Mother stacks them). Only
-		-- eliminate when the LAST one falls; otherwise re-point the primary CC id to a
-		-- surviving Mother and keep the player in the game.
 		local remaining: string? = nil
 		for otherId, d in buildingData do
 			if d.buildingType == "CommandCenter" and d.owner == owner then
@@ -4263,10 +4218,26 @@ function BuildingManager.damage(id: string, amount: number)
 		if remaining then
 			playerCCId[owner.UserId] = remaining
 		else
+			lastCC = true
 			playerHasCC[owner.UserId] = nil
 			playerCCId[owner.UserId] = nil
-			if onCCDestroyedCb then onCCDestroyedCb(owner) end
 		end
+	end
+
+	-- The killing blow on a commander. It is staged rather than played here and now:
+	-- every camera is sent to the spot first, the Centre comes apart under them, and the
+	-- elimination (which is what raises the victory/defeat card) waits until it has. It
+	-- is already out of buildingData, so nothing can target or repair it in the meantime.
+	if lastCC then
+		task.spawn(runFinalBlow, owner, model, destroyPos)
+		return
+	end
+
+	if model then model:Destroy() end
+
+	-- CreepyWorm vanishes silently (either burst already fired VFX, or destroyed mid-construction)
+	if data.buildingType ~= "CreepyWorm" then
+		task.spawn(BuildFX.destruction, destroyPos)
 	end
 
 	if wasGland then
@@ -4359,10 +4330,11 @@ function BuildingManager.removeAllBuildingsFor(player: any)
 		if not data then continue end
 		buildingData[id]      = nil
 		turretTimers[id]      = nil
+		foundryTimers[id]     = nil
 		deployerTimers[id]    = nil
+		deployerUnlock[id]    = nil
 		deployerUnitType[id]  = nil
 		deployerUpdateAcc[id] = nil
-		deployerLevel[id]     = nil
 		testSupplyLevel[id]   = nil
 		testRateLevel[id]     = nil
 		monumentWinTimer[id]  = nil
@@ -4506,10 +4478,11 @@ local function gatherSightSources(ownerStr: string): { SightSource }
 		local vr = (Config.VISION_RADIUS :: any)[bd.buildingType] or Config.VISION_DEFAULT
 		sources[#sources + 1] = { x = bd.base.Position.X, z = bd.base.Position.Z, r2 = vr * vr }
 	end
-	if unitManagerRef and unitManagerRef.getOwnerUnitPositions then
-		local r2 = Config.VISION_UNIT * Config.VISION_UNIT
-		for _, p in unitManagerRef.getOwnerUnitPositions(ownerStr) do
-			sources[#sources + 1] = { x = p.X, z = p.Z, r2 = r2 }
+	-- Each unit brings its own radius: a Watcher sees further than the rest, and the
+	-- artillery it spots for should be able to use that.
+	if unitManagerRef and unitManagerRef.getOwnerUnitSight then
+		for _, u in unitManagerRef.getOwnerUnitSight(ownerStr) do
+			sources[#sources + 1] = { x = u.x, z = u.z, r2 = u.r * u.r }
 		end
 	end
 	return sources
@@ -4544,7 +4517,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	buildingsFolder.Parent = workspace
 
 	-- ── Turret attack loop ────────────────────────────────────────────────
-	RunService.Heartbeat:Connect(function(dt)
+	PerfProbe.onHeartbeat("BuildingManager", function(dt)
 		for id, data in buildingData do
 			if data.buildingType ~= "Turret" then continue end
 			if data.isConstructing then continue end   -- still under construction
@@ -4662,8 +4635,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		-- ── Deployer / TEST auto-spawn ────────────────────────────────────────
 		-- Both the Bonfire and the TEST building auto-summon their chosen unit up to a
-		-- capacity, on an interval. The Bonfire scales both from one Empower level; the
-		-- TEST building scales capacity (Supply) and interval (Spawn Rate) separately.
+		-- capacity, on an interval. The Bonfire's are fixed for every bonfire; the TEST
+		-- building scales capacity (Supply) and interval (Spawn Rate) separately.
 		local deployerUpdateRemote = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
 		local testUpdateRemote     = RemoteHandler.get(Config.REMOTES.TestUpdate)
 		for id, data in buildingData do
@@ -4677,9 +4650,8 @@ function BuildingManager.init(resourceManager, mineralManager_)
 				capacity = Config.testCapacity(testSupplyLevel[id] or 0)
 				interval = Config.testInterval(testRateLevel[id] or 0)
 			else
-				local level = deployerLevel[id] or 0
-				capacity = Config.bonfireCapacity(level)
-				interval = Config.bonfireInterval(level)
+				capacity = Config.DEPLOYER_CAPACITY
+				interval = Config.DEPLOYER_SUMMON_INTERVAL
 			end
 
 			deployerTimers[id] = (deployerTimers[id] or 0) + dt
@@ -4710,9 +4682,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 						local rCost = rLvl < Config.TEST_RATE_MAX_LEVEL and Config.testRateCost(rLvl) or 0
 						testUpdateRemote:FireClient(data.owner, id, unitType, progress, sLvl, rLvl, capacity, sCost, rCost)
 					else
-						local level    = deployerLevel[id] or 0
-						local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
-						deployerUpdateRemote:FireClient(data.owner, id, unitType, progress, level, capacity, nextCost)
+						deployerUpdateRemote:FireClient(data.owner, id, unitType, progress)
 					end
 				end
 			end
@@ -4745,55 +4715,63 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- ── Foundry passive income ─────────────────────────────────────────────
-		-- Each standing Foundry pays out FOUNDRY_BASE_INCOME, boosted +15% per active
-		-- mineral deposit within FOUNDRY_BOOST_RADIUS (uncapped). Boosting deposits are
-		-- drained a little each tick, and the floating "Boosted +X%" label is refreshed.
-		foundryIncomeAccum += dt
-		if foundryIncomeAccum >= Config.FOUNDRY_INCOME_INTERVAL then
-			foundryIncomeAccum -= Config.FOUNDRY_INCOME_INTERVAL
-			for _, data in buildingData do
-				if data.buildingType ~= "Foundry" or data.isConstructing then continue end
-				local pos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
+		-- Each Foundry keeps its OWN payout clock, running from the moment it finished
+		-- building, so one raised mid-match pays out on its own beat instead of falling
+		-- into step with every other Foundry on the map. Each pays FOUNDRY_BASE_INCOME,
+		-- boosted +15% per active mineral deposit within FOUNDRY_BOOST_RADIUS (uncapped).
+		-- Boosting deposits are drained a little each tick, and the floating "Refining +N"
+		-- label is refreshed.
+		for id, data in buildingData do
+			if data.buildingType ~= "Foundry" or data.isConstructing then continue end
 
-				local depositCount = 0
-				if mineralManager then
-					depositCount = mineralManager.drainAllNear(
-						pos, Config.FOUNDRY_BOOST_RADIUS, Config.FOUNDRY_DRAIN_PER_DEPOSIT)
-				end
+			-- The clock only advances once the structure is standing, so the first payout
+			-- lands a full interval after it was built rather than after it was ordered.
+			local elapsed = (foundryTimers[id] or 0) + dt
+			if elapsed < Config.FOUNDRY_INCOME_INTERVAL then
+				foundryTimers[id] = elapsed
+				continue
+			end
+			foundryTimers[id] = elapsed - Config.FOUNDRY_INCOME_INTERVAL
+			local pos = Vector3.new(data.base.Position.X, 0, data.base.Position.Z)
 
-				local boostMult = 1 + depositCount * Config.FOUNDRY_BOOST_PER_DEPOSIT
-				local income    = math.floor(Config.FOUNDRY_BASE_INCOME * boostMult)
-				if resourceManagerRef and data.owner then
-					resourceManagerRef.add(data.owner, income)
-				end
+			local depositCount = 0
+			if mineralManager then
+				depositCount = mineralManager.drainAllNear(
+					pos, Config.FOUNDRY_BOOST_RADIUS, Config.FOUNDRY_DRAIN_PER_DEPOSIT)
+			end
 
-				local model = data.base.Parent :: Model?
+			local income = Config.FOUNDRY_BASE_INCOME
+				+ depositCount * Config.FOUNDRY_INCOME_PER_DEPOSIT
+			if resourceManagerRef and data.owner then
+				resourceManagerRef.add(data.owner, income)
+			end
 
-				-- Floating "+N" income popup over the owner's Foundry each tick.
-				if data.owner and data.owner.UserId > 0 and data.owner.Parent and model then
-					RemoteHandler.get(Config.REMOTES.FoundryIncome):FireClient(data.owner, model.Name, income)
-				end
+			local model = data.base.Parent :: Model?
 
-				-- Harvest sound on the crucible when deposits are actually being refined.
-				if depositCount > 0 and model then
-					local molten = model:FindFirstChild("Molten")
-					local harv   = molten and molten:FindFirstChild("_FoundryHarvest") :: Sound?
-					if harv then harv:Play() end
-				end
+			-- Floating "+N" income popup over the owner's Foundry each tick.
+			if data.owner and data.owner.UserId > 0 and data.owner.Parent and model then
+				RemoteHandler.get(Config.REMOTES.FoundryIncome):FireClient(data.owner, model.Name, income)
+			end
 
-				-- Refresh the floating boost readout (replicates to all clients).
-				local bl = data.base:FindFirstChild("BoostLabel") :: BillboardGui?
-				if bl then
-					if depositCount > 0 then
-						bl.Enabled = true
-						local lbl = bl:FindFirstChild("Text") :: TextLabel?
-						if lbl then
-							lbl.Text = string.format("Boosted +%d%%",
-								math.floor(depositCount * Config.FOUNDRY_BOOST_PER_DEPOSIT * 100 + 0.5))
-						end
-					else
-						bl.Enabled = false
+			-- Harvest sound on the crucible when deposits are actually being refined.
+			if depositCount > 0 and model then
+				local molten = model:FindFirstChild("Molten")
+				local harv   = molten and molten:FindFirstChild("_FoundryHarvest") :: Sound?
+				if harv then harv:Play() end
+			end
+
+			-- Refresh the floating boost readout (replicates to all clients).
+			local bl = data.base:FindFirstChild("BoostLabel") :: BillboardGui?
+			if bl then
+				if depositCount > 0 then
+					bl.Enabled = true
+					local lbl = bl:FindFirstChild("Text") :: TextLabel?
+					if lbl then
+						lbl.Text = string.format("Refining +%d",
+							depositCount * Config.FOUNDRY_INCOME_PER_DEPOSIT)
 					end
+				else
+					bl.Enabled = false
 				end
 			end
 		end
@@ -5004,9 +4982,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 	-- She roots back down afterwards if that is how she started.
 	-- `queued` (the player held [Shift]) stacks the spot behind whatever she is already
 	-- doing instead of replacing it, so a whole run of injections can be laid out at once.
-	-- `plantInst`, when given, aims the spike at one of her own grown plants rather than
-	-- at bare ground; the plant's own position is the spot she walks to.
-	RemoteHandler.get(Config.REMOTES.InjectGround).OnServerEvent:Connect(function(player, ccId, pos, queued, plantInst)
+	-- `targetInst`, when given, aims the spike at something standing rather than at bare
+	-- ground -- one of her own grown plants (it bursts) or one of her own egg nests (it
+	-- divides). Either way the target's own position is the spot she walks to.
+	RemoteHandler.get(Config.REMOTES.InjectGround).OnServerEvent:Connect(function(player, ccId, pos, queued, targetInst)
 		if type(ccId) ~= "string" then return end
 		if typeof(pos) ~= "Vector3" then return end
 		local data = buildingData[ccId]
@@ -5021,16 +5000,30 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		-- and one of the kinds that actually gives something up. The client sends the
 		-- model itself, so the spot comes off the plant, not off the cursor.
 		local plant: Model? = nil
-		if plantInst ~= nil then
-			if typeof(plantInst) ~= "Instance" or not plantInst:IsA("Model") then return end
+		local nest:  Model? = nil
+		if targetInst ~= nil then
+			if typeof(targetInst) ~= "Instance" or not targetInst:IsA("Model") then return end
 			local folder = workspace:FindFirstChild("InjectPlants")
-			if not folder or plantInst.Parent ~= folder then return end
-			local owner = plantInst:GetAttribute("OwnerUserId")
-			if owner ~= nil and owner ~= player.UserId then return end
-			local info = InjectPlants.injectInfo(plantInst)
-			if not (info and info.kind) then return end
-			plant = plantInst
-			pos   = plantInst:GetPivot().Position
+			if folder and targetInst.Parent == folder then
+				local owner = targetInst:GetAttribute("OwnerUserId")
+				if owner ~= nil and owner ~= player.UserId then return end
+				local info = InjectPlants.injectInfo(targetInst)
+				if not (info and info.kind) then return end
+				plant = targetInst
+			else
+				-- An egg nest instead. It has to be one of THIS Mother's, which the
+				-- folder tree already says: nests live in workspace.EggNests/<ccId>.
+				local sub  = targetInst.Parent
+				local root = sub and sub.Parent
+				if not sub or root ~= workspace:FindFirstChild("EggNests") then return end
+				if sub.Name ~= ccId then return end
+				if targetInst:GetAttribute("EggOwnerId") ~= player.UserId then return end
+				-- Re-checked when the spike actually goes in; refusing here as well keeps
+				-- a full socket from eating the walk and the cooldown for nothing.
+				if not eggNestInjectable(ccId, targetInst) then return end
+				nest = targetInst
+			end
+			pos = targetInst:GetPivot().Position
 		end
 
 		local target = Vector3.new(pos.X, 0, pos.Z)
@@ -5040,8 +5033,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		-- Bare ground has to BE bare. Without this the same clearing takes spike after
 		-- spike and grows into a thicket; the client draws the very radius being tested
 		-- (the hologram disc), so a refusal here is one the player already saw coming.
-		-- Aiming at a plant skips it: that is a deliberate target, not a crowded patch.
-		if not plant and not groundClearForInject(target) then return end
+		-- Aiming at a plant or a nest skips it: that is a deliberate target, not a
+		-- crowded patch.
+		if not plant and not nest and not groundClearForInject(target) then return end
 
 		local wantQueue = queued == true
 		local order     = injectOrders[ccId]
@@ -5061,7 +5055,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 
 		if wantQueue and order then
 			if not queue then queue = {}; injectQueues[ccId] = queue end
-			table.insert(queue, { target = target, plant = plant })
+			table.insert(queue, { target = target, plant = plant, nest = nest })
 			return
 		end
 
@@ -5071,12 +5065,14 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if order then
 			order.target = target
 			order.plant  = plant
+			order.nest   = nest
 		else
 			injectOrders[ccId] = {
 				target    = target,
 				phase     = "walk",
 				wasRooted = not ccMobile[ccId],
 				plant     = plant,
+				nest      = nest,
 			}
 		end
 
@@ -5166,7 +5162,10 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		end
 
 		-- Whitelist: only these types may be placed by clients directly
-		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true, TEST=true }
+		-- TEST is deliberately absent: the sandbox bonfire is off the build tray, and the
+		-- whitelist is what makes that stick against a hand-rolled placement request. The
+		-- rest of its implementation is intact, so re-listing it here brings it back.
+		local PLACEABLE = { CommandCenter=true, Foundry=true, Deployer=true, Turret=true, Relay=true, CreepyBlob=true, LampreyNest=true, EngineeringPost=true }
 		if not PLACEABLE[buildingType] then return end
 
 		-- Faction gate: the Hollowed build NOTHING from the tray — every unit and
@@ -5284,59 +5283,48 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if not VALID[unitType] then return end
 		local data = buildingData[deployerId]
 		if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return end
-		-- Research gate for locked unit types
-		if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
-			local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
-			if not researchManagerRef.hasResearch(player, req) then return end
-		end
+		-- This bonfire only knows the units its own unlock ladder has reached.
+		if not Config.bonfireUnitUnlocked(unitType, deployerUnlock[deployerId] or 0) then return end
 		deployerUnitType[deployerId] = unitType
 		-- Immediately send an update so the client reflects the change without waiting for next poll
-		local level    = deployerLevel[deployerId] or 0
-		local progress = math.clamp((deployerTimers[deployerId] or 0) / Config.bonfireInterval(level), 0, 1)
-		local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
-		RemoteHandler.get(Config.REMOTES.DeployerUpdate):FireClient(player, deployerId, unitType, progress, level, Config.bonfireCapacity(level), nextCost)
+		local progress = math.clamp((deployerTimers[deployerId] or 0) / Config.DEPLOYER_SUMMON_INTERVAL, 0, 1)
+		RemoteHandler.get(Config.REMOTES.DeployerUpdate):FireClient(player, deployerId, unitType, progress)
 	end)
 
-	-- ── UpgradeDeployer remote (Empower bonfires: +capacity, faster summon) ─────
-	-- Accepts one id or a list (multi-select). When several bonfires are selected at
-	-- different levels, only the LOWEST-level ones are upgraded so a press evens the
-	-- group out; each is charged its own (level-based) cost, stopping when broke.
-	RemoteHandler.get(Config.REMOTES.UpgradeDeployer).OnServerEvent:Connect(function(player, deployerIds)
+	-- ── UnlockDeployerUnit remote (teach a bonfire the next unit on its ladder) ─
+	-- Accepts one id or a list (multi-select). The LOWEST unlock level in the selection
+	-- is the one advanced, so a press evens the group out, and each bonfire pays its own
+	-- price until the player runs out.
+	RemoteHandler.get(Config.REMOTES.UnlockDeployerUnit).OnServerEvent:Connect(function(player, deployerIds)
 		local ids = type(deployerIds) == "string" and { deployerIds } or deployerIds
 		if type(ids) ~= "table" then return end
 
-		-- Eligible = owned, finished, below max. Find the lowest level among them.
 		local eligible: { string } = {}
 		local minLevel = math.huge
 		for _, id in ids do
 			if type(id) ~= "string" then continue end
 			local data = buildingData[id]
 			if not data or data.buildingType ~= "Deployer" or data.owner ~= player or data.isConstructing then continue end
-			local lvl = deployerLevel[id] or 0
-			if lvl >= Config.DEPLOYER_UPGRADE_MAX_LEVEL then continue end
+			local lvl = deployerUnlock[id] or 0
+			if lvl >= Config.BONFIRE_UNLOCK_MAX_LEVEL then continue end
 			table.insert(eligible, id)
 			if lvl < minLevel then minLevel = lvl end
 		end
 		if #eligible == 0 then return end
 
-		local cost          = Config.bonfireUpgradeCost(minLevel)  -- all min-level bonfires share this cost
-		local updateRemote  = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
+		local cost         = Config.bonfireUnlockCost(minLevel)
+		local updateRemote = RemoteHandler.get(Config.REMOTES.DeployerUpdate)
 		for _, id in eligible do
-			if (deployerLevel[id] or 0) ~= minLevel then continue end
+			if (deployerUnlock[id] or 0) ~= minLevel then continue end
 			if not resourceManagerRef or resourceManagerRef.get(player) < cost then break end
 			resourceManagerRef.spend(player, cost)
-			local level = minLevel + 1
-			deployerLevel[id] = level
-			-- Stack the next tiki log onto the live model (replicates to everyone).
-			local bdata = buildingData[id]
-			if bdata and bdata.base and bdata.base.Parent then
-				UnitVisuals.addBonfireLog(bdata.base.Parent, level)
-			end
+			applyBonfireUnlock(id, minLevel + 1)
+
+			-- Push an update straight back so the card redraws on the purchase rather than
+			-- on the next periodic tick. `true` plays the flare.
 			local unitType = deployerUnitType[id] or "Survivor"
-			local progress = math.clamp((deployerTimers[id] or 0) / Config.bonfireInterval(level), 0, 1)
-			local nextCost = level < Config.DEPLOYER_UPGRADE_MAX_LEVEL and Config.bonfireUpgradeCost(level) or 0
-			-- `true` 8th arg flags a fresh upgrade so the client plays the empower FX.
-			updateRemote:FireClient(player, id, unitType, progress, level, Config.bonfireCapacity(level), nextCost, true)
+			local progress = math.clamp((deployerTimers[id] or 0) / Config.DEPLOYER_SUMMON_INTERVAL, 0, 1)
+			updateRemote:FireClient(player, id, unitType, progress, true)
 		end
 	end)
 
@@ -5382,10 +5370,6 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		if not VALID[unitType] then return end
 		local data = buildingData[testId]
 		if not data or data.buildingType ~= "TEST" or data.owner ~= player then return end
-		if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
-			local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
-			if not researchManagerRef.hasResearch(player, req) then return end
-		end
 		deployerUnitType[testId] = unitType
 		sendTestUpdate(player, testId)
 	end)
@@ -5470,6 +5454,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					local model = buildingsFolder:FindFirstChild(blobId)
 					if model then model:Destroy() end
 
+					nextBuildRiseTime = Config.CREEPY_TURRET_BUILD_TIME
 					local tId  = createBuilding(player, blobPos, "Turret")
 					local tDat = buildingData[tId]
 					if tDat then
@@ -5556,7 +5541,7 @@ function BuildingManager.init(resourceManager, mineralManager_)
 					local lbase = launcherBase(data)
 					local aim   = Vector3.new(rally.X - lbase.X, 0, rally.Z - lbase.Z)
 					aim = if aim.Magnitude > 0.1 then aim.Unit else Vector3.new(0, 0, 1)
-					layoutNestLauncher(model, lbase, aim, LAUNCHER_REST)
+					layoutNestLauncher(model, lbase, aim, LAUNCHER.REST)
 				end
 			end
 		end
@@ -5591,17 +5576,14 @@ end
 
 -- ── Bonfire helpers for AI bots (server-side; no client UI involved) ──────────
 -- Set which unit a bonfire summons (lets AI armies be varied, not all-Survivor).
--- Enforces the same unit whitelist + research gates as the SetDeployerType remote,
--- so a bot can't summon anything a player couldn't pick.
+-- Enforces the same whitelist and the same per-bonfire unlock ladder as the
+-- SetDeployerType remote, so a bot can't summon anything a player couldn't pick.
 function BuildingManager.setBonfireSummonType(player: any, deployerId: string, unitType: string): boolean
 	local VALID = { Survivor = true, Sniper = true, Tank = true, Howitzer = true, Elite = true, Medic = true, Foamer = true }
 	if not VALID[unitType] then return false end
 	local data = buildingData[deployerId]
 	if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return false end
-	if (unitType == "Elite" or unitType == "Medic") and researchManagerRef then
-		local req = unitType == "Elite" and "EliteUnits" or "MedicUnit"
-		if not researchManagerRef.hasResearch(player, req) then return false end
-	end
+	if not Config.bonfireUnitUnlocked(unitType, deployerUnlock[deployerId] or 0) then return false end
 	deployerUnitType[deployerId] = unitType
 	return true
 end
@@ -5642,21 +5624,26 @@ function BuildingManager.collectEngineeringForPlayer(player: any, id: string): b
 	return true
 end
 
--- Empower a bonfire one level (same effect as the player's Empower, incl. the tiki log),
--- capped at `maxLevel`. Returns true if it upgraded. Lets AI capacity scale with difficulty.
-function BuildingManager.upgradeBonfireForPlayer(player: any, deployerId: string, maxLevel: number): boolean
+-- Buy the next unit unlock on one bonfire, up to `maxLevel` (mirrors the player remote,
+-- charging the same price). Lets a bot field a varied army only by paying for it.
+function BuildingManager.unlockBonfireUnitForPlayer(player: any, deployerId: string, maxLevel: number): boolean
 	local data = buildingData[deployerId]
 	if not data or data.buildingType ~= "Deployer" or data.owner ~= player or data.isConstructing then return false end
-	local level = deployerLevel[deployerId] or 0
-	local cap   = math.min(Config.DEPLOYER_UPGRADE_MAX_LEVEL, maxLevel or 0)
+	local level = deployerUnlock[deployerId] or 0
+	local cap   = math.min(Config.BONFIRE_UNLOCK_MAX_LEVEL, maxLevel or 0)
 	if level >= cap then return false end
-	local cost = Config.bonfireUpgradeCost(level)
+	local cost = Config.bonfireUnlockCost(level)
 	if not resourceManagerRef or resourceManagerRef.get(player) < cost then return false end
 	resourceManagerRef.spend(player, cost)
-	level += 1
-	deployerLevel[deployerId] = level
-	if data.base and data.base.Parent then UnitVisuals.addBonfireLog(data.base.Parent, level) end
+	applyBonfireUnlock(deployerId, level + 1)
 	return true
+end
+
+-- How many unit unlocks this bonfire has bought (nil if it is not one).
+function BuildingManager.getBonfireUnlockLevel(player: any, deployerId: string): number?
+	local data = buildingData[deployerId]
+	if not data or data.buildingType ~= "Deployer" or data.owner ~= player then return nil end
+	return deployerUnlock[deployerId] or 0
 end
 
 -- ── Monument upgrade ──────────────────────────────────────────────────────────

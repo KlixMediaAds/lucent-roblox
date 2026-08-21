@@ -9,6 +9,7 @@ local RunService   = game:GetService("RunService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -98,7 +99,7 @@ end
 local refreshConn: RBXScriptConnection?
 local function startRefreshLoop()
 	if refreshConn then refreshConn:Disconnect() end
-	refreshConn = RunService.Heartbeat:Connect(function()
+	refreshConn = PerfProbe.onHeartbeat("BlobPanel", function()
 		if not (activeBlobId and CommandCard.isOwner(OWNER)) then
 			if refreshConn then refreshConn:Disconnect(); refreshConn = nil end
 			return

@@ -3,6 +3,8 @@ local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local UILib       = require(script.Parent:WaitForChild("UILib"))
 
 local MiniMap     = {}
@@ -824,7 +826,7 @@ function MiniMap.init(cameraModule: any, userId: number)
 	local SYNC_INTERVAL = 0.1
 	local syncAcc       = SYNC_INTERVAL  -- fire on the first frame
 
-	RunService.RenderStepped:Connect(function(dt: number)
+	PerfProbe.onRender("MiniMap", function(dt: number)
 		syncAcc += dt
 		if syncAcc >= SYNC_INTERVAL then
 			syncAcc = 0

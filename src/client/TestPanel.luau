@@ -5,7 +5,7 @@
     Selecting a TEST building opens a three-way menu on the command card:
       • UPGRADES  — two SEPARATE repeatable upgrades: SUPPLY (+capacity) and
                     SPAWN RATE (shorter summon interval). Each is purchased and
-                    tracked independently (unlike the Bonfire's combined Empower).
+                    tracked independently. The Bonfire has no such upgrade at all.
       • UNITS     — the same unit grid as the Bonfire: pick which unit the building
                     auto-summons (sends SetTestType).
       • STRUCTURES— the Command Center build options (handed off to HUD's build page
@@ -32,7 +32,6 @@ local OWNER       = "test"
 
 -- ── Callbacks / deps ───────────────────────────────────────────────────────────
 local networkRef:       any
-local hasResearchFn:    ((string) -> boolean)?
 local resourcesFn:      (() -> number)?
 local showStructuresFn: ((backFn: () -> ()) -> ())?
 local hideStructuresFn: (() -> ())?
@@ -85,7 +84,6 @@ local UNIT_COLOR: { [string]: Color3 } = {
 	Survivor = C.GREEN, Tank = C.BARRACKS, Howitzer = HOWITZER_OLV,
 	Elite = PURPLE, Medic = MEDIC_TEAL, Foamer = FOAM_BLUE,
 }
-local RESEARCH_GATE: { [string]: string } = { Elite = "EliteUnits", Medic = "MedicUnit" }
 
 -- ── World display (slim summon progress bar on the base) ───────────────────────
 local testBillboards: { [string]: BillboardGui } = {}
@@ -190,19 +188,16 @@ local function buildUnitsPage(): CommandCard.Page
 	local current = activeTestId and stateFor(activeTestId).unitType or "Survivor"
 	local slots: { CommandCard.Slot } = {}
 	for i, def in UNIT_DEFS do
-		local key    = def.key
-		local gate   = RESEARCH_GATE[key]
-		local locked = gate ~= nil and not (hasResearchFn and hasResearchFn(gate))
+		local key = def.key
 		table.insert(slots, {
 			index           = i,
 			name            = key:upper(),
 			color           = def.color,
-			locked          = locked,
 			icon            = def.icon,
 			viewportKey     = "unit:" .. key,
 			viewportFactory = function() return ViewportPreview.forUnit(key, Vector2.new(64, 64)) end,
 			badge           = (key == current) and "✓" or nil,
-			desc            = locked and "Locked — research required" or ("Summon " .. key),
+			desc            = "Summon " .. key,
 			onClick         = function()
 				if locked then return end
 				if activeTestId then networkRef.setTestType(activeTestId, key) end
@@ -275,9 +270,8 @@ renderIfActive = function()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function TestPanel.init(network, hasResearch, getResources, showStructures, hideStructures)
+function TestPanel.init(network, getResources, showStructures, hideStructures)
 	networkRef       = network
-	hasResearchFn    = hasResearch
 	resourcesFn      = getResources
 	showStructuresFn = showStructures
 	hideStructuresFn = hideStructures

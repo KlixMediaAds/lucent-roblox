@@ -49,6 +49,7 @@ do
 		p.Anchored      = true
 		p.CanCollide    = false
 		p.CanQuery      = false
+		p.CanTouch      = false
 		p.CastShadow    = true
 		p.Parent        = folder
 	end
@@ -639,6 +640,11 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 	-- Auto-place every human player's base: an instant Command Center at their
 	-- base spot (lane mode adds extra resources via setupLanePlayerBase).
 	for _, player in Players:GetPlayers() do
+		-- Stamp the opening wallet here rather than at join: the race that decides its
+		-- size (Config.startingResources) is not picked until the lobby, so a player who
+		-- switched race after joining would otherwise open on the other race's budget.
+		-- Lane mode's extra grant is added on top of this by setupLanePlayerBase.
+		ResourceManager.reset(player)
 		if isLane then
 			setupLanePlayerBase(player)
 		else
@@ -692,5 +698,26 @@ LobbyManager.init(MineralManager, TerrainManager, function(aiQueue, gamemode)
 		end)
 	end
 end)
+
+-- ── Performance reporting ─────────────────────────────────────────────────────
+-- The server measures its own frame exactly the way the client does, and broadcasts it
+-- twice a second so the F3 overlay can show both halves of the game at once. A client
+-- struggling while the server sits at 2 ms is a different problem from one where the
+-- server is at 30 ms and dragging everything down with it.
+do
+	local RemoteHandler = require(Shared:WaitForChild("RemoteHandler"))
+	local PerfProbe     = require(Shared:WaitForChild("PerfProbe"))
+	-- Connected after every system above, so the roll closes over a finished frame.
+	PerfProbe.autoRollHeartbeat()
+
+	local remote = RemoteHandler.get(Config.REMOTES.PerfSync)
+	task.spawn(function()
+		while true do
+			task.wait(0.5)
+			local rows, frameMs = PerfProbe.snapshot()
+			remote:FireAllClients(frameMs, rows)
+		end
+	end)
+end
 
 print("[Server] RTS initialized")

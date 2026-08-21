@@ -18,6 +18,7 @@ local RunService       = game:GetService("RunService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -127,14 +128,13 @@ end
 -- Horizontal layout: each child slides right from the root along the bottom bar.
 -- Spacing = node diameter (80) + gap (15) = 95 px between centres.
 local CHILD_DEFS: { { btype: string, icon: string, color: Color3, desc: string } } = {
-	{ btype = "Foundry",    icon = "🏭", color = C.MINE,                        desc = "Passive income; +15% per nearby mineral deposit (deposits drain)" },
-	{ btype = "Deployer",   icon = "🔥", color = Color3.fromRGB(160, 80, 230),  desc = "Mystical bonfire; auto-summons units for free. Empower it for more capacity & faster summons" },
+	{ btype = "Foundry",    icon = "🏭", color = C.MINE,                        desc = "Passive income; +2 per tick for each nearby mineral deposit (deposits drain)" },
+	{ btype = "Deployer",   icon = "🔥", color = Color3.fromRGB(160, 80, 230),  desc = "Mystical bonfire; auto-summons units for free, up to 3 alive at a time. Unlock more unit types at each one" },
 	{ btype = "Turret",     icon = "⚙", color = C.TURRET,                      desc = "Auto-attacks nearby enemies"                   },
 	{ btype = "Relay",      icon = "📡", color = C.ACCENT,                      desc = "Extends your build zone"                       },
 	{ btype = "CreepyBlob", icon = "🫧", color = Color3.fromRGB(100, 40, 180),  desc = "Evolve into soldiers, a worm burst, or a creepy turret" },
 	{ btype = "LampreyNest", icon = "🥚", color = Color3.fromRGB(120, 190, 60), desc = "Births Lampreys from pulsing eggs"             },
 	{ btype = "EngineeringPost", icon = "🔬", color = Color3.fromRGB(90, 200, 255), desc = "Researches random combat upgrades for your units" },
-	{ btype = "TEST", icon = "🧪", color = Color3.fromRGB(160, 80, 230), desc = "Sandbox bonfire (limit 1): summons units, builds structures & has separate supply / spawn-rate upgrades" },
 }
 local CHILD_SPACING = 114   -- px between child centres
 
@@ -1847,7 +1847,7 @@ function HUD.wire(
 
 		-- Toggle visibility from the live selection (cheap: a tiny table scan / frame).
 		local sellShown = false
-		RunService.Heartbeat:Connect(function()
+		PerfProbe.onHeartbeat("HUD", function()
 			local btn = sellBtnRef
 			if not btn then return end
 			local show = #sellableSelectedIds(unitController.getSelectedBuildingIds()) > 0

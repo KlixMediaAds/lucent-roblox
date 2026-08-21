@@ -3,6 +3,7 @@ local RunService        = game:GetService("RunService")
 local Debris            = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local UnitBlueprints    = require(Shared:WaitForChild("UnitBlueprints"))
@@ -1191,6 +1192,7 @@ local function playRollerMountSound(pos: Vector3)
 	p.Anchored      = true
 	p.CanCollide    = false
 	p.CanQuery      = false
+	p.CanTouch      = false
 	p.Transparency  = 1
 	p.Size          = Vector3.new(1, 1, 1)
 	p.Position      = pos
@@ -1270,6 +1272,7 @@ local function freeCarried(rider: UnitData)
 	rider.carriedBy = nil
 	if rider.part then
 		rider.part.CanQuery = true
+		rider.part.CanTouch = false
 		rider.part:SetAttribute("Carried", nil)   -- resume normal walk/idle gait
 	end
 	-- Only restore the bar if the unit is actually hurt — a full-HP unit shows no bar,
@@ -1309,8 +1312,8 @@ function UnitManager.spawnForDeployer(deployerId: string, player: Player, spawnP
 	local spawnType = unitType or "Survivor"
 	local uid = spawnUnit(player, spawnPos, spawnType)
 	if uid then
-		-- Bonfire summons count as "trained" so train-gated unlocks (e.g. EliteUnits)
-		-- still progress now that the Barracks is gone.
+		-- Bonfire summons count as "trained" so train-gated unlocks still progress
+		-- now that the Barracks is gone.
 		if researchManagerRef and player.UserId > 0 then
 			researchManagerRef.recordUnitTrained(player, spawnType)
 		end
@@ -1571,6 +1574,21 @@ function UnitManager.getOwnerUnitPositions(ownerStr: string): { Vector3 }
 		if tostring(data.owner.UserId) == ownerStr then
 			out[#out + 1] = data.part.Position
 		end
+	end
+	return out
+end
+
+-- The same units, each with the RADIUS it actually sees at, for the fog/spotter checks.
+-- Most units share Config.VISION_UNIT; a Watcher sees further and nothing else does, so
+-- what it lights up for its owner is exactly what it can spot for.
+export type UnitSight = { x: number, z: number, r: number }
+function UnitManager.getOwnerUnitSight(ownerStr: string): { UnitSight }
+	local out: { UnitSight } = {}
+	for _, data in units do
+		if data.hp <= 0 then continue end
+		if tostring(data.owner.UserId) ~= ownerStr then continue end
+		local p = data.part.Position
+		out[#out + 1] = { x = p.X, z = p.Z, r = Config.unitVision(data.unitType) }
 	end
 	return out
 end
@@ -1970,7 +1988,7 @@ function UnitManager.init(resourceManager)
 		end
 	end
 
-	RunService.Heartbeat:Connect(function(dt)
+	PerfProbe.onHeartbeat("UnitManager", function(dt)
 		local toRemove: { string } = {}
 		rebuildSpatialGrid()
 		aggroScanFrame = (aggroScanFrame + 1) % AGGRO_SCAN_EVERY
@@ -2451,7 +2469,8 @@ function UnitManager.init(resourceManager)
 			-- Downed soldiers hold position (they still shoot via the combat scan below,
 			-- just never chase); active rescuers are busy hauling.
 			if doAggro and not data.aggroId and not data.focusBldId and data.unitType ~= "Medic"
-				and data.unitType ~= "Leech"  -- non-combat Hollowed unit
+				and data.unitType ~= "Leech"     -- non-combat Hollowed units: the Leech eats,
+				and data.unitType ~= "Watcher"   -- the Watcher only looks
 				and not data.immobilized and not data.draggingId
 				and not (isFoamer and foamState ~= "mobile") then
 				if data.target == nil or data.atkMoveDest ~= nil then
@@ -3406,32 +3425,14 @@ function UnitManager.init(resourceManager)
 		spawnUnit(player, pos, targetType)
 	end)
 
-	-- ── Leech evolve → Watcher (ranged cluster of eyes) or Mother (Command Center) ──
-	-- Charges the appropriate cost, then despawns the Leech and spawns the chosen
-	-- unit/structure in its place. Works whether the Leech is mobile or burrowed.
-	RemoteHandler.get(Config.REMOTES.EvolveLeech).OnServerEvent:Connect(function(player, leechId, targetType)
-		if type(leechId) ~= "string" then return end
-		if targetType == nil then targetType = "Watcher" end -- back-compat with older clients
-		if targetType ~= "Watcher" and targetType ~= "Mother" then return end
-		local data = units[leechId]
-		if not data or data.owner ~= player or data.unitType ~= "Leech" then return end
-		if data.hp <= 0 or data.dying then return end
-		if targetType == "Mother" and not buildingManagerRef then return end
-
-		local cost = (targetType == "Mother") and Config.LEECH_MOTHER_COST or Config.LEECH_EVOLVE_COST
-		if not resourceManagerRef or not resourceManagerRef.spend(player, cost) then return end
-		local pos = despawnUnit(leechId)
-		if not pos then
-			-- Refund if the Leech vanished between the checks and the despawn.
-			resourceManagerRef.add(player, cost)
-			return
-		end
-		if targetType == "Mother" then
-			buildingManagerRef.morphStructureForPlayer(player, pos, "CommandCenter")
-		else
-			spawnUnit(player, pos, "Watcher")
-		end
-	end)
+	-- ── Leech evolve: retired ───────────────────────────────────────────────────────
+	-- A Leech used to evolve into a Watcher or into a second Mother. Neither is bought
+	-- that way any more -- a Watcher is hatched from a Large nest (three of the Mother's
+	-- injections into one nest, BuildingManager.swellEggNest) and nothing turns a single
+	-- Leech into a Command Center. The remote stays registered and does nothing, so a
+	-- client left over from before the change cannot spend a player's resources on an
+	-- evolution that no longer exists.
+	RemoteHandler.get(Config.REMOTES.EvolveLeech).OnServerEvent:Connect(function() end)
 
 	-- ── Roller mount system ────────────────────────────────────────────────────────
 	-- How many more riders a Roller can still accept (passengers already aboard +

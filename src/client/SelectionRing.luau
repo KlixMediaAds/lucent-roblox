@@ -31,6 +31,8 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local SelectionRing = {}
 
 export type Opts = {
@@ -90,7 +92,7 @@ end
 
 local function ensureLoop()
 	if loop then return end
-	loop = RunService.RenderStepped:Connect(function()
+	loop = PerfProbe.onRender("SelectionRing", function()
 		for i = #active, 1, -1 do
 			local r = active[i]
 			-- The target dying takes its ring with it, so callers that lose track of a

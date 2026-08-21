@@ -144,6 +144,7 @@ local function decoPart(parent, name)
 	p.Anchored   = true
 	p.CanCollide = false
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.CastShadow = false
 	p.Parent     = parent
 	return p
@@ -159,6 +160,7 @@ local function solidPart(parent, name, size, cf, color, material)
 	p.Anchored   = true
 	p.CanCollide = true
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.CastShadow = true
 	p.Parent     = parent
 	return p
@@ -508,6 +510,7 @@ function FungiCluster.create(origin: Vector3, seed: number?, fullness: number?):
 	anchor.Anchored     = true
 	anchor.CanCollide   = false
 	anchor.CanQuery     = false
+	anchor.CanTouch     = false
 	anchor.CastShadow   = false
 	anchor.Size         = Vector3.new(0.1, 0.1, 0.1)
 	anchor.CFrame       = CFrame.new(origin)

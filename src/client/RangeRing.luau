@@ -14,6 +14,7 @@ local function makeLayer(radius: number, width: number, transparency: number, y:
 		p.Anchored     = true
 		p.CanCollide   = false
 		p.CanQuery     = false
+		p.CanTouch     = false
 		p.CastShadow   = false
 		p.Material     = Enum.Material.Neon
 		p.Color        = Color3.new(1, 1, 1)
@@ -43,6 +44,7 @@ function RangeRing.create(radius: number, cx: number, cz: number, y: number?): M
 	pivot.Anchored    = true
 	pivot.CanCollide  = false
 	pivot.CanQuery    = false
+	pivot.CanTouch    = false
 	pivot.CastShadow  = false
 	pivot.CFrame      = CFrame.new(0, 0, 0)
 	pivot.Parent      = model
@@ -82,6 +84,7 @@ function RangeRing.createBuildZone(zones: { Zone }, baseY: number?): Model
 	pivot.Anchored    = true
 	pivot.CanCollide  = false
 	pivot.CanQuery    = false
+	pivot.CanTouch    = false
 	pivot.CastShadow  = false
 	pivot.CFrame      = CFrame.new(0, 0, 0)
 	pivot.Parent      = model
@@ -122,6 +125,7 @@ function RangeRing.createBuildZone(zones: { Zone }, baseY: number?): Model
 			p.Anchored     = true
 			p.CanCollide   = false
 			p.CanQuery     = false
+			p.CanTouch     = false
 			p.CastShadow   = false
 			p.Material     = Enum.Material.Neon
 			p.Color        = Color3.new(1, 1, 1)
@@ -152,6 +156,7 @@ function RangeRing.createBuildZone(zones: { Zone }, baseY: number?): Model
 				f.Anchored     = true
 				f.CanCollide   = false
 				f.CanQuery     = false
+				f.CanTouch     = false
 				f.CastShadow   = false
 				f.Material     = Enum.Material.Neon
 				f.Color        = Color3.new(1, 1, 1)

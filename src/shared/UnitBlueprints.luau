@@ -279,6 +279,7 @@ function UnitBlueprints.instantiate(spec: PartSpec, bodyCF: CFrame, teamColor: C
 	p.CanCollide = false
 	p.CastShadow = false
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.CFrame     = bodyCF * spec.cf
 	return p
 end

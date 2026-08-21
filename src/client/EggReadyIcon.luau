@@ -36,6 +36,8 @@
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local ViewportPreview = require(script.Parent:WaitForChild("ViewportPreview"))
 local UILib           = require(script.Parent:WaitForChild("UILib"))
 
@@ -175,7 +177,7 @@ function EggReadyIcon.start()
 	overlaySg.Parent         = localPlayer.PlayerGui
 
 	-- Reposition every mark each frame, at the same render priority the Bonfire's use.
-	RunService:BindToRenderStep("EggReadyPositions", Enum.RenderPriority.Camera.Value + 1, function()
+	PerfProbe.bindRender("EggReadyPositions", Enum.RenderPriority.Camera.Value + 1, "EggReadyIcon", function()
 		local cam = workspace.CurrentCamera
 		if not cam then return end
 		local camPos = cam.CFrame.Position

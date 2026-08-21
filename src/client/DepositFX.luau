@@ -7,6 +7,8 @@ local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local DepositFX = {}
 
 local isMobile    = UserInputService.TouchEnabled
@@ -81,7 +83,7 @@ function DepositFX.start()
 		local folder = workspace:WaitForChild("Deposits", 60)
 		if not folder then return end
 
-		conn = RunService.Heartbeat:Connect(function(dt: number)
+		conn = PerfProbe.onHeartbeat("DepositFX", function(dt: number)
 			accum += dt
 			if accum < TICK_RATE then return end
 			accum -= TICK_RATE

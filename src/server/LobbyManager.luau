@@ -72,7 +72,7 @@ local DIFFICULTY = {
 -- Random (rolled when the match starts).
 local AI_RACE_ORDER = { "Humans", "Hollowed", "Random" }
 
-local aiDiffs: { string } = { "Medium", "Medium", "Medium" }
+local aiDiffs: { string } = { "Easy", "Easy", "Easy" }
 local aiRaces: { string } = { "Humans", "Humans", "Humans" }
 
 type AIEntry = { personality: string, level: number, race: string }
@@ -119,7 +119,7 @@ end
 local function buildAISnapshot(): { AIEntry }
 	local snapshot: { AIEntry } = {}
 	for i = 1, aiCount do
-		local d    = DIFFICULTY[aiDiffs[i]] or DIFFICULTY.Medium
+		local d    = DIFFICULTY[aiDiffs[i]] or DIFFICULTY.Easy
 		local race = aiRaces[i]
 		if race == "Random" then
 			race = math.random() < 0.5 and "Humans" or "Hollowed"

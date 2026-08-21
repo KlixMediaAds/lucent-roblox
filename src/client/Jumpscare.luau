@@ -15,6 +15,8 @@ local RunService   = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Debris       = game:GetService("Debris")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local Jumpscare = {}
 
 -- Lamprey palette (matches LampreyBody so it reads as the same creature).
@@ -53,6 +55,7 @@ local function mk(size: Vector3, color: Color3, material: Enum.Material, shape: 
 	p.Anchored    = true
 	p.CanCollide  = false
 	p.CanQuery    = false
+	p.CanTouch    = false
 	p.CastShadow  = false
 	p.Parent      = vpf
 	return p
@@ -179,7 +182,7 @@ function Jumpscare.trigger()
 	local END_Z   = -2.4
 	local elapsed = 0
 	local conn: RBXScriptConnection
-	conn = RunService.RenderStepped:Connect(function(dt)
+	conn = PerfProbe.onRender("Jumpscare", function(dt)
 		elapsed += dt
 		local t = math.clamp(elapsed / DUR, 0, 1)
 

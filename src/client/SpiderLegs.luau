@@ -10,6 +10,10 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local SpiderLegs = {}
 
 -- ── Geometry (3× reach relative to the original design) ──────────────────────
@@ -110,6 +114,7 @@ function SpiderLegs.attach(unitId: string, body: BasePart)
 			p.CanCollide    = false
 			p.CastShadow    = false
 			p.CanQuery      = false
+			p.CanTouch      = false
 			p:SetAttribute("UnitId", unitId)
 			p.Parent        = legsFolder
 			table.insert(parts, p)
@@ -156,7 +161,7 @@ function SpiderLegs.init(cam: Camera)
 
 	-- RenderStepped fires immediately before the frame is rendered, so
 	-- part positions are always fresh with zero visual lag.
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("SpiderLegs", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -174,6 +179,10 @@ function SpiderLegs.init(cam: Camera)
 				e.lastPos = bpos   -- keep lastPos fresh so speed is correct on uncull
 				continue
 			end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- ── Movement speed → animation clock ──────────────────────────
 			-- Raw speed from position delta, then exponentially smoothed to

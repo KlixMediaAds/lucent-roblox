@@ -203,6 +203,14 @@ function Network.onShowEndScreen(fn: (number, string, any, number) -> ())
 	RemoteHandler.get(Config.REMOTES.ShowEndScreen).OnClientEvent:Connect(fn)
 end
 
+-- A commander's LAST Command Center has just taken its killing blow and is about to come
+-- apart: (ownerUserId, worldPos, isHollowed). Fired to EVERY client, so the kill is
+-- watched by the one who landed it and the one who lost it alike. The end card follows
+-- Config.FINAL_BLOW_CAM_LEAD + FINAL_BLOW_DEATH_HOLD seconds later.
+function Network.onFinalBlow(fn: (number, Vector3, boolean) -> ())
+	RemoteHandler.get(Config.REMOTES.FinalBlow).OnClientEvent:Connect(fn)
+end
+
 -- Fired by server to the local player when their CC is destroyed mid-match
 -- (not the final 1v1). stats = this player's stats, duration = seconds.
 function Network.onShowDefeatScreen(fn: (any, number) -> ())
@@ -243,10 +251,11 @@ end
 -- ccId, pos: send the Mother to inject the ground at pos (she walks there, then three
 -- plants rise out of the wound). `queued` (the player held [Shift]) stacks the spot
 -- behind her current order instead of replacing it.
--- `plant`, when given, aims the spike at one of her own grown plants at that spot, which
--- bursts it for what it was growing instead of opening fresh ground.
-function Network.injectGround(ccId: string, pos: Vector3, queued: boolean?, plant: Model?)
-	RemoteHandler.get(Config.REMOTES.InjectGround):FireServer(ccId, pos, queued == true, plant)
+-- `target`, when given, aims the spike at something standing at that spot instead of at
+-- fresh ground: one of her own grown plants (it bursts for what it was growing) or one of
+-- her own egg nests (it divides into a twin nest alongside).
+function Network.injectGround(ccId: string, pos: Vector3, queued: boolean?, target: Model?)
+	RemoteHandler.get(Config.REMOTES.InjectGround):FireServer(ccId, pos, queued == true, target)
 end
 
 -- ccId: buy one Egg Sacs upgrade on the Mother (plants nests + raises the Embryo cap)
@@ -272,12 +281,6 @@ end
 -- eggId, unitType: choose which unit one of the Mother's Egg-Sac eggs keeps alive
 function Network.assignEgg(eggId: string, unitType: string)
 	RemoteHandler.get(Config.REMOTES.AssignEgg):FireServer(eggId, unitType)
-end
-
--- leechId, targetType ("Watcher"/"Mother"): evolve a Leech in place — into a Watcher
--- (slow ranged cluster of eyes) or a Mother (a new Command Center)
-function Network.evolveLeech(leechId: string, targetType: string)
-	RemoteHandler.get(Config.REMOTES.EvolveLeech):FireServer(leechId, targetType)
 end
 
 -- rollerId, unitIds: send these owned units to climb into the Roller (right-click)
@@ -371,14 +374,15 @@ function Network.setDeployerType(deployerId: string, unitType: string)
 	RemoteHandler.get(Config.REMOTES.SetDeployerType):FireServer(deployerId, unitType)
 end
 
--- Empower one or more bonfires: +capacity and faster summon (scaling price per
--- purchase). Pass a list to upgrade a multi-selection (server upgrades the lowest levels).
-function Network.upgradeDeployer(deployerIds: { string } | string)
-	RemoteHandler.get(Config.REMOTES.UpgradeDeployer):FireServer(deployerIds)
+-- Teach one or more bonfires the next unit on their unlock ladder (Config
+-- .BONFIRE_UNLOCK_ORDER). Pass a list to buy across a multi-selection; the server
+-- advances the lowest-level ones so a press evens the group out.
+function Network.unlockDeployerUnit(deployerIds: { string } | string)
+	RemoteHandler.get(Config.REMOTES.UnlockDeployerUnit):FireServer(deployerIds)
 end
 
--- deployerId, unitType, progress (0–1), level, capacity, nextCost, justUpgraded
-function Network.onDeployerUpdate(fn: (string, string, number, number?, number?, number?, boolean?) -> ())
+-- deployerId, unitType, progress (0–1), justUnlocked
+function Network.onDeployerUpdate(fn: (string, string, number, boolean?) -> ())
 	RemoteHandler.get(Config.REMOTES.DeployerUpdate).OnClientEvent:Connect(fn)
 end
 

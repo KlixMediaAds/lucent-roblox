@@ -51,6 +51,9 @@ local BLOOD: { [string]: Blood } = {
 	Needler       = { spray = EEL,   pool = EEL_DK,   bone = false },
 	CreepySoldier = { spray = ICHOR, pool = ICHOR_DK, bone = false },
 	Broodmother   = { spray = ICHOR, pool = ICHOR_DK, bone = false },
+	-- Not a unit: the Hollowed Command Center herself, bleeding what her brood bleeds.
+	-- BuildingManager calls this in on her final death (see runFinalBlow).
+	Mother        = { spray = EEL,   pool = EEL_DK,   bone = false },
 }
 local DEFAULT_BLOOD: Blood = { spray = RED, pool = RED_DK, bone = true }
 
@@ -419,6 +422,7 @@ function GoreManager.decapitate(body: BasePart)
 		head.Anchored   = false
 		head.CanCollide = true
 		head.CanQuery   = false
+		head.CanTouch   = false
 		head.AssemblyLinearVelocity  = Vector3.new(
 			(math.random() - 0.5) * 16, 36 + math.random() * 16, (math.random() - 0.5) * 16)
 		head.AssemblyAngularVelocity = Vector3.new(
@@ -438,6 +442,7 @@ function GoreManager.decapitate(body: BasePart)
 		bp.Anchored   = false
 		bp.CanCollide = true
 		bp.CanQuery   = false
+		bp.CanTouch   = false
 		if not root or bp.Position.Y < root.Position.Y then root = bp end
 	end
 	if root then

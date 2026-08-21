@@ -6,6 +6,10 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local CreepyLegs = {}
 local legsFolder: Folder
 local camera:     Camera
@@ -79,6 +83,7 @@ local function makePart(col: Color3): BasePart
 	p.CanCollide    = false
 	p.CastShadow    = false
 	p.CanQuery      = false
+	p.CanTouch      = false
 	p.Parent        = legsFolder
 	return p
 end
@@ -136,7 +141,7 @@ function CreepyLegs.init(cam: Camera)
 	legsFolder.Name = "_CreepyLegs"
 	legsFolder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt: number)
+	PerfProbe.onRender("CreepyLegs", function(frameDt: number)
 		local now    = os.clock()
 		local camPos = camera.CFrame.Position
 
@@ -148,6 +153,10 @@ function CreepyLegs.init(cam: Camera)
 			local dx   = bpos.X - camPos.X
 			local dz   = bpos.Z - camPos.Z
 			if dx*dx + dz*dz > CULL_SQ then continue end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- Anchor point: just above body centre
 			local headPos = bpos + Vector3.new(0, 1.2, 0)

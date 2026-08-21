@@ -10,6 +10,8 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local MechLegs = {}
 
 -- ── Leg geometry constants ─────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ local function makePart(): Part
 	p.Anchored           = true
 	p.CanCollide         = false
 	p.CanQuery           = false
+	p.CanTouch           = false
 	p.CastShadow         = false
 	p.Color              = Color3.fromRGB(50, 55, 70)
 	p.Material           = Enum.Material.Metal
@@ -142,7 +145,7 @@ function MechLegs.attach(ccId: string, base: BasePart)
 	}
 	sets[ccId] = set
 
-	set.conn = RunService.Heartbeat:Connect(function(dt: number)
+	set.conn = PerfProbe.onHeartbeat("MechLegs", function(dt: number)
 		-- If CC is gone and we haven't started retracting yet, start now
 		if not base.Parent and not set.retracting then
 			sets[ccId] = nil

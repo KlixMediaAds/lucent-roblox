@@ -4,21 +4,28 @@ local Config = {}
 Config.GAMEMODES = { Default = "Default", Lane = "Lane", Swarm = "Swarm" }
 
 -- Economy
-Config.STARTING_RESOURCES   = 30
+-- Opening wallet, by race. The Humans buy every structure and unit they field, so they
+-- open with a budget that actually reaches the Foundries their whole economy rests on.
+-- The Hollowed grow their army out of the Mother for free, so they open lean.
+Config.STARTING_RESOURCES        = 30    -- Hollowed (and the pre-match default wallet)
+Config.STARTING_RESOURCES_HUMANS = 200
 Config.BUILDING_COST         = 50   -- Barracks cost
-Config.FOUNDRY_COST          = 150  -- Foundry building cost (passive-income structure; scales — see below)
+Config.FOUNDRY_COST          = 100  -- Foundry building cost (flat, every one costs the same)
+
+-- Opening wallet for a commander of this race.
+function Config.startingResources(hollowed: boolean?): number
+	return if hollowed then Config.STARTING_RESOURCES else Config.STARTING_RESOURCES_HUMANS
+end
 
 -- Buildings whose cost grows exponentially with how many the player already owns.
 -- The Nth (0-indexed by current active count) costs baseCost * growth^count, so the
 -- price climbs as you stack them and drops right back down if one is lost/sold.
-Config.EXPONENTIAL_BUILDING_COST = {
-	Foundry = 1.6,
-}
+-- Empty for now: the Foundry used to climb 1.6x per stack and is flat again.
+Config.EXPONENTIAL_BUILDING_COST = {} :: { [string]: number }
 
 -- Buildings whose FIRST one (current count 0) is free; later ones cost as normal.
-Config.FIRST_FREE_BUILDING = {
-	Foundry = true,
-}
+-- Empty for now: the Foundry's first one used to be free, offsetting the climb above.
+Config.FIRST_FREE_BUILDING = {} :: { [string]: boolean }
 
 -- Scaled cost for `buildingType` given how many the player currently owns.
 function Config.scaledBuildingCost(baseCost: number, buildingType: string, currentCount: number): number
@@ -27,34 +34,41 @@ function Config.scaledBuildingCost(baseCost: number, buildingType: string, curre
 	if not growth then return baseCost end
 	return math.floor(baseCost * growth ^ math.max(0, currentCount) + 0.5)
 end
--- Bonfire (internal building type "Deployer") — a mystical purple bonfire that
--- auto-summons units for FREE up to a capacity, with a repeatable "Empower" upgrade
--- that raises capacity AND shortens the summon interval. Each purchase also stacks a
--- LOG onto the fire, building a tiki tower that flares outward as it climbs (see
--- UnitVisuals.addBonfireLog). Capacity/interval are tracked per-building from level.
--- The upgrade is open-ended by design; MAX_LEVEL just caps it "for now".
-Config.DEPLOYER_COST              = 100  -- Bonfire build cost (flat)
-Config.DEPLOYER_BASE_CAPACITY     = 3    -- max simultaneous summoned units at level 0
-Config.DEPLOYER_BASE_INTERVAL     = 15   -- seconds between summons at level 0
-Config.DEPLOYER_MIN_INTERVAL      = 3.5  -- floor so deep upgrades don't go absurd
-Config.DEPLOYER_UPGRADE_COST      = 75   -- base cost of the first Empower upgrade
-Config.DEPLOYER_UPGRADE_GROWTH    = 1.22 -- upgrade cost multiplier per level already bought
-Config.DEPLOYER_UPGRADE_CAP_STEP  = 1    -- +capacity per Empower level
-Config.DEPLOYER_UPGRADE_INTERVAL_MULT = 0.9   -- summon interval ×this per Empower level (until the floor)
-Config.DEPLOYER_UPGRADE_MAX_LEVEL = 20   -- max Empower purchases per bonfire (≈ tiki logs)
+-- Bonfire (internal building type "Deployer"): a mystical purple bonfire that summons
+-- units for FREE, one every DEPLOYER_SUMMON_INTERVAL, up to DEPLOYER_CAPACITY alive at
+-- once. Both are fixed for every bonfire. The only thing a bonfire buys is VARIETY, on
+-- its own unit unlock ladder (BONFIRE_UNLOCK_ORDER below); it has no upgrade for
+-- throughput, so more army means more bonfires rather than a deeper one.
+Config.DEPLOYER_COST             = 100  -- Bonfire build cost (flat)
+Config.DEPLOYER_CAPACITY         = 3    -- max simultaneous summoned units per bonfire
+Config.DEPLOYER_SUMMON_INTERVAL  = 15   -- seconds between summons
 
--- Cost to Empower a bonfire that has already bought `level` upgrades.
-function Config.bonfireUpgradeCost(level: number): number
-	return math.floor(Config.DEPLOYER_UPGRADE_COST * Config.DEPLOYER_UPGRADE_GROWTH ^ math.max(0, level) + 0.5)
+-- ── Bonfire unit unlocks ──────────────────────────────────────────────────────
+-- The only thing a bonfire upgrades. It is built knowing just the first unit on this
+-- ladder; each unlock teaches it the next one, for that bonfire alone. Two bonfires
+-- therefore need paying for twice, which is the point: variety is what costs.
+Config.BONFIRE_UNLOCK_ORDER = { "Survivor", "Medic", "Tank", "Elite", "Foamer", "Howitzer" }
+Config.BONFIRE_UNLOCK_COST_BASE = 50   -- the first unlock (Medic)
+Config.BONFIRE_UNLOCK_COST_STEP = 50   -- each further unlock costs this much more again
+Config.BONFIRE_UNLOCK_MAX_LEVEL = #Config.BONFIRE_UNLOCK_ORDER - 1  -- Survivor is free
+
+-- Cost of the next unlock on a bonfire that has bought `level` already: 50, 100, 150, …
+function Config.bonfireUnlockCost(level: number): number
+	return Config.BONFIRE_UNLOCK_COST_BASE + Config.BONFIRE_UNLOCK_COST_STEP * math.max(0, level)
 end
-function Config.bonfireCapacity(level: number): number
-	return Config.DEPLOYER_BASE_CAPACITY + level * Config.DEPLOYER_UPGRADE_CAP_STEP
+
+-- The unit that the NEXT unlock would teach a bonfire at `level`; nil once maxed.
+function Config.bonfireUnlockNext(level: number): string?
+	return Config.BONFIRE_UNLOCK_ORDER[math.max(0, level) + 2]
 end
-function Config.bonfireInterval(level: number): number
-	-- Early levels speed up summons; later levels are floored so the reward shifts to
-	-- pure capacity (and the growing tiki).
-	return math.max(Config.DEPLOYER_MIN_INTERVAL,
-		Config.DEPLOYER_BASE_INTERVAL * Config.DEPLOYER_UPGRADE_INTERVAL_MULT ^ math.max(0, level))
+
+-- Whether a bonfire that has bought `level` unlocks may summon `unitType`. Units off the
+-- ladder entirely (the Sniper is a field upgrade, not a summon) are never summonable.
+function Config.bonfireUnitUnlocked(unitType: string, level: number): boolean
+	for i, name in Config.BONFIRE_UNLOCK_ORDER do
+		if name == unitType then return i <= math.max(0, level) + 1 end
+	end
+	return false
 end
 
 -- TEST building — a 4×4-tile "super bonfire" sandbox structure (limit 1 per player).
@@ -62,8 +76,8 @@ end
 --   • UNITS     — same unit grid as the Bonfire; picks which unit it auto-summons.
 --   • STRUCTURES— the Command Center build options.
 --   • UPGRADES  — two SEPARATE repeatable upgrades: Supply (+capacity) and
---                 Spawn Rate (shorter summon interval). Unlike the Bonfire's combined
---                 "Empower", these are tracked and purchased independently.
+--                 Spawn Rate (shorter summon interval), tracked and purchased
+--                 independently. The Bonfire has no capacity/rate upgrade at all.
 Config.TEST_COST              = 100  -- build cost (flat)
 Config.TEST_SIZE              = Vector3.new(20, 8, 20)  -- 4×4 tiles (grid = 5)
 Config.TEST_BASE_CAPACITY     = 3    -- max simultaneous summoned units at supply level 0
@@ -98,18 +112,18 @@ Config.UNIT_TYPES = {
 	Sniper        = { cost = 75,  size = Vector3.new(4, 4, 4) },  -- long-range marksman: slow fire, high damage (trained by upgrading a Survivor, not summoned directly)
 	Tank          = { cost = 60,  size = Vector3.new(7, 5, 9)  },
 	Howitzer      = { cost = 90,  size = Vector3.new(8, 14, 8) },
-	Elite         = { cost = 100, size = Vector3.new(5, 6, 5), researchReq = "EliteUnits" },
-	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4), researchReq = "MedicUnit"  },
+	Elite         = { cost = 100, size = Vector3.new(5, 6, 5) },
+	Medic         = { cost = 60,  size = Vector3.new(4, 4, 4) },
 	Foamer        = { cost = 80,  size = Vector3.new(6, 5, 7)  },
 	Lamprey       = { cost = 35, size = Vector3.new(7, 12, 7) },  -- massive burrowing lamprey (visuals drawn client-side)
 	Hagfish       = { cost = 70, size = Vector3.new(6, 10, 6) },  -- slithering cobra-posed hagfish (visuals drawn client-side)
-	Broodmother   = { cost = 200, size = Vector3.new(13.2, 24, 13.2) }, -- towering anemone-bodied tripod (visuals drawn client-side; 1.2× the base 11×20×11)
+	Broodmother   = { cost = 300, size = Vector3.new(13.2, 24, 13.2) }, -- towering anemone-bodied tripod (visuals drawn client-side; 1.2× the base 11×20×11)
 	CreepySoldier = { cost = 0,   size = Vector3.new(4, 4, 4) },  -- spawned free by Mutant turrets
 	-- ── Hollowed race (trained from the Mother) — MVP single black parts ──
 	Leech         = { cost = 50,  size = Vector3.new(4, 3, 5) },  -- burrows to become a passive-income structure
 	Embryo        = { cost = 40,  size = Vector3.new(4, 4, 4) },  -- simple melee combatant; evolves once the Mother's Evolve is unlocked
 	Roller        = { cost = 120, size = Vector3.new(6, 10, 10) }, -- armored rolling disc (Whirlipede-like), evolves from an Embryo; visuals drawn client-side (RollerBody)
-	Watcher       = { cost = 90,  size = Vector3.new(6, 6, 6)  }, -- slow-drifting cluster of eyes (hagfish-eye inspired), evolves from a Leech; ranged gaze attack; visuals drawn client-side (WatcherBody)
+	Watcher       = { cost = 100, size = Vector3.new(6, 6, 6)  }, -- slow-drifting cluster of eyes (hagfish-eye inspired), hatched from a Large nest; NO attack, it is pure vision (see VISION_UNIT_TYPE); visuals drawn client-side (WatcherBody)
 	Needler       = { cost = 15, size = Vector3.new(4, 6, 4)  }, -- spherical body + side eyes + a single long two-jointed insect arm, evolves from an Embryo; anchored-pull gait, stationary mantis-shrimp melee strike; visuals drawn client-side (NeedlerBody)
 }
 
@@ -146,10 +160,8 @@ Config.LEECH_ANCHOR_DELAY_MAX = 3.0   -- max seconds head-up before a Leech anch
 Config.LEECH_SCATTER_MIN      = 7     -- min studs a new Leech crawls out before auto-burrowing
 Config.LEECH_SCATTER_MAX      = 12    -- max studs a new Leech crawls out before auto-burrowing
 
--- A selected Leech can evolve in place into a Watcher (a slow, ranged cluster of eyes).
--- The server charges this, despawns the Leech, and spawns a Watcher where it stood.
-Config.LEECH_EVOLVE_COST      = 70    -- one-time cost to evolve a Leech into a Watcher
-Config.LEECH_MOTHER_COST      = 100   -- one-time cost to evolve a Leech into a Mother (Command Center)
+-- (A Leech used to evolve into a Watcher or a second Mother. Both are gone: a Watcher is
+-- hatched from a Large nest now -- three of the Mother's injections into one nest.)
 
 -- Roller mount system: the armored Roller can carry up to CAPACITY units inside.
 -- MELEE passengers (short attack range) add their damage to the Roller's grind;
@@ -168,12 +180,14 @@ Config.MOTHER_EVOLVE_COST  = 150   -- one-time cost of the Mother's Evolve unloc
 
 -- Foundry: a large industrial structure (4× the Command Center footprint) that
 -- passively produces income. Every active mineral deposit within FOUNDRY_BOOST_RADIUS
--- boosts its output by FOUNDRY_BOOST_PER_DEPOSIT (uncapped) and is drained a little each
--- income tick, so a deposit-rich site pays out more but exhausts the field faster.
-Config.FOUNDRY_BASE_INCOME       = 12    -- resources per tick with no nearby deposits
+-- adds a FLAT FOUNDRY_INCOME_PER_DEPOSIT to the payout (uncapped) and is drained a little
+-- each income tick, so a deposit-rich site pays out more but exhausts the field faster.
+-- Flat rather than a percentage: at these small numbers a percentage rounded away to
+-- nothing, so a Foundry could sit on a deposit, drain it, and earn no more for it.
+Config.FOUNDRY_BASE_INCOME       = 3     -- resources per tick with no nearby deposits
 Config.FOUNDRY_INCOME_INTERVAL   = 6     -- seconds between Foundry income ticks
 Config.FOUNDRY_BOOST_RADIUS      = 60    -- studs; active deposits within this of a Foundry boost it
-Config.FOUNDRY_BOOST_PER_DEPOSIT = 0.15  -- +15% income per active nearby deposit (no cap)
+Config.FOUNDRY_INCOME_PER_DEPOSIT = 2    -- flat +resources per tick for each active nearby deposit
 Config.FOUNDRY_DRAIN_PER_DEPOSIT = 12    -- resources drained from each boosting deposit per income tick
 
 -- Units (shared movement config)
@@ -243,6 +257,10 @@ Config.BLOB_SOLDIER_COST     = 40    -- per CreepySoldier spawn
 Config.BLOB_SOLDIER_COOLDOWN = 6     -- seconds between soldier spawns
 Config.BLOB_WORM_COST        = 300   -- triggers worm burst, consumes blob
 Config.BLOB_TURRET_COST      = 275   -- transforms blob into a Creepy Turret
+-- A blob-grown turret is built as buildingType "Turret" so it shares the Human turret's
+-- stats table. It is a Hollowed structure though, so it keeps the old 10s assembly rather
+-- than inheriting the Human build-speed in Config.BUILD_TIME.
+Config.CREEPY_TURRET_BUILD_TIME = 10
 Config.RELAY_HP         = 250
 Config.RELAY_BUILD_TIME = 12
 Config.RELAY_RADIUS     = 65    -- studs; extends the build zone around this structure
@@ -333,6 +351,39 @@ Config.MOTHER_INJECT_RANGE    = 400   -- max studs from the Mother a target poin
 Config.MOTHER_INJECT_PLANT_LEECHES = 3   -- Leeches out of a spire
 Config.MOTHER_INJECT_PLANT_NESTS   = 2   -- her own egg nests out of a pod cluster
 
+-- Injecting one of her own egg nests instead of a plant: the nest does not burst and it
+-- does not split off a second nest. It SWELLS. The bowl grows by a fifth and a second egg
+-- forms in the socket beside the first, so what stands there is still one nest -- one
+-- thing to click, one health bar, one thing to raid -- that now carries two eggs and
+-- therefore hatches two creatures at a time.
+--
+-- The egg cap is what keeps the loop honest. Every swelling costs a spike cooldown and
+-- nothing else, so without a ceiling one nest would take every injection she ever makes
+-- and become a whole colony's worth of eggs standing on one tile.
+-- A nest goes up in TIERS, one per injection, and the bowl swells by SWELL each time:
+--
+--   1 Small   one egg, the nest as planted
+--   2 Medium  two eggs sharing the bowl -- one pick hatches from both
+--   3 Large   the pair is replaced by a single PRIME egg PRIME_SCALE across, ringed by
+--             BUDS smaller shells at BUD_SCALE. It hatches ONE creature at a time, but
+--             from a list nothing else can produce (see BuildingManager's EGG_HATCHABLE).
+Config.MOTHER_INJECT_NEST_TIERS = 3    -- Small → Medium → Large; the spike stops there
+Config.MOTHER_INJECT_NEST_SWELL = 1.2  -- how much bigger the bowl gets per tier
+Config.NEST_PRIME_EGG_SCALE     = 1.4  -- the Large nest's central egg, against a normal one
+Config.NEST_BUD_SCALE           = 0.7  -- the shells ringing it: 30% smaller than normal
+Config.NEST_BUDS                = 3    -- how many of them
+
+-- ── The last Command Center falling ───────────────────────────────────────────
+-- A commander's final Centre coming down is the match turning over, so it is never
+-- allowed to happen off-screen or in the same breath as the verdict. The server stages
+-- it in three beats: every client is sent to the spot (the FinalBlow remote, a camera
+-- jump), the Centre then comes apart where they are all watching -- a Core explodes, a
+-- Mother bursts -- and only once the wreck has settled does the victory/defeat card go
+-- up. Both numbers are read by the server (which paces the beats) and by the client
+-- (which times its shake off the same clock), so they must stay shared.
+Config.FINAL_BLOW_CAM_LEAD   = 0.85  -- seconds the camera has to arrive before the death
+Config.FINAL_BLOW_DEATH_HOLD = 2.8   -- seconds the death plays out before the end card
+
 -- Spike Gland: the structure a frond bursts into. Each one standing shaves 20% off the
 -- Mother's spike cooldown, compounding, so a player who keeps injecting fronds injects
 -- faster. It is a real building with HP: the buff is only as durable as the glands are.
@@ -344,6 +395,25 @@ Config.MOTHER_INJECT_COOLDOWN_MIN = 2.5   -- seconds; no number of glands goes u
 Config.GLAND_COOLDOWN_REDUCTION   = 0.20  -- each standing gland cuts the cooldown by 20%
 Config.MOTHER_INJECT_PLANT_GLANDS = 1     -- glands out of a frond
 Config.GLAND_SIZE                 = Vector3.new(10, 9, 10)
+
+-- ── The parasite the wound spits out ──────────────────────────────────────────
+-- A bare-ground injection does not simply push plants up out of the soil. Each plant
+-- comes out of the wound as a small parasite first: it is thrown clear, scurries to the
+-- patch of ground the plant belongs on, then takes root and unfolds into it. The plant
+-- itself waits underground for exactly as long as its parasite has to run, so the growth
+-- rises THROUGH the creature that carried it and the two read as one thing.
+--
+-- Both sides read these: the server holds each plant buried for the lead, and the client
+-- animates the run against the same clock (InjectParasite).
+Config.INJECT_PARASITE_LEAP   = 0.55  -- seconds of the arc out of the wound
+Config.INJECT_PARASITE_SCURRY = 1.05  -- seconds it works the ground before it roots
+Config.INJECT_PARASITE_ROOT   = 1.10  -- seconds it spends unfolding into the rising plant
+
+-- How long a plant stays buried: the whole run up to the moment the parasite roots. The
+-- root phase then overlaps the plant's rise, which is the blend.
+function Config.injectParasiteLead(): number
+	return Config.INJECT_PARASITE_LEAP + Config.INJECT_PARASITE_SCURRY
+end
 
 -- The Mother's spike cooldown with `glands` of hers standing. Shared so the server's
 -- clock and the client's countdown ring can never disagree on how long the window is.
@@ -415,14 +485,10 @@ Config.UNLOCKS = {
 		vp = { kind = "building", name = "Foundry" },
 		desc = "Foundries you build run hotter, refining a touch more each tick.",
 		condText = "Build 3 Foundries", cond = { type = "building", name = "Foundry", count = 3 } },
-	EliteUnits       = { icon = "⭐", title = "Elite Units", category = "Army",
-		vp = { kind = "unit", name = "Elite" },
-		desc = "Unlocks the Elite unit at the Bonfire.",
-		condText = "Summon 5 Survivors", cond = { type = "train",    name = "Survivor",  count = 5 } },
-	MedicUnit        = { icon = "➕", title = "Medic Unit", category = "Army",
-		vp = { kind = "unit", name = "Medic" },
-		desc = "Unlocks the Medic, which automatically heals nearby friendly units.",
-		condText = "Build 2 Bonfires", cond = { type = "building", name = "Deployer", count = 2 } },
+	-- EliteUnits / MedicUnit retired: each Bonfire now buys its own units through its
+	-- unlock ladder (BONFIRE_UNLOCK_ORDER), so a tree entry saying "requirement not met"
+	-- for a unit the player had already paid to unlock was a second gate on the same
+	-- thing. Deleting them here also clears their gates everywhere hasResearch is read.
 	TurretUpgrades   = { icon = "⚙", title = "Turret Upgrades", category = "Infra",
 		vp = { kind = "building", name = "Turret" },
 		desc = "Unlocks upgrade options for all Turrets.",
@@ -552,6 +618,15 @@ Config.TURRET_ARTILLERY = { range = 200, damage = 130, rate = 5.0 }
 -- "is it out of the fog" for the owner.
 Config.VISION_UNIT    = 65
 Config.VISION_DEFAULT = 40
+-- Units that see further (or less far) than the rest. The Watcher is a cluster of EYES
+-- with no attack at all, so seeing 15% further than anything else on the field is the
+-- whole of what it does. Both the client's fog reveal and the server's spotter check read
+-- this through Config.unitVision, so what it lights up is exactly what it can spot for.
+Config.VISION_UNIT_TYPE = { Watcher = 75 }   -- 65 × 1.15, rounded
+
+function Config.unitVision(unitType: string?): number
+	return (unitType and (Config.VISION_UNIT_TYPE :: any)[unitType]) or Config.VISION_UNIT
+end
 Config.VISION_RADIUS  = {
 	CommandCenter = 75, Foundry = 55, Turret = 40, EngineeringPost = 50,
 	Deployer = 50, Relay = 45, Monument = 60, CreepyWorm = 40, CreepyBlob = 45,
@@ -569,7 +644,9 @@ Config.TURRET_DAMAGE      = 20
 Config.TURRET_ATTACK_RATE = 1.5   -- seconds between shots
 
 -- Build / train times (seconds)  —  CommandCenter is always instant
-Config.BUILD_TIME       = { Deployer = 15, Turret = 10, Monument = 20, Relay = 12, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 20, EngineeringPost = 15, TEST = 12 }
+-- Human structures build in half the time the Hollowed ones take: the Humans pay
+-- resources for everything they field, so their structures go up fast.
+Config.BUILD_TIME       = { Deployer = 7.5, Turret = 5, Monument = 20, Relay = 6, CreepyWorm = 10, CreepyBlob = 12, LampreyNest = 18, Foundry = 10, EngineeringPost = 7.5, TEST = 12 }
 Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 20, Elite = 18, Medic = 10, Foamer = 14, Lamprey = 18, Hagfish = 18, Broodmother = 22, CreepySoldier = 0, Leech = 0, Embryo = 0, Roller = 0, Watcher = 0, Needler = 0 }
 
 -- Combat / Health
@@ -577,8 +654,11 @@ Config.UNIT_TRAIN_TIME  = { Survivor = 6,   Sniper = 12, Tank = 12, Howitzer = 2
 -- per hit at a very fast attack rate (short melee range so it rolls right up and stays).
 Config.UNIT_HP             = { Survivor = 80,  Sniper = 60,  Tank = 250,  Howitzer = 220,  Elite = 180,  Medic = 70,   Foamer = 140, Lamprey = 240, Hagfish = 150, Broodmother = 420, CreepySoldier = 55, Leech = 90,  Embryo = 70, Roller = 264, Watcher = 170, Needler = 140 }
 Config.BUILDING_HP         = { Deployer = 450, CommandCenter = 1000, Turret = 350, Monument = 3000, Relay = 250, CreepyWorm = 150, CreepyBlob = 350, LampreyNest = 600, Foundry = 800, EngineeringPost = 550, TEST = 600, Gland = 300 }
-Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 35,   Howitzer = 70,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 20, Needler = 42 }
-Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 54, Needler = 14 }
+-- Watcher sits at 0/0 alongside the Leech: it is an EYE, not a weapon. It sees further
+-- than anything else the Hollowed field (VISION_UNIT_TYPE below) and does nothing else,
+-- so it never acquires a target and never chases one.
+Config.UNIT_ATTACK_DAMAGE  = { Survivor = 12,  Sniper = 85,  Tank = 26,   Howitzer = 52,   Elite = 25,   Medic = 22,   Foamer = 8,  Lamprey = 45,  Hagfish = 22,  Broodmother = 5,  CreepySoldier = 14, Leech = 0,   Embryo = 14, Roller = 6, Watcher = 0, Needler = 42 }
+Config.UNIT_ATTACK_RANGE   = { Survivor = 15,  Sniper = 95,  Tank = 45,   Howitzer = 65,   Elite = 30,   Medic = 22,   Foamer = 22, Lamprey = 42,  Hagfish = 36,  Broodmother = 30, CreepySoldier = 13, Leech = 0,   Embryo = 14, Roller = 8, Watcher = 0, Needler = 14 }
 Config.UNIT_ATTACK_RATE    = { Survivor = 0.8, Sniper = 3.5, Tank = 1.6,  Howitzer = 4.0,  Elite = 1.0,  Medic = 1.2,  Foamer = 1.8, Lamprey = 2.1, Hagfish = 6.0, Broodmother = 4.0, CreepySoldier = 0.7, Leech = 1.0, Embryo = 0.9, Roller = 0.4, Watcher = 1.8, Needler = 1.7 }
 
 -- Needler merge ability: a selected Needler folds the nearest owned Needler within
@@ -619,6 +699,8 @@ Config.CAMERA_EDGE_THRESHOLD = 30   -- pixels from screen edge
 
 -- Remote event names
 Config.REMOTES = {
+	-- The server's own frame cost, broadcast for the F3 performance overlay.
+	PerfSync         = "PerfSync",
 	TrainUnit        = "TrainUnit",
 	MoveUnits        = "MoveUnits",
 	FormationMove    = "FormationMove",
@@ -680,7 +762,7 @@ Config.REMOTES = {
 	SpawnLaneUnit           = "SpawnLaneUnit",
 	SetDeployerType         = "SetDeployerType",
 	DeployerUpdate          = "DeployerUpdate",
-	UpgradeDeployer         = "UpgradeDeployer",
+	UnlockDeployerUnit      = "UnlockDeployerUnit",
 	SetTestType             = "SetTestType",
 	TestUpdate              = "TestUpdate",
 	UpgradeTest             = "UpgradeTest",
@@ -706,6 +788,10 @@ Config.REMOTES = {
 	LeechHarvest            = "LeechHarvest",
 	MotherEggLand           = "MotherEggLand",
 	SellBuilding            = "SellBuilding",
+	-- S→C: a commander's LAST Command Center is about to come down. Payload:
+	-- (ownerUserId, worldPos, isHollowed). Every client jumps its camera there so the
+	-- match is decided in front of them rather than behind a loading card.
+	FinalBlow               = "FinalBlow",
 	ShowDefeatScreen        = "ShowDefeatScreen",
 	PlayAgain               = "PlayAgain",
 	-- Leave / return to the ready-up lobby. Solo → immediate; multiplayer → a

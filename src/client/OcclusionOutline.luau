@@ -30,6 +30,8 @@
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local ForestFade = require(script.Parent:WaitForChild("ForestFade"))
 
 local OcclusionOutline = {}
@@ -243,7 +245,7 @@ function OcclusionOutline.start()
 		if c.Name == "Units" or c.Name == "Buildings" then rewire() end
 	end)
 
-	RunService.Heartbeat:Connect(function(dt: number)
+	PerfProbe.onHeartbeat("OcclusionOutline", function(dt: number)
 		accum += dt
 		if accum < TICK then return end
 		accum = 0

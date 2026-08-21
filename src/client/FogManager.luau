@@ -15,6 +15,15 @@
 
 local TweenService = game:GetService("TweenService")
 local Players      = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Only for Config.unitVision: the per-unit reveal radius has to be the same number the
+-- server spots with, or a Watcher would light up ground its own artillery calls fog.
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+
+-- The fog tick is wrapped in a probe; without this require the loop threw on its first
+-- iteration and every later tick was simply never run.
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 
 local FogManager  = {}
 local localPlayer = Players.LocalPlayer
@@ -44,7 +53,6 @@ local VIS_BARRACKS = 50
 local VIS_MINE     = 45
 local VIS_TURRET   = 40
 local VIS_MINER    = 30
-local VIS_UNIT     = 65
 
 local STATE_UNEXPLORED = 0
 local STATE_EXPLORED   = 1
@@ -53,10 +61,9 @@ local STATE_VISIBLE    = 2
 local FADE_INFO        = TweenInfo.new(UNIT_FADE, Enum.EasingStyle.Linear)
 local TILE_REVEAL_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Precomputed squared radii + cell-radii + inner squared radii (feather start)
-local UNIT_R2   = VIS_UNIT  * VIS_UNIT
-local UNIT_RC   = math.ceil(VIS_UNIT  / CELL_SIZE) + 1
-local UNIT_RI2  = (VIS_UNIT  * (1 - FEATHER_FRAC)) ^ 2
+-- Precomputed squared radii + cell-radii + inner squared radii (feather start). Units are
+-- not in here: each carries its own radius (see UnitSource), since they no longer all see
+-- the same distance.
 local MINER_R2  = VIS_MINER * VIS_MINER
 local MINER_RC  = math.ceil(VIS_MINER / CELL_SIZE) + 1
 local MINER_RI2 = (VIS_MINER * (1 - FEATHER_FRAC)) ^ 2
@@ -89,7 +96,11 @@ local exploredMap: { [number]: { [number]: true } } = {}
 type Source = { x: number, z: number, r2: number, rc: number, ri2: number }
 
 -- Cached lists of own parts — rebuilt only when a folder child changes
-local ownUnitParts:    { BasePart } = {}
+-- Units carry their own reveal radius: most share Config.VISION_UNIT, a Watcher sees
+-- further (Config.VISION_UNIT_TYPE). Stored per unit at rebuild time so the per-frame pass
+-- stays a straight walk over numbers.
+type UnitSource = { part: BasePart, r2: number, rc: number, ri2: number }
+local ownUnitParts:    { UnitSource } = {}
 local ownBuildingData: { { part: BasePart, r2: number, rc: number, ri2: number } } = {}
 local ownMinerParts:   { BasePart } = {}
 local sourcesDirty = true
@@ -230,7 +241,14 @@ local function rebuildSourceList()
 		for _, c in unitsF:GetChildren() do
 			local ov = c:FindFirstChild("OwnerId")
 			if ov and ov.Value == myStr and c:IsA("BasePart") then
-				table.insert(ownUnitParts, c :: BasePart)
+				local tv = c:FindFirstChild("UnitType") :: StringValue?
+				local r  = Config.unitVision(tv and tv.Value or nil)
+				table.insert(ownUnitParts, {
+					part = c :: BasePart,
+					r2   = r * r,
+					rc   = math.ceil(r / CELL_SIZE) + 1,
+					ri2  = (r * (1 - FEATHER_FRAC)) ^ 2,
+				})
 			end
 		end
 	end
@@ -274,9 +292,9 @@ local function collectSources(): { Source }
 	if sourcesDirty then rebuildSourceList() end
 
 	local out: { Source } = {}
-	for _, p in ownUnitParts do
-		local pos = p.Position
-		table.insert(out, { x = pos.X, z = pos.Z, r2 = UNIT_R2, rc = UNIT_RC, ri2 = UNIT_RI2 })
+	for _, u in ownUnitParts do
+		local pos = u.part.Position
+		table.insert(out, { x = pos.X, z = pos.Z, r2 = u.r2, rc = u.rc, ri2 = u.ri2 })
 	end
 	for _, bd in ownBuildingData do
 		local pos = bd.part.Position
@@ -673,6 +691,7 @@ function FogManager.init(userId: number)
 		p.CanCollide   = false
 		p.CastShadow   = false
 		p.CanQuery     = false
+		p.CanTouch     = false
 		p.Parent       = fogFolder
 		return p
 	end
@@ -722,7 +741,13 @@ function FogManager.init(userId: number)
 		local warm        = true
 
 		while true do
-			updateFog()
+			-- Guarded: an error thrown inside a tick used to kill this thread outright,
+			-- and a dead fog loop is invisible until you notice enemies showing through
+			-- the fog and your own units revealing nothing. Warn and keep ticking.
+			PerfProbe.open("FogManager")
+			local ok, err = pcall(updateFog)
+			PerfProbe.shut()
+			if not ok then warn("[FogManager] tick failed: " .. tostring(err)) end
 
 			if warm then
 				local haveSource = #ownUnitParts > 0 or #ownBuildingData > 0

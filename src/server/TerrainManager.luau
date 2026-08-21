@@ -67,6 +67,7 @@ local function addObstacle(cx: number, cz: number, hw: number, hd: number, h: nu
 	p.Anchored        = true
 	p.CanCollide      = false
 	p.CanQuery        = false
+	p.CanTouch        = false
 	p.Transparency    = 1
 	p.CastShadow      = false
 	p.Parent          = obstaclesFolder

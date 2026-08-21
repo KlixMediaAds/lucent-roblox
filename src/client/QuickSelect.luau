@@ -31,6 +31,8 @@ local Players      = game:GetService("Players")
 local RunService   = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local UILib           = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview = require(script.Parent:WaitForChild("ViewportPreview"))
 
@@ -364,7 +366,7 @@ function QuickSelect.init(unitController: any, cameraModule: any)
 	-- through half a dozen different paths, and a quarter-second lag on a HUD button is
 	-- invisible next to the cost of hooking all of them.
 	local acc = POLL
-	RunService.Heartbeat:Connect(function(dt: number)
+	PerfProbe.onHeartbeat("QuickSelect", function(dt: number)
 		acc += dt
 		if acc < POLL then return end
 		acc = 0

@@ -9,6 +9,10 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local WalkerLegs = {}
 
 -- ── Geometry constants ────────────────────────────────────────────────────────
@@ -108,6 +112,7 @@ local function makePart(col: Color3, mat: Enum.Material, shape: Enum.PartType?):
 	p.CanCollide     = false
 	p.CastShadow     = false
 	p.CanQuery       = false
+	p.CanTouch       = false
 	p.Parent         = legsFolder
 	return p
 end
@@ -186,7 +191,7 @@ function WalkerLegs.init(cam: Camera)
 	legsFolder.Name   = "_WalkerLegs"
 	legsFolder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("WalkerLegs", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -205,6 +210,10 @@ function WalkerLegs.init(cam: Camera)
 				e.lastPos = bpos
 				continue
 			end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- ── Speed smoothing ────────────────────────────────────────────────
 			local moved     = (bpos - e.lastPos).Magnitude

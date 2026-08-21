@@ -18,6 +18,9 @@
 	anchored, non-colliding and non-queryable: this is scenery, not a unit.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+
 local InjectPlants = {}
 
 InjectPlants.VARIANTS = { "spire", "frond", "pods" }
@@ -30,10 +33,19 @@ InjectPlants.VARIANTS = { "spire", "frond", "pods" }
 -- plant, so the player sees what it would become before spending on it. MotherPanel owns
 -- the name → ViewportPreview mapping; a plant with no `kind` has nothing to show yet.
 export type InjectInfo = { label: string, yield: string, kind: string?, preview: string? }
+-- Yields are written as a PAYOUT, matching how the sight renders them: one lime line that
+-- reads the same whatever she is standing over.
+--
+-- The frond names the EFFECT rather than the building. What a Spike Gland is worth is the
+-- cooldown it shaves off her spike, and a player deciding whether to spend an injection on
+-- one should not have to have learnt that beforehand. The number comes straight from
+-- Config so the line cannot drift from what the gland actually does.
+local GLAND_CUT = math.floor(Config.GLAND_COOLDOWN_REDUCTION * 100 + 0.5)
 local INJECT: { [string]: InjectInfo } = {
-	spire = { label = "Spire",       yield = "3 LEECHES",   kind = "leeches", preview = "leech" },
-	pods  = { label = "Pod Cluster", yield = "2 EGG NESTS", kind = "nests",   preview = "nest"  },
-	frond = { label = "Frond",       yield = "SPIKE GLAND",  kind = "glands",  preview = "gland" },
+	spire = { label = "Spire",       yield = "+3 LEECHES",   kind = "leeches", preview = "leech" },
+	pods  = { label = "Pod Cluster", yield = "+2 EGG NESTS", kind = "nests",   preview = "nest"  },
+	frond = { label = "Frond",       yield = "-" .. GLAND_CUT .. "% SPIKE COOLDOWN",
+		kind = "glands", preview = "gland" },
 }
 InjectPlants.INJECT = INJECT
 
@@ -99,6 +111,9 @@ function InjectPlants.findSpot(folder: Instance?, x: number, z: number, variant:
 end
 
 local RISE_TIME = 1.3   -- seconds a plant takes to climb out of the ground
+-- Shared so the client's parasite can time its unfolding against the same rise it is
+-- supposed to be turning into (InjectParasite).
+InjectPlants.RISE_TIME = RISE_TIME
 
 -- ── Palette (Hollowed flesh) ──────────────────────────────────────────────────
 local STEM_COLS = {
@@ -113,6 +128,12 @@ local BULB_COLS = {
 	Color3.fromRGB(175, 75, 240),
 }
 
+-- Published so anything that has to LOOK like these plants is built out of the same
+-- three colours rather than a second set that drifts away from them.
+InjectPlants.STEM_COLS = STEM_COLS
+InjectPlants.BULB_COLS = BULB_COLS
+InjectPlants.FLESH_COL = FLESH_COL
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 local function part(parent: Instance, name: string, size: Vector3, cf: CFrame,
 	color: Color3, material: Enum.Material): BasePart
@@ -125,6 +146,7 @@ local function part(parent: Instance, name: string, size: Vector3, cf: CFrame,
 	p.Anchored   = true
 	p.CanCollide = false
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.CastShadow = false
 	p.Parent     = parent
 	return p
@@ -242,8 +264,16 @@ end
 -- `instant` skips the rise and stands the plant up where it belongs straight away. That
 -- is for plants that were always there (WildPlants seeds the map with hundreds before
 -- anyone can see it) rather than ones a spike just forced out of the soil.
+--
+-- `opts` covers what an INJECTED plant carries that a wild one does not. Every field is
+-- stamped before the model is parented, so a client watching the folder for new plants
+-- sees a fully described one on the very first frame:
+--   ownerUserId  : whose plant it is (only her own take her spike)
+--   parasiteFrom : the wound it was spat out of, which is where its parasite starts
+--   delay        : seconds it stays buried before the rise, for the parasite's run
+export type GrowOpts = { ownerUserId: number?, parasiteFrom: Vector3?, delay: number? }
 function InjectPlants.grow(parent: Instance, origin: Vector3, variant: string, seed: number?,
-	instant: boolean?): Model
+	instant: boolean?, opts: GrowOpts?): Model
 	local r     = Random.new(seed or (os.clock() * 1e6) % 1e9)
 	local model = Instance.new("Model")
 	model.Name  = "InjectPlant_" .. variant
@@ -257,6 +287,7 @@ function InjectPlants.grow(parent: Instance, origin: Vector3, variant: string, s
 	anchor.Anchored     = true
 	anchor.CanCollide   = false
 	anchor.CanQuery     = false
+	anchor.CanTouch     = false
 	anchor.CastShadow   = false
 	anchor.Parent       = model
 	model.PrimaryPart   = anchor
@@ -273,12 +304,32 @@ function InjectPlants.grow(parent: Instance, origin: Vector3, variant: string, s
 	-- Start fully buried, then climb. Terrain hides whatever is still underground, so
 	-- the plant appears to shoulder its way out of the soil.
 	local rest = model:GetPivot()
+
+	if opts and opts.ownerUserId then model:SetAttribute("OwnerUserId", opts.ownerUserId) end
+
+	local delay = (opts and opts.delay) or 0
+	if not instant then
+		-- Sunk BEFORE it is parented: a plant held back for its parasite would otherwise
+		-- stand there in full view for the frame between parenting and the sink.
+		model:PivotTo(rest * CFrame.new(0, -depth, 0))
+		if opts and opts.parasiteFrom then
+			model:SetAttribute("ParasiteFrom", opts.parasiteFrom)
+			-- Where the plant will END UP standing. The model is buried while the parasite
+			-- runs, so its pivot is metres under the ground it is heading for and cannot be
+			-- read for the spot itself.
+			model:SetAttribute("PlantOrigin", origin)
+			-- Server clock, so every client's parasite lands on the same beat as the rise
+			-- no matter when the model reached them.
+			model:SetAttribute("RiseAt", workspace:GetServerTimeNow() + delay)
+		end
+	end
+
 	model.Parent = parent
 	if instant then return model end
 
-	model:PivotTo(rest * CFrame.new(0, -depth, 0))
-
 	task.spawn(function()
+		if delay > 0 then task.wait(delay) end
+		if not model.Parent then return end
 		local t0 = os.clock()
 		while model.Parent do
 			local k = math.min((os.clock() - t0) / RISE_TIME, 1)

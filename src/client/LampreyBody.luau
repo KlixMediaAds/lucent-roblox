@@ -14,6 +14,10 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local LampreyBody = {}
 
 -- ── Geometry ──────────────────────────────────────────────────────────────────
@@ -126,6 +130,7 @@ local function makePart(unitId: string, col: Color3, mat: Enum.Material, shape: 
 	p.Anchored       = true
 	p.CanCollide     = false
 	p.CanQuery       = false
+	p.CanTouch       = false
 	p.CastShadow     = false
 	p.Size           = Vector3.new(0.2, 0.2, 0.2)
 	p:SetAttribute("UnitId", unitId)
@@ -476,7 +481,7 @@ function LampreyBody.init(cam: Camera)
 	folder.Name   = "_LampreyBody"
 	folder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("LampreyBody", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -493,6 +498,10 @@ function LampreyBody.init(cam: Camera)
 			if dx*dx + dy*dy + dz*dz > CULL_SQ then
 				continue
 			end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- Speed estimate from frame-to-frame body movement (parts are anchored,
 			-- so AssemblyLinearVelocity is always zero — derive it ourselves).

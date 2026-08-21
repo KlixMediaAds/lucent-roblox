@@ -24,6 +24,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local CommandCard       = require(script.Parent:WaitForChild("CommandCard"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -234,7 +235,7 @@ local shownReadyAt = 0
 local shownOnCd    = false
 local shownCdLen   = 0
 local shownBusy    = false
-RunService.Heartbeat:Connect(function()
+PerfProbe.onHeartbeat("MotherPanel", function()
 	if not MotherPanel.isVisible() then return end
 	local readyAt = injectReadyAt()
 	local onCd    = readyAt > workspace:GetServerTimeNow()

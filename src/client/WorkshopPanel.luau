@@ -23,6 +23,7 @@ local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -873,7 +874,7 @@ function WorkshopPanel.init(
     setTab("Infra")
 
     -- Per-frame: auto-spin the viewport and advance progress bars while open.
-    RunService.Heartbeat:Connect(function(dt)
+    PerfProbe.onHeartbeat("WorkshopPanel", function(dt)
         if not (overlay and overlay.Visible) then return end
 
         -- Rotating viewport

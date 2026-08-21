@@ -481,6 +481,7 @@ local function attachNow(ccId: string, model: Model)
 		p.Anchored   = true
 		p.CanCollide = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.CastShadow = shadows and src.CastShadow
 		p.Parent     = legsFolder
 		hidden[#hidden + 1] = { part = src, transparency = src.Transparency }

@@ -37,6 +37,7 @@ local RunService        = game:GetService("RunService")
 local TweenService      = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local RemoteHandler     = require(Shared:WaitForChild("RemoteHandler"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -92,26 +93,33 @@ local FACTION_LABEL = { Humans = "HUMANS",   Hollowed = "HOLLOWED" }
 
 -- ── Palette ───────────────────────────────────────────────────────────────────
 -- Wuthering-Waves-inspired: near-black slate, ivory text, signature gold + cyan.
-local C_BG          = Color3.fromRGB(  6,   8,  13)
-local C_BG2         = Color3.fromRGB( 11,  14,  21)
-local C_GOLD        = Color3.fromRGB(232, 196, 120)
-local C_PANEL       = Color3.fromRGB( 14,  17,  25)
-local C_PANEL_HI    = Color3.fromRGB( 23,  28,  39)
-local C_BORDER      = Color3.fromRGB( 64,  76,  98)
-local C_GRID        = Color3.fromRGB( 22,  28,  40)
-local C_TITLE       = Color3.fromRGB(238, 240, 245)
-local C_TEXT        = Color3.fromRGB(206, 214, 228)
-local C_SUBTEXT     = Color3.fromRGB(120, 134, 158)
-local C_ACCENT      = Color3.fromRGB(120, 224, 255)
-local C_DEPOSIT     = Color3.fromRGB(255, 236, 150)
-local C_READY_ON    = Color3.fromRGB(232, 196, 120)
-local C_READY_OFF   = Color3.fromRGB( 24,  30,  42)
-local C_READY_DOT   = Color3.fromRGB(110, 224, 175)
-local C_WAITING_DOT = Color3.fromRGB(206,  92,  92)
-local C_SLOT        = Color3.fromRGB( 20,  25,  36)   -- inactive value button
-local C_SLOT_DIS    = Color3.fromRGB( 16,  19,  27)   -- disabled (coming soon)
-local C_FACTION_SEL = Color3.fromRGB( 46,  38,  22)   -- selected faction card (gold-tinted fill)
-local C_TERRAIN_DOT = Color3.fromRGB( 80,  68,  58)
+-- One palette table rather than 23 locals: this chunk is one of the biggest in the
+-- client and Luau allows only 200 locals per chunk, which colours have no claim on.
+local C = {
+	BG          = Color3.fromRGB(  6,   8,  13),
+	BG2         = Color3.fromRGB( 11,  14,  21),
+	GOLD        = Color3.fromRGB(232, 196, 120),
+	PANEL       = Color3.fromRGB( 14,  17,  25),
+	PANEL_HI    = Color3.fromRGB( 23,  28,  39),
+	BORDER      = Color3.fromRGB( 64,  76,  98),
+	GRID        = Color3.fromRGB( 22,  28,  40),
+	TITLE       = Color3.fromRGB(238, 240, 245),
+	TEXT        = Color3.fromRGB(206, 214, 228),
+	SUBTEXT     = Color3.fromRGB(120, 134, 158),
+	ACCENT      = Color3.fromRGB(120, 224, 255),
+	DEPOSIT     = Color3.fromRGB(255, 236, 150),
+	READY_ON    = Color3.fromRGB(232, 196, 120),
+	READY_OFF   = Color3.fromRGB( 24,  30,  42),
+	READY_DOT   = Color3.fromRGB(110, 224, 175),
+	WAITING_DOT = Color3.fromRGB(206,  92,  92),
+	SLOT        = Color3.fromRGB( 20,  25,  36),      -- inactive value button
+	SLOT_DIS    = Color3.fromRGB( 16,  19,  27),      -- disabled (coming soon)
+	FACTION_SEL = Color3.fromRGB( 46,  38,  22),      -- selected faction card (gold-tinted fill)
+	TERRAIN_DOT = Color3.fromRGB( 80,  68,  58),
+	READY_TOP   = Color3.fromRGB(255, 248, 196),      -- near-white top
+	READY_BOT   = Color3.fromRGB(255, 204,  56),      -- saturated yellow bottom
+	READY_GLOW  = Color3.fromRGB(255, 226, 120),
+}
 
 -- AI difficulty accent colors
 local DIFF_COLORS = {
@@ -169,9 +177,6 @@ local lobbyGamemode       = "Default"
 local lastSettings        = { aiCount = 1, ais = {} }
 
 -- Bright "ready up" palette, pronounced yellow→white gradient
-local C_READY_TOP   = Color3.fromRGB(255, 248, 196)  -- near-white top
-local C_READY_BOT   = Color3.fromRGB(255, 204,  56)  -- saturated yellow bottom
-local C_READY_GLOW  = Color3.fromRGB(255, 226, 120)
 
 -- ── UIScale update ────────────────────────────────────────────────────────────
 local function updateScale()
@@ -256,12 +261,12 @@ local function makeBtn(
 	b.Text = text; b.Parent = parent
 	corner(b, 5)
 	gradient(b, Color3.fromRGB(255, 255, 255), Color3.fromRGB(214, 214, 214), 90)
-	local st = stroke(b, C_BORDER, 1); st.Transparency = 0.25
+	local st = stroke(b, C.BORDER, 1); st.Transparency = 0.25
 	b.MouseEnter:Connect(function()
-		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.5, Color = C_ACCENT }):Play()
+		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0, Thickness = 1.5, Color = C.ACCENT }):Play()
 	end)
 	b.MouseLeave:Connect(function()
-		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0.25, Thickness = 1, Color = C_BORDER }):Play()
+		TweenService:Create(st, TweenInfo.new(0.12), { Transparency = 0.25, Thickness = 1, Color = C.BORDER }):Play()
 	end)
 	return b
 end
@@ -270,12 +275,12 @@ end
 local TERRAIN_COLORS = {
 	Layered = Color3.fromRGB(120, 200, 130),
 	Walled  = Color3.fromRGB(196, 150, 110),
-	Off     = C_SUBTEXT,
+	Off     = C.SUBTEXT,
 }
 local function syncTerrain(mode: string)
 	lobbyTerrainMode = mode or "Off"
 	if terrainBtn then
-		local c = TERRAIN_COLORS[lobbyTerrainMode] or C_TITLE
+		local c = TERRAIN_COLORS[lobbyTerrainMode] or C.TITLE
 		terrainBtn.Text       = lobbyTerrainMode:upper()
 		terrainBtn.TextColor3  = c
 		local st = terrainBtn:FindFirstChildOfClass("UIStroke")
@@ -375,11 +380,11 @@ local function buildStatCard()
 	f.ZIndex = 60
 	f.Parent = sg
 	corner(f, 12)
-	local st = stroke(f, C_GOLD, 1); st.Transparency = 0.3
+	local st = stroke(f, C.GOLD, 1); st.Transparency = 0.3
 	gradient(f, Color3.fromRGB(18, 22, 33), Color3.fromRGB(10, 12, 19), 90)
 	statScale = Instance.new("UIScale"); statScale.Scale = 1; statScale.Parent = f
 
-	statName = label(f, "", 22, C_TITLE, Enum.Font.GothamBold,
+	statName = label(f, "", 22, C.TITLE, Enum.Font.GothamBold,
 		UDim2.new(1, -80, 0, 28), UDim2.fromOffset(22, 20), Enum.TextXAlignment.Left)
 	;(statName :: TextLabel).TextTruncate = Enum.TextTruncate.AtEnd
 	;(statName :: TextLabel).ZIndex = 61
@@ -387,17 +392,17 @@ local function buildStatCard()
 	local hr = Instance.new("Frame")
 	hr.Size = UDim2.new(1, -44, 0, 1)
 	hr.Position = UDim2.fromOffset(22, 56)
-	hr.BackgroundColor3 = C_GOLD
+	hr.BackgroundColor3 = C.GOLD
 	hr.BackgroundTransparency = 0.72
 	hr.BorderSizePixel = 0
 	hr.ZIndex = 61
 	hr.Parent = f
 
 	local function row(capText: string, y: number): TextLabel
-		local cap = label(f, capText, 11, C_GOLD, Enum.Font.GothamBold,
+		local cap = label(f, capText, 11, C.GOLD, Enum.Font.GothamBold,
 			UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, y), Enum.TextXAlignment.Left)
 		cap.ZIndex = 61
-		local val = label(f, "", 24, C_TEXT, Enum.Font.GothamMedium,
+		local val = label(f, "", 24, C.TEXT, Enum.Font.GothamMedium,
 			UDim2.new(1, -44, 0, 28), UDim2.fromOffset(22, y + 14), Enum.TextXAlignment.Left)
 		val.ZIndex = 61
 		return val
@@ -406,7 +411,7 @@ local function buildStatCard()
 	statPlay = row("PLAYTIME", 74)
 	statJoin = row("JOINED",  126)
 
-	local bcap = label(f, "BADGES", 11, C_GOLD, Enum.Font.GothamBold,
+	local bcap = label(f, "BADGES", 11, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, 178), Enum.TextXAlignment.Left)
 	bcap.ZIndex = 61
 
@@ -421,7 +426,7 @@ local function buildStatCard()
 
 	-- Only shown when the figures could not be loaded, so a session-only number is never
 	-- passed off as a lifetime one.
-	statNote = label(f, "", 11, C_SUBTEXT, Enum.Font.Gotham,
+	statNote = label(f, "", 11, C.SUBTEXT, Enum.Font.Gotham,
 		UDim2.new(1, -44, 0, 13), UDim2.fromOffset(22, STAT_H - 24), Enum.TextXAlignment.Left)
 	;(statNote :: TextLabel).ZIndex = 61
 
@@ -447,7 +452,7 @@ local function buildStatCard()
 		bar.AnchorPoint = Vector2.new(0.5, 0.5)
 		bar.Position = UDim2.fromScale(0.5, 0.5)
 		bar.Rotation = rot
-		bar.BackgroundColor3 = C_SUBTEXT
+		bar.BackgroundColor3 = C.SUBTEXT
 		bar.BorderSizePixel = 0
 		bar.ZIndex = 63
 		bar.Parent = close
@@ -457,11 +462,11 @@ local function buildStatCard()
 
 	close.MouseEnter:Connect(function()
 		close.BackgroundTransparency = 0.05
-		for _, b in bars do b.BackgroundColor3 = C_TITLE end
+		for _, b in bars do b.BackgroundColor3 = C.TITLE end
 	end)
 	close.MouseLeave:Connect(function()
 		close.BackgroundTransparency = 0.25
-		for _, b in bars do b.BackgroundColor3 = C_SUBTEXT end
+		for _, b in bars do b.BackgroundColor3 = C.SUBTEXT end
 	end)
 	close.MouseButton1Click:Connect(function() hideStatCard() end)
 	dim.MouseButton1Click:Connect(function() hideStatCard() end)
@@ -483,22 +488,22 @@ local function buildBadgeTip()
 	f.ZIndex = 70
 	f.Parent = sg
 	corner(f, 8)
-	local st = stroke(f, C_GOLD, 1); st.Transparency = 0.25
+	local st = stroke(f, C.GOLD, 1); st.Transparency = 0.25
 
-	badgeTipName = label(f, "", 13, C_GOLD, Enum.Font.GothamBold,
+	badgeTipName = label(f, "", 13, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -20, 0, 16), UDim2.fromOffset(10, 8), Enum.TextXAlignment.Left)
 	;(badgeTipName :: TextLabel).ZIndex = 71
 
-	badgeTipDesc = label(f, "", 11, C_TEXT, Enum.Font.Gotham,
+	badgeTipDesc = label(f, "", 11, C.TEXT, Enum.Font.Gotham,
 		UDim2.new(1, -20, 0, 40), UDim2.fromOffset(10, 26), Enum.TextXAlignment.Left)
 	;(badgeTipDesc :: TextLabel).TextWrapped   = true
 	;(badgeTipDesc :: TextLabel).TextYAlignment = Enum.TextYAlignment.Top
 	;(badgeTipDesc :: TextLabel).ZIndex = 71
 
-	local cap = label(f, "OBTAINED", 9, C_GOLD, Enum.Font.GothamBold,
+	local cap = label(f, "OBTAINED", 9, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -20, 0, 11), UDim2.fromOffset(10, 68), Enum.TextXAlignment.Left)
 	cap.ZIndex = 71
-	badgeTipDate = label(f, "", 12, C_TEXT, Enum.Font.GothamMedium,
+	badgeTipDate = label(f, "", 12, C.TEXT, Enum.Font.GothamMedium,
 		UDim2.new(1, -20, 0, 15), UDim2.fromOffset(10, 79), Enum.TextXAlignment.Left)
 	;(badgeTipDate :: TextLabel).ZIndex = 71
 
@@ -640,7 +645,7 @@ local function showStatCard(name: string, userId: number)
 	-- Every badge on the card breathes off ONE clock, exactly as a colony of ripe eggs
 	-- does in the world, so they stay in step with each other.
 	if pipConn then pipConn:Disconnect() end
-	pipConn = RunService.RenderStepped:Connect(function()
+	pipConn = PerfProbe.onRender("LobbyUI", function()
 		if #badgePips == 0 then return end
 		local pulse = 0.5 + 0.5 * math.sin(os.clock() * 3.4)
 		for _, pip in badgePips do UILib.pulseReadyPip(pip, pulse) end
@@ -666,20 +671,20 @@ local function buildBanner(opts: {
 }): Frame
 	local card = Instance.new("Frame")
 	card.Size = UDim2.fromOffset(BANNER_W, BANNER_H)
-	card.BackgroundColor3 = opts.kind == "empty" and C_SLOT_DIS or Color3.fromRGB(17, 21, 31)
+	card.BackgroundColor3 = opts.kind == "empty" and C.SLOT_DIS or Color3.fromRGB(17, 21, 31)
 	card.BackgroundTransparency = opts.kind == "empty" and 0.35 or 0
 	card.BorderSizePixel = 0
 	corner(card, 8)
-	local cst = stroke(card, C_BORDER, 1)
+	local cst = stroke(card, C.BORDER, 1)
 	cst.Transparency = opts.kind == "empty" and 0.7 or 0.4
 
 	if opts.kind == "empty" then
-		label(card, "OPEN\nSLOT", 15, C_SUBTEXT, Enum.Font.GothamBold,
+		label(card, "OPEN\nSLOT", 15, C.SUBTEXT, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0)).TextYAlignment = Enum.TextYAlignment.Center
 		return card
 	end
 
-	local accent = opts.kind == "ai" and (opts.diffColor or C_GOLD) or C_TEXT
+	local accent = opts.kind == "ai" and (opts.diffColor or C.GOLD) or C.TEXT
 
 	-- Name (top)
 	local nameLbl = label(card, opts.name or "", 14, accent, Enum.Font.GothamBold,
@@ -695,7 +700,7 @@ local function buildBanner(opts: {
 	holder.ClipsDescendants = true
 	holder.Parent = card
 	corner(holder, 6)
-	local hst = stroke(holder, C_BORDER, 1); hst.Transparency = 0.5
+	local hst = stroke(holder, C.BORDER, 1); hst.Transparency = 0.5
 
 	if opts.kind == "ai" then
 		-- The icon box shows the AI's race and doubles as its race picker.
@@ -712,11 +717,11 @@ local function buildBanner(opts: {
 		end
 		local raceStrip = label(holder,
 			race == "Random" and "RANDOM" or (FACTION_LABEL[race] or race:upper()),
-			10, C_GOLD, Enum.Font.GothamBold,
+			10, C.GOLD, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 0, 14), UDim2.new(0, 0, 1, -16))
 
 		if opts.index then
-			local rst = stroke(holder, C_GOLD, 1); rst.Transparency = 0.55
+			local rst = stroke(holder, C.GOLD, 1); rst.Transparency = 0.55
 			local pick = Instance.new("TextButton")
 			pick.Name = "PickRace"
 			pick.Size = UDim2.new(1, 0, 1, 0)
@@ -727,12 +732,12 @@ local function buildBanner(opts: {
 			pick.Parent = holder
 			pick.MouseEnter:Connect(function()
 				rst.Transparency = 0; rst.Thickness = 2
-				raceStrip.TextColor3 = C_TITLE
+				raceStrip.TextColor3 = C.TITLE
 				raceStrip.Text = "RACE  ⇄"
 			end)
 			pick.MouseLeave:Connect(function()
 				rst.Transparency = 0.55; rst.Thickness = 1
-				raceStrip.TextColor3 = C_GOLD
+				raceStrip.TextColor3 = C.GOLD
 				raceStrip.Text = race == "Random" and "RANDOM" or (FACTION_LABEL[race] or race:upper())
 			end)
 			pick.MouseButton1Click:Connect(function()
@@ -763,7 +768,7 @@ local function buildBanner(opts: {
 		plate.ZIndex = 5
 		plate.Parent = holder
 
-		local plateLbl = label(plate, "VIEW PROFILE", 12, C_GOLD, Enum.Font.GothamBold,
+		local plateLbl = label(plate, "VIEW PROFILE", 12, C.GOLD, Enum.Font.GothamBold,
 			UDim2.new(1, -8, 1, 0), UDim2.fromOffset(4, 0))
 		plateLbl.TextWrapped    = true   -- wraps to two lines inside the avatar box
 		plateLbl.TextYAlignment = Enum.TextYAlignment.Center
@@ -804,7 +809,7 @@ local function buildBanner(opts: {
 		probe.Destroying:Connect(function() hideStatCard() end)
 	else
 		-- No valid avatar (e.g. a Studio test session): fall back to a name initial.
-		local g = label(holder, string.sub(opts.name or "?", 1, 1):upper(), 54, C_GOLD,
+		local g = label(holder, string.sub(opts.name or "?", 1, 1):upper(), 54, C.GOLD,
 			Enum.Font.GothamBlack, UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0))
 		g.TextYAlignment = Enum.TextYAlignment.Center
 	end
@@ -814,7 +819,7 @@ local function buildBanner(opts: {
 	local raceY   = 34 + BANNER_IN_W + 6   -- 160
 	local canSwap = opts.isLocal and opts.kind == "player"
 	local caption = if opts.kind == "ai" then "DIFFICULTY  ⇄ CYCLE" elseif canSwap then "RACE  ⇄ SWAP" else "RACE"
-	label(card, caption, 10, C_GOLD, Enum.Font.GothamBold,
+	label(card, caption, 10, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -12, 0, 12), UDim2.fromOffset(BANNER_PAD, raceY), Enum.TextXAlignment.Left)
 
 	local raceBox = Instance.new("Frame")
@@ -861,14 +866,14 @@ local function buildBanner(opts: {
 		local vpf  = ViewportPreview.forUnit(unit, Vector2.new(BANNER_IN_W - 8, raceBox.Size.Y.Offset - 22))
 		vpf.Position = UDim2.fromOffset(4, 2)
 		vpf.Parent = raceBox
-		local raceLbl = label(raceBox, FACTION_LABEL[faction] or "HUMANS", 11, C_GOLD, Enum.Font.GothamBold,
+		local raceLbl = label(raceBox, FACTION_LABEL[faction] or "HUMANS", 11, C.GOLD, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 0, 16), UDim2.new(0, 0, 1, -18))
 
 		-- Your own race box is a second way into the team picker: click it to swap to the
 		-- other race, exactly as the TEAM cards in the settings do. A transparent button
 		-- sits over the box so the 3D preview keeps rendering underneath.
 		if canSwap then
-			local rst = stroke(raceBox, C_GOLD, 1); rst.Transparency = 0.55
+			local rst = stroke(raceBox, C.GOLD, 1); rst.Transparency = 0.55
 			local swap = Instance.new("TextButton")
 			swap.Name = "SwapRace"
 			swap.Size = UDim2.new(1, 0, 1, 0)
@@ -881,13 +886,13 @@ local function buildBanner(opts: {
 				rst.Transparency = 0
 				rst.Thickness = 2
 				raceBox.BackgroundTransparency = 0
-				raceLbl.TextColor3 = C_TITLE
+				raceLbl.TextColor3 = C.TITLE
 			end)
 			swap.MouseLeave:Connect(function()
 				rst.Transparency = 0.55
 				rst.Thickness = 1
 				raceBox.BackgroundTransparency = 0.35
-				raceLbl.TextColor3 = C_GOLD
+				raceLbl.TextColor3 = C.GOLD
 			end)
 			swap.MouseButton1Click:Connect(function()
 				if swapLocalFaction then swapLocalFaction(faction) end
@@ -897,17 +902,17 @@ local function buildBanner(opts: {
 
 	-- Ready / waiting status pill (bottom)
 	local statusLblC = label(card, opts.kind == "ai" and "AI" or (opts.ready and "READY" or "waiting"),
-		11, C_SUBTEXT, Enum.Font.GothamBold,
+		11, C.SUBTEXT, Enum.Font.GothamBold,
 		UDim2.new(1, -12, 0, 20), UDim2.new(0, BANNER_PAD, 1, -28))
 	if opts.kind == "ai" then
 		statusLblC.TextColor3 = accent
 	else
-		statusLblC.TextColor3 = opts.ready and C_READY_DOT or C_SUBTEXT
+		statusLblC.TextColor3 = opts.ready and C.READY_DOT or C.SUBTEXT
 	end
 
 	-- Highlight the local player's own banner.
 	if opts.isLocal then
-		cst.Color = C_GOLD; cst.Thickness = 2; cst.Transparency = 0
+		cst.Color = C.GOLD; cst.Thickness = 2; cst.Transparency = 0
 	end
 
 	return card
@@ -922,7 +927,7 @@ local function syncRoster(readyList: { { name: string, userId: number, ready: bo
 	local parts = { tostring(n) }
 	for i = 1, n do
 		local a = ais[i] or {}
-		table.insert(parts, string.format("ai%d|%s|%s", i, a.difficulty or "Medium", a.race or "Humans"))
+		table.insert(parts, string.format("ai%d|%s|%s", i, a.difficulty or "Easy", a.race or "Humans"))
 	end
 	for _, e in readyList do
 		table.insert(parts, string.format("%s|%s|%s", e.name, e.faction or "Humans", tostring(e.ready)))
@@ -956,10 +961,10 @@ local function syncRoster(readyList: { { name: string, userId: number, ready: bo
 		if slots >= MAX_BANNERS then break end
 		slots += 1
 		local a    = ais[i] or {}
-		local diff = a.difficulty or "Medium"
+		local diff = a.difficulty or "Easy"
 		buildBanner({
 			kind = "ai", name = "AI OPPONENT", index = i,
-			diff = diff, diffColor = DIFF_COLORS[diff] or C_GOLD,
+			diff = diff, diffColor = DIFF_COLORS[diff] or C.GOLD,
 			race = a.race or "Humans",
 		}).Parent = bannersContent
 	end
@@ -978,7 +983,7 @@ local function applySettings(settings)
 
 	if aiCountBtn then
 		aiCountBtn.Text = n == 0 and "NONE" or tostring(n)
-		aiCountBtn.TextColor3 = n == 0 and C_SUBTEXT or C_TITLE
+		aiCountBtn.TextColor3 = n == 0 and C.SUBTEXT or C.TITLE
 	end
 end
 
@@ -1001,8 +1006,8 @@ local function applyReadyState(ready: boolean)
 		readyBtn.TextColor3 = Color3.fromRGB(14, 42, 22)
 		readyBtn.Text = "✓\nLOCKED IN"
 	else
-		readyGrad.Color = ColorSequence.new(C_READY_TOP, C_READY_BOT)
-		readyStroke.Color = C_READY_GLOW
+		readyGrad.Color = ColorSequence.new(C.READY_TOP, C.READY_BOT)
+		readyStroke.Color = C.READY_GLOW
 		readyBtn.TextColor3 = Color3.fromRGB(54, 38, 6)
 		readyBtn.Text = "READY\nUP"
 	end
@@ -1132,7 +1137,7 @@ local function playGameStartTransition(onComplete: (string) -> ())
 	task.spawn(function()
 		for _, txt in { "3", "2", "1" } do
 			statusLbl.Text = "Game starting in  " .. txt
-			statusLbl.TextColor3 = C_TEXT; statusLbl.TextSize = 18
+			statusLbl.TextColor3 = C.TEXT; statusLbl.TextSize = 18
 			if sndCountdown then sndCountdown:Play() end
 			TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 24 }):Play()
 			task.delay(0.12, function()
@@ -1140,7 +1145,7 @@ local function playGameStartTransition(onComplete: (string) -> ())
 			end)
 			task.wait(0.65)
 		end
-		statusLbl.Text = "GO!"; statusLbl.TextColor3 = C_READY_DOT; statusLbl.TextSize = 18
+		statusLbl.Text = "GO!"; statusLbl.TextColor3 = C.READY_DOT; statusLbl.TextSize = 18
 		if sndCountdown then sndCountdown:Play() end  -- final tick; the big start sound plays with the reveal
 		TweenService:Create(statusLbl, TweenInfo.new(0.10), { TextSize = 30 }):Play()
 		task.delay(0.14, function()
@@ -1203,18 +1208,18 @@ end
 -- ── Build: backdrop ─────────────────────────────────────────────────────────────
 local function buildBackdrop()
 	bg = Instance.new("Frame")
-	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C_BG
+	bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = C.BG
 	bg.BorderSizePixel = 0; bg.Active = true   -- absorb clicks so nothing behind the lobby is hit
 	bg.Parent = sg
-	gradient(bg, C_BG, C_BG2, 90)
+	gradient(bg, C.BG, C.BG2, 90)
 
 	local deco = Instance.new("Frame")
 	deco.Name = "Deco"; deco.Size = UDim2.new(1, 0, 1, 0)
 	deco.BackgroundTransparency = 1; deco.Parent = bg
 	for _, cfg in {
-		{ x = 0.13, w = 1, rot =  17, col = C_BORDER, tr = 0.86 },
-		{ x = 0.84, w = 2, rot = -15, col = C_GOLD,   tr = 0.9  },
-		{ x = 0.9,  w = 1, rot = -15, col = C_ACCENT, tr = 0.93 },
+		{ x = 0.13, w = 1, rot =  17, col = C.BORDER, tr = 0.86 },
+		{ x = 0.84, w = 2, rot = -15, col = C.GOLD,   tr = 0.9  },
+		{ x = 0.9,  w = 1, rot = -15, col = C.ACCENT, tr = 0.93 },
 	} do
 		local ln = Instance.new("Frame")
 		ln.Size = UDim2.new(0, cfg.w, 1.7, 0); ln.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -1226,7 +1231,7 @@ local function buildBackdrop()
 	bigDia.Size = UDim2.fromOffset(520, 520); bigDia.AnchorPoint = Vector2.new(0.5, 0.5)
 	bigDia.Position = UDim2.new(0.5, 0, 0.5, 0); bigDia.Rotation = 45
 	bigDia.BackgroundTransparency = 1; bigDia.Parent = deco
-	local bd = stroke(bigDia, C_BORDER, 1); bd.Transparency = 0.9
+	local bd = stroke(bigDia, C.BORDER, 1); bd.Transparency = 0.9
 
 	glow = Instance.new("Frame")
 	glow.Name = "Glow"; glow.Size = UDim2.new(1, 0, 1, 0)
@@ -1249,7 +1254,7 @@ local function buildBackdrop()
 	particles.BackgroundTransparency = 1; particles.ClipsDescendants = true
 	particles.ZIndex = 1; particles.Parent = bg
 
-	local PARTICLE_COLS = { C_GOLD, C_ACCENT, Color3.fromRGB(206, 222, 246) }
+	local PARTICLE_COLS = { C.GOLD, C.ACCENT, Color3.fromRGB(206, 222, 246) }
 	local function spawnParticle()
 		local sz = math.random(2, 5)
 		local p  = Instance.new("Frame")
@@ -1275,7 +1280,7 @@ end
 -- The lobby carries no title of its own, the MainMenu tab shell provides branding
 -- on top. All that lives up here is the ready/countdown status line.
 local function buildTitle()
-	statusLbl = label(container, "Waiting for players to ready up...", 15, C_SUBTEXT, Enum.Font.Gotham,
+	statusLbl = label(container, "Waiting for players to ready up...", 15, C.SUBTEXT, Enum.Font.Gotham,
 		UDim2.new(1, 0, 0, 24), UDim2.fromOffset(0, HEADER_H - 34))
 end
 
@@ -1284,11 +1289,11 @@ end
 -- false the control is rendered as a static/disabled chip.
 local function settingRow(parent: Instance, y: number, caption: string,
 	valueText: string, valueColor: Color3, interactive: boolean): TextButton
-	label(parent, caption, 12, C_GOLD, Enum.Font.GothamBold,
+	label(parent, caption, 12, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -32, 0, 16), UDim2.fromOffset(16, y), Enum.TextXAlignment.Left)
 	local btn = makeBtn(parent, valueText,
 		UDim2.new(1, -32, 0, 50), UDim2.fromOffset(16, y + 20),
-		interactive and C_SLOT or C_SLOT_DIS, valueColor, 18)
+		interactive and C.SLOT or C.SLOT_DIS, valueColor, 18)
 	if not interactive then
 		btn.AutoButtonColor = false
 		btn.Active = false
@@ -1329,12 +1334,12 @@ end
 local function applyFactionVisual()
 	for f, refs in factionCards do
 		local sel = f == selectedFaction
-		refs.card.BackgroundColor3      = sel and C_FACTION_SEL or C_SLOT
+		refs.card.BackgroundColor3      = sel and C.FACTION_SEL or C.SLOT
 		refs.card.BackgroundTransparency = sel and 0 or 0.35
-		refs.stroke.Color               = sel and C_GOLD or C_BORDER
+		refs.stroke.Color               = sel and C.GOLD or C.BORDER
 		refs.stroke.Thickness           = sel and 3 or 1
 		refs.stroke.Transparency        = sel and 0 or 0.6
-		refs.name.TextColor3            = sel and C_GOLD or C_SUBTEXT
+		refs.name.TextColor3            = sel and C.GOLD or C.SUBTEXT
 		refs.name.Font                  = sel and Enum.Font.GothamBlack or Enum.Font.GothamBold
 		refs.vpf.ImageTransparency      = sel and 0 or 0.55
 		refs.badge.Visible              = sel
@@ -1360,7 +1365,7 @@ end
 -- Two picture buttons side by side: Humans (a Survivor) and Hollowed (a Lamprey),
 -- each a 3D unit thumbnail above a label. The chosen one reads as selected.
 local function buildFactionSection(parent: Instance, y: number)
-	label(parent, "TEAM", 12, C_GOLD, Enum.Font.GothamBold,
+	label(parent, "TEAM", 12, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -32, 0, 16), UDim2.fromOffset(16, y), Enum.TextXAlignment.Left)
 
 	local FB_GAP = 12
@@ -1379,19 +1384,19 @@ local function buildFactionSection(parent: Instance, y: number)
 		card.Name             = "Faction_" .. d.faction
 		card.Size             = UDim2.fromOffset(fbW, fbH)
 		card.Position         = UDim2.fromOffset(bx, fbY)
-		card.BackgroundColor3  = C_SLOT
+		card.BackgroundColor3  = C.SLOT
 		card.AutoButtonColor  = false
 		card.BorderSizePixel  = 0
 		card.Text             = ""
 		card.Parent           = parent
 		corner(card, 6)
-		local st = stroke(card, C_BORDER, 1); st.Transparency = 0.35
+		local st = stroke(card, C.BORDER, 1); st.Transparency = 0.35
 
 		local vpf    = ViewportPreview.forUnit(d.unit, Vector2.new(fbW - 16, fbH - 36))
 		vpf.Position = UDim2.fromOffset(8, 6)
 		vpf.Parent   = card
 
-		local nameLbl = label(card, d.label, 13, C_TEXT, Enum.Font.GothamBold,
+		local nameLbl = label(card, d.label, 13, C.TEXT, Enum.Font.GothamBold,
 			UDim2.new(1, 0, 0, 18), UDim2.new(0, 0, 1, -24), Enum.TextXAlignment.Center)
 
 		-- "✓ SELECTED" pill pinned to the top-left corner; shown only on the chosen card.
@@ -1400,8 +1405,8 @@ local function buildFactionSection(parent: Instance, y: number)
 		badge.Text             = "✓ SELECTED"
 		badge.Font             = Enum.Font.GothamBlack
 		badge.TextSize         = 10
-		badge.TextColor3       = C_BG
-		badge.BackgroundColor3 = C_GOLD
+		badge.TextColor3       = C.BG
+		badge.BackgroundColor3 = C.GOLD
 		badge.Size             = UDim2.fromOffset(74, 16)
 		badge.Position         = UDim2.fromOffset(6, 6)
 		badge.ZIndex           = 5
@@ -1422,15 +1427,15 @@ local function buildSettingsColumn()
 	settingsPanel.Name = "Settings"
 	settingsPanel.Size = UDim2.fromOffset(SETTINGS_COLLAPSED_W, SETTINGS_HEADER_H)  -- collapsed by default
 	settingsPanel.Position = UDim2.fromOffset(CONTENT_X, CONTENT_Y)
-	settingsPanel.BackgroundColor3 = C_PANEL
+	settingsPanel.BackgroundColor3 = C.PANEL
 	settingsPanel.BackgroundTransparency = 0.04
 	settingsPanel.BorderSizePixel = 0
 	settingsPanel.ClipsDescendants = true  -- rows below the header clip away when collapsed
 	settingsPanel.Parent = container
 	corner(settingsPanel, 8)
-	local ps = stroke(settingsPanel, C_BORDER, 1); ps.Transparency = 0.15
-	gradient(settingsPanel, C_PANEL_HI, C_PANEL, 90)
-	cornerBrackets(settingsPanel, C_GOLD, 14, 2, 9)
+	local ps = stroke(settingsPanel, C.BORDER, 1); ps.Transparency = 0.15
+	gradient(settingsPanel, C.PANEL_HI, C.PANEL, 90)
+	cornerBrackets(settingsPanel, C.GOLD, 14, 2, 9)
 
 	-- Header doubles as the toggle button (the whole bar is clickable).
 	local header = Instance.new("TextButton")
@@ -1443,17 +1448,17 @@ local function buildSettingsColumn()
 	header.ZIndex = 4
 	header.Parent = settingsPanel
 
-	settingsTitleLbl = label(header, "⚙  SETTINGS", 14, C_GOLD, Enum.Font.GothamBold,
+	settingsTitleLbl = label(header, "⚙  SETTINGS", 14, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -44, 1, 0), UDim2.fromOffset(14, 0), Enum.TextXAlignment.Left)
 	settingsTitleLbl.ZIndex = 4
 
-	settingsChevron = label(header, "▼", 16, C_GOLD, Enum.Font.GothamBold,
+	settingsChevron = label(header, "▼", 16, C.GOLD, Enum.Font.GothamBold,
 		UDim2.fromOffset(24, 24), UDim2.new(1, -38, 0.5, -12))
 	settingsChevron.ZIndex = 4
 
 	local div = Instance.new("Frame")
 	div.Size = UDim2.new(1, -32, 0, 1); div.Position = UDim2.fromOffset(16, SETTINGS_HEADER_H - 2)
-	div.BackgroundColor3 = C_BORDER; div.BackgroundTransparency = 0.5
+	div.BackgroundColor3 = C.BORDER; div.BackgroundTransparency = 0.5
 	div.BorderSizePixel = 0; div.Parent = settingsPanel
 
 	local rowY = SETTINGS_HEADER_H + 14
@@ -1461,7 +1466,7 @@ local function buildSettingsColumn()
 
 	-- Gamemode (cycles Default ↔ Swarm)
 	gamemodeBtn = settingRow(settingsPanel, rowY, "GAMEMODE", "DEFAULT", Color3.fromRGB(20, 24, 32), true)
-	gamemodeBtn.BackgroundColor3 = C_READY_ON  -- reads as the active selection
+	gamemodeBtn.BackgroundColor3 = C.READY_ON  -- reads as the active selection
 	rowY += ROW_STEP
 
 	-- Terrain (cycles Layered → Walled → Off)
@@ -1471,7 +1476,7 @@ local function buildSettingsColumn()
 	-- AI Count (cycles 0..3). Per-AI difficulty and race moved onto each AI's
 	-- roster card — click the card's difficulty / icon to change them.
 
-	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C_TITLE, true)
+	aiCountBtn = settingRow(settingsPanel, rowY, "AI COUNT", "1", C.TITLE, true)
 	rowY += ROW_STEP
 
 	-- Team / faction: two picture buttons, Humans (a Survivor) vs Hollowed (a Lamprey).
@@ -1491,18 +1496,18 @@ local function buildPlayersPanel()
 	playersPanel.Name = "Players"
 	playersPanel.Size = UDim2.fromOffset(PANEL_W, PANEL_H)
 	playersPanel.Position = UDim2.fromOffset(0, 0)
-	playersPanel.BackgroundColor3 = C_PANEL
+	playersPanel.BackgroundColor3 = C.PANEL
 	playersPanel.BackgroundTransparency = 0.04
 	playersPanel.BorderSizePixel = 0
 	playersPanel.Parent = rightGroup
 	corner(playersPanel, 8)
-	local rs = stroke(playersPanel, C_BORDER, 1); rs.Transparency = 0.15
-	gradient(playersPanel, C_PANEL_HI, C_PANEL, 90)
-	cornerBrackets(playersPanel, C_GOLD, 14, 2, 9)
+	local rs = stroke(playersPanel, C.BORDER, 1); rs.Transparency = 0.15
+	gradient(playersPanel, C.PANEL_HI, C.PANEL, 90)
+	cornerBrackets(playersPanel, C.GOLD, 14, 2, 9)
 
-	label(playersPanel, "◆  COMBATANTS", 13, C_GOLD, Enum.Font.GothamBold,
+	label(playersPanel, "◆  COMBATANTS", 13, C.GOLD, Enum.Font.GothamBold,
 		UDim2.new(1, -28, 0, 18), UDim2.fromOffset(16, 10), Enum.TextXAlignment.Left)
-	label(playersPanel, "FREE-FOR-ALL", 10, C_SUBTEXT, Enum.Font.GothamBold,
+	label(playersPanel, "FREE-FOR-ALL", 10, C.SUBTEXT, Enum.Font.GothamBold,
 		UDim2.new(1, -28, 0, 16), UDim2.fromOffset(16, 11), Enum.TextXAlignment.Right)
 
 	bannersContent = Instance.new("Frame")
@@ -1541,8 +1546,8 @@ local function buildReadyButton()
 	readyBtn.TextYAlignment = Enum.TextYAlignment.Center
 	readyBtn.Parent = rightGroup
 	corner(readyBtn, 6)
-	readyGrad = gradient(readyBtn, C_READY_TOP, C_READY_BOT, 90)
-	readyStroke = stroke(readyBtn, C_READY_GLOW, 2)
+	readyGrad = gradient(readyBtn, C.READY_TOP, C.READY_BOT, 90)
+	readyStroke = stroke(readyBtn, C.READY_GLOW, 2)
 	readyStroke.Transparency = 0.45
 	cornerBrackets(readyBtn, Color3.fromRGB(255, 255, 255), 16, 2, 9)
 

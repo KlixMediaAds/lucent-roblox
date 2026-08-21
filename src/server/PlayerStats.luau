@@ -40,6 +40,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 
 local PlayerStats = {}
 
@@ -257,7 +258,7 @@ function PlayerStats.init()
 		profiles[player.UserId] = nil
 	end)
 
-	RunService.Heartbeat:Connect(function(dt)
+	PerfProbe.onHeartbeat("PlayerStats", function(dt)
 		if matchActive then
 			accrueAcc += dt
 			-- Accrued in whole seconds so the stored number never drifts on fractions.

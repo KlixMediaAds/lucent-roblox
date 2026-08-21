@@ -20,6 +20,10 @@ local RunService   = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Debris       = game:GetService("Debris")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local WatcherBody = {}
 
 -- ── Geometry ──────────────────────────────────────────────────────────────────
@@ -174,6 +178,7 @@ local function makePart(unitId: string, col: Color3, mat: Enum.Material, shape: 
 	p.Anchored       = true
 	p.CanCollide     = false
 	p.CanQuery       = false
+	p.CanTouch       = false
 	p.CastShadow     = false
 	p.Size           = Vector3.new(0.2, 0.2, 0.2)
 	p:SetAttribute("UnitId", unitId)
@@ -190,6 +195,7 @@ local function drawGaze(unitId: string, fromPos: Vector3, toPos: Vector3)
 	beam.Anchored      = true
 	beam.CanCollide    = false
 	beam.CanQuery      = false
+	beam.CanTouch      = false
 	beam.CastShadow    = false
 	beam.Material      = Enum.Material.Neon
 	beam.Color         = C_SCLERA
@@ -209,6 +215,7 @@ local function playSoundAt(pos: Vector3, id: string, volume: number)
 	p.Anchored    = true
 	p.CanCollide  = false
 	p.CanQuery    = false
+	p.CanTouch    = false
 	p.Transparency = 1
 	p.Size        = Vector3.new(1, 1, 1)
 	p.Position    = pos
@@ -449,7 +456,7 @@ function WatcherBody.init(cam: Camera)
 	folder.Name   = "_WatcherBody"
 	folder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("WatcherBody", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -462,6 +469,10 @@ function WatcherBody.init(cam: Camera)
 			local bpos = body.Position
 			local dx, dy, dz = bpos.X - camPos.X, bpos.Y - camPos.Y, bpos.Z - camPos.Z
 			if dx * dx + dy * dy + dz * dz > CULL_SQ then continue end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- Speed estimate from frame-to-frame movement (parts are anchored).
 			local last      = e.prevPos or bpos

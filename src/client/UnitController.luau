@@ -4,6 +4,7 @@ local UserInputService = game:GetService("UserInputService")
 local GuiService       = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared           = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config           = require(Shared:WaitForChild("Config"))
 local RangeRing        = require(script.Parent:WaitForChild("RangeRing"))
 local SelectionRing    = require(script.Parent:WaitForChild("SelectionRing"))
@@ -104,7 +105,9 @@ local multiBldRings:     { [string]: SelectionRing.Ring } = {}  -- extra rings f
 -- Selecting an egg also selects its descendants in the tentacle tree, so a whole subtree
 -- can be assigned a unit at once. Tracked as a set of egg ids → their highlight boxes.
 local selectedEggIds:  { string }                          = {}
-local selectedEggRings: { [string]: SelectionRing.Ring }   = {}
+-- Keyed by NEST, not by egg: an injected nest holds two shells in one bowl and wears one
+-- ring for both of them.
+local selectedEggRings: { [Instance]: SelectionRing.Ring }  = {}
 
 -- ── Double-click tracking ─────────────────────────────────────────────────────
 local lastClickTime:   number  = 0
@@ -224,6 +227,7 @@ local function spawnMovePing(pos: Vector3, isAtkMove: boolean)
 	ring.Anchored       = true
 	ring.CanCollide     = false
 	ring.CanQuery       = false
+	ring.CanTouch       = false
 	ring.CastShadow     = false
 	ring.Transparency   = 0.2
 	ring.Parent         = workspace
@@ -343,6 +347,7 @@ local function makeNeonPart(name: string, shape: Enum.PartType?): Part
 	p.Anchored     = true
 	p.CanCollide   = false
 	p.CanQuery     = false
+	p.CanTouch     = false
 	p.CastShadow   = false
 	p.Parent       = workspace
 	return p
@@ -510,18 +515,19 @@ local function hitBuilding(): string?
 end
 
 -- Raycast for an owned Egg-Sac nest under the cursor. Each one is a clickable Model (the
--- bowl, plus its egg when one is present) tagged with an "EggId" attribute, living in
--- workspace.EggNests. Returns the egg id and the clump Model, or nil.
+-- bowl, plus the one or two eggs sitting in it) tagged with a "NestId" attribute, living in
+-- workspace.EggNests. The NEST is what is clicked, whatever it holds; returns its id and
+-- the Model, or nil.
 local function hitEgg(): (string?, Instance?)
 	local ray    = mouse.UnitRay
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 2000)
 	if not result then return nil end
 	local inst: Instance? = result.Instance
 	while inst and inst ~= workspace do
-		local eid = inst:GetAttribute("EggId")
-		if eid ~= nil then
+		local nid = inst:GetAttribute("NestId")
+		if nid ~= nil then
 			if inst:GetAttribute("EggOwnerId") == localPlayer.UserId then
-				return eid :: string, inst
+				return nid :: string, inst
 			end
 			return nil
 		end
@@ -703,6 +709,9 @@ local function refreshPlantCache()
 		if not m:IsA("Model") then continue end
 		local variant = m:GetAttribute("Variant")
 		if type(variant) ~= "string" then continue end
+		-- Buried, waiting on the parasite carrying it: not clickable until it stands up.
+		local riseAt = m:GetAttribute("RiseAt")
+		if type(riseAt) == "number" and workspace:GetServerTimeNow() < riseAt then continue end
 		local r   = ((InjectPlants.RADIUS :: any)[variant] or 4.5) + PLANT_PICK_PAD
 		local pos = m:GetPivot().Position
 		table.insert(plantCache, { model = m, x = pos.X, z = pos.Z, r2 = r * r })
@@ -780,108 +789,120 @@ end
 
 -- Clear all egg highlights + tell init.client to close the EggPanel.
 local function clearEggSelection()
-	for id, ring in selectedEggRings do SelectionRing.destroy(ring); selectedEggRings[id] = nil end
+	for nest, ring in selectedEggRings do SelectionRing.destroy(ring); selectedEggRings[nest] = nil end
 	if #selectedEggIds > 0 then
 		selectedEggIds = {}
 		if onEggSelectedCb then onEggSelectedCb(nil) end
 	end
 end
 
--- Scan the local player's egg clump Models, returning eggId → clump Model plus a
--- parentEggId → { childEggId } adjacency map (from each clump's "ParentEgg" attribute).
--- The adjacency map no longer drives selection (a click takes one egg); it is kept because
--- the tentacle tree is still what the nests are physically grown along.
+-- Scan the local player's egg nests, returning eggId -> egg SHELL. A nest is one clickable
+-- Model carrying one or more shells (the Mother's spike swells a nest and grows another egg
+-- in the same bowl), so the id that matters lives on the shell and the nest is its parent.
 -- Nests sit in workspace.EggNests (grouped per owning Mother) rather than under the
 -- Mother's model, so they stay put when she uproots and walks off.
-local function scanOwnedEggs(): ({ [string]: Instance }, { [string]: { string } })
-	local models:   { [string]: Instance }   = {}
-	local children: { [string]: { string } } = {}
+local function scanOwnedEggs(): { [string]: BasePart }
+	local out: { [string]: BasePart } = {}
 	local folder = workspace:FindFirstChild("EggNests")
-	if not folder then return models, children end
+	if not folder then return out end
 	for _, cc in folder:GetChildren() do
-		for _, m in cc:GetChildren() do
-			local eid = m:GetAttribute("EggId")
-			if eid ~= nil and m:GetAttribute("EggOwnerId") == localPlayer.UserId then
-				models[eid :: string] = m
-				local pid = m:GetAttribute("ParentEgg")
-				if pid ~= nil then
-					local list = children[pid :: string]
-					if not list then list = {}; children[pid :: string] = list end
-					table.insert(list, eid :: string)
-				end
+		for _, nest in cc:GetChildren() do
+			if nest:GetAttribute("EggOwnerId") ~= localPlayer.UserId then continue end
+			for _, part in nest:GetChildren() do
+				local eid = part:GetAttribute("EggId")
+				if eid ~= nil and part:IsA("BasePart") then out[eid :: string] = part end
 			end
 		end
 	end
-	return models, children
+	return out
+end
+
+-- Every egg id sitting in one nest, in no particular order.
+local function nestEggIds(nest: Instance): { string }
+	local ids: { string } = {}
+	for _, part in nest:GetChildren() do
+		local eid = part:GetAttribute("EggId")
+		if eid ~= nil then table.insert(ids, eid :: string) end
+	end
+	return ids
 end
 
 -- Highlight the given eggs and open the panel for the set. Picking a creature spends every
--- ripe egg in it. Caller supplies the id list plus the eggId → clump Model lookup.
-local function applyEggSelection(ids: { string }, models: { [string]: Instance })
+-- ripe egg in it. Caller supplies the id list plus the eggId -> shell lookup.
+local function applyEggSelection(ids: { string }, eggs: { [string]: BasePart })
 	selectedEggIds = ids
 	for _, id in ids do
-		local m = models[id]
-		-- Ring the nest bowl: the egg only exists while a creature is incubating, and it
-		-- changes size as it grows, so the bowl is the one steady thing to circle.
-		local anchor = m and ((m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg"))
+		local egg  = eggs[id]
+		local nest = egg and egg.Parent
+		-- One ring per NEST, not per egg: a swollen nest holds two shells in the one bowl
+		-- and is one thing standing there. Ring the bowl, because a shell wanders off
+		-- centre as it grows and is gone entirely between broods.
+		if not nest or selectedEggRings[nest] then continue end
+		local anchor = nest:FindFirstChild("Bowl") or egg
 		if anchor and anchor:IsA("BasePart") then
-			selectedEggRings[id] = SelectionRing.attach(anchor, {
+			selectedEggRings[nest] = SelectionRing.attach(anchor, {
 				color  = RING_EGG,
 				radius = SelectionRing.radiusFor(anchor, 0.8),
 			})
-			m.Destroying:Connect(function()
-				local r = selectedEggRings[id]
-				if r then SelectionRing.destroy(r); selectedEggRings[id] = nil end
+			nest.Destroying:Connect(function()
+				local r = selectedEggRings[nest]
+				if r then SelectionRing.destroy(r); selectedEggRings[nest] = nil end
 			end)
 		end
 	end
 	if onEggSelectedCb then onEggSelectedCb(ids) end
 end
 
--- Select the clicked egg and NOTHING else. A click used to take the whole tentacle
--- subtree under it, which made a single egg impossible to spend on its own: every pick
--- went to the sisters too. The tree is still there, it just no longer decides selection.
+-- Select the clicked NEST and nothing else: every egg it holds, which is one egg for a
+-- nest that has never been injected and two for one that has. Both go on the card together
+-- -- that is what makes a swollen nest hatch two creatures off a single pick -- while a
+-- neighbouring nest is left alone, so a colony can still be spent one nest at a time.
 -- Double-clicking is how you get the whole colony (see below). Caller has already cleared
 -- unit/building selection.
-local function selectEgg(rootEggId: string)
+local function selectEgg(nest: Instance)
 	clearEggSelection()
 	clearPlantSelection()
-	local models = scanOwnedEggs()
-	if not models[rootEggId] then return end
-	applyEggSelection({ rootEggId }, models)
+	local ids = nestEggIds(nest)
+	if #ids == 0 then return end
+	applyEggSelection(ids, scanOwnedEggs())
 end
 
--- Is this nest's egg grown and waiting to be spent? The server stamps "EggReady" on the
--- egg part as it ripens and clears it the moment it is spent, so it replicates.
-local function eggIsReady(clump: Instance): boolean
-	local egg = (clump :: any):FindFirstChild("Egg")
-	return egg ~= nil and egg:GetAttribute("EggReady") == true
+-- Is this shell grown and waiting to be spent? The server stamps "EggReady" on the egg part
+-- as it ripens and clears it the moment it is spent, so it replicates.
+local function eggIsReady(egg: BasePart): boolean
+	return egg:GetAttribute("EggReady") == true
 end
 
--- Double-click on an egg: take every AVAILABLE egg on screen, meaning every one of yours
+-- Double-click on a nest: take every AVAILABLE egg on screen, meaning every one of yours
 -- that has finished growing. Since a hatch is now a one-shot order rather than a standing
 -- choice, this is the "spend the whole colony at once" gesture: double-click, pick a
--- creature, and every ripe nest hatches one.
+-- creature, and every ripe egg hatches one.
 --
 -- Eggs still growing are deliberately left out. Including them would put tiles in front of
 -- the player that silently do nothing for part of the selection.
-local function selectAllReadyEggsOnScreen(rootEggId: string)
-	local models = scanOwnedEggs()
-	if not models[rootEggId] then return end
+local function selectAllReadyEggsOnScreen(nest: Instance)
+	local eggs = scanOwnedEggs()
+	-- Same KIND of nest only. A Large nest holds one prime egg that hatches from a list
+	-- nothing else can touch, so sweeping it up with a colony of ordinary eggs would put a
+	-- card in front of the player that half the selection refuses. Double-clicking a Large
+	-- nest takes the Large nests; double-clicking an ordinary one leaves them out of it.
+	local tier = (nest:GetAttribute("NestTier") :: number?) or 1
 
 	clearEggSelection()
 	clearPlantSelection()
 	local ids: { string } = {}
-	for id, m in models do
-		if not eggIsReady(m) then continue end
-		local adornee = (m :: any):FindFirstChild("Bowl") or (m :: any):FindFirstChild("Egg") or m
-		local pos = adornee:IsA("BasePart") and adornee.Position or (m :: any):GetPivot().Position
-		if isOnScreen(pos) then table.insert(ids, id) end
+	for id, egg in eggs do
+		if not eggIsReady(egg) then continue end
+		local parent = egg.Parent
+		if not parent then continue end
+		if ((parent:GetAttribute("NestTier") :: number?) or 1) ~= tier then continue end
+		local adornee = parent:FindFirstChild("Bowl") or egg
+		if isOnScreen((adornee :: BasePart).Position) then table.insert(ids, id) end
 	end
-	-- Double-clicking a nest whose own egg is still growing would otherwise select nothing
-	-- and read as a dead click; fall back to just that egg.
-	if #ids == 0 then applyEggSelection({ rootEggId }, models); return end
-	applyEggSelection(ids, models)
+	-- Double-clicking a nest whose eggs are all still growing would otherwise select
+	-- nothing and read as a dead click; fall back to just that nest.
+	if #ids == 0 then applyEggSelection(nestEggIds(nest), eggs); return end
+	applyEggSelection(ids, eggs)
 end
 
 -- Select all owned visible units of the same UnitType as the given id.
@@ -1120,7 +1141,7 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 
 	-- While the right button is held, grow the formation preview once the cursor
 	-- has travelled past the drag threshold (needs 2+ units to form a line).
-	RunService.RenderStepped:Connect(function()
+	PerfProbe.onRender("UnitController", function()
 		if not rmbActive or not rmbStartGround then return end
 		local cur = cameraModule.getGroundPosition()
 		if not cur then return end
@@ -1403,7 +1424,8 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 			local now = os.clock()
 			local uid = hitUnit()
 			local eggId: string? = nil
-			if not uid then eggId = hitEgg() end
+			local eggNest: Instance? = nil
+			if not uid then eggId, eggNest = hitEgg() end
 			if uid then
 				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == uid
 				lastClickTime   = now
@@ -1418,10 +1440,12 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				clearEggSelection()
 				clearPlantSelection()
 				clearBuildingPanels()
-			elseif eggId then
-				-- Own Egg-Sac egg: highlight THAT egg alone and open the "what to hatch" panel.
-				-- Double-clicking takes every ripe egg on screen instead, so a whole colony
-				-- can be spent on one pick.
+			elseif eggId and eggNest then
+				-- Own Egg-Sac nest: highlight THAT nest alone (both its eggs, if the Mother
+				-- has swollen it) and open the "what to hatch" panel. Double-clicking takes
+				-- every ripe egg on screen instead, so a whole colony can be spent on one
+				-- pick.
+				local nest     = eggNest :: Instance
 				local isDouble = (now - lastClickTime < DOUBLE_CLICK_SECS) and lastClickTarget == eggId
 				lastClickTime   = now
 				lastClickTarget = eggId
@@ -1429,9 +1453,9 @@ function UnitController.init(network, cameraModule, frame: Frame, isBlocked: () 
 				selectBuilding(nil)
 				clearBuildingPanels()
 				if isDouble then
-					selectAllReadyEggsOnScreen(eggId)
+					selectAllReadyEggsOnScreen(nest)
 				else
-					selectEgg(eggId)
+					selectEgg(nest)
 				end
 			else
 				local bid = hitBuilding()
@@ -1599,12 +1623,12 @@ end
 -- growing would silently take no part in it. With nothing ripe yet the whole clutch is
 -- taken instead, so the button still shows you where your nests are.
 function UnitController.selectAllEggs(): number
-	local models = scanOwnedEggs()
+	local eggs = scanOwnedEggs()
 	local ready: { string } = {}
 	local all:   { string } = {}
-	for id, m in models do
+	for id, egg in eggs do
 		table.insert(all, id)
-		if eggIsReady(m) then table.insert(ready, id) end
+		if eggIsReady(egg) then table.insert(ready, id) end
 	end
 	local ids = if #ready > 0 then ready else all
 	if #ids == 0 then return 0 end
@@ -1614,7 +1638,7 @@ function UnitController.selectAllEggs(): number
 	clearPlantSelection()
 	clearBuildingPanels()
 	clearEggSelection()
-	applyEggSelection(ids, models)
+	applyEggSelection(ids, eggs)
 	return #ids
 end
 
@@ -1640,11 +1664,12 @@ function UnitController.ownedTally(): Tally
 		end
 	end
 
-	local eggs   = 0
-	local models = scanOwnedEggs()
-	for _ in models do eggs += 1 end
+	-- Counted in EGGS rather than nests: a nest the Mother has swollen carries two, and
+	-- two is what the button can actually spend.
+	local eggCount = 0
+	for _ in scanOwnedEggs() do eggCount += 1 end
 
-	return { cc = cc, eggs = eggs, leeches = leeches, army = army }
+	return { cc = cc, eggs = eggCount, leeches = leeches, army = army }
 end
 
 -- Where the current selection is standing, as one point: what the camera flies to when
@@ -1664,11 +1689,11 @@ function UnitController.selectionCentroid(): Vector3?
 	if n > 0 then return sum / n end
 
 	if #selectedEggIds > 0 then
-		local models = scanOwnedEggs()
+		local eggs = scanOwnedEggs()
 		for _, id in selectedEggIds do
-			local m = models[id]
-			if m then
-				sum += (m :: any):GetPivot().Position
+			local egg = eggs[id]
+			if egg then
+				sum += egg.Position
 				n   += 1
 			end
 		end

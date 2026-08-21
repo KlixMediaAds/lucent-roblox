@@ -13,9 +13,22 @@ local function sync(player: Player)
 	RemoteHandler.get(Config.REMOTES.SyncResources):FireClient(player, store[player.UserId] or 0)
 end
 
+-- Opening wallet for this commander. The two races open with different budgets (see
+-- Config.startingResources), and a bot commander is a plain stand-in table rather than a
+-- Player, so its race is read off the isSwarm flag AIManager stamps on it.
+local function startingFor(player: any): number
+	local hollowed: boolean
+	if type(player) == "table" then
+		hollowed = player.isSwarm == true
+	else
+		hollowed = player:GetAttribute("Faction") == "Hollowed"
+	end
+	return Config.startingResources(hollowed)
+end
+
 function ResourceManager.init()
 	Players.PlayerAdded:Connect(function(player)
-		store[player.UserId]       = Config.STARTING_RESOURCES
+		store[player.UserId]       = startingFor(player)
 		totalEarned[player.UserId] = 0
 		task.defer(sync, player)
 	end)
@@ -49,7 +62,7 @@ function ResourceManager.spend(player: Player, amount: number): boolean
 end
 
 function ResourceManager.reset(player: Player)
-	store[player.UserId]       = Config.STARTING_RESOURCES
+	store[player.UserId]       = startingFor(player)
 	totalEarned[player.UserId] = 0
 	sync(player)
 end

@@ -34,14 +34,31 @@ local LAMPREY_COL = Color3.fromRGB(120, 190,  60)
 local HAGFISH_COL = Color3.fromRGB( 90, 200, 150)
 local ROLLER_COL  = Color3.fromRGB(150,  70, 110)
 local NEEDLER_COL = Color3.fromRGB(170, 100,  60)
+local BROOD_COL   = Color3.fromRGB(140,  90, 200)
+local WATCHER_COL = Color3.fromRGB( 90, 150, 210)
 
+-- Which creatures an egg offers depends on the NEST it sits in, and the two lists do not
+-- overlap. An ordinary nest fields the everyday brood; a LARGE nest -- three of the
+-- Mother's injections deep, one prime egg where a pair used to be -- fields the heavy
+-- three and hatches them one at a time. The server enforces the same split
+-- (BuildingManager's EGG_HATCHABLE_BASIC / _PRIME); this only decides what is drawn.
 type Opt = { key: string, name: string, color: Color3, desc: string }
 local OPTIONS: { Opt } = {
 	{ key = "Lamprey", name = "LAMPREY", color = LAMPREY_COL, desc = "This egg hatches Lampreys." },
 	{ key = "Hagfish", name = "HAGFISH", color = HAGFISH_COL, desc = "This egg hatches Hagfish." },
-	{ key = "Roller",  name = "ROLLER",  color = ROLLER_COL,  desc = "This egg hatches Rollers, fast armored grinders." },
 	{ key = "Needler", name = "NEEDLER", color = NEEDLER_COL, desc = "This egg hatches Needlers, slow stalkers that strike with one long insect arm." },
 }
+local PRIME_OPTIONS: { Opt } = {
+	{ key = "Roller",      name = "ROLLER",  color = ROLLER_COL,  desc = "The prime egg carries a Roller: an armored disc that grinds through what it rolls over." },
+	{ key = "Broodmother", name = "BROOD",   color = BROOD_COL,   desc = "The prime egg carries a Broodmother: a towering tripod whose orbiting swarm burns down everything near it." },
+	{ key = "Watcher",     name = "WATCHER", color = WATCHER_COL, desc = "The prime egg carries a Watcher: a drifting cluster of eyes that cannot fight, and sees further than anything else you own." },
+}
+
+-- The tier of the nest an egg sits in, off the clump's replicated "NestTier" attribute.
+local function nestTierOf(egg: BasePart): number
+	local nest = egg.Parent
+	return (nest and (nest:GetAttribute("NestTier") :: number?)) or 1
+end
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 -- The selected egg + its tentacle-tree descendants; a unit choice applies to all of them.
@@ -57,15 +74,19 @@ function EggPanel.init(network: any, getResources: (() -> number)?)
 	resourcesFn = getResources
 end
 
--- The egg part behind an egg id: the clump Model under workspace.EggNests carries the id
--- as its name, and the shell itself is its "Egg" child. Same part the world mark
--- (EggReadyIcon) reads, so panel and world can never disagree on which eggs are ripe.
+-- The egg part behind an egg id. A nest Model under workspace.EggNests holds one shell, or
+-- two once the Mother has injected it, and each shell carries its own "EggId" attribute --
+-- so the id is hunted on the parts rather than looked up by nest name. Same part the world
+-- mark (EggReadyIcon) reads, so panel and world can never disagree on which eggs are ripe.
 local function eggPart(eggId: string): BasePart?
 	local root = workspace:FindFirstChild("EggNests")
 	if not root then return nil end
 	for _, clutch in root:GetChildren() do
-		local clump = clutch:FindFirstChild(eggId)
-		if clump then return clump:FindFirstChild("Egg") :: BasePart? end
+		for _, nest in clutch:GetChildren() do
+			for _, part in nest:GetChildren() do
+				if part:IsA("BasePart") and part:GetAttribute("EggId") == eggId then return part end
+			end
+		end
 	end
 	return nil
 end
@@ -81,11 +102,25 @@ local function readyCount(): number
 	return n
 end
 
+-- Which list the selection draws from. A Large nest's prime egg only offers the heavy
+-- three, and only when the WHOLE selection is prime: a sweep that mixed a prime egg in
+-- with ordinary ones would otherwise put tiles on the card that half of the selection
+-- silently refuses. Selecting a Large nest on its own is how you order from it.
+local function activeOptions(): ({ Opt }, boolean)
+	local prime = #activeEggIds > 0
+	for _, id in activeEggIds do
+		local part = eggPart(id)
+		if not part or nestTierOf(part) < Config.MOTHER_INJECT_NEST_TIERS then prime = false; break end
+	end
+	return (prime and PRIME_OPTIONS or OPTIONS), prime
+end
+
 local function buildPage(): CommandCard.Page
 	local slots: { CommandCard.Slot } = {}
 	local ready = readyCount()
 	local funds = resourcesFn and resourcesFn() or 0
-	for i, opt in OPTIONS do
+	local options, isPrime = activeOptions()
+	for i, opt in options do
 		local key    = opt.key
 		local def    = (Config.UNIT_TYPES :: any)[key]
 		local cost   = (def and def.cost) or 0
@@ -125,7 +160,9 @@ local function buildPage(): CommandCard.Page
 		})
 	end
 	local n = #activeEggIds
-	local header = (n > 1) and ("EGGS ×" .. n) or "EGG"
+	local header = if isPrime then "PRIME EGG"
+		elseif n > 1 then ("EGGS ×" .. n)
+		else "EGG"
 	return { header = header, slots = slots, cols = 2 }
 end
 

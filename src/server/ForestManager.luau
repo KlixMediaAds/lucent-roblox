@@ -171,6 +171,7 @@ local function buildPineTree(pos: Vector3, seed: number, src: Model): Model
 	anchor.Anchored     = true
 	anchor.CanCollide   = false
 	anchor.CanQuery     = false
+	anchor.CanTouch     = false
 	anchor.Transparency = 1
 	anchor.CastShadow   = false
 	anchor.Parent       = model
@@ -199,6 +200,7 @@ local function buildProceduralTree(pos: Vector3, seed: number): Model
 	anchor.Anchored     = true
 	anchor.CanCollide   = false
 	anchor.CanQuery     = false
+	anchor.CanTouch     = false
 	anchor.Transparency = 1
 	anchor.CastShadow   = false
 	anchor.Parent       = model
@@ -215,6 +217,7 @@ local function buildProceduralTree(pos: Vector3, seed: number): Model
 	trunk.Anchored    = true
 	trunk.CanCollide  = false
 	trunk.CanQuery    = false
+	trunk.CanTouch    = false
 	trunk.CastShadow  = false
 	trunk.Parent      = model
 
@@ -236,6 +239,7 @@ local function buildProceduralTree(pos: Vector3, seed: number): Model
 		ball.Anchored     = true
 		ball.CanCollide   = false
 		ball.CanQuery     = false
+		ball.CanTouch     = false
 		ball.CastShadow   = false
 		ball.Parent       = model
 	end

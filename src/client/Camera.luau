@@ -3,6 +3,7 @@ local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local AudioDucker       = require(script.Parent:WaitForChild("AudioDucker"))
 
@@ -128,7 +129,7 @@ function Camera.init()
 
 	-- Priority > Camera (200) so this runs AFTER Roblox's built-in camera script
 	-- and overwrites whatever it set, keeping full control of cam.CFrame.
-	RunService:BindToRenderStep("RTSCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	PerfProbe.bindRender("RTSCamera", Enum.RenderPriority.Camera.Value + 1, "Camera", function(dt)
 		-- Frozen mid-teleport-duck: hold the current pose (audio is fading out) until the
 		-- duck's low point moves the focus and clears the hold. Ignores follow/pan/return.
 		if teleportHeld then

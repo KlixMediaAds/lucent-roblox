@@ -122,6 +122,7 @@ local function buildField()
 		deck.Anchored         = true
 		deck.CanCollide       = false
 		deck.CanQuery         = false
+		deck.CanTouch         = false
 		deck.CastShadow       = false
 		deck.Material         = Enum.Material.Neon
 		deck.Color            = tintRef
@@ -145,6 +146,7 @@ local function buildField()
 			seg.Anchored     = true
 			seg.CanCollide   = false
 			seg.CanQuery     = false
+			seg.CanTouch     = false
 			seg.CastShadow   = false
 			seg.Material     = Enum.Material.Neon
 			seg.Color        = tintRef
@@ -168,6 +170,7 @@ local function makeBar(parent: Instance): Part
 	p.Anchored     = true
 	p.CanCollide   = false
 	p.CanQuery     = false
+	p.CanTouch     = false
 	p.CastShadow   = false
 	p.Material     = Enum.Material.Neon
 	p.Transparency = 0.1
@@ -187,6 +190,7 @@ local function ensureStamp()
 	fill.Anchored     = true
 	fill.CanCollide   = false
 	fill.CanQuery     = false
+	fill.CanTouch     = false
 	fill.CastShadow   = false
 	fill.Material     = Enum.Material.Neon
 	fill.Transparency = 0.62
@@ -274,6 +278,7 @@ function BuildField.sweep()
 	part.Anchored     = true
 	part.CanCollide   = false
 	part.CanQuery     = false
+	part.CanTouch     = false
 	part.CastShadow   = false
 	part.Material     = Enum.Material.Neon
 	part.Color        = tintRef

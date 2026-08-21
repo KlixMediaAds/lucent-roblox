@@ -54,6 +54,7 @@ local function makePart(parent: Instance): Part
 	p.CanCollide     = false
 	p.CastShadow     = false
 	p.CanQuery       = false
+	p.CanTouch       = false
 	p.Parent         = parent
 	return p
 end
@@ -723,6 +724,7 @@ function UnitVisuals.buildGlandDecor(parent: Instance, groundCF: CFrame, teamCol
 		p.Anchored   = true
 		p.CanCollide = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.CastShadow = false
 		p.Parent     = parent
 		return p
@@ -798,6 +800,7 @@ function UnitVisuals.buildCommandCenterDecor(parent: Instance, groundCF: CFrame,
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1064,6 +1067,7 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1101,6 +1105,7 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 		arm.CanCollide   = false
 		arm.CastShadow   = false
 		arm.CanQuery     = false
+		arm.CanTouch     = false
 		arm.Parent       = parent
 	end
 
@@ -1140,71 +1145,18 @@ function UnitVisuals.buildFoundryDecor(parent: Instance, groundCF: CFrame, teamC
 	end
 end
 
--- ── Bonfire "tiki" log stack (Empower upgrades) ──────────────────────────────
--- Each Empower purchase stacks ONE log onto the bonfire, building a log-cabin tiki
--- around the flames: logs come in alternating layers (a pair along X, then a pair
--- along Z) that flare outward as the tower climbs. Deterministic per index so the
--- server can add the next log on each upgrade and every client sees the same tower.
-local BONFIRE_LOG_A = Color3.fromRGB(74, 50, 34)
-local BONFIRE_LOG_B = Color3.fromRGB(58, 38, 26)
-
--- Local-space size + CFrame (relative to groundCF) of the `index`-th tiki log (1-based).
-local function bonfireLogPose(index: number): (Vector3, CFrame)
-	local layer = math.floor((index - 1) / 2)    -- two logs per layer
-	local side  = (index - 1) % 2                 -- the two logs of a layer
-	local sign  = (side == 0) and 1 or -1
-	local y     = 0.75 + layer * 1.05             -- each layer sits higher
-	local r     = 2.0 + layer * 0.2               -- ...and flares a bit wider
-	local len   = 2 * r + 1.4                     -- overhang past the corners
-	local thick = 0.62
-	if layer % 2 == 0 then
-		-- Pair runs along X, capping the front/back edges (±Z).
-		return Vector3.new(len, thick, thick), CFrame.new(0, y, sign * r)
-	else
-		-- Pair runs along Z, capping the left/right edges (±X).
-		return Vector3.new(thick, thick, len), CFrame.new(sign * r, y, 0)
-	end
-end
-
-local function makeBonfireLog(parent: Instance, groundCF: CFrame, index: number): Part
-	local size, localCF = bonfireLogPose(index)
-	local p      = Instance.new("Part")
-	p.Name       = "TikiLog" .. index
-	p.Size       = size
-	p.CFrame     = groundCF * localCF
-	p.Color      = (index % 2 == 0) and BONFIRE_LOG_A or BONFIRE_LOG_B
-	p.Material   = Enum.Material.Wood
-	p.Anchored   = true
-	p.CanCollide = false
-	p.CastShadow = false
-	p.CanQuery   = false
-	p.Parent     = parent
-	return p
-end
-
--- Adds the single tiki log for the given upgrade `index` to a LIVE bonfire model.
--- Called server-side on each Empower so the tower grows (replicates to everyone).
-function UnitVisuals.addBonfireLog(model: Instance, index: number): Part?
-	local base = model:FindFirstChild("Base") :: BasePart?
-	if not base then return nil end
-	local groundCF = base.CFrame * CFrame.new(0, -base.Size.Y / 2, 0)
-	return makeBonfireLog(model, groundCF, index)
-end
-
 --[[
 	Builds the Bonfire decoration set (internal building type "Deployer"): a small
 	mystical purple bonfire that summons units. A ring of dark stones and crossed logs
 	cradle layered violet neon flames, ringed by a glowing team-coloured rune circle on
-	the ground with a few drifting embers. Empower upgrades stack a tiki of logs on top
-	(see addBonfireLog). Shared by BuildingManager (live, withFX) and buildBuildingPreview
-	(thumbnail) so the two stay in sync.
+	the ground with a few drifting embers. Shared by BuildingManager (live, withFX) and
+	buildBuildingPreview (thumbnail) so the two stay in sync.
 
 	groundCF:  CFrame at the ground-level centre of the footprint (Y = 0 = ground).
 	teamColor: accent colour for the rune ring (the flames stay purple — that's the identity).
 	withFX:    true to add the purple glow light + looped ember light (live building only).
-	level:     number of Empower upgrades already bought → that many tiki logs are built.
 ]]
-function UnitVisuals.buildBonfireDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?, level: number?)
+function UnitVisuals.buildBonfireDecor(parent: Instance, groundCF: CFrame, teamColor: BrickColor, withFX: boolean?)
 	local cStone  = Color3.fromRGB(58, 56, 64)
 	local cStone2 = Color3.fromRGB(44, 42, 50)
 	local cLog    = Color3.fromRGB(58, 40, 30)
@@ -1225,6 +1177,7 @@ function UnitVisuals.buildBonfireDecor(parent: Instance, groundCF: CFrame, teamC
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1283,11 +1236,6 @@ function UnitVisuals.buildBonfireDecor(parent: Instance, groundCF: CFrame, teamC
 			e.Transparency = 0.3
 		end
 	end
-
-	-- Tiki log stack from previously-bought Empower upgrades (0 for a fresh bonfire).
-	for i = 1, (level or 0) do
-		makeBonfireLog(parent, groundCF, i)
-	end
 end
 
 --[[
@@ -1317,6 +1265,7 @@ function UnitVisuals.buildEngineeringPostDecor(parent: Instance, groundCF: CFram
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1374,6 +1323,7 @@ function UnitVisuals.buildLampreyNestDecor(parent: Instance, groundCF: CFrame, t
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1488,6 +1438,7 @@ function UnitVisuals.buildMotherNestDecor(parent: Instance, groundCF: CFrame, te
 		p.CanCollide = false
 		p.CastShadow = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.Parent     = parent
 		return p
 	end
@@ -1554,6 +1505,73 @@ end
 --   arched = false → mobile crawling pose (gently S-curved, head lifted to sense).
 --   arched = true  → burrowed feeding pose (rainbow arch, head planted into the ground).
 -- The live unit is fully drawn/animated by LeechBody, so none of this is in the blueprint.
+-- Preview-only static Watcher: the upright pill of flesh studded with amber eyes that
+-- WatcherBody animates on the live unit. Same palette and proportions, held still --
+-- no bob, no blink, no darting pupils, because a thumbnail has nothing to animate for.
+local function addWatcherPreview(parent: Instance, body: BasePart)
+	local PILL_R  = 1.8
+	local PILL_H  = 1.7
+	local N_EYES  = 12
+	local N_LOBES = 3
+
+	local C_FLESH  = Color3.fromRGB(52, 32, 40)
+	local C_LOBE   = Color3.fromRGB(44, 27, 34)
+	local C_SOCKET = Color3.fromRGB(24, 14, 18)
+	local C_SCLERA = Color3.fromRGB(235, 150, 78)
+	local C_PUPIL  = Color3.fromRGB(18, 9, 12)
+
+	local centre = body.Position
+
+	local function ap(color: Color3, mat: Enum.Material, shape: Enum.PartType?): Part
+		local p   = makePart(parent)
+		if shape then (p :: any).Shape = shape end
+		p.Color   = color
+		p.Material = mat
+		return p
+	end
+
+	-- Core: a cylinder capped by two hemispheres, standing on end.
+	local cyl    = ap(C_FLESH, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+	cyl.Size     = Vector3.new(PILL_H * 2, PILL_R * 2, PILL_R * 2)
+	cyl.CFrame   = CFrame.new(centre) * CFrame.Angles(0, 0, math.pi / 2)
+	for _, dy in { PILL_H, -PILL_H } do
+		local cap  = ap(C_FLESH, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		cap.Size   = Vector3.new(PILL_R * 2, PILL_R * 2, PILL_R * 2)
+		cap.CFrame = CFrame.new(centre + Vector3.new(0, dy, 0))
+	end
+
+	-- Lumps, so the knot is not a clean capsule.
+	for i = 1, N_LOBES do
+		local a    = (i / N_LOBES) * math.pi * 2 + 0.6
+		local lobe = ap(C_LOBE, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		local d    = 1.15 + (i % 2) * 0.35
+		lobe.Size  = Vector3.new(d, d, d)
+		lobe.CFrame = CFrame.new(centre + Vector3.new(
+			math.cos(a) * PILL_R * 0.8, ((i - 2) * 0.9), math.sin(a) * PILL_R * 0.8))
+	end
+
+	-- Eyes on a spiral around the pill, each a socket + sclera + pupil looking outward.
+	for i = 1, N_EYES do
+		local t   = (i - 0.5) / N_EYES
+		local y   = -PILL_H + t * PILL_H * 2
+		local ang = t * math.pi * 2 * 2.4 + 0.4
+		local out = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		local at  = centre + Vector3.new(0, y, 0) + out * (PILL_R * 0.94)
+
+		local socket  = ap(C_SOCKET, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		socket.Size   = Vector3.new(1.2, 1.2, 1.2)
+		socket.CFrame = CFrame.new(at)
+
+		local sclera  = ap(C_SCLERA, Enum.Material.Neon, Enum.PartType.Ball)
+		sclera.Size   = Vector3.new(1.05, 1.05, 1.05)
+		sclera.CFrame = CFrame.new(at + out * 0.22)
+
+		local pupil   = ap(C_PUPIL, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+		pupil.Size    = Vector3.new(0.44, 0.44, 0.44)
+		pupil.CFrame  = CFrame.new(at + out * 0.55)
+	end
+end
+
 local function addLeechPreview(parent: Instance, arched: boolean)
 	local N_SEG     = 7
 	local BODY_LEN  = 7.5
@@ -1654,6 +1672,7 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 	body.CanCollide     = false
 	body.CastShadow     = false
 	body.CanQuery       = false
+	body.CanTouch       = false
 	body.Parent         = parent
 
 	-- Shared geometry from the single-source-of-truth blueprint.
@@ -1690,6 +1709,10 @@ function UnitVisuals.buildUnitPreview(parent: Instance, unitType: string, teamCo
 		body.Transparency = 1   -- live unit + preview draw the creature, not the pivot block
 		addNeedlerPreview(parent, body)
 	end
+	if unitType == "Watcher" then
+		body.Transparency = 1   -- live unit + preview draw the eye cluster, not the pivot block
+		addWatcherPreview(parent, body)
+	end
 
 	return body
 end
@@ -1710,6 +1733,7 @@ function UnitVisuals.buildLeechPreview(parent: Instance, arched: boolean, _teamC
 	body.CanCollide = false
 	body.CastShadow = false
 	body.CanQuery   = false
+	body.CanTouch   = false
 	body.Parent     = parent
 	addLeechPreview(parent, arched)
 	return body

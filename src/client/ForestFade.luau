@@ -26,6 +26,8 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local CameraModule = require(script.Parent:WaitForChild("Camera"))
 
 local ForestFade = {}
@@ -256,7 +258,7 @@ function ForestFade.start()
 		if c.Name == "Forest" and c:IsA("Folder") then attach(c) end
 	end)
 
-	RunService.RenderStepped:Connect(function(dt: number)
+	PerfProbe.onRender("ForestFade", function(dt: number)
 		if #entries == 0 then return end
 		accum += dt
 		if accum >= RETARGET then

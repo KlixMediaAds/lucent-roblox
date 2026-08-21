@@ -17,9 +17,9 @@
 	    honoring the per-category concurrency cap. No instant grants.
 	  • ENGINEERING POST — builds one and pays for Light researches like a player,
 	    collecting random stat upgrades on the same 30 s timer.
-	  • ARMY — free capacity-limited Bonfire auto-summon (same as the player),
-	    scaled only by paid Empowers; paid Survivor → Sniper field upgrades; paid
-	    turret upgrade paths. Armies attack-move like a player's would.
+	  • ARMY: free capacity-limited Bonfire auto-summon (same as the player), with
+	    variety bought one paid unit unlock at a time; paid Survivor → Sniper field
+	    upgrades; paid turret upgrade paths. Armies attack-move like a player's would.
 	  • VISION — sees through the same fog radii the player's FogManager uses
 	    (units 65, per-building VISION_RADIUS). Anything else is remembered intel
 	    that goes stale. No wallhacks.
@@ -52,22 +52,21 @@ local AIManager = {}
 -- spend:       0..1 chance per opportunity the bot remembers to spend surplus
 -- ambition:    multiplier on the style's structure targets (a cautious beginner
 --              simply builds less; a strong player builds the full base)
--- empower:     how deep it will Empower bonfires (bank pays every level)
 -- techDepth:   how far down its research priority list it bothers to go
 -- firstStrike: opening peace window before the first committed assault
 type Level = {
 	strat: number, react: number, mem: number,
 	micro: number, spend: number, scouts: number, harass: boolean,
-	minAtk: number, ambition: number, empower: number, techDepth: number,
+	minAtk: number, ambition: number, techDepth: number,
 	firstStrike: number, monument: boolean,
 }
 
 local LEVELS: { Level } = {
-	{ strat = 10.0, react = 2.4, mem = 20,  micro = 0.35, spend = 0.35, scouts = 1, harass = false, minAtk = 4, ambition = 0.70, empower = 1,  techDepth = 2, firstStrike = 210, monument = false },
-	{ strat = 8.0,  react = 2.0, mem = 40,  micro = 0.50, spend = 0.55, scouts = 1, harass = false, minAtk = 5, ambition = 0.85, empower = 3,  techDepth = 3, firstStrike = 175, monument = false },
-	{ strat = 6.5,  react = 1.5, mem = 75,  micro = 0.70, spend = 0.75, scouts = 1, harass = true,  minAtk = 5, ambition = 1.00, empower = 6,  techDepth = 5, firstStrike = 145, monument = false },
-	{ strat = 5.0,  react = 1.1, mem = 130, micro = 0.85, spend = 0.90, scouts = 2, harass = true,  minAtk = 6, ambition = 1.15, empower = 10, techDepth = 7, firstStrike = 115, monument = true  },
-	{ strat = 4.0,  react = 0.8, mem = 240, micro = 1.00, spend = 1.00, scouts = 2, harass = true,  minAtk = 6, ambition = 1.30, empower = 20, techDepth = 9, firstStrike = 90,  monument = true  },
+	{ strat = 10.0, react = 2.4, mem = 20,  micro = 0.35, spend = 0.35, scouts = 1, harass = false, minAtk = 4, ambition = 0.70, techDepth = 2, firstStrike = 210, monument = false },
+	{ strat = 8.0,  react = 2.0, mem = 40,  micro = 0.50, spend = 0.55, scouts = 1, harass = false, minAtk = 5, ambition = 0.85, techDepth = 3, firstStrike = 175, monument = false },
+	{ strat = 6.5,  react = 1.5, mem = 75,  micro = 0.70, spend = 0.75, scouts = 1, harass = true,  minAtk = 5, ambition = 1.00, techDepth = 5, firstStrike = 145, monument = false },
+	{ strat = 5.0,  react = 1.1, mem = 130, micro = 0.85, spend = 0.90, scouts = 2, harass = true,  minAtk = 6, ambition = 1.15, techDepth = 7, firstStrike = 115, monument = true  },
+	{ strat = 4.0,  react = 0.8, mem = 240, micro = 1.00, spend = 1.00, scouts = 2, harass = true,  minAtk = 6, ambition = 1.30, techDepth = 9, firstStrike = 90,  monument = true  },
 }
 
 local RETREAT_RATIO = 0.45  -- pull back when myValue < enemyLocalValue * this
@@ -103,7 +102,7 @@ local STYLES: { [string]: Style } = {
 			mid     = { Survivor = 3, Elite = 2, Tank = 1, Foamer = 1 },
 			late    = { Survivor = 2, Elite = 3, Tank = 2, Foamer = 1, Medic = 1 },
 		},
-		techOrder = { "EliteUnits", "ConcussionShells", "MedicUnit", "TurretUpgrades", "Relay", "RocketBarrage", "BetterMines" },
+		techOrder = { "ConcussionShells", "TurretUpgrades", "Relay", "RocketBarrage", "BetterMines" },
 		turret = "Flamethrower",
 		engageRatio = 0.95, garrison = 0.20, stageMin = 3, stageMax = 8,
 		harass = true, waveMode = false, turtle = false,
@@ -118,7 +117,7 @@ local STYLES: { [string]: Style } = {
 			mid     = { Tank = 3, Howitzer = 2, Survivor = 1, Medic = 1 },
 			late    = { Tank = 3, Howitzer = 3, Elite = 1, Medic = 1 },
 		},
-		techOrder = { "ConcussionShells", "EliteUnits", "TurretUpgrades", "MedicUnit", "Relay", "RocketBarrage", "BetterMines" },
+		techOrder = { "ConcussionShells", "TurretUpgrades", "Relay", "RocketBarrage", "BetterMines" },
 		turret = "Artillery",
 		engageRatio = 1.15, garrison = 0.30, stageMin = 8, stageMax = 16,
 		harass = false, waveMode = false, turtle = false,
@@ -133,7 +132,7 @@ local STYLES: { [string]: Style } = {
 			mid     = { Survivor = 2, Foamer = 2, Howitzer = 1, Tank = 1 },
 			late    = { Howitzer = 2, Foamer = 2, Tank = 2, Elite = 2, Medic = 1 },
 		},
-		techOrder = { "TurretUpgrades", "ConcussionShells", "EliteUnits", "MedicUnit", "Relay", "Trapper", "BetterMines" },
+		techOrder = { "TurretUpgrades", "ConcussionShells", "Relay", "Trapper", "BetterMines" },
 		turret = "Artillery",
 		engageRatio = 1.35, garrison = 0.45, stageMin = 10, stageMax = 18,
 		harass = false, waveMode = false, turtle = true,
@@ -148,7 +147,7 @@ local STYLES: { [string]: Style } = {
 			mid     = { Survivor = 2, Tank = 3, Elite = 1 },
 			late    = { Tank = 3, Howitzer = 2, Elite = 2, Foamer = 1 },
 		},
-		techOrder = { "EliteUnits", "ConcussionShells", "TurretUpgrades", "Relay", "RocketBarrage", "MedicUnit", "BetterMines" },
+		techOrder = { "ConcussionShells", "TurretUpgrades", "Relay", "RocketBarrage", "BetterMines" },
 		turret = "RocketLauncher",
 		engageRatio = 0.95, garrison = 0.30, stageMin = 4, stageMax = 10,
 		harass = false, waveMode = true, turtle = false,
@@ -311,12 +310,14 @@ local function gatherEyes(ai: any): { Eye }
 	local myStr = ai.ownerStr
 	local unitsF = workspace:FindFirstChild("Units")
 	if unitsF then
-		local r2 = Config.VISION_UNIT * Config.VISION_UNIT
 		for _, p in unitsF:GetChildren() do
 			if not p:IsA("BasePart") then continue end
 			local ov = p:FindFirstChild("OwnerId")
 			if ov and ov.Value == myStr then
-				eyes[#eyes + 1] = { x = p.Position.X, z = p.Position.Z, r2 = r2 }
+				-- Per unit, like the player's fog: a bot's Watcher sees as far as yours.
+				local tv = p:FindFirstChild("UnitType") :: StringValue?
+				local r  = Config.unitVision(tv and tv.Value or nil)
+				eyes[#eyes + 1] = { x = p.Position.X, z = p.Position.Z, r2 = r * r }
 			end
 		end
 	end
@@ -813,20 +814,14 @@ local function computeComposition(ai: any)
 		w["Survivor"] = (w["Survivor"] or 0) + 1
 	end
 
-	if hasTech(ai, "MedicUnit") and unitManager.getUnitCount(ai.player) >= 6 then
+	if unitManager.getUnitCount(ai.player) >= 6 then
 		w["Medic"] = math.max(w["Medic"] or 0, 1)
 	end
 
-	-- Research-gated picks: zero them out and demand the tech instead — the
-	-- research planner will queue it through the normal timed path.
+	-- Nothing in this composition is research-gated any more: the Elite and the Medic
+	-- are bought at the Bonfire itself now (planBonfires pays for the unlocks), so there
+	-- is no tech for the research planner to be told to want on their behalf.
 	ai.compDemand = {}
-	local gated = { Elite = "EliteUnits", Medic = "MedicUnit" }
-	for unitName, tech in gated do
-		if (w[unitName] or 0) > 0 and not hasTech(ai, tech) then
-			ai.compDemand[tech] = true
-			w[unitName] = 0
-		end
-	end
 
 	local total = 0
 	for _, v in w do total += v end
@@ -852,26 +847,41 @@ local function planBonfires(ai: any)
 			local utype = pickWeighted(ai.currentWeights)
 			local def   = Config.UNIT_TYPES[utype]
 			if not def or (def.researchReq and not hasTech(ai, def.researchReq)) then utype = "Survivor" end
+			-- And a bonfire can only be told to summon what its OWN unlock ladder has
+			-- reached, exactly as a player's can (the unlocks are bought below).
+			local unlocked = buildingManager.getBonfireUnlockLevel
+				and buildingManager.getBonfireUnlockLevel(ai.player, id) or 0
+			if not Config.bonfireUnitUnlocked(utype, unlocked) then utype = "Survivor" end
 			if buildingManager.setBonfireSummonType(ai.player, id, utype) then
 				ai.bonfireType[id] = utype
 			end
 		end
 	end
 
-	-- Empower with surplus: lowest-level bonfire first, capped by the level's
-	-- ambition. Every level is bought at full price; discipline gates how
-	-- reliably surplus actually gets spent.
-	if ai.empowerCap > 0 and buildingManager.upgradeBonfireForPlayer then
-		for _ = 1, ai.pacingExempt and 4 or 1 do
-			if bank(ai) <= ai.reserve * 2.5 or not remembers(ai) then break end
-			local upgraded = false
-			for _, id in ids do
-				if buildingManager.upgradeBonfireForPlayer(ai.player, id, ai.empowerCap) then
-					upgraded = true
+	-- Unit unlocks: a bonfire knows only the units its own ladder has reached, so the
+	-- composition this bot wants has to be paid for, bonfire by bonfire. Buy toward the
+	-- deepest unit its current weights actually call for, out of surplus only.
+	if buildingManager.unlockBonfireUnitForPlayer then
+		local wantLevel = 0
+		for unitName, weight in ai.currentWeights or {} do
+			if weight <= 0 then continue end
+			for i, name in Config.BONFIRE_UNLOCK_ORDER do
+				if name == unitName then
+					wantLevel = math.max(wantLevel, i - 1)
 					break
 				end
 			end
-			if not upgraded then break end
+		end
+		for _ = 1, ai.pacingExempt and 4 or 1 do
+			if bank(ai) <= ai.reserve * 2.5 or not remembers(ai) then break end
+			local bought = false
+			for _, id in ids do
+				if buildingManager.unlockBonfireUnitForPlayer(ai.player, id, wantLevel) then
+					bought = true
+					break
+				end
+			end
+			if not bought then break end
 		end
 	end
 end
@@ -1456,7 +1466,6 @@ local function applyLevel(ai: any, level: number)
 	ai.harassEnabled    = L.harass
 	ai.minAtk           = L.minAtk
 	ai.ambition         = L.ambition
-	ai.empowerCap       = L.empower
 	ai.techDepth        = L.techDepth
 	ai.firstStrike      = L.firstStrike
 	ai.monumentAmbition = L.monument
@@ -1472,7 +1481,6 @@ local function applyLevel(ai: any, level: number)
 		ai.micro            = 1.0
 		ai.spend            = 1.0
 		ai.ambition         = 1.5
-		ai.empowerCap       = Config.DEPLOYER_UPGRADE_MAX_LEVEL
 		ai.techDepth        = 9
 		ai.firstStrike      = 60
 		ai.monumentAmbition = true

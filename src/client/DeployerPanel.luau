@@ -3,9 +3,9 @@
     DeployerPanel — command-card menu for the Bonfire (internal building type "Deployer").
 
     Selecting a Bonfire opens a grid: pick which unit type it summons (sends
-    SetDeployerType), plus an EMPOWER upgrade slot that raises capacity and shortens the
-    summon interval for a scaling price (sends UpgradeDeployer). The bonfire free-summons
-    its chosen unit up to its (upgradeable) capacity.
+    SetDeployerType), plus an UNLOCK slot that teaches this bonfire the next unit on its
+    ladder (sends UnlockDeployerUnit). The bonfire free-summons its chosen unit up to a
+    fixed capacity; there is no upgrade for capacity or summon speed.
 
     World display (matches Signal Flare method):
       • BillboardGui on the bonfire base  — slim progress bar (summon countdown).
@@ -19,6 +19,7 @@ local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UILib             = require(script.Parent:WaitForChild("UILib"))
 local ViewportPreview   = require(script.Parent:WaitForChild("ViewportPreview"))
@@ -32,15 +33,9 @@ local OWNER         = "deployer"
 -- ── State ─────────────────────────────────────────────────────────────────────
 local activeDeployerId: string? = nil
 local networkRef:       any
-local hasResearchFn:    ((string) -> boolean)?
 local resourcesFn:      (() -> number)?
 local getMultiIdsFn:    (() -> { string })?
 
--- Per-bonfire Empower state, fed by DeployerUpdate (level, capacity, next upgrade cost).
-local deployerLevels:    { [string]: number } = {}
-local deployerCaps:      { [string]: number } = {}
-local deployerNextCosts: { [string]: number } = {}
-local UPGRADE_COLOR = Color3.fromRGB(232, 196, 120)  -- gold (matches other upgrade buttons)
 
 -- ── Unit definitions ──────────────────────────────────────────────────────────
 local PURPLE       = Color3.fromRGB(160,  80, 230)
@@ -69,8 +64,18 @@ local UNIT_COLOR: { [string]: Color3 } = {
 	Foamer   = FOAM_BLUE,
 }
 
--- ── Research gate per unit key ──────────────────────────────────────────────────
-local RESEARCH_GATE: { [string]: string } = { Elite = "EliteUnits", Medic = "MedicUnit" }
+-- Per-bonfire unit unlocks. A bonfire is built knowing only the first unit on
+-- Config.BONFIRE_UNLOCK_ORDER and buys the rest one at a time, for itself alone. The level
+-- rides on the building model as the "BonfireUnlock" attribute, so it can be read for any
+-- bonfire the player has selected.
+local UNLOCK_COLOR = Color3.fromRGB(120, 210, 255)  -- ice blue, apart from the unit tiles
+
+local function unlockLevelOf(deployerId: string): number
+	local bf    = workspace:FindFirstChild("Buildings") :: Folder?
+	local model = bf and bf:FindFirstChild(deployerId)
+	local lvl   = model and model:GetAttribute("BonfireUnlock")
+	return type(lvl) == "number" and lvl or 0
+end
 
 -- ── World display (Signal Flare method) ───────────────────────────────────────
 -- Each deployer gets:
@@ -91,8 +96,8 @@ local function getDeployerBase(deployerId: string): BasePart?
 	return model and model:FindFirstChild("Base") :: BasePart?
 end
 
--- All currently-selected buildings that are actually bonfires (so the Empower button
--- and its cost/level readout reflect the whole multi-selection, not just the active one).
+-- All currently-selected buildings that are actually bonfires (so the UNLOCK button and
+-- its cost/level readout reflect the whole multi-selection, not just the active one).
 local function selectedBonfireIds(): { string }
 	local sel  = (getMultiIdsFn and getMultiIdsFn()) or {}
 	local bf   = workspace:FindFirstChild("Buildings") :: Folder?
@@ -111,8 +116,8 @@ local function selectedBonfireIds(): { string }
 	return out
 end
 
--- ── Empower animation ─────────────────────────────────────────────────────────
--- A short violet flare when a bonfire is Empowered: a ground shock-ring expands out,
+-- ── Unlock animation ──────────────────────────────────────────────────────────
+-- A short violet flare when a bonfire learns a new unit: a ground shock-ring expands out,
 -- a column of fire flashes up, and a few embers spit skyward. World parts (parented to
 -- workspace, self-destructing) so model rescale / destruction can't strand them.
 local FX_PURPLE = Color3.fromRGB(185, 105, 255)
@@ -133,6 +138,7 @@ local function playUpgradeFX(deployerId: string)
 		p.Anchored   = true
 		p.CanCollide = false
 		p.CanQuery   = false
+		p.CanTouch   = false
 		p.CastShadow = false
 		p.Parent     = workspace
 		return p
@@ -191,9 +197,6 @@ local function destroyDeployerDisplay(deployerId: string)
 		deployerEntries[deployerId] = nil
 	end
 	deployerCurrentTypes[deployerId] = nil
-	deployerLevels[deployerId]       = nil
-	deployerCaps[deployerId]         = nil
-	deployerNextCosts[deployerId]    = nil
 end
 
 local function ensureDisplay(deployerId: string, unitType: string)
@@ -281,23 +284,34 @@ end
 -- ── Command-card page ───────────────────────────────────────────────────────────
 local function buildPage(): CommandCard.Page
 	local current = activeDeployerId and deployerCurrentTypes[activeDeployerId] or "Survivor"
+	local ids     = selectedBonfireIds()
+
+	-- Unit tiles reflect the LOWEST unlock level in the selection, so the grid only offers
+	-- what every selected bonfire could actually be told to summon.
+	local minUnlock = math.huge
+	for _, id in ids do
+		local u = unlockLevelOf(id)
+		if u < minUnlock then minUnlock = u end
+	end
+	if minUnlock == math.huge then minUnlock = 0 end
+
 	local slots: { CommandCard.Slot } = {}
 	for i, def in UNIT_DEFS do
-		local key    = def.key
-		local gate   = RESEARCH_GATE[key]
-		local locked = gate ~= nil and not (hasResearchFn and hasResearchFn(gate))
+		local key      = def.key
+		local unlocked = Config.bonfireUnitUnlocked(key, minUnlock)
 		table.insert(slots, {
 			index           = i,
 			name            = key:upper(),
 			color           = def.color,
-			locked          = locked,
+			locked          = not unlocked,
 			icon            = def.icon,
 			viewportKey     = "unit:" .. key,
 			viewportFactory = function() return ViewportPreview.forUnit(key, Vector2.new(64, 64)) end,
 			badge           = (key == current) and "✓" or nil,
-			desc            = locked and "Locked — research required" or ("Summon " .. key),
+			desc            = if unlocked then ("Summon " .. key)
+				else "Locked: unlock it at this bonfire",
 			onClick         = function()
-				if locked then return end
+				if not unlocked then return end
 				-- Apply to the whole bonfire multi-selection.
 				for _, id in selectedBonfireIds() do
 					networkRef.setDeployerType(id, key)
@@ -307,50 +321,44 @@ local function buildPage(): CommandCard.Page
 		})
 	end
 
-	-- ── Empower upgrade slot (+capacity, faster summon; scaling price) ──────────
-	-- Reflects the whole bonfire multi-selection: targets the LOWEST level present, so a
-	-- press evens the group out (stragglers catch up to the rest before any go higher).
-	local ids = selectedBonfireIds()
-	local minLevel = math.huge
+	-- ── Unlock slot (teaches this bonfire the next unit on the ladder) ───────────
+	-- Reflects the whole bonfire multi-selection: targets the LOWEST unlock level present,
+	-- so a press evens the group out. The tile previews the unit it would teach.
+	local res = resourcesFn and resourcesFn() or 0
+	local nextUnit  = Config.bonfireUnlockNext(minUnlock)
+	local unlMaxed  = nextUnit == nil
+	local unlCost   = Config.bonfireUnlockCost(minUnlock)
+	local atMinUnl  = 0
 	for _, id in ids do
-		local lvl = deployerLevels[id] or 0
-		if lvl < minLevel then minLevel = lvl end
+		if unlockLevelOf(id) == minUnlock then atMinUnl += 1 end
 	end
-	if minLevel == math.huge then minLevel = 0 end
-	local atMin = 0
-	for _, id in ids do
-		if (deployerLevels[id] or 0) == minLevel then atMin += 1 end
-	end
-
-	local maxed   = minLevel >= Config.DEPLOYER_UPGRADE_MAX_LEVEL
-	local perCost = Config.bonfireUpgradeCost(minLevel)
-	local cap     = Config.bonfireCapacity(minLevel)
-	local res     = resourcesFn and resourcesFn() or 0
-	local multi   = atMin > 1
-	local desc
-	if maxed then
-		desc = "Max power — capacity " .. cap
-	elseif multi then
-		desc = "Empower " .. atMin .. " bonfires (Lv " .. minLevel .. ") · " .. perCost .. " each"
+	local unlMulti  = atMinUnl > 1
+	local unlDesc
+	if unlMaxed then
+		unlDesc = "Every unit unlocked"
+	elseif unlMulti then
+		unlDesc = "Unlock " .. (nextUnit :: string) .. " on " .. atMinUnl .. " bonfires · " .. unlCost .. " each"
 	else
-		desc = "Capacity " .. cap .. " → " .. (cap + Config.DEPLOYER_UPGRADE_CAP_STEP) .. ", faster summons"
+		unlDesc = "Teach this bonfire to summon the " .. (nextUnit :: string)
 	end
 	table.insert(slots, {
 		index           = #UNIT_DEFS + 1,
-		name            = "EMPOWER",
-		color           = UPGRADE_COLOR,
-		cost            = (not maxed) and perCost or nil,
-		enabled         = (not maxed) and res >= perCost,
-		locked          = maxed,
-		icon            = "✦",
-		viewportKey     = "bonfire:empower",
-		viewportFactory = function() return ViewportPreview.forBonfireUpgrade(Vector2.new(64, 64)) end,
-		badge           = multi and ("×" .. atMin) or nil,
-		desc            = desc,
+		name            = "UNLOCK",
+		color           = UNLOCK_COLOR,
+		cost            = (not unlMaxed) and unlCost or nil,
+		enabled         = (not unlMaxed) and res >= unlCost,
+		locked          = unlMaxed,
+		icon            = "🔓",
+		viewportKey     = "bonfire:unlock:" .. (nextUnit or "none"),
+		viewportFactory = function()
+			return ViewportPreview.forUnit(nextUnit or "Survivor", Vector2.new(64, 64))
+		end,
+		badge           = unlMulti and ("×" .. atMinUnl) or nil,
+		desc            = unlDesc,
 		onClick         = function()
-			if maxed then return end
+			if unlMaxed then return end
 			local sel = selectedBonfireIds()
-			if #sel > 0 then networkRef.upgradeDeployer(sel) end
+			if #sel > 0 then networkRef.unlockDeployerUnit(sel) end
 		end,
 	})
 
@@ -364,9 +372,8 @@ local function renderIfActive()
 end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
-function DeployerPanel.init(network, hasResearch, getResources, getMultiIds)
+function DeployerPanel.init(network, getResources, getMultiIds)
 	networkRef    = network
-	hasResearchFn = hasResearch
 	resourcesFn   = getResources
 	getMultiIdsFn = getMultiIds
 
@@ -379,7 +386,7 @@ function DeployerPanel.init(network, hasResearch, getResources, getMultiIds)
 	overlaySg.Parent           = localPlayer.PlayerGui
 
 	-- Reposition icons every frame (same technique as FlareIconOverlay in init.client)
-	RunService:BindToRenderStep("DeployerIconPositions", Enum.RenderPriority.Camera.Value + 1, function()
+	PerfProbe.bindRender("DeployerIconPositions", Enum.RenderPriority.Camera.Value + 1, "DeployerPanel", function()
 		local cam = workspace.CurrentCamera
 		for _, entry in deployerEntries do
 			if not entry.anchor.Parent then
@@ -401,12 +408,9 @@ function DeployerPanel.init(network, hasResearch, getResources, getMultiIds)
 		end
 	end)
 
-	-- Listen for server updates → drive world display + Empower state
-	network.onDeployerUpdate(function(deployerId: string, unitType: string, progress: number, level: number?, capacity: number?, nextCost: number?, justUpgraded: boolean?)
-		if level    ~= nil then deployerLevels[deployerId]    = level    end
-		if capacity ~= nil then deployerCaps[deployerId]      = capacity end
-		if nextCost ~= nil then deployerNextCosts[deployerId] = nextCost end
-		if justUpgraded then playUpgradeFX(deployerId) end
+	-- Listen for server updates → drive the world display
+	network.onDeployerUpdate(function(deployerId: string, unitType: string, progress: number, justUnlocked: boolean?)
+		if justUnlocked then playUpgradeFX(deployerId) end
 		updateWorldDisplay(deployerId, unitType, progress)
 		if deployerId == activeDeployerId or (getMultiIdsFn and table.find(getMultiIdsFn(), deployerId)) then
 			renderIfActive()
@@ -416,12 +420,29 @@ end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
+-- Live on the selected bonfire's unlock level, so a purchase redraws the card at once
+-- instead of on the next periodic server update.
+local unlockConn: RBXScriptConnection? = nil
+
 function DeployerPanel.show(deployerId: string)
 	activeDeployerId = deployerId
+	if unlockConn then
+		unlockConn:Disconnect()
+		unlockConn = nil
+	end
+	local bf    = workspace:FindFirstChild("Buildings") :: Folder?
+	local model = bf and bf:FindFirstChild(deployerId)
+	if model then
+		unlockConn = model:GetAttributeChangedSignal("BonfireUnlock"):Connect(renderIfActive)
+	end
 	CommandCard.show(OWNER, buildPage())
 end
 
 function DeployerPanel.hide()
+	if unlockConn then
+		unlockConn:Disconnect()
+		unlockConn = nil
+	end
 	activeDeployerId = nil
 	CommandCard.hide(OWNER)
 end

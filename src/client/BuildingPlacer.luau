@@ -6,6 +6,7 @@ local TweenService      = game:GetService("TweenService")
 local Lighting          = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local RangeRing         = require(script.Parent:WaitForChild("RangeRing"))
 local BuildField        = require(script.Parent:WaitForChild("BuildField"))
@@ -170,6 +171,7 @@ local function createDepositMarkers()
         ring.Anchored           = true
         ring.CanCollide         = false
         ring.CanQuery           = false
+        ring.CanTouch           = false
         ring.CastShadow         = false
         ring.Transparency       = 0.3
         ring.Parent             = workspace
@@ -481,6 +483,7 @@ local function makeGhost()
 	ghost.Anchored     = true
 	ghost.CanCollide   = false
 	ghost.CanQuery     = false
+	ghost.CanTouch     = false
 	ghost.Transparency = 0.5
 	ghost.BrickColor   = localPlayer.TeamColor
 	ghost.Material     = Enum.Material.SmoothPlastic
@@ -561,7 +564,7 @@ function BuildingPlacer.init(network, cameraModule)
 		end
 	end)
 
-	RunService.RenderStepped:Connect(function()
+	PerfProbe.onRender("BuildingPlacer", function()
 		if not isPlacing then return end
 
 		-- Line drag mode: pool of ghosts along the drag line
@@ -589,6 +592,7 @@ function BuildingPlacer.init(network, cameraModule)
 					g.Anchored       = true
 					g.CanCollide     = false
 					g.CanQuery       = false
+					g.CanTouch       = false
 					g.Material       = Enum.Material.SmoothPlastic
 					g.Parent         = workspace
 					table.insert(lineGhosts, g)

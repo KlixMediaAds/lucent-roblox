@@ -19,6 +19,10 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local HagfishBody = {}
 
 -- ── Geometry ──────────────────────────────────────────────────────────────────
@@ -121,6 +125,7 @@ local function makePart(unitId: string?, col: Color3, mat: Enum.Material, shape:
 	p.Anchored       = true
 	p.CanCollide     = false
 	p.CanQuery       = false
+	p.CanTouch       = false
 	p.CastShadow     = false
 	p.Size           = Vector3.new(0.2, 0.2, 0.2)
 	if unitId then p:SetAttribute("UnitId", unitId) end
@@ -355,7 +360,7 @@ function HagfishBody.init(cam: Camera)
 	folder.Name   = "_HagfishBody"
 	folder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("HagfishBody", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -368,6 +373,10 @@ function HagfishBody.init(cam: Camera)
 			local bpos = body.Position
 			local dx, dy, dz = bpos.X - camPos.X, bpos.Y - camPos.Y, bpos.Z - camPos.Z
 			if dx*dx + dy*dy + dz*dz > CULL_SQ then continue end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- Speed estimate from frame-to-frame movement (parts are anchored)
 			local last      = e.prevPos or bpos
@@ -496,7 +505,7 @@ function HagfishBody.spawnTentacles(positions: { Vector3 })
 
 	local elapsed = 0
 	local conn: RBXScriptConnection
-	conn = RunService.RenderStepped:Connect(function(dt)
+	conn = PerfProbe.onRender("HagfishBody", function(dt)
 		elapsed += dt
 		if elapsed >= T_LIFE then
 			conn:Disconnect()

@@ -14,6 +14,8 @@
 
 local RunService = game:GetService("RunService")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local MotherEggBody = {}
 
 -- ── Look ────────────────────────────────────────────────────────────────────────
@@ -60,7 +62,7 @@ end
 function MotherEggBody.init(cam: Camera)
 	camera = cam
 
-	RunService.RenderStepped:Connect(function()
+	PerfProbe.onRender("MotherEggBody", function()
 		local now    = os.clock()
 		local camPos = camera and camera.CFrame.Position or Vector3.zero
 

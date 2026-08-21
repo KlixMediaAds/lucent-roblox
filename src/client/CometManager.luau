@@ -30,6 +30,7 @@ local function makePart(size: number, color: BrickColor, trans: number): Part
 	p.CanCollide    = false
 	p.CastShadow    = false
 	p.CanQuery      = false
+	p.CanTouch      = false
 	p.Parent        = workspace
 	return p
 end
@@ -84,6 +85,7 @@ local function spawnComet(targetPos: Vector3, stagger: number)
 			ring.CanCollide    = false
 			ring.CastShadow    = false
 			ring.CanQuery      = false
+			ring.CanTouch      = false
 			ring.Parent        = workspace
 
 			local ringEnd = CFrame.new(endPos.X, 0.1, endPos.Z)

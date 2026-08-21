@@ -15,6 +15,10 @@
 local RunService = game:GetService("RunService")
 local Debris     = game:GetService("Debris")
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PerfProbe = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PerfProbe"))
+local BodyLOD = require(script.Parent:WaitForChild("BodyLOD"))
+
 local LeechBody = {}
 
 -- Fire a one-shot spatial sound at a world position (self-cleaning).
@@ -23,6 +27,7 @@ local function playSoundAt(pos: Vector3, id: string, volume: number)
 	p.Anchored   = true
 	p.CanCollide = false
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.Transparency = 1
 	p.Size       = Vector3.new(1, 1, 1)
 	p.Position   = pos
@@ -166,6 +171,7 @@ local function makePart(unitId: string, col: Color3, mat: Enum.Material, shape: 
 	p.Anchored   = true
 	p.CanCollide = false
 	p.CanQuery   = false
+	p.CanTouch   = false
 	p.CastShadow = false
 	p.Size       = Vector3.new(0.2, 0.2, 0.2)
 	p:SetAttribute("UnitId", unitId)
@@ -449,7 +455,7 @@ function LeechBody.init(cam: Camera)
 	folder.Name   = "_LeechBody"
 	folder.Parent = workspace
 
-	RunService.RenderStepped:Connect(function(dt)
+	PerfProbe.onRender("LeechBody", function(frameDt)
 		local camPos = camera.CFrame.Position
 
 		for unitId, e in active do
@@ -462,6 +468,10 @@ function LeechBody.init(cam: Camera)
 			local bpos = body.Position
 			local dx, dy, dz = bpos.X - camPos.X, bpos.Y - camPos.Y, bpos.Z - camPos.Z
 			if dx * dx + dy * dy + dz * dz > CULL_SQ then continue end
+			-- Shared animation budget: a rig off screen or far off poses at a lower rate,
+			-- and `dt` is the time banked since it last did, so its clocks keep pace.
+			local dt = BodyLOD.step(unitId, bpos, frameDt)
+			if not dt then continue end
 
 			-- Speed estimate from frame-to-frame movement (parts are anchored)
 			local last      = e.prevPos or bpos
