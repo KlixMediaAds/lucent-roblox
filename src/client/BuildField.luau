@@ -30,7 +30,7 @@
 	  BuildField.sweep()
 --]]
 
-local RunService = game:GetService("RunService")
+local PerfProbe = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("PerfProbe"))
 
 local BuildField = {}
 
@@ -339,7 +339,7 @@ function BuildField.show(zones: { Zone }, tint: Color3?)
 	if #zonesRef == 0 then return end
 
 	buildField()
-	loopConn = RunService.RenderStepped:Connect(step)
+	loopConn = PerfProbe.onRender("BuildField", step)
 	BuildField.sweep()
 end
 

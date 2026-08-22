@@ -149,6 +149,7 @@ local aggroScanFrame = 0
 local AGGRO_SCAN_EVERY = 18   -- ~0.3 s at 60 Hz
 
 local SEP_DIST   = 5.5   -- studs: same-team separation trigger radius
+local SEP_DIST2  = SEP_DIST * SEP_DIST   -- compared squared, to keep sqrt off the reject path
 local SEP_PUSH   = 0.18  -- studs pushed per frame per overlapping neighbour
 local MOVE_BOUND = 427   -- studs: clamp units inside the ±432 boundary walls
 local HP_BAR_SHOW_SECS = 3
@@ -165,9 +166,20 @@ local TRAIL_STEPS   = 6
 local GRID_CELL   = 16    -- studs per cell side
 local GRID_OFFSET = 30    -- shifts cell index: world [-432..432] → cx/cz [3..57]
 local GRID_STRIDE = 70    -- column count for packing (cx, cz) into one integer key
-local spatialGrid: { [number]: { string } } = {}
+-- Cells hold an INDEX into the parallel arrays below, not a unit id. The separation
+-- pass runs for every unit against every same-cell neighbour every frame, and it used to
+-- pay a tostring() allocation and two BasePart.Position crossings per candidate pair
+-- before it knew whether the pair was even within range. Everything that pass needs to
+-- reject a pair is copied into flat number arrays here, where the grid is walking the
+-- units and reading their positions anyway, so the reject path is pure arithmetic.
+local spatialGrid: { [number]: { number } } = {}
 local gridOccupied: { number }               = {}
 local gridOccupiedCount                      = 0
+local gridN     = 0
+local gId:    { string } = {}   -- index → unit id (only looked up once a pair is real)
+local gX:     { number } = {}
+local gZ:     { number } = {}
+local gOwner: { number } = {}   -- numeric UserId, so owner tests never build a string
 
 -- Reusable scratch buffer for grid-range queries — avoids a table alloc per lookup.
 local gridScratch: { string } = {}
@@ -258,9 +270,16 @@ local function rebuildSpatialGrid()
 		for j = 1, #cell do cell[j] = nil end
 	end
 	gridOccupiedCount = 0
+	gridN = 0
 	for id, data in units do
 		if data.carriedBy then continue end   -- riding on a Roller: not targetable while aboard
 		local pos = data.part.Position
+		local n   = gridN + 1
+		gridN     = n
+		gId[n]    = id
+		gX[n]     = pos.X
+		gZ[n]     = pos.Z
+		gOwner[n] = data.owner.UserId
 		local cx  = math.floor(pos.X / GRID_CELL) + GRID_OFFSET
 		local cz  = math.floor(pos.Z / GRID_CELL) + GRID_OFFSET
 		local k   = cx * GRID_STRIDE + cz
@@ -271,7 +290,7 @@ local function rebuildSpatialGrid()
 			gridOccupiedCount += 1
 			gridOccupied[gridOccupiedCount] = k
 		end
-		cell[#cell + 1] = id
+		cell[#cell + 1] = n
 	end
 end
 
@@ -287,9 +306,9 @@ local function fillGridScratch(fromPos: Vector3, range: number)
 		for cz = cz0, cz1 do
 			local cell = spatialGrid[cx * GRID_STRIDE + cz]
 			if cell then
-				for _, id in cell do
+				for _, idx in cell do
 					gridScratchN += 1
-					gridScratch[gridScratchN] = id
+					gridScratch[gridScratchN] = gId[idx]
 				end
 			end
 		end
@@ -1990,10 +2009,13 @@ function UnitManager.init(resourceManager)
 
 	PerfProbe.onHeartbeat("UnitManager", function(dt)
 		local toRemove: { string } = {}
+		PerfProbe.open("UM.grid")
 		rebuildSpatialGrid()
+		PerfProbe.shut()
 		aggroScanFrame = (aggroScanFrame + 1) % AGGRO_SCAN_EVERY
 		local doAggro  = aggroScanFrame == 0
 
+		PerfProbe.open("UM.ai")
 		for id, data in units do
 			-- A dying Broodmother is frozen mid-collapse; skip all AI until the
 			-- death timer (beginBroodmotherDeath) removes it.
@@ -2487,6 +2509,7 @@ function UnitManager.init(resourceManager)
 						acqSpotter = buildingManagerRef.makeSpotterCheck(myStr)
 					end
 					local bestId2, bestDist2 = nil :: string?, acqR + 1
+					local myOwnerNum = data.owner.UserId
 					local acx0 = math.floor((myPos.X - acqR) / GRID_CELL) + GRID_OFFSET
 					local acx1 = math.floor((myPos.X + acqR) / GRID_CELL) + GRID_OFFSET
 					local acz0 = math.floor((myPos.Z - acqR) / GRID_CELL) + GRID_OFFSET
@@ -2495,16 +2518,17 @@ function UnitManager.init(resourceManager)
 						for gz = acz0, acz1 do
 							local cell = spatialGrid[gx * GRID_STRIDE + gz]
 							if not cell then continue end
-							for _, otherId in cell do
-								local other = units[otherId]
-								if not other or other.hp <= 0 then continue end
-								if tostring(other.owner.UserId) == myStr then continue end
-								local dx = other.part.Position.X - myPos.X
-								local dz = other.part.Position.Z - myPos.Z
+							for _, oidx in cell do
+								if gOwner[oidx] == myOwnerNum then continue end
+								local dx = gX[oidx] - myPos.X
+								local dz = gZ[oidx] - myPos.Z
 								local d  = math.sqrt(dx * dx + dz * dz)
-								if d <= acqR and d < bestDist2 and (not acqSpotter or acqSpotter(other.part.Position)) then
-									bestDist2 = d; bestId2 = otherId
-								end
+								if d > acqR or d >= bestDist2 then continue end
+								local otherId = gId[oidx]
+								local other   = units[otherId]
+								if not other or other.hp <= 0 then continue end
+								if acqSpotter and not acqSpotter(other.part.Position) then continue end
+								bestDist2 = d; bestId2 = otherId
 							end
 						end
 					end
@@ -3064,8 +3088,10 @@ function UnitManager.init(resourceManager)
 				end
 			end
 		end
+		PerfProbe.shut()
 
 		-- ── Foam DoT tick ──────────────────────────────────────────────────────
+		PerfProbe.open("UM.foamDot")
 		do
 			local now = tick()
 			for dotId, dotData in units do
@@ -3084,6 +3110,7 @@ function UnitManager.init(resourceManager)
 				end
 			end
 		end
+		PerfProbe.shut()
 
 		-- ── Howitzer fire zone burn (scorches ALL units, both teams) ───────────
 		-- A crater is heat, not a landmine: standing in one costs FIRE_DPS per
@@ -3091,6 +3118,7 @@ function UnitManager.init(resourceManager)
 		-- chunk. Crucially, overlapping craters do NOT stack — a unit sitting in
 		-- three of them takes the hottest, not triple — so a Howitzer line
 		-- shelling one spot can no longer delete whatever steps into the fire.
+		PerfProbe.open("UM.fireZones")
 		do
 			local FIRE_FULL  = Config.HOWITZER_FIRE_FULL_DURATION
 			local FIRE_FADE  = Config.HOWITZER_FIRE_FADE_DURATION
@@ -3158,14 +3186,17 @@ function UnitManager.init(resourceManager)
 				end
 			end
 		end
+		PerfProbe.shut()
 
 		-- ── Separation pass ────────────────────────────────────────────────────
+		PerfProbe.open("UM.separation")
 		for id, data in units do
 			if data.dying then continue end   -- a collapsing Broodmother stays put
 			if data.carriedBy then continue end   -- riding a Roller: positionCarried owns its seat
 			if data.immobilized or data.draggingId then continue end  -- rescue pass owns these
 			local myPos = data.part.Position
-			local myStr = tostring(data.owner.UserId)
+			local myX, myZ   = myPos.X, myPos.Z
+			local myOwnerNum = data.owner.UserId
 			local pushX, pushZ = 0, 0
 			local count = 0
 
@@ -3177,23 +3208,27 @@ function UnitManager.init(resourceManager)
 				for gz = scz0, scz1 do
 					local cell = spatialGrid[gx * GRID_STRIDE + gz]
 					if not cell then continue end
-					for _, otherId in cell do
-						if otherId == id then continue end
-						local other = units[otherId]
-						if not other then continue end
-						-- A rider that mounted this tick is still in the (start-of-tick) grid;
-						-- don't let it shove its Roller off course from the seat it's sitting in.
-						if other.carriedBy then continue end
-						if tostring(other.owner.UserId) ~= myStr then continue end
-						local dx   = myPos.X - other.part.Position.X
-						local dz   = myPos.Z - other.part.Position.Z
-						local dist = math.sqrt(dx * dx + dz * dz)
-						if dist < SEP_DIST and dist > 0.01 then
-							local strength = (SEP_DIST - dist) / SEP_DIST
-							pushX += (dx / dist) * strength
-							pushZ += (dz / dist) * strength
-							count += 1
-						end
+					for _, oidx in cell do
+						-- Cheap numeric rejects first. Nearly every candidate dies on one of
+						-- these two, and neither touches a string, an Instance or a sqrt.
+						if gOwner[oidx] ~= myOwnerNum then continue end
+						local dx = myX - gX[oidx]
+						local dz = myZ - gZ[oidx]
+						local d2 = dx * dx + dz * dz
+						-- d2 <= 0.0001 is the old `dist > 0.01` guard, and it also rejects
+						-- this unit against itself without a separate id comparison.
+						if d2 >= SEP_DIST2 or d2 <= 0.0001 then continue end
+						-- Only genuine overlaps get this far, so the hash lookup is paid a
+						-- handful of times per unit instead of once per candidate: a rider
+						-- that mounted this tick is still in the (start-of-tick) grid, and
+						-- must not shove the Roller it is sitting on off course.
+						local other = units[gId[oidx]]
+						if not other or other.carriedBy then continue end
+						local dist     = math.sqrt(d2)
+						local strength = (SEP_DIST - dist) / SEP_DIST
+						pushX += (dx / dist) * strength
+						pushZ += (dz / dist) * strength
+						count += 1
 					end
 				end
 			end
@@ -3208,10 +3243,13 @@ function UnitManager.init(resourceManager)
 				end
 			end
 		end
+		PerfProbe.shut()
 
 		-- Wounded soldiers: collapse pose, drag-home movement and base healing. Runs
 		-- before the decorator sync so the prone/carry CFrames propagate this frame.
+		PerfProbe.open("UM.rescues")
 		processRescues(dt)
+		PerfProbe.shut()
 
 		-- Update anchored decorator parts (treads, pill body, eyes, etc.) to match body CFrame.
 		-- This replaces the old WeldConstraint physics pass for all decorated units.
@@ -3219,6 +3257,7 @@ function UnitManager.init(resourceManager)
 		-- (decorLastCF dirty check), and all moved units' decorators are written in a
 		-- single BulkMoveTo — far cheaper than thousands of individual .CFrame sets,
 		-- both server-side and in replication.
+		PerfProbe.open("UM.decorators")
 		local bulkParts: { BasePart } = decorBulkParts
 		local bulkCFs:   { CFrame }   = decorBulkCFs
 		table.clear(bulkParts)
@@ -3237,8 +3276,10 @@ function UnitManager.init(resourceManager)
 		if #bulkParts > 0 then
 			workspace:BulkMoveTo(bulkParts, bulkCFs, Enum.BulkMoveMode.FireCFrameChanged)
 		end
+		PerfProbe.shut()
 
 		-- Remove dead units
+		PerfProbe.open("UM.removal")
 		local killCredit: { [string]: number } = {}   -- attacker id str → kills this frame
 		for _, id in toRemove do
 			local d = units[id]
@@ -3288,11 +3329,13 @@ function UnitManager.init(resourceManager)
 				researchManagerRef.recordEnemyKills(attackerStr, n)      -- player-only research
 			end
 		end
+		PerfProbe.shut()
 
 		-- ── Population readout ────────────────────────────────────────────────
 		-- Pushed from here rather than from every spawn/death site: one place, and only
 		-- when the number has moved. The cap rides along so the HUD never has to keep
 		-- its own copy of it.
+		PerfProbe.open("UM.popSync")
 		popSyncAcc += dt
 		if popSyncAcc >= POP_SYNC_INTERVAL then
 			popSyncAcc = 0
@@ -3304,6 +3347,7 @@ function UnitManager.init(resourceManager)
 				end
 			end
 		end
+		PerfProbe.shut()
 	end)
 
 	-- Train remote

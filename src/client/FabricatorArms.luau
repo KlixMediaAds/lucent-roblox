@@ -15,9 +15,9 @@
 	drives every CC, with a distance-square cull for far-away bases.
 ]]
 
-local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe         = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 
@@ -312,7 +312,7 @@ function FabricatorArms.init(cam: Camera)
 		end)
 	end)
 
-	RunService.Heartbeat:Connect(update)
+	PerfProbe.onHeartbeat("FabricatorArms", update)
 end
 
 return FabricatorArms

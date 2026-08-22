@@ -110,7 +110,7 @@ local function compose(): string
 		out[#out + 1] = ""
 		out[#out + 1] = "SERVER SYSTEMS, ms per heartbeat"
 		for i, r in serverRows do
-			if i > 8 then break end
+			if i > 16 then break end
 			out[#out + 1] = string.format("  %-18s %6.2f", r.name, r.ms)
 		end
 	end

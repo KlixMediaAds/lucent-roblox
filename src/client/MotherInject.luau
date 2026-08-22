@@ -131,7 +131,7 @@ end
 local MARK_COL  = Color3.fromRGB(196, 90, 255)
 local TEXT_COL  = Color3.fromRGB(236, 214, 255)
 local BLOCK_COL = Color3.fromRGB(200, 62, 72)   -- target she cannot take: refuses the click
-local WAIT_COL  = Color3.fromRGB(150, 196, 255)  -- spike still recharging: allowed, but it waits
+local WAIT_COL  = Color3.fromRGB(150, 196, 255)  -- inject still recharging: allowed, but it waits
 -- What she GETS out of the target. Deliberately not the purple everything else on this
 -- sight is drawn in: the yield is the one line the player is actually reading, and purple
 -- text on a purple hologram over dark ground was the hardest thing here to make out.
@@ -149,9 +149,10 @@ local TARGET_NAME = "Ground"
 local function buildReadout(parent: BasePart): (TextLabel, TextLabel)
 	local bb          = Instance.new("BillboardGui")
 	bb.Name           = "InjectReadout"
-	-- Wide enough for the longest line either plate can hold ("-20% SPIKE COOLDOWN"),
-	-- since neither wraps and a clipped payout is worse than a slightly roomy plate.
-	bb.Size           = UDim2.fromOffset(186, 48)
+	-- Wide enough for the longest line either plate can hold (the frond's
+	-- "+15 MAX ENERGY, +0.3 REGEN"), since neither wraps and a clipped payout is worse
+	-- than a slightly roomy plate.
+	bb.Size           = UDim2.fromOffset(238, 48)
 	bb.StudsOffset    = Vector3.new(0, 9.5, 0)
 	bb.AlwaysOnTop    = true
 	bb.LightInfluence = 0
@@ -251,7 +252,7 @@ local function revealSub()
 	end
 end
 
--- Seconds until her spike can go in again, off the timestamp the server stamps on her
+-- Seconds until she can inject again, off the timestamp the server stamps on her
 -- base. Injecting is free, so this is the pacing the player actually feels: the sight
 -- reports it, but does not refuse the click -- a spot laid onto a run already under way is
 -- accepted, and the server is the one that decides.
@@ -262,9 +263,20 @@ local function cooldownLeft(): number
 	return math.max(0, v - workspace:GetServerTimeNow())
 end
 
+-- Her energy pool, as the server last published it. Before the first tick lands the
+-- opening pool is the honest answer.
+local function energy(): number
+	local base = ccBaseFn and ccBaseFn()
+	local v    = base and base:GetAttribute("MotherEnergy")
+	return type(v) == "number" and v or Config.MOTHER_ENERGY_START
+end
+
 -- Can she pay for one more wound? The server charges per injection, queued ones included,
--- so a target she cannot afford is refused here rather than silently dropped there.
+-- so a target she cannot afford is refused here rather than silently dropped there. The
+-- price is her energy; the resource cost is kept in the test because it is configurable
+-- and has been non-zero before.
 local function canAfford(): boolean
+	if energy() < Config.MOTHER_INJECT_ENERGY then return false end
 	local cost = Config.MOTHER_INJECT_COST
 	if cost <= 0 then return true end
 	return (resourcesFn and resourcesFn() or 0) >= cost
@@ -291,7 +303,10 @@ local function refreshReadout()
 	nameLbl.Text = hoverInfo and hoverInfo.label or TARGET_NAME
 
 	local was = sub.Text
-	if not canAfford() then
+	if energy() < Config.MOTHER_INJECT_ENERGY then
+		sub.Text       = "NEED " .. Config.MOTHER_INJECT_ENERGY .. " ENERGY"
+		sub.TextColor3 = BLOCK_COL
+	elseif not canAfford() then
 		sub.Text       = "NEED " .. Config.MOTHER_INJECT_COST .. " RESOURCES"
 		sub.TextColor3 = BLOCK_COL
 	elseif hoverTarget and queuedTargets[hoverTarget] then
@@ -308,7 +323,7 @@ local function refreshReadout()
 		local cd = cooldownLeft()
 		if cd > 0 then
 			-- She is between wounds: the spot can still be laid down, it just waits its turn.
-			sub.Text       = "SPIKE READY IN " .. math.ceil(cd) .. "s"
+			sub.Text       = "INJECT READY IN " .. math.ceil(cd) .. "s"
 			sub.TextColor3 = WAIT_COL
 		else
 			local n        = #ghosts

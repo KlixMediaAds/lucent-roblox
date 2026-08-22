@@ -19,11 +19,11 @@
 	showMessage() — render a centered message (e.g. "Upgrades coming soon!").
 ]]
 
-local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local UILib = require(script.Parent:WaitForChild("UILib"))
+local PerfProbe = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("PerfProbe"))
 local C     = UILib.C
 
 local CommandCard = {}
@@ -45,6 +45,9 @@ local BEVEL_LO   = Color3.fromRGB(8, 11, 16)      -- bottom edge shadow
 local TXT        = Color3.fromRGB(214, 224, 238)
 local TXT_DIM    = Color3.fromRGB(120, 134, 158)
 local HOTKEY_COL = Color3.fromRGB(228, 198, 120)
+-- Pool-paid abilities (the Mother's energy) price in her purple, so a pool cost is never
+-- read as a resource cost.
+local ENERGY_COL = Color3.fromRGB(196,  90, 255)
 
 -- Cooldown palette: the shade's leading edge, the printed seconds, and the ring that
 -- fires when the ability comes back up.
@@ -63,6 +66,10 @@ export type Slot = {
 	index:           number,
 	name:            string,
 	cost:            number?,
+	-- Abilities paid for out of a pool rather than the wallet (the Mother's energy).
+	-- Printed on the tooltip's price line beside any resource cost, in its own colour so
+	-- the two are never mistaken for each other.
+	energyCost:      number?,
 	color:           Color3,
 	enabled:         boolean?,
 	locked:          boolean?,
@@ -157,7 +164,8 @@ local wasdUsed   = false
 
 local vpCache: { [string]: ViewportFrame } = {}
 
-type TipData = { name: string, cost: number?, desc: string, enabled: boolean, locked: boolean }
+type TipData = { name: string, cost: number?, energyCost: number?, desc: string,
+	enabled: boolean, locked: boolean }
 
 type Tile = {
 	wrapper:  Frame,
@@ -200,9 +208,21 @@ local function showTip(data: TipData)
 	if not (tip and tipName and tipCostLbl and tipDesc) then return end
 	tipName.Text       = data.name
 	tipName.TextColor3 = data.locked and TXT_DIM or TXT
+	local price = {}
 	if data.cost ~= nil then
+		price[#price + 1] = "◆  " .. data.cost
+	end
+	if data.energyCost ~= nil then
+		-- Coloured inline rather than given its own label: the price line is one row and
+		-- an ability can carry both a wallet cost and a pool cost.
+		local c = data.locked and TXT_DIM or ENERGY_COL
+		price[#price + 1] = string.format('<font color="rgb(%d,%d,%d)">%d ENERGY</font>',
+			math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5),
+			data.energyCost)
+	end
+	if #price > 0 then
 		tipCostLbl.Visible    = true
-		tipCostLbl.Text       = "◆  " .. data.cost
+		tipCostLbl.Text       = table.concat(price, "   ")
 		tipCostLbl.TextColor3 = data.locked and TXT_DIM or (data.enabled and HOTKEY_COL or C.RED)
 	else
 		tipCostLbl.Visible = false
@@ -295,7 +315,7 @@ local function stepCooldowns()
 	end
 end
 
-RunService.RenderStepped:Connect(stepCooldowns)
+PerfProbe.onRender("CommandCard", stepCooldowns)
 
 local function makeTile(parent: Instance, index: number): Tile
 	local row = math.floor((index - 1) / COLS)
@@ -635,7 +655,8 @@ local function applySlot(tile: Tile, slot: Slot, cols: number)
 		slot.onClick()
 	end
 	tile.tip = {
-		name = slot.name, cost = slot.cost, desc = slot.desc or "",
+		name = slot.name, cost = slot.cost, energyCost = slot.energyCost,
+		desc = slot.desc or "",
 		enabled = enabled, locked = locked,
 	}
 end
@@ -812,6 +833,10 @@ function CommandCard.init(sg: ScreenGui)
 	hLbl.Position                  = UDim2.fromOffset(18, 0)
 	hLbl.BackgroundTransparency    = 1
 	hLbl.Font                      = Enum.Font.GothamBold
+	-- Rich text so a page can colour part of its header. The Mother's page uses it to
+	-- print her energy pool in her own purple beside her name; every other header is a
+	-- plain uppercase word and is unaffected.
+	hLbl.RichText                  = true
 	hLbl.TextScaled                = true
 	hLbl.TextColor3                = TXT
 	hLbl.TextXAlignment            = Enum.TextXAlignment.Left
@@ -865,6 +890,7 @@ function CommandCard.init(sg: ScreenGui)
 	tCost.TextColor3               = HOTKEY_COL
 	tCost.TextXAlignment           = Enum.TextXAlignment.Left
 	tCost.Text                     = ""
+	tCost.RichText                 = true   -- an energy price is coloured inline
 	tCost.ZIndex                   = 15
 	tCost.Parent                   = tp
 	tipCostLbl = tCost

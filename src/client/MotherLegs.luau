@@ -66,9 +66,9 @@
 	  MotherLegs.detach(ccId)          -- hand the static model back, exactly as built
 ]]
 
-local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe         = require(Shared:WaitForChild("PerfProbe"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 
 local MotherLegs = {}
@@ -553,7 +553,7 @@ local function attachNow(ccId: string, model: Model)
 		speed = 0, turn = 0, brace = 0, phase = 0,
 		blinkAt = BLINK_MIN,
 	}
-	if not conn then conn = RunService.RenderStepped:Connect(step) end
+	if not conn then conn = PerfProbe.onRender("MotherLegs", step) end
 end
 
 -- The Mother's model can replicate a beat before her decor parts do (she now spawns

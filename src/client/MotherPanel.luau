@@ -1,13 +1,13 @@
 --!strict
 --[[
-    MotherPanel: command-card page for the Hollowed "Mother" (their spike Command
+    MotherPanel: command-card page for the Hollowed "Mother" (their injecting Command
     Center). It is the Hollowed player's default card: init.client feeds it to the
     command card as the fallback page, so it sits open whenever nothing is selected.
 
     The grid holds ONE action, a single button filling the whole frame (cols = 1):
 
         INJECT   → [R], or the tile: pick a point on the ground; the Mother walks over (uprooting
-                   herself if she was rooted), drives her spike in, and three plants
+                   herself if she was rooted), injects the ground, and three plants
                    rise out of the wound. She roots back down afterwards. Holding [Shift]
                    on the pick queues it, so a whole run of wounds can be laid out at once.
 
@@ -69,8 +69,8 @@ local function tileFace(): (string, () -> ViewportFrame)
 	return "mother:head", function() return ViewportPreview.forMotherHead(VP_PX) end
 end
 
--- ── Spike cooldown ────────────────────────────────────────────────────────────
--- Injecting is free; what limits it is the spike's cooldown. The server stamps the
+-- ── Inject cooldown ───────────────────────────────────────────────────────────
+-- What limits injecting is its cooldown and her energy. The server stamps the
 -- moment it is next usable on the Mother's base as "InjectReadyAt", on the shared
 -- workspace:GetServerTimeNow() clock, so this side needs nothing but the attribute.
 local function ccBase(): BasePart?
@@ -90,17 +90,48 @@ local function injectCooldownLeft(): number
 	return math.max(0, injectReadyAt() - workspace:GetServerTimeNow())
 end
 
--- How long her spike's window currently IS, which Spike Glands shorten. The server
--- restates it on the base whenever the gland count moves, so this is always the real
--- number; the Config default only stands in before the first one is published.
+-- How long the inject window IS. Flat now (glands feed her energy pool instead of
+-- shortening it), but still read off the base rather than assumed, so the countdown ring
+-- draws against whatever the server actually stamped.
 local function injectCooldownLength(): number
 	local base = ccBase()
 	local v    = base and base:GetAttribute("InjectCooldown")
 	return type(v) == "number" and v or Config.MOTHER_INJECT_COOLDOWN
 end
 
+-- ── Energy ────────────────────────────────────────────────────────────────────
+-- The server publishes the whole number on her base as "MotherEnergy" and spends
+-- MOTHER_INJECT_ENERGY per wound. Before the first tick lands, the opening pool is the
+-- honest answer rather than zero, so the header never flashes an empty bar on select.
+local function energy(): number
+	local base = ccBase()
+	local v    = base and base:GetAttribute("MotherEnergy")
+	return type(v) == "number" and v or Config.MOTHER_ENERGY_START
+end
+
+-- Her ceiling, which every standing Gland raises. The server publishes it beside
+-- the pool itself; the Config base only stands in before the first one lands.
+local function energyMax(): number
+	local base = ccBase()
+	local v    = base and base:GetAttribute("MotherEnergyMax")
+	return type(v) == "number" and v or Config.MOTHER_ENERGY_MAX
+end
+
+local function hasInjectEnergy(): boolean
+	return energy() >= Config.MOTHER_INJECT_ENERGY
+end
+
+-- "MOTHER  25/100", with the pool in her purple. The card's header label is RichText.
+local function headerText(): string
+	local col = INJECT_COL
+	return string.format(
+		'MOTHER  <font color="rgb(%d,%d,%d)">%d/%d</font>',
+		math.floor(col.R * 255 + 0.5), math.floor(col.G * 255 + 0.5), math.floor(col.B * 255 + 0.5),
+		energy(), energyMax())
+end
+
 -- Is she already on her way to (or standing over) a wound? The cooldown does not start
--- until the spike actually goes in, so without this the tile would read as idle for the
+-- until the inject actually lands, so without this the tile would read as idle for the
 -- whole walk. Pressing it during that re-aims her rather than ordering a second wound,
 -- and the tile says so.
 local function injectBusy(): boolean
@@ -112,11 +143,10 @@ end
 local function buildPage(): CommandCard.Page
 	local cost    = Config.MOTHER_INJECT_COST
 	local res     = resourcesFn and resourcesFn() or 0
-	local canPay  = cost <= 0 or res >= cost
+	local canPay  = (cost <= 0 or res >= cost) and hasInjectEnergy()
 	local readyAt = injectReadyAt()
 	local onCd    = readyAt > workspace:GetServerTimeNow()
 	local cdLen   = injectCooldownLength()
-	local cdText  = string.format("%.3g", cdLen)
 	-- `working` = an order is in flight: she is walking to a wound, standing over one, or
 	-- waiting out the clock partway through a queued run. The server accepts a press in
 	-- that state (it re-aims her, or stacks another spot behind the run), so the tile has
@@ -131,37 +161,31 @@ local function buildPage(): CommandCard.Page
 		name    = isAiming and "INJECT (PICK A SPOT)"
 			or (busy and "INJECT (ON HER WAY)" or "INJECT"),
 		label   = isAiming and "PICK A SPOT"
-			or (busy and "ON HER WAY" or "INJECT"),
+			or (busy and "ON HER WAY"
+			or (not hasInjectEnergy() and "NO ENERGY" or "INJECT")),
 		viewportKey     = vpKey,
 		viewportFactory = vpFactory,
 		hotkey  = "R",
 		color   = INJECT_COL,
-		cost    = cost > 0 and cost or nil,
+		cost       = cost > 0 and cost or nil,
+		energyCost = Config.MOTHER_INJECT_ENERGY,
 		enabled = canPay and (working or not onCd),
 		-- The card runs the countdown itself off this window, so a ticking cooldown costs
 		-- no re-renders here.
 		cooldownUntil = onCd and readyAt or nil,
 		cooldownTotal = cdLen,
-		desc    = onCd
-			and ("Her spike is spent. It takes " .. cdText
-				.. " seconds to be ready to drive in again.")
-			or (busy and not isAiming
-			and ("She is walking to the spot. Her spike does not go on cooldown until it "
-				.. "actually goes in. Press again to send her somewhere else instead.")
-			or (isAiming
-			and "Click the ground to send her. Hold [Shift] to queue several. Right-click or [Esc] to call it off."
-			or ("Pick a point on the ground. The Mother walks to it, sinks her spike in, and "
-				.. Config.MOTHER_INJECT_PLANTS .. " plants tear their way up out of the soil. "
-				.. "Aim at a plant she has already grown and it bursts instead, giving up "
-				.. "what it was growing. A frond gives a Spike Gland, and every gland "
-				.. "standing cuts her cooldown by "
-				.. math.floor(Config.GLAND_COOLDOWN_REDUCTION * 100 + 0.5) .. "%. "
-				.. "Costs nothing; her spike needs " .. cdText .. " seconds between wounds."))),
+		-- Kept to a glance. The price is on the tooltip's own price line, and what a
+		-- given plant yields is on the aiming sight, so neither is spelled out here.
+		desc    = (not hasInjectEnergy()) and "Not enough energy yet."
+			or (onCd    and "Inject is recovering.")
+			or (isAiming and "Click ground. [Shift] queues.")
+			or (busy     and "On her way over.")
+			or ("Inject the ground. " .. Config.MOTHER_INJECT_PLANTS .. " plants rise."),
 		onClick = function() MotherPanel.triggerInject() end,
 	}
 
 	-- cols = 1 → one tile that fills the whole grid frame.
-	return { header = "MOTHER", slots = { slot }, cols = 1 }
+	return { header = headerText(), slots = { slot }, cols = 1 }
 end
 
 local function renderIfActive()
@@ -191,6 +215,7 @@ function MotherPanel.triggerInject()
 	local cost = Config.MOTHER_INJECT_COST
 	local res  = resourcesFn and resourcesFn() or 0
 	if cost > 0 and res < cost then return end
+	if not hasInjectEnergy() then return end
 	-- Exactly the server's refusal: the cooldown only blocks STARTING a run. With one
 	-- already in flight the press re-aims her or adds to it, which is always allowed.
 	if not injectBusy() and injectCooldownLeft() > 0 then return end
@@ -235,18 +260,26 @@ local shownReadyAt = 0
 local shownOnCd    = false
 local shownCdLen   = 0
 local shownBusy    = false
+local shownEnergy  = -1
+local shownEnergyMax = -1
 PerfProbe.onHeartbeat("MotherPanel", function()
 	if not MotherPanel.isVisible() then return end
 	local readyAt = injectReadyAt()
 	local onCd    = readyAt > workspace:GetServerTimeNow()
-	-- The window's LENGTH is watched too: raising or losing a Spike Gland moves it while
-	-- nothing else about the tile changes, and the tooltip states the number. So is the
-	-- busy flag, which is what the tile wears for the whole walk out to the wound.
+	-- The window's LENGTH is watched too: the tooltip states the number, and reading it
+	-- from the base means a Config change lands without a client rebuild. So is the busy
+	-- flag, which is what the tile wears for the whole walk out to the wound.
 	local cdLen   = injectCooldownLength()
 	local busy    = injectBusy()
+	-- The pool is watched too: it prints in the header and it gates the tile, and it
+	-- moves once a second on its own without anything else about the page changing.
+	local nrg     = energy()
+	local nrgMax  = energyMax()
 	if readyAt ~= shownReadyAt or onCd ~= shownOnCd
-		or cdLen ~= shownCdLen or busy ~= shownBusy then
-		shownReadyAt, shownOnCd, shownCdLen, shownBusy = readyAt, onCd, cdLen, busy
+		or cdLen ~= shownCdLen or busy ~= shownBusy
+		or nrg ~= shownEnergy or nrgMax ~= shownEnergyMax then
+		shownReadyAt, shownOnCd, shownCdLen, shownBusy, shownEnergy, shownEnergyMax =
+			readyAt, onCd, cdLen, busy, nrg, nrgMax
 		renderIfActive()
 	end
 end)

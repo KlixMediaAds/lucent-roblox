@@ -36,15 +36,17 @@ export type InjectInfo = { label: string, yield: string, kind: string?, preview:
 -- Yields are written as a PAYOUT, matching how the sight renders them: one lime line that
 -- reads the same whatever she is standing over.
 --
--- The frond names the EFFECT rather than the building. What a Spike Gland is worth is the
--- cooldown it shaves off her spike, and a player deciding whether to spend an injection on
--- one should not have to have learnt that beforehand. The number comes straight from
--- Config so the line cannot drift from what the gland actually does.
-local GLAND_CUT = math.floor(Config.GLAND_COOLDOWN_REDUCTION * 100 + 0.5)
+-- The frond names the EFFECT rather than the building. What a Spike Gland is worth is what
+-- it adds to her energy pool, and a player deciding whether to spend an injection on one
+-- should not have to have learnt that beforehand. Both numbers come straight from Config
+-- so the line cannot drift from what the gland actually does.
+local GLAND_MAX   = Config.GLAND_ENERGY_MAX
+local GLAND_REGEN = Config.GLAND_ENERGY_REGEN
 local INJECT: { [string]: InjectInfo } = {
 	spire = { label = "Spire",       yield = "+3 LEECHES",   kind = "leeches", preview = "leech" },
 	pods  = { label = "Pod Cluster", yield = "+2 EGG NESTS", kind = "nests",   preview = "nest"  },
-	frond = { label = "Frond",       yield = "-" .. GLAND_CUT .. "% SPIKE COOLDOWN",
+	frond = { label = "Frond",
+		yield = "+" .. GLAND_MAX .. " MAX ENERGY, +" .. GLAND_REGEN .. " REGEN",
 		kind = "glands", preview = "gland" },
 }
 InjectPlants.INJECT = INJECT

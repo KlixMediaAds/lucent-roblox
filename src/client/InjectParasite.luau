@@ -21,12 +21,12 @@
 -- when the run is over.
 --!strict
 
-local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService      = game:GetService("TweenService")
 local Debris            = game:GetService("Debris")
 
 local Shared       = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe         = require(Shared:WaitForChild("PerfProbe"))
 local Config       = require(Shared:WaitForChild("Config"))
 local InjectPlants = require(Shared:WaitForChild("InjectPlants"))
 
@@ -528,7 +528,7 @@ function InjectParasite.init(cam: Camera)
 		if child.Name == "InjectPlants" and child:IsA("Folder") then watch(child) end
 	end)
 
-	RunService.RenderStepped:Connect(step)
+	PerfProbe.onRender("InjectParasite", step)
 end
 
 return InjectParasite

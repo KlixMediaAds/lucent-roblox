@@ -323,11 +323,27 @@ end
 -- ground point, the Mother walks over (uprooting herself if she was rooted), drives her
 -- spike into the soil, and three plants tear their way up out of the wound. She re-roots
 -- afterwards if that is how she started.
--- Injecting is FREE: the limiter is the cooldown, not the wallet. She may only drive her
--- spike in once every MOTHER_INJECT_COOLDOWN seconds, and a queued run paces itself
--- against the same clock (she stands over the next spot until the spike is ready again).
+-- Injecting costs no RESOURCES: what it spends is the Mother's own energy, and what
+-- paces it is a short cooldown on top. She banks energy continuously and spends a chunk
+-- of it per wound, so a rested Mother can drive several spikes in quick succession and
+-- then has to feed the pool back up. The cooldown alone only stops her machine-gunning
+-- the whole pool out in one frame.
+--
+-- A queued run paces itself against both: she stands over the next spot until the spike
+-- is off cooldown AND there is energy in the pool for it.
 Config.MOTHER_INJECT_COST     = 0     -- resources per injection, ground or plant
-Config.MOTHER_INJECT_COOLDOWN = 10    -- seconds between one spike going in and the next
+Config.MOTHER_INJECT_COOLDOWN = 2     -- seconds between one spike going in and the next
+
+-- ── The Mother's energy pool ──────────────────────────────────────────────────
+-- Replicated to her owner as a "MotherEnergy" attribute on her base (whole numbers, so
+-- it publishes about once a second rather than every frame). The command card prints it
+-- beside her name.
+-- MAX and REGEN are the BASE values: each standing Spike Gland raises both (see
+-- GLAND_ENERGY_MAX / GLAND_ENERGY_REGEN and the motherEnergy* helpers below).
+Config.MOTHER_ENERGY_START  = 25    -- what she wakes up with
+Config.MOTHER_ENERGY_MAX    = 100   -- base pool ceiling; regen stops here
+Config.MOTHER_ENERGY_REGEN  = 1     -- base energy per second, always ticking
+Config.MOTHER_INJECT_ENERGY = 10    -- energy one wound costs
 Config.MOTHER_INJECT_ARRIVE   = 14    -- studs from the point that counts as "stood over it"
 Config.MOTHER_INJECT_DURATION = 1.8   -- seconds she stays hunched over the injection
 Config.MOTHER_INJECT_PLANTS   = 3     -- plants that rise per injection
@@ -384,17 +400,29 @@ Config.NEST_BUDS                = 3    -- how many of them
 Config.FINAL_BLOW_CAM_LEAD   = 0.85  -- seconds the camera has to arrive before the death
 Config.FINAL_BLOW_DEATH_HOLD = 2.8   -- seconds the death plays out before the end card
 
--- Spike Gland: the structure a frond bursts into. Each one standing shaves 20% off the
--- Mother's spike cooldown, compounding, so a player who keeps injecting fronds injects
--- faster. It is a real building with HP: the buff is only as durable as the glands are.
+-- Spike Gland: the structure a frond bursts into. Each one standing grows the Mother's
+-- energy pool -- a bigger ceiling AND a faster refill -- so a player who keeps injecting
+-- fronds can sustain more injections rather than merely faster ones. It is a real
+-- building with HP, so the buff is only as durable as the glands are: shoot the glands
+-- down and her ceiling falls back, taking any energy above the new cap with it.
 --
--- The floor matters. Injecting bare ground grows one frond every time, and every frond is
--- another gland, so the loop feeds itself; without a hard floor the cooldown converges on
--- zero and the ability stops being an ability. MIN is what that loop is allowed to reach.
-Config.MOTHER_INJECT_COOLDOWN_MIN = 2.5   -- seconds; no number of glands goes under this
-Config.GLAND_COOLDOWN_REDUCTION   = 0.20  -- each standing gland cuts the cooldown by 20%
+-- Both bonuses are FLAT per gland, not compounding. Injecting bare ground grows one frond
+-- every time and every frond is another gland, so the loop feeds itself; flat growth keeps
+-- that loop linear instead of running away.
+Config.GLAND_ENERGY_MAX   = 15    -- max energy each standing gland adds
+Config.GLAND_ENERGY_REGEN = 0.3   -- energy per second each standing gland adds
 Config.MOTHER_INJECT_PLANT_GLANDS = 1     -- glands out of a frond
 Config.GLAND_SIZE                 = Vector3.new(10, 9, 10)
+
+-- Her ceiling and her refill rate with `glands` of hers standing. Shared so the server's
+-- pool and the client's readout can never disagree about how big it is.
+function Config.motherEnergyMax(glands: number): number
+	return Config.MOTHER_ENERGY_MAX + Config.GLAND_ENERGY_MAX * math.max(0, glands)
+end
+
+function Config.motherEnergyRegen(glands: number): number
+	return Config.MOTHER_ENERGY_REGEN + Config.GLAND_ENERGY_REGEN * math.max(0, glands)
+end
 
 -- ── The parasite the wound spits out ──────────────────────────────────────────
 -- A bare-ground injection does not simply push plants up out of the soil. Each plant
@@ -415,12 +443,19 @@ function Config.injectParasiteLead(): number
 	return Config.INJECT_PARASITE_LEAP + Config.INJECT_PARASITE_SCURRY
 end
 
--- The Mother's spike cooldown with `glands` of hers standing. Shared so the server's
--- clock and the client's countdown ring can never disagree on how long the window is.
-function Config.injectCooldown(glands: number): number
-	local cd = Config.MOTHER_INJECT_COOLDOWN
-		* (1 - Config.GLAND_COOLDOWN_REDUCTION) ^ math.max(0, glands)
-	return math.max(Config.MOTHER_INJECT_COOLDOWN_MIN, cd)
+-- The Mother's spike cooldown. Flat now: glands feed her energy pool instead of shortening
+-- this, so the window is the same every time. Kept as a function because the server stamps
+-- it on her base and the client draws its countdown ring from the stamped number.
+function Config.injectCooldown(): number
+	return Config.MOTHER_INJECT_COOLDOWN
+end
+
+-- Seconds until the pool has covered one wound, given `energy` in it now. Shared so the
+-- server's pacing and the client's refusal cannot disagree about when she is ready.
+function Config.injectEnergyWait(energy: number): number
+	local short = Config.MOTHER_INJECT_ENERGY - energy
+	if short <= 0 then return 0 end
+	return short / math.max(Config.MOTHER_ENERGY_REGEN, 0.001)
 end
 
 -- Lamprey Nest rally upgrade — a one-time node purchase that changes how the nest

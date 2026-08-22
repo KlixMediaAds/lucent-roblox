@@ -20,8 +20,9 @@
 	must not fight over the property), which is what the Felled attribute is for.
 
 	Because trees are invisible to raycasts, this module also owns the only workable
-	answer to "is a tree in the way of that": blocksSight(), used by OcclusionOutline to
-	decide whether one of your units has gone behind a canopy.
+	answer to "is a tree in the way of that": blocksSight(). Nothing calls it since the
+	occlusion outline was cut; it is kept because raycasts cannot replace it, and it
+	costs nothing until called (the grid it reads is filed at tree registration).
 ]]
 
 local RunService = game:GetService("RunService")

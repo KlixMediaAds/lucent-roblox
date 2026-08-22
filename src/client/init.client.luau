@@ -61,7 +61,6 @@ local CometManager    = require(script:WaitForChild("CometManager"))
 local DepositFX       = require(script:WaitForChild("DepositFX"))
 local EggReadyIcon    = require(script:WaitForChild("EggReadyIcon"))
 local ForestFade      = require(script:WaitForChild("ForestFade"))
-local OcclusionOutline = require(script:WaitForChild("OcclusionOutline"))
 local LobbyUI         = require(script:WaitForChild("LobbyUI"))
 local MainMenu        = require(script:WaitForChild("MainMenu"))
 local ShaderManager   = require(script:WaitForChild("ShaderManager"))
@@ -3646,7 +3645,6 @@ end -- startGame
 CometManager.init()
 EggReadyIcon.start()   -- mark over each Egg-Sac egg that has grown ripe and can be spent
 ForestFade.start()   -- trees dissolve out of the middle of the view; watches for the forest itself
-OcclusionOutline.start()   -- your own units/buildings keep an edge when something covers them
 
 -- Main menu first: a tabbed shell. The READY UP tab reveals the Map/AI lobby (which
 -- owns the game-start flow) beneath the persistent tab bar; the lobby only builds the

@@ -194,6 +194,18 @@ local MAX_INJECT_QUEUE = 8
 -- can run the countdown on the INJECT tile without asking the server for it.
 local injectReadyAt: { [string]: number } = {}
 
+-- ccId → the Mother's energy pool, as a float that regen ticks every heartbeat. A wound
+-- spends MOTHER_INJECT_ENERGY of it. Only the WHOLE number is published to the client
+-- (as a "MotherEnergy" attribute), so a pool filling at 1/second replicates about once a
+-- second instead of sixty times.
+local motherEnergy: { [string]: number } = {}
+
+-- Her ceiling and refill rate, which Spike Glands raise. Cached per Mother and restated
+-- only when the gland count actually moves (refreshMotherEnergy), because counting glands
+-- walks every building and the regen tick runs every heartbeat.
+local motherEnergyMax:   { [string]: number } = {}
+local motherEnergyRegen: { [string]: number } = {}
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 -- Flip a Command Center between rooted (structure) and mobile (walking), keeping the
@@ -314,6 +326,51 @@ local function injectCooldownLeft(ccId: string): number
 	return math.max(0, ready - workspace:GetServerTimeNow())
 end
 
+-- Her pool right now. A Mother that has never been touched starts full of START, which
+-- is what makes her openable without waiting; the table is only written once she spends
+-- or banks anything.
+local function energyOf(ccId: string): number
+	local e = motherEnergy[ccId]
+	if e == nil then return Config.MOTHER_ENERGY_START end
+	return e
+end
+
+local function energyMaxOf(ccId: string): number
+	return motherEnergyMax[ccId] or Config.MOTHER_ENERGY_MAX
+end
+
+local function energyRegenOf(ccId: string): number
+	return motherEnergyRegen[ccId] or Config.MOTHER_ENERGY_REGEN
+end
+
+-- Write the pool and publish the whole number if it moved. Every caller goes through
+-- here so the attribute can never drift from the value the server is spending. Clamping
+-- to the live ceiling here is also what takes her overflow away when a gland dies.
+local function setEnergy(ccId: string, value: number)
+	local e = math.clamp(value, 0, energyMaxOf(ccId))
+	motherEnergy[ccId] = e
+	local data = buildingData[ccId]
+	if not data or not data.base.Parent then return end
+	local shown = math.floor(e)
+	if data.base:GetAttribute("MotherEnergy") ~= shown then
+		data.base:SetAttribute("MotherEnergy", shown)
+	end
+end
+
+-- Seconds until the pool covers one more wound; 0 when it already does.
+local function injectEnergyWait(ccId: string): number
+	return Config.injectEnergyWait(energyOf(ccId))
+end
+
+-- Take one wound's worth out of the pool. False when there is not enough, which is the
+-- caller's cue to abandon the run rather than drive a free spike.
+local function spendInjectEnergy(ccId: string): boolean
+	local e = energyOf(ccId)
+	if e < Config.MOTHER_INJECT_ENERGY then return false end
+	setEnergy(ccId, e - Config.MOTHER_INJECT_ENERGY)
+	return true
+end
+
 -- How many Spike Glands this owner has standing. Counted live off buildingData rather
 -- than tallied, so a gland shot down stops shortening her cooldown the moment it dies and
 -- there is no bookkeeping to leak.
@@ -327,15 +384,22 @@ local function glandCount(owner: any): number
 	return n
 end
 
--- Restate the spike's current window length on every Mother this owner has. Called when
--- the gland count moves (one raised, one shot down), so the INJECT tile can name the real
--- number without waiting for the next injection to stamp it.
-local function refreshInjectCooldownAttr(owner: any)
+-- Restate this owner's Mother energy stats. Called when the gland count moves (one
+-- raised, one shot down), which is the only thing that changes them, so the header can
+-- name the real ceiling immediately instead of waiting for the next tick to notice.
+-- Re-running setEnergy re-clamps her pool, which is what drops her overflow when a
+-- gland is shot down and her ceiling falls.
+local function refreshMotherEnergy(owner: any)
 	if not owner then return end
-	local cd = Config.injectCooldown(glandCount(owner))
-	for _, d in buildingData do
+	local glands = glandCount(owner)
+	local maxE   = Config.motherEnergyMax(glands)
+	local regen  = Config.motherEnergyRegen(glands)
+	for ccId, d in buildingData do
 		if d.buildingType == "CommandCenter" and d.owner == owner and d.base.Parent then
-			d.base:SetAttribute("InjectCooldown", cd)
+			motherEnergyMax[ccId]   = maxE
+			motherEnergyRegen[ccId] = regen
+			d.base:SetAttribute("MotherEnergyMax", maxE)
+			setEnergy(ccId, energyOf(ccId))
 		end
 	end
 end
@@ -345,7 +409,7 @@ end
 -- the right fraction, and glands make it a moving number.
 local function startInjectCooldown(ccId: string)
 	local data = buildingData[ccId]
-	local cd   = Config.injectCooldown(data and glandCount(data.owner) or 0)
+	local cd   = Config.injectCooldown()
 	if cd <= 0 then return end
 	local ready         = workspace:GetServerTimeNow() + cd
 	injectReadyAt[ccId] = ready
@@ -382,7 +446,7 @@ local function runInjection(ccId: string, order: InjectOrder)
 	-- The wound that STARTS a run finds the clock already at zero (ordering it is what
 	-- required that), so this waits for nothing. Wounds stacked behind it on the queue do
 	-- wait, which is what paces a run to one wound per window.
-	local wait = injectCooldownLeft(ccId)
+	local wait = math.max(injectCooldownLeft(ccId), injectEnergyWait(ccId))
 	if wait > 0 then
 		task.wait(wait)
 		-- The run can be called off from under her while she waits (a hand-issued move
@@ -394,6 +458,16 @@ local function runInjection(ccId: string, order: InjectOrder)
 			clearInjectPose(ccId)
 			return
 		end
+	end
+	-- The pool is charged at the spike, not at the order, for the same reason the clock
+	-- is: her walk can be most of a minute and a run called off on the way should cost
+	-- her nothing. If the pool somehow came up short anyway, the run is abandoned rather
+	-- than run for free.
+	if not spendInjectEnergy(ccId) then
+		injectOrders[ccId] = nil
+		injectQueues[ccId] = nil
+		clearInjectPose(ccId)
+		return
 	end
 	startInjectCooldown(ccId)
 
@@ -2231,6 +2305,9 @@ function BuildingManager.resetAll()
 	injectOrders             = {}
 	injectQueues             = {}
 	injectReadyAt            = {}
+	motherEnergy             = {}
+	motherEnergyMax          = {}
+	motherEnergyRegen        = {}
 	playerCCId               = {}
 	local plants = workspace:FindFirstChild("InjectPlants")
 	if plants then plants:Destroy() end
@@ -3858,7 +3935,7 @@ function BuildingManager.plantInjectGland(ccId: string, origin: Vector3, count: 
 		createBuilding(data.owner, Vector3.new(px, 0, pz), "Gland")
 		skipNextConstruction = false
 	end
-	refreshInjectCooldownAttr(data.owner)
+	refreshMotherEnergy(data.owner)
 end
 
 function BuildingManager.plantInjectEggNests(ccId: string, count: number)
@@ -4167,8 +4244,11 @@ function BuildingManager.damage(id: string, amount: number)
 		AlertManager.report(data.owner, data.base.Position, "base")
 	end
 
-	-- Extra banner notification for the Command Center specifically (throttled)
-	if data.buildingType == "CommandCenter" and data.hp > 0 then
+	-- Extra banner notification for the Command Center specifically (throttled).
+	-- Real, connected players only: an AI owner is a mock table, and FireClient on one
+	-- throws "Unable to cast value to Object" out of the middle of the attacker's turn.
+	if data.buildingType == "CommandCenter" and data.hp > 0
+		and data.owner.UserId > 0 and data.owner.Parent then
 		local uid  = data.owner.UserId
 		local now  = os.clock()
 		if (ccAttackThrottle[uid] or 0) + CC_ATTACK_THROTTLE < now then
@@ -4242,7 +4322,7 @@ function BuildingManager.damage(id: string, amount: number)
 
 	if wasGland then
 		-- One fewer organ feeding her spike: her cooldown goes straight back up.
-		refreshInjectCooldownAttr(owner)
+		refreshMotherEnergy(owner)
 	end
 
 	if wasMonument then
@@ -4906,6 +4986,23 @@ function BuildingManager.init(resourceManager, mineralManager_)
 			if (d.base:GetAttribute("InjectBusy") == true) ~= busy then
 				d.base:SetAttribute("InjectBusy", busy)
 			end
+
+			-- Energy regen. The pool belongs to the Hollowed Mother; a Human Fabricator
+			-- Core is the same buildingType and has no use for it, so it is skipped
+			-- rather than handed an attribute nothing reads.
+			if not isHollowed(d.owner) then continue end
+			-- setEnergy only writes the attribute when the whole number moves, so this is
+			-- a float add per Mother per frame and one replicated change per second.
+			local maxE = energyMaxOf(ccId)
+			if d.base:GetAttribute("MotherEnergyMax") ~= maxE then
+				d.base:SetAttribute("MotherEnergyMax", maxE)
+			end
+			local e = energyOf(ccId)
+			if e < maxE then
+				setEnergy(ccId, e + energyRegenOf(ccId) * dt)
+			elseif d.base:GetAttribute("MotherEnergy") == nil then
+				setEnergy(ccId, e)   -- publish the opening value once
+			end
 		end
 
 	end)
@@ -5052,6 +5149,9 @@ function BuildingManager.init(resourceManager, mineralManager_)
 		-- another wound behind it, is laying out a plan rather than driving a spike --
 		-- each queued wound waits out the cooldown itself when she gets there.
 		if not order and injectCooldownLeft(ccId) > 0 then return end
+		-- Same rule for the pool: it only blocks STARTING a run. Wounds stacked behind one
+		-- already under way wait for their own energy when she gets to them.
+		if not order and energyOf(ccId) < Config.MOTHER_INJECT_ENERGY then return end
 
 		if wantQueue and order then
 			if not queue then queue = {}; injectQueues[ccId] = queue end

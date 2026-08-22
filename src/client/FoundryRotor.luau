@@ -12,9 +12,9 @@
 	until construction finishes (model scale ≈ 1) so the build-up rise isn't fought.
 ]]
 
-local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local PerfProbe         = require(Shared:WaitForChild("PerfProbe"))
 local Config            = require(Shared:WaitForChild("Config"))
 local UnitVisuals       = require(Shared:WaitForChild("UnitVisuals"))
 
@@ -93,7 +93,7 @@ function FoundryRotor.init(cam: Camera)
 		end)
 	end)
 
-	RunService.Heartbeat:Connect(update)
+	PerfProbe.onHeartbeat("FoundryRotor", update)
 end
 
 return FoundryRotor
